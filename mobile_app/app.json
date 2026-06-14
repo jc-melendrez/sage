@@ -22,7 +22,8 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.sage.learning"
+      "package": "com.sage.learning",
+      "googleServicesFile": "./google-services.json"
     },
     "web": {
       "output": "static",
@@ -41,7 +42,19 @@
             "backgroundColor": "#1E1B4B"
           }
         }
-      ]
+      ],
+      [
+        "@react-native-firebase/app",
+        {
+          "android": {
+            "googleServicesFile": "./google-services.json"
+          },
+          "ios": {
+            "googleServiceInfoPlist": "./GoogleService-Info.plist"
+          }
+        }
+      ],
+      "@react-native-firebase/auth"
     ],
     "experiments": {
       "typedRoutes": true,

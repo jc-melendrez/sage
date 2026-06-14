@@ -5,7 +5,8 @@ import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { isAuthenticated } from '@/services/authService';
+import { isAuthenticated, getToken, getCurrentUser } from '@/services/authService';
+import { getFirebaseUid, initFirebaseAuth } from '@/services/firebaseAuthService';
 
 export const unstable_settings = {
   initialRouteName: '(tabs)',
@@ -31,6 +32,21 @@ export default function RootLayout() {
         router.replace('/login');
       } else if (loggedIn && segments[0] === 'login') {
         router.replace('/(tabs)');
+      }
+
+      // Recovery: if user has Django JWT but no Firebase UID, initialize Firebase auth
+      if (loggedIn) {
+        const token = await getToken();
+        const fbUid = await getFirebaseUid();
+        if (token && !fbUid) {
+          try {
+            const user = await getCurrentUser();
+            await initFirebaseAuth(user);
+          } catch (error) {
+            // Log silently - Firebase init failure is non-blocking
+            console.error('Firebase recovery initialization failed:', error);
+          }
+        }
       }
       
       setIsReady(true);
