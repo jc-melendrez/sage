@@ -56,7 +56,7 @@ export default function ProfileScreen() {
   const progressPercent = Math.min((currentXP / nextLevelXP) * 100, 100);
 
   const earnedBadges = userData?.badges || [];
-
+  
   return (
     <View style={styles.container}>
       
@@ -222,6 +222,9 @@ export default function ProfileScreen() {
         </View>
 
       </ScrollView>
+      <TouchableOpacity onPress={() => router.push('/game')}>
+        <Text>Play Classic Mode</Text>
+      </TouchableOpacity>
     </View>
   );
 }

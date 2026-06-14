@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, useRouter, useSegments, useRootNavigationState } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -22,10 +22,9 @@ export default function RootLayout() {
 
   useEffect(() => {
     const verifyAuth = async () => {
-      // Wait for the navigation root to be ready before redirecting (Crucial for Android)
       if (!navigationState?.key) return;
 
-      const loggedIn = await isAuthenticated(); // Read fresh token status
+      const loggedIn = await isAuthenticated();
       const inAuthGroup = segments[0] === '(tabs)' || segments.length === 0;
 
       if (!loggedIn && inAuthGroup) {
@@ -34,28 +33,28 @@ export default function RootLayout() {
         router.replace('/(tabs)');
       }
 
-      // Recovery: if user has Django JWT but no Firebase UID, initialize Firebase auth
       if (loggedIn) {
         const token = await getToken();
         const fbUid = await getFirebaseUid();
         if (token && !fbUid) {
           try {
             const user = await getCurrentUser();
-            await initFirebaseAuth(user);
+            if (user) {
+              await initFirebaseAuth(user);
+            }
           } catch (error) {
-            // Log silently - Firebase init failure is non-blocking
             console.error('Firebase recovery initialization failed:', error);
           }
         }
       }
-      
+
       setIsReady(true);
     };
 
     verifyAuth();
-  }, [segments, navigationState?.key]); 
+  }, [segments, navigationState?.key]);
 
-  if (!isReady) return null; 
+  if (!isReady) return null;
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
@@ -63,6 +62,7 @@ export default function RootLayout() {
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="login" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+        <Stack.Screen name="game" options={{ headerShown: false }} />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>

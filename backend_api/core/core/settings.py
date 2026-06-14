@@ -65,6 +65,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'ai_assistant',
+    'game'
 ]
 
 MIDDLEWARE = [

@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { Modal, View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import Dashboard from '../../components/Dashboard';
-
+import { useRouter } from 'expo-router';
 export default function DashboardScreen() {
   const [isModalVisible, setIsModalVisible] = useState(false);
+  const router = useRouter();
 
   return (
     <View style={{ flex: 1 }}>
@@ -37,6 +38,9 @@ export default function DashboardScreen() {
           </View>
         </View>
       </Modal>
+      <TouchableOpacity onPress={() => router.push('/game')}>
+        <Text>Play Classic Mode</Text>
+      </TouchableOpacity>
     </View>
   );
 }

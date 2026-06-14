@@ -71,3 +71,5 @@ env.bak/
 venv.bak/
 SETUP_GUIDE.md
 FRONTEND_BACKEND_CONNECTION.md
+
+serviceAccountKey.json

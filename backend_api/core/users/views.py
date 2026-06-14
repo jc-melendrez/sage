@@ -6,12 +6,14 @@ from rest_framework.views import APIView
 from .models import User, Badge, Recommendation, Session, Activity, StudyGroup
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
+from core.firebase import get_firestore
 from .serializers import (
     UserSerializer, UserRegistrationSerializer, 
     BadgeSerializer, RecommendationSerializer, 
     SessionSerializer, ActivitySerializer
 )
 
+PALETTE = ['#7F77DD', '#1D9E75', '#D85A30', '#D4537E', '#378ADD', '#639922']
 class CurrentUserProfileView(APIView):
     # This acts as the bouncer: No token = No access
     permission_classes = [IsAuthenticated] 
@@ -28,17 +30,18 @@ class CurrentUserProfileView(APIView):
 
 # --- 1. REGISTRATION ENDPOINT ---
 class RegisterUserView(APIView):
-    permission_classes = [AllowAny] # Anyone can access this to sign up
+    permission_classes = [AllowAny]
 
     def post(self, request):
         serializer = UserRegistrationSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save()
+            user = serializer.instance  # 👈 add this
+            sync_user_to_firestore(user)  # 👈 add this
             return Response(
                 {"message": "User registered successfully!"}, 
                 status=status.HTTP_201_CREATED
             )
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 # --- 2. DATA FETCHING ENDPOINTS (Using your Serializers) ---
 
@@ -197,6 +200,7 @@ class AddXpTestView(APIView):
         
         old_level = user.level
         user.add_xp(int(amount)) # This calls the logic we wrote in the model
+        sync_user_to_firestore(user)
         
         return Response({
             "message": f"Added {amount} XP!",
@@ -204,3 +208,23 @@ class AddXpTestView(APIView):
             "new_level": user.level,
             "leveled_up": user.level > old_level
         })
+
+
+def sync_user_to_firestore(user):
+    """Sync user data from Django to Firestore. Non-blocking."""
+    try:
+        db = get_firestore()
+        display_name = f"{user.first_name} {user.last_name}".strip() or user.username
+        db.collection('users').document(str(user.id)).set({
+            'djangoUserId': user.id,
+            'username': user.username,
+            'displayName': display_name,
+            'email': user.email,
+            'level': user.level,
+            'current_xp': user.current_xp,
+            'total_points': user.total_points,
+            'streak': user.streak,
+            'avatarColor': PALETTE[user.id % len(PALETTE)],
+        }, merge=True)  # merge=True won't overwrite existing fields
+    except Exception as e:
+        print(f'[Firebase Sync Error] {e}')  # Non-blocking
