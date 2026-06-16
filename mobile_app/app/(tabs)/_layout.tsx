@@ -51,6 +51,13 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="games"
+        options={{
+          title: 'Play',
+          tabBarIcon: ({ color }) => <IconSymbol size={24} name="gamecontroller" color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="ai-assistant"
         options={{
           title: 'AI Assistant',

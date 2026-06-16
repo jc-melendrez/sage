@@ -38,9 +38,6 @@ export default function DashboardScreen() {
           </View>
         </View>
       </Modal>
-      <TouchableOpacity onPress={() => router.push('/game')}>
-        <Text>Play Classic Mode</Text>
-      </TouchableOpacity>
     </View>
   );
 }

@@ -3,9 +3,10 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, SafeAreaView } fr
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 
-export default function GameCenterScreen() {
+export default function GamesScreen() {
   const router = useRouter();
 
+  // Define game modes - currently only Classic is active
   const gameModes = [
     {
       id: 'classic',
@@ -13,8 +14,8 @@ export default function GameCenterScreen() {
       subtitle: 'Multiplayer Quiz',
       description: 'Host or join a room. Compete in real-time with friends and climb the leaderboard!',
       icon: 'trophy' as const,
-      color: '#7F77DD',
-      route: '/game/classic' as const, // Points to the setup screen
+      color: '#7F77DD', // Matching your primary purple theme
+      route: '/game' as const,
       active: true,
     },
     {
@@ -86,11 +87,29 @@ export default function GameCenterScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F9FAFB' },
-  header: { paddingHorizontal: 24, paddingTop: 20, paddingBottom: 16 },
-  title: { fontSize: 28, fontWeight: '800', color: '#111827', letterSpacing: -0.5 },
-  subtitle: { fontSize: 16, color: '#6B7280', marginTop: 4 },
-  scrollContent: { padding: 20 },
+  container: {
+    flex: 1,
+    backgroundColor: '#F9FAFB',
+  },
+  header: {
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    paddingBottom: 16,
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: '800',
+    color: '#111827',
+    letterSpacing: -0.5,
+  },
+  subtitle: {
+    fontSize: 16,
+    color: '#6B7280',
+    marginTop: 4,
+  },
+  scrollContent: {
+    padding: 20,
+  },
   card: {
     backgroundColor: 'white',
     borderRadius: 24,
@@ -104,12 +123,37 @@ const styles = StyleSheet.create({
     shadowRadius: 10,
     elevation: 3,
   },
-  disabledCard: { backgroundColor: '#F3F4F6', borderWidth: 1, borderColor: '#E5E7EB' },
-  iconWrapper: { width: 56, height: 56, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
-  cardBody: { flex: 1, marginLeft: 16, marginRight: 8 },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  disabledCard: {
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  iconWrapper: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cardBody: {
+    flex: 1,
+    marginLeft: 16,
+    marginRight: 8,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   modeTitle: { fontSize: 18, fontWeight: '700', color: '#1F2937' },
-  modeSubtitle: { fontSize: 12, fontWeight: '600', color: '#6D28D9', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 },
+  modeSubtitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6D28D9',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
   modeDescription: { fontSize: 14, color: '#6B7280', lineHeight: 18 },
   lockBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#E5E7EB', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
   lockText: { fontSize: 9, fontWeight: '800', color: '#6B7280', marginLeft: 2 },
