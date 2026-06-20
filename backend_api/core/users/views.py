@@ -83,6 +83,23 @@ def user_badges(request, user_id):
     serializer = BadgeSerializer(badges, many=True)
     return Response(serializer.data)
 
+def sync_group_to_firestore(group):
+    """Sync group metadata from Django to Firestore. Non-blocking."""
+    try:
+        db = get_firestore()
+        db.collection('groups').document(str(group.id)).set({
+            'id': group.id,
+            'name': group.name,
+            'description': group.description or '',
+            'join_code': group.join_code,
+            'created_by': group.created_by.id,
+            'members_count': group.members.count(),
+            'members': [m.id for m in group.members.all()],
+            'created_at': group.created_at.isoformat() if group.created_at else None
+        }, merge=True)
+    except Exception as e:
+        print(f'[Firebase Group Sync Error] {e}')
+
 class CreateGroupView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -102,6 +119,9 @@ class CreateGroupView(APIView):
         
         # Add the creator to the members list automatically
         group.members.add(request.user)
+
+        # Sync the new group to Firestore
+        sync_group_to_firestore(group)
 
         return Response({
             "message": "Group created successfully!",
@@ -124,6 +144,9 @@ class JoinGroupView(APIView):
             
             # Add the user to the group
             group.members.add(request.user)
+            
+            # Sync the updated group details and members list to Firestore
+            sync_group_to_firestore(group)
             
             return Response({
                 "message": f"Successfully joined {group.name}!",
@@ -151,6 +174,28 @@ class MyGroupsView(APIView):
         return Response(data)
 
 from .models import GroupMessage # Make sure this is imported at the top!
+import threading
+
+def sync_group_messages_to_firestore(group, messages):
+    """Sync all SQLite messages for a group to Firestore. Runs in background."""
+    if not messages:
+        return
+    try:
+        db = get_firestore()
+        batch = db.batch()
+        for m in messages:
+            doc_ref = db.collection('groups').document(str(group.id)).collection('messages').document(str(m.id))
+            batch.set(doc_ref, {
+                'id': m.id,
+                'text': m.text,
+                'sender_id': m.sender.id,
+                'sender_name': m.sender.first_name or m.sender.username,
+                'time': m.created_at.strftime("%I:%M %p"),
+                'created_at': m.created_at.isoformat()
+            }, merge=True)
+        batch.commit()
+    except Exception as e:
+        print(f'[Firebase Group Chat Sync Error] {e}')
 
 class GroupChatView(APIView):
     permission_classes = [IsAuthenticated]
@@ -159,6 +204,10 @@ class GroupChatView(APIView):
         try:
             group = StudyGroup.objects.get(id=group_id, members=request.user)
             messages = group.messages.all().order_by('created_at')
+            
+            # Start background thread to sync SQLite messages to Firestore
+            threading.Thread(target=sync_group_messages_to_firestore, args=(group, list(messages))).start()
+
             data = [{
                 "id": m.id,
                 "text": m.text,
@@ -180,6 +229,20 @@ class GroupChatView(APIView):
                 
             msg = GroupMessage.objects.create(group=group, sender=request.user, text=text)
             
+            # Sync this new message to Firestore
+            try:
+                db = get_firestore()
+                db.collection('groups').document(str(group.id)).collection('messages').document(str(msg.id)).set({
+                    'id': msg.id,
+                    'text': msg.text,
+                    'sender_id': msg.sender.id,
+                    'sender_name': msg.sender.first_name or msg.sender.username,
+                    'time': msg.created_at.strftime("%I:%M %p"),
+                    'created_at': msg.created_at.isoformat()
+                })
+            except Exception as e:
+                print(f'[Firebase Sync Error on POST] {e}')
+
             return Response({
                 "id": msg.id,
                 "text": msg.text,

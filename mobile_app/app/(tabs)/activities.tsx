@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard'; // 🌟 NEW: Clipboard for the Copy Button
+import firestore from '@react-native-firebase/firestore';
 import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser } from '@/services/authService';
 import TakeQuiz from '../../components/TakeQuiz';
@@ -75,10 +76,25 @@ export default function ActivitiesScreen() {
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const scrollViewRef = useRef<ScrollView>(null);
+  const chatUnsubscribeRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     loadInitialData();
   }, []);
+
+  // Cleanup chat unsubscribe listener when leaving the chat screen
+  useEffect(() => {
+    if (!activeGroup && chatUnsubscribeRef.current) {
+      chatUnsubscribeRef.current();
+      chatUnsubscribeRef.current = null;
+    }
+    return () => {
+      if (chatUnsubscribeRef.current) {
+        chatUnsubscribeRef.current();
+        chatUnsubscribeRef.current = null;
+      }
+    };
+  }, [activeGroup]);
 
   const loadInitialData = async () => {
     try {
@@ -114,17 +130,65 @@ export default function ActivitiesScreen() {
   const openChat = async (group: StudyGroup) => {
     setActiveGroup(group);
     setIsActionMenuOpen(false);
+    
+    // Unsubscribe from any existing listener first
+    if (chatUnsubscribeRef.current) {
+      chatUnsubscribeRef.current();
+      chatUnsubscribeRef.current = null;
+    }
+
     try {
       const token = await getToken();
       const res = await fetch(`${API_BASE_URL}/users/groups/${group.id}/chat/`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
-        setMessages(await res.json());
+        const initialMsgs = await res.json();
+        setMessages(initialMsgs);
         setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: false }), 100);
       }
     } catch (error) {
-      console.error(error);
+      console.error("Failed to load initial messages:", error);
+    }
+
+    // Connect real-time Firestore listener for this group's messages
+    try {
+      const unsub = firestore()
+        .collection('groups')
+        .doc(String(group.id))
+        .collection('messages')
+        .orderBy('created_at', 'asc')
+        .onSnapshot(snapshot => {
+          if (snapshot) {
+            const firestoreMsgs = snapshot.docs.map(doc => {
+              const data = doc.data();
+              return {
+                id: data.id,
+                text: data.text,
+                sender_id: data.sender_id,
+                sender_name: data.sender_name,
+                time: data.time || '',
+              };
+            });
+
+            setMessages(prev => {
+              // Filter out local temporary messages that are already synced (matching by text and sender)
+              const tempMessages = prev.filter(m => m.id > 1000000000000);
+              const unsyncedTemp = tempMessages.filter(temp => 
+                !firestoreMsgs.some(f => f.sender_id === temp.sender_id && f.text === temp.text)
+              );
+              return [...firestoreMsgs, ...unsyncedTemp];
+            });
+
+            setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
+          }
+        }, error => {
+          console.error("Firestore Chat Subscription Error:", error);
+        });
+
+      chatUnsubscribeRef.current = unsub;
+    } catch (firestoreError) {
+      console.error("Failed to initialize firestore listener:", firestoreError);
     }
   };
 

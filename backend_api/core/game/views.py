@@ -22,9 +22,20 @@ class CreateGameView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        topic = request.data.get('topic', 'General Knowledge')
+        file_content = request.data.get('fileContent')
         question_count = int(request.data.get('questionCount', 10))
         time_per_question = int(request.data.get('timePerQuestion', 15))
+
+        if not file_content:
+            return Response({'error': 'No content provided to generate quiz'}, status=400)
+
+        # Generate Topic and Questions via AI
+        ai_data = self.process_content(file_content, question_count)
+        if not ai_data:
+            return Response({'error': 'AI failed to process content'}, status=500)
+
+        topic = ai_data.get('topic', 'Study Quiz')
+        questions = ai_data.get('questions', [])
 
         room_code = generate_room_code()
         db = get_firestore()
@@ -36,7 +47,7 @@ class CreateGameView(APIView):
             'topic': topic,
             'questionCount': question_count,
             'timePerQuestion': time_per_question,
-            'questions': [],
+            'questions': questions,
             'createdAt': fs.SERVER_TIMESTAMP,
         })
 
@@ -53,8 +64,47 @@ class CreateGameView(APIView):
 
         return Response({
             'roomCode': room_code,
+            'topic': topic,
             'message': 'Room created successfully!'
         })
+
+    def process_content(self, content, count):
+        try:
+            response = requests.post(
+                'https://api.groq.com/openai/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {settings.GROQ_API_KEY}',
+                    'Content-Type': 'application/json',
+                },
+                json={
+                    'model': 'llama-3.3-70b-versatile',
+                    'messages': [{
+                        'role': 'user',
+                        'content': f'''Based on the following content, 1) Provide a concise quiz title/topic (max 5 words). 2) Generate {count} multiple choice questions.
+Return ONLY valid JSON in this format:
+{{
+  "topic": "Concise Title",
+  "questions": [
+    {{
+      "question": "...",
+      "choices": ["A. option", "B. option", "C. option", "D. option"],
+      "correctAnswer": "A. option"
+    }}
+  ]
+}}
+
+Content:
+{content[:10000]}'''
+                    }],
+                    'response_format': {"type": "json_object"},
+                    'max_tokens': 3000,
+                },
+                timeout=45
+            )
+            return response.json()['choices'][0]['message']['content']
+        except Exception as e:
+            print(f'[AI Error] {e}')
+            return None
 
 
 class JoinGameView(APIView):
@@ -111,62 +161,21 @@ class StartGameView(APIView):
         if room_data['status'] != 'waiting':
             return Response({'error': 'Game already started'}, status=400)
 
-        # Generate questions via DeepSeek
-        questions = self.generate_questions(room_data['topic'], room_data['questionCount'])
-
-        if not questions:
-            return Response({'error': 'Failed to generate questions'}, status=500)
-
         # Assign shuffled question order to each player
-        count = room_data['questionCount']
+        count = len(room_data.get('questions', []))
         players = room_ref.collection('players').stream()
         for player in players:
             order = list(range(count))
             random.shuffle(order)
             player.reference.update({'questionOrder': order})
 
-        # Save questions and set status to active
+        # Set status to active
         room_ref.update({
-            'questions': questions,
             'status': 'active',
             'startedAt': fs.SERVER_TIMESTAMP,
         })
 
         return Response({'message': 'Game started!'})
-
-    def generate_questions(self, topic, count):
-        try:
-            response = requests.post(
-                'https://api.groq.com/openai/v1/chat/completions',
-                headers={
-                    'Authorization': f'Bearer {settings.GROQ_API_KEY}',
-                    'Content-Type': 'application/json',
-                },
-                json={
-                    'model': 'llama-3.3-70b-versatile',
-                    'messages': [{
-                        'role': 'user',
-                        'content': f'''Generate {count} multiple choice questions about "{topic}".
-Return ONLY a valid JSON array, no explanation, no markdown:
-[
-  {{
-    "question": "...",
-    "choices": ["A. option", "B. option", "C. option", "D. option"],
-    "correctAnswer": "A. option"
-  }}
-]'''
-                    }],
-                    'max_tokens': 2000,
-                },
-                timeout=30
-            )
-            content = response.json()['choices'][0]['message']['content']
-            # Strip markdown code blocks if DeepSeek wraps it
-            content = content.strip().replace('```json', '').replace('```', '').strip()
-            return json.loads(content)
-        except Exception as e:
-            print(f'[DeepSeek Error] {e}')
-            return None
 
 
 class AnswerQuestionView(APIView):

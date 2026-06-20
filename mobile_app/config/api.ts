@@ -2,10 +2,10 @@
 export const API_CONFIG = {
   // For development on same device (web)
   LOCALHOST: 'http://localhost:8000/api',
-  
+
   // Local machine IP (for devices on same network)
-  LOCAL: 'http://192.168.1.16:8000/api',
-  
+  LOCAL: 'http://192.168.1.11:8000/api',
+
   // ngrok tunnel URL (for testing multiple devices anywhere)
   TUNNEL: 'https://eloquent-flagpole-resupply.ngrok-free.dev/api',
 };
