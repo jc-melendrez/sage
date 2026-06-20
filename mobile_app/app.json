@@ -55,7 +55,8 @@
           }
         }
       ],
-      "@react-native-firebase/auth"
+      "@react-native-firebase/auth",
+      "expo-sqlite"
     ],
     "experiments": {
       "typedRoutes": true,
