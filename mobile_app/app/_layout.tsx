@@ -7,6 +7,7 @@ import 'react-native-reanimated';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { isAuthenticated, getToken, getCurrentUser } from '@/services/authService';
 import { getFirebaseUid, initFirebaseAuth } from '@/services/firebaseAuthService';
+import { initializeOfflineDatabase } from '@/utils/offlineStorage';
 
 export const unstable_settings = {
   initialRouteName: '(tabs)',
@@ -22,7 +23,10 @@ export default function RootLayout() {
 
   useEffect(() => {
     const verifyAuth = async () => {
-      if (!navigationState?.key) return;
+      if (!navigationState?.key) {
+        setIsReady(true);
+        return;
+      }
 
       const loggedIn = await isAuthenticated();
       const inAuthGroup = segments[0] === '(tabs)' || segments.length === 0;
@@ -48,6 +52,7 @@ export default function RootLayout() {
         }
       }
 
+      await initializeOfflineDatabase().catch(console.error);
       setIsReady(true);
     };
 
