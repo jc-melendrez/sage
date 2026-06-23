@@ -1,9 +1,10 @@
+import threading
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
@@ -14,6 +15,7 @@ from .serializers import (
 )
 
 PALETTE = ['#7F77DD', '#1D9E75', '#D85A30', '#D4537E', '#378ADD', '#639922']
+
 class CurrentUserProfileView(APIView):
     # This acts as the bouncer: No token = No access
     permission_classes = [IsAuthenticated] 
@@ -36,12 +38,16 @@ class RegisterUserView(APIView):
         serializer = UserRegistrationSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save()
-            user = serializer.instance  # 👈 add this
-            sync_user_to_firestore(user)  # 👈 add this
+            user = serializer.instance
+            try:
+                sync_user_to_firestore(user)
+            except Exception as e:
+                print(f'[Registration Warning] Firebase sync failed: {e}')
             return Response(
                 {"message": "User registered successfully!"}, 
                 status=status.HTTP_201_CREATED
             )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 # --- 2. DATA FETCHING ENDPOINTS (Using your Serializers) ---
 
@@ -168,13 +174,10 @@ class MyGroupsView(APIView):
                 "description": group.description,
                 "members_count": group.members.count(),
                 "join_code": group.join_code,
-                "created_by": group.created_by.id, # 🌟 NEW: Tells the app who the Admin is!
+                "created_by": group.created_by.id,
             } for group in groups
         ]
         return Response(data)
-
-from .models import GroupMessage # Make sure this is imported at the top!
-import threading
 
 def sync_group_messages_to_firestore(group, messages):
     """Sync all SQLite messages for a group to Firestore. Runs in background."""
@@ -258,11 +261,11 @@ class AddXpTestView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        amount = request.data.get('amount', 500) # Defaults to 500 XP
+        amount = request.data.get('amount', 500)
         user = request.user
         
         old_level = user.level
-        user.add_xp(int(amount)) # This calls the logic we wrote in the model
+        user.add_xp(int(amount))
         sync_user_to_firestore(user)
         
         return Response({
@@ -288,6 +291,6 @@ def sync_user_to_firestore(user):
             'total_points': user.total_points,
             'streak': user.streak,
             'avatarColor': PALETTE[user.id % len(PALETTE)],
-        }, merge=True)  # merge=True won't overwrite existing fields
+        }, merge=True)
     except Exception as e:
-        print(f'[Firebase Sync Error] {e}')  # Non-blocking
+        print(f'[Firebase Sync Error] {e}')
