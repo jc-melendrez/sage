@@ -23,5 +23,7 @@ urlpatterns = [
     path('groups/<int:group_id>/chat/', views.GroupChatView.as_view(), name='group_chat'),
 
     path('test-xp/', views.AddXpTestView.as_view(), name='add_xp_test'),
+    path('test-model-config/', views.TestModelConfigView.as_view(), name='test_model_config'),
+    path('lessons/generate/', views.generate_lesson, name='generate_lesson'),
     
 ]

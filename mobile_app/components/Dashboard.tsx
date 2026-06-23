@@ -15,6 +15,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { API_BASE_URL } from '@/config/api';
 import { Fonts } from '@/constants/theme';
 import { getCurrentUser, getToken } from '@/services/authService';
+import LessonDisplay from './LessonDisplay';
+import LessonGenerator from './LessonGenerator';
 
 interface User {
   id: number;
@@ -62,6 +64,10 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
+
+  // Lesson State
+  const [lesson, setLesson] = useState<any>(null);
+  const [showLessonGenerator, setShowLessonGenerator] = useState(false);
 
   // FAB State & Animation Tracker
   const [isFabOpen, setIsFabOpen] = useState(false);
@@ -188,6 +194,58 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
   }
 
   const displayName = user?.first_name || user?.name || user?.username || 'User';
+
+  // Handle lesson generation
+  const handleLessonGenerated = (generatedLesson: any) => {
+    setLesson(generatedLesson);
+    setShowLessonGenerator(false);
+  };
+
+  // Handle lesson display close
+  const handleLessonDisplayClose = () => {
+    setLesson(null);
+  };
+
+  // Handle FAB menu item press for lesson generation
+  const handleGenerateLesson = () => {
+    toggleFab();
+    setShowLessonGenerator(true);
+  };
+
+  // Generate Quiz menu item
+  const fabMenuItem1 = (
+    <Animated.View style={[styles.fabMenuItemWrapper, item1Anim]}>
+      <TouchableOpacity 
+        style={styles.fabMenuItem}
+        onPress={() => {
+          toggleFab();
+          onGenerateQuiz?.();
+        }}
+      >
+        <Text style={styles.fabMenuText}>Generate Quiz</Text>
+        <View style={styles.fabMenuIconBox}><Ionicons name="document-text" size={20} color="#6D28D9" /></View>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+
+  // Conditionally render components
+  if (showLessonGenerator) {
+    return (
+      <LessonGenerator
+        onLessonGenerated={handleLessonGenerated}
+        onCancel={() => setShowLessonGenerator(false)}
+      />
+    );
+  }
+
+  if (lesson) {
+    return (
+      <LessonDisplay
+        lesson={lesson}
+        onClose={handleLessonDisplayClose}
+      />
+    );
+  }
 
   return (
     <View style={styles.mainWrapper}>
@@ -346,19 +404,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       {/* FAB Sliding Menu Items */}
       {isFabOpen && (
         <View style={styles.fabMenu}>
-          
-          <Animated.View style={[styles.fabMenuItemWrapper, item1Anim]}>
-            <TouchableOpacity 
-              style={styles.fabMenuItem}
-              onPress={() => {
-                toggleFab();
-                onGenerateQuiz?.();
-              }}
-            >
-              <Text style={styles.fabMenuText}>Generate Quiz</Text>
-              <View style={styles.fabMenuIconBox}><Ionicons name="document-text" size={20} color="#6D28D9" /></View>
-            </TouchableOpacity>
-          </Animated.View>
+          {fabMenuItem1}
 
           <Animated.View style={[styles.fabMenuItemWrapper, item2Anim]}>
             <TouchableOpacity style={styles.fabMenuItem}>
@@ -398,31 +444,31 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   
   // Header
-  header: { backgroundColor: '#6D28D9', paddingTop: 25, paddingBottom: 24, paddingHorizontal: 20, borderBottomLeftRadius: 32, borderBottomRightRadius: 32, elevation: 4 },
-  headerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  welcome: { color: '#DDD6FE', fontSize: 13, fontFamily: Fonts.sans },
-  name: { color: 'white', fontSize: 22, fontWeight: '700', marginTop: 2, fontFamily: Fonts.sans },
-  iconCircle: { backgroundColor: 'rgba(255,255,255,0.2)', padding: 12, borderRadius: 50 },
+  header: { backgroundColor: '#6D28D9', paddingTop: 30, paddingBottom: 28, paddingHorizontal: 20, borderBottomLeftRadius: 32, borderBottomRightRadius: 32, elevation: 4 },
+  headerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
+  welcome: { color: '#DDD6FE', fontSize: 14, fontFamily: Fonts.sans },
+  name: { color: 'white', fontSize: 24, fontWeight: '700', marginTop: 2, fontFamily: Fonts.sans },
+  iconCircle: { backgroundColor: 'rgba(255,255,255,0.2)', padding: 14, borderRadius: 50 },
 
   // Glassmorphic Quick Stats
-  glassStatsRow: { flexDirection: 'row', gap: 10 },
-  glassStatCard: { flex: 1, backgroundColor: 'rgba(255,255,255,0.1)', padding: 12, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
-  glassStatIconRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
-  glassStatValue: { color: 'white', fontSize: 18, fontWeight: 'bold', fontFamily: Fonts.sans },
-  glassStatLabel: { color: '#DDD6FE', fontSize: 11, fontFamily: Fonts.sans },
+  glassStatsRow: { flexDirection: 'row', gap: 12 },
+  glassStatCard: { flex: 1, backgroundColor: 'rgba(255,255,255,0.1)', padding: 16, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
+  glassStatIconRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
+  glassStatValue: { color: 'white', fontSize: 20, fontWeight: 'bold', fontFamily: Fonts.sans },
+  glassStatLabel: { color: '#DDD6FE', fontSize: 12, fontFamily: Fonts.sans },
 
   content: { padding: 20 },
-  section: { marginBottom: 24 },
+  section: { marginBottom: 32 },
   
   // Section Headers
-  sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
-  sectionTitle: { fontSize: 16, fontWeight: '600', color: '#111827', fontFamily: Fonts.sans },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
+  sectionTitle: { fontSize: 18, fontWeight: '600', color: '#111827', fontFamily: Fonts.sans, borderLeftWidth: 4, borderLeftColor: '#6D28D9', paddingLeft: 8 },
   joinButtonText: { color: '#6D28D9', fontSize: 14, fontWeight: '600', fontFamily: Fonts.sans }, 
 
   // Cards
-  card: { backgroundColor: 'white', borderRadius: 16, marginBottom: 12, padding: 16, elevation: 2, shadowColor: '#111', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 4 },
-  cardTitle: { fontSize: 14, fontWeight: '600', color: '#1F2937', fontFamily: Fonts.sans },
-  cardDescription: { fontSize: 12, color: '#6B7280', marginTop: 4, lineHeight: 18, fontFamily: Fonts.sans },
+  card: { backgroundColor: 'white', borderRadius: 16, marginBottom: 16, padding: 16, elevation: 3, shadowColor: '#111', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.08, shadowRadius: 6 },
+  cardTitle: { fontSize: 15, fontWeight: '600', color: '#1F2937', fontFamily: Fonts.sans },
+  cardDescription: { fontSize: 13, color: '#6B7280', marginTop: 6, lineHeight: 20, fontFamily: Fonts.sans },
   
   // Custom AI Card Styling
   aiCard: { borderLeftWidth: 4, paddingLeft: 12 },
@@ -437,10 +483,10 @@ const styles = StyleSheet.create({
   sessionFooterText: { fontSize: 12, color: '#6D28D9', fontWeight: '500', fontFamily: Fonts.sans },
 
   // Badges
-  badgeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  badgeCard: { width: '22%', backgroundColor: '#FEFCE8', paddingVertical: 12, borderRadius: 12, alignItems: 'center', elevation: 1 },
-  badgeIcon: { fontSize: 22, marginBottom: 4 },
-  badgeLabel: { fontSize: 10, color: '#374151', fontWeight: '500', textAlign: 'center', fontFamily: Fonts.sans },
+  badgeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  badgeCard: { width: '22%', backgroundColor: '#FEFCE8', paddingVertical: 14, borderRadius: 12, alignItems: 'center', elevation: 1 },
+  badgeIcon: { fontSize: 24, marginBottom: 4 },
+  badgeLabel: { fontSize: 11, color: '#374151', fontWeight: '500', textAlign: 'center', fontFamily: Fonts.sans },
 
   // Floating Action Menu Styles
   fabMain: { position: 'absolute', bottom: 20, right: 20, width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4 },

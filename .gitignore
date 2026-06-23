@@ -73,3 +73,6 @@ SETUP_GUIDE.md
 FRONTEND_BACKEND_CONNECTION.md
 
 serviceAccountKey.json
+
+.agents/
+skills-lock.json

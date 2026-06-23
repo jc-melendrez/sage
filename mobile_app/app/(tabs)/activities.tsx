@@ -9,6 +9,7 @@ import firestore from '@react-native-firebase/firestore';
 import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser } from '@/services/authService';
 import TakeQuiz from '../../components/TakeQuiz';
+import LessonDisplay from '../../components/LessonDisplay';
 
 // --- Interfaces ---
 interface StudyGroup {
@@ -30,13 +31,17 @@ interface GroupMessage {
 
 interface Lesson {
   id: number;
+  user_id: number;
   title: string;
   subject: string;
-  duration: string;
-  progress: number;
-  status: 'completed' | 'in-progress' | 'not-started';
-  points: number;
-  color: string;
+  sections: Array<{
+    title: string;
+    content: string;
+    key_concepts: string[];
+  }>;
+  learning_objectives: string[];
+  estimated_duration: string;
+  created_at?: string;
 }
 
 interface Quiz {
@@ -75,6 +80,41 @@ export default function ActivitiesScreen() {
   const [newGroupName, setNewGroupName] = useState('');
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // --- Generate Lesson Modal ---
+  const [isGenerateLessonModalOpen, setIsGenerateLessonModalOpen] = useState(false);
+  const [lessonTopic, setLessonTopic] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
+  // --- Lesson Display Modal ---
+  const [isLessonDisplayModalOpen, setIsLessonDisplayModalOpen] = useState(false);
+  const [lessonToDisplay, setLessonToDisplay] = useState<Lesson | null>(null);
+  const [lessons, setLessons] = useState<Lesson[]>([
+    { 
+      id: 1, 
+      user_id: 1,
+      title: 'Introduction to Calculus', 
+      subject: 'Mathematics', 
+      sections: [
+        { title: 'Introduction to Derivatives', content: 'Learn the basics of derivatives and their applications.', key_concepts: ['derivative', 'slope', 'rate of change'] }
+      ], 
+      learning_objectives: ['Understand the concept of derivatives', 'Apply basic derivative rules'],
+      estimated_duration: '45 min', 
+      created_at: new Date().toISOString()
+    },
+    { 
+      id: 2, 
+      user_id: 1,
+      title: "Newton's Laws of Motion", 
+      subject: 'Physics', 
+      sections: [
+        { title: 'First Law of Motion', content: 'An object at rest stays at rest unless acted upon by a force.', key_concepts: ['inertia', 'force', 'mass'] },
+        { title: 'Second Law of Motion', content: 'F = ma - Force equals mass times acceleration.', key_concepts: ['force', 'mass', 'acceleration'] }
+      ], 
+      learning_objectives: ['Understand Newton\'s three laws', 'Apply laws to solve problems'],
+      estimated_duration: '30 min', 
+      created_at: new Date().toISOString()
+    },
+  ]);
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
 
@@ -258,11 +298,35 @@ export default function ActivitiesScreen() {
     } finally { setIsSubmitting(false); }
   };
 
-  // Static Fallback Data
-  const lessons: Lesson[] = [
-    { id: 1, title: 'Introduction to Calculus', subject: 'Mathematics', duration: '45 min', progress: 100, status: 'completed', points: 250, color: '#3B82F6' },
-    { id: 2, title: "Newton's Laws of Motion", subject: 'Physics', duration: '30 min', progress: 60, status: 'in-progress', points: 200, color: '#10B981' },
-  ];
+  // --- Generate Lesson Function ---
+  const handleGenerateLesson = async () => {
+    if (!lessonTopic.trim()) return;
+    try {
+      setIsGenerating(true);
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/users/lessons/generate/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ topic: lessonTopic.trim() })
+      });
+      
+      if (res.ok) {
+        const newLesson = await res.json();
+        setLessons(prev => [newLesson, ...prev]);
+        setLessonTopic('');
+        setIsGenerateLessonModalOpen(false);
+        Alert.alert('Success', 'Lesson generated successfully!');
+      } else {
+        Alert.alert('Error', 'Failed to generate lesson. Please try again.');
+      }
+    } catch (error) {
+      console.error('Error generating lesson:', error);
+      Alert.alert('Error', 'Failed to generate lesson. Please try again.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
 
   // --- ACTIVE CHAT VIEW ---
   if (activeGroup) {
@@ -435,11 +499,9 @@ export default function ActivitiesScreen() {
       </View>
 
       <View style={styles.tabsContainer}>
-        {/*
         <TouchableOpacity style={[styles.tab, selectedTab === 'lessons' && styles.tabActive]} onPress={() => setSelectedTab('lessons')}>
           <Text style={[styles.tabText, selectedTab === 'lessons' && styles.tabTextActive]}>Lessons</Text>
         </TouchableOpacity>
-        */}
         <TouchableOpacity style={[styles.tab, selectedTab === 'quizzes' && styles.tabActive]} onPress={() => setSelectedTab('quizzes')}>
           <Text style={[styles.tabText, selectedTab === 'quizzes' && styles.tabTextActive]}>Quizzes</Text>
         </TouchableOpacity>
@@ -454,26 +516,26 @@ export default function ActivitiesScreen() {
         {selectedTab === 'lessons' && (
           <View style={styles.itemsList}>
             {lessons.map((lesson) => (
-              <View key={lesson.id} style={styles.card}>
+              <TouchableOpacity key={lesson.id} style={styles.card} onPress={() => {
+                setLessonToDisplay(lesson);
+                setIsLessonDisplayModalOpen(true);
+              }}>
                 <View style={styles.cardHeader}>
                   <View style={{ flex: 1 }}>
                     <View style={styles.subjectBadge}>
-                      <View style={[styles.colorDot, { backgroundColor: lesson.color }]} />
+                      <View style={[styles.colorDot, { backgroundColor: '#6D28D9' }]} />
                       <Text style={styles.subjectText}>{lesson.subject}</Text>
                     </View>
                     <Text style={styles.cardTitle}>{lesson.title}</Text>
                     <View style={styles.metaInfo}>
-                      <View style={styles.metaItem}><Ionicons name="time-outline" size={12} color="#6B7280" /><Text style={styles.metaText}>{lesson.duration}</Text></View>
-                      <View style={styles.metaItem}><Ionicons name="trophy-outline" size={12} color="#6B7280" /><Text style={styles.metaText}>{lesson.points} pts</Text></View>
+                      <View style={styles.metaItem}><Ionicons name="time-outline" size={12} color="#6B7280" /><Text style={styles.metaText}>{lesson.estimated_duration}</Text></View>
                     </View>
                   </View>
                   <View style={styles.statusIcon}>
-                    {lesson.status === 'completed' && <Ionicons name="checkmark-circle" size={24} color="#10B981" />}
-                    {lesson.status === 'in-progress' && <Ionicons name="play-circle" size={24} color="#6D28D9" />}
-                    {lesson.status === 'not-started' && <Ionicons name="book-outline" size={24} color="#D1D5DB" />}
+                    <Ionicons name="book-outline" size={24} color="#6D28D9" />
                   </View>
                 </View>
-              </View>
+              </TouchableOpacity>
             ))}
           </View>
         )}
@@ -603,6 +665,59 @@ export default function ActivitiesScreen() {
         />
       </Modal>
 
+      {/* GENERATE LESSON MODAL */}
+      <Modal visible={isGenerateLessonModalOpen} animationType="fade" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Generate Lesson</Text>
+              <TouchableOpacity onPress={() => setIsGenerateLessonModalOpen(false)}>
+                <Ionicons name="close" size={24} color="#1F2937" />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalSubtitle}>Enter a topic to generate a new lesson</Text>
+            <TextInput 
+              style={styles.modalInput} 
+              placeholder="e.g. Algebra, Physics, History" 
+              placeholderTextColor="#9CA3AF" 
+              value={lessonTopic} 
+              onChangeText={setLessonTopic}
+            />
+            <TouchableOpacity 
+              style={[styles.modalSubmitBtn, !lessonTopic.trim() && { opacity: 0.5 }]} 
+              onPress={handleGenerateLesson}
+              disabled={!lessonTopic.trim() || isGenerating}
+            >
+              {isGenerating ? (
+                <ActivityIndicator color="white" />
+              ) : (
+                <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 14 }}>Generate Lesson</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* GENERATE LESSON FAB */}
+      {selectedTab === 'lessons' && (
+        <TouchableOpacity 
+          style={styles.generateLessonFab} 
+          onPress={() => setIsGenerateLessonModalOpen(true)}
+        >
+          <Ionicons name="add" size={24} color="white" />
+        </TouchableOpacity>
+      )}
+
+      {/* LESSON DISPLAY MODAL */}
+      <Modal visible={isLessonDisplayModalOpen} animationType="slide">
+        {lessonToDisplay && (
+          <LessonDisplay 
+            lesson={lessonToDisplay} 
+            onClose={() => setIsLessonDisplayModalOpen(false)} 
+          />
+        )}
+      </Modal>
+
     </View>
   );
 }
@@ -691,6 +806,7 @@ const styles = StyleSheet.create({ container: { flex: 1, backgroundColor: '#F9FA
   modalContent: { backgroundColor: 'white', borderRadius: 20, padding: 20 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   modalTitle: { fontSize: 18, fontWeight: 'bold', color: '#1F2937' },
+  modalSubtitle: { fontSize: 14, color: '#6B7280', marginBottom: 16, textAlign: 'center' },
   modalInput: { backgroundColor: '#F3F4F6', borderRadius: 10, padding: 14, fontSize: 15, marginBottom: 16 },
   modalSubmitBtn: { backgroundColor: '#6D28D9', padding: 14, borderRadius: 10, alignItems: 'center' },
 
@@ -715,4 +831,7 @@ const styles = StyleSheet.create({ container: { flex: 1, backgroundColor: '#F9FA
 
   takeQuizBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#7C3AED', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, gap: 4, alignSelf: 'center' },
   takeQuizBtnText: { color: 'white', fontWeight: 'bold', fontSize: 13 },
+  
+  // Generate Lesson FAB
+  generateLessonFab: { position: 'absolute', bottom: 80, right: 20, width: 56, height: 56, borderRadius: 28, backgroundColor: '#6D28D9', justifyContent: 'center', alignItems: 'center', elevation: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4, zIndex: 10 },
 });
