@@ -25,5 +25,6 @@ urlpatterns = [
     path('test-xp/', views.AddXpTestView.as_view(), name='add_xp_test'),
     path('test-model-config/', views.TestModelConfigView.as_view(), name='test_model_config'),
     path('lessons/generate/', views.generate_lesson, name='generate_lesson'),
+    path('documents/upload/', views.upload_document, name='upload_document'),
     
 ]

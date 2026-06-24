@@ -46,3 +46,5 @@ typing-extensions==4.15.0
 tzdata==2026.2
 urllib3==2.6.3
 virtualenv==20.35.4
+python-docx==1.1.0
+PyPDF2==3.0.1
