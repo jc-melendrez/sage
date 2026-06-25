@@ -10,6 +10,8 @@ import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser } from '@/services/authService';
 import TakeQuiz from '../../components/TakeQuiz';
 import LessonDisplay from '../../components/LessonDisplay';
+import LessonGenerator from '@/components/LessonGenerator';
+
 
 // --- Interfaces ---
 interface StudyGroup {
@@ -83,8 +85,7 @@ export default function ActivitiesScreen() {
 
   // --- Generate Lesson Modal ---
   const [isGenerateLessonModalOpen, setIsGenerateLessonModalOpen] = useState(false);
-  const [lessonTopic, setLessonTopic] = useState('');
-  const [isGenerating, setIsGenerating] = useState(false);
+  
   // --- Lesson Display Modal ---
   const [isLessonDisplayModalOpen, setIsLessonDisplayModalOpen] = useState(false);
   const [lessonToDisplay, setLessonToDisplay] = useState<Lesson | null>(null);
@@ -299,33 +300,7 @@ export default function ActivitiesScreen() {
   };
 
   // --- Generate Lesson Function ---
-  const handleGenerateLesson = async () => {
-    if (!lessonTopic.trim()) return;
-    try {
-      setIsGenerating(true);
-      const token = await getToken();
-      const res = await fetch(`${API_BASE_URL}/users/lessons/generate/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ topic: lessonTopic.trim() })
-      });
-      
-      if (res.ok) {
-        const newLesson = await res.json();
-        setLessons(prev => [newLesson, ...prev]);
-        setLessonTopic('');
-        setIsGenerateLessonModalOpen(false);
-        Alert.alert('Success', 'Lesson generated successfully!');
-      } else {
-        Alert.alert('Error', 'Failed to generate lesson. Please try again.');
-      }
-    } catch (error) {
-      console.error('Error generating lesson:', error);
-      Alert.alert('Error', 'Failed to generate lesson. Please try again.');
-    } finally {
-      setIsGenerating(false);
-    }
-  };
+
 
 
   // --- ACTIVE CHAT VIEW ---
@@ -513,32 +488,61 @@ export default function ActivitiesScreen() {
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         
         {/* LESSONS VIEW */}
-        {selectedTab === 'lessons' && (
-          <View style={styles.itemsList}>
-            {lessons.map((lesson) => (
-              <TouchableOpacity key={lesson.id} style={styles.card} onPress={() => {
-                setLessonToDisplay(lesson);
-                setIsLessonDisplayModalOpen(true);
-              }}>
-                <View style={styles.cardHeader}>
-                  <View style={{ flex: 1 }}>
-                    <View style={styles.subjectBadge}>
-                      <View style={[styles.colorDot, { backgroundColor: '#6D28D9' }]} />
-                      <Text style={styles.subjectText}>{lesson.subject}</Text>
-                    </View>
-                    <Text style={styles.cardTitle}>{lesson.title}</Text>
-                    <View style={styles.metaInfo}>
-                      <View style={styles.metaItem}><Ionicons name="time-outline" size={12} color="#6B7280" /><Text style={styles.metaText}>{lesson.estimated_duration}</Text></View>
-                    </View>
-                  </View>
-                  <View style={styles.statusIcon}>
-                    <Ionicons name="book-outline" size={24} color="#6D28D9" />
-                  </View>
-                </View>
-              </TouchableOpacity>
-            ))}
+{selectedTab === 'lessons' && (
+  <View style={styles.itemsList}>
+    {lessons.map((lesson, index) => (
+      <TouchableOpacity
+        key={`${lesson.id ?? 'lesson'}-${index}`}
+        style={styles.card}
+        onPress={() => {
+          setLessonToDisplay(lesson);
+          setIsLessonDisplayModalOpen(true);
+        }}
+      >
+        <View style={styles.cardHeader}>
+          <View style={{ flex: 1 }}>
+            <View style={styles.subjectBadge}>
+              <View
+                style={[
+                  styles.colorDot,
+                  { backgroundColor: '#6D28D9' },
+                ]}
+              />
+              <Text style={styles.subjectText}>
+                {lesson.subject}
+              </Text>
+            </View>
+
+            <Text style={styles.cardTitle}>
+              {lesson.title}
+            </Text>
+
+            <View style={styles.metaInfo}>
+              <View style={styles.metaItem}>
+                <Ionicons
+                  name="time-outline"
+                  size={12}
+                  color="#6B7280"
+                />
+                <Text style={styles.metaText}>
+                  {lesson.estimated_duration}
+                </Text>
+              </View>
+            </View>
           </View>
-        )}
+
+          <View style={styles.statusIcon}>
+            <Ionicons
+              name="book-outline"
+              size={24}
+              color="#6D28D9"
+            />
+          </View>
+        </View>
+      </TouchableOpacity>
+    ))}
+  </View>
+)}
 
         {/* QUIZZES VIEW */}
         {selectedTab === 'quizzes' && (
@@ -666,37 +670,23 @@ export default function ActivitiesScreen() {
       </Modal>
 
       {/* GENERATE LESSON MODAL */}
-      <Modal visible={isGenerateLessonModalOpen} animationType="fade" transparent={true}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Generate Lesson</Text>
-              <TouchableOpacity onPress={() => setIsGenerateLessonModalOpen(false)}>
-                <Ionicons name="close" size={24} color="#1F2937" />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.modalSubtitle}>Enter a topic to generate a new lesson</Text>
-            <TextInput 
-              style={styles.modalInput} 
-              placeholder="e.g. Algebra, Physics, History" 
-              placeholderTextColor="#9CA3AF" 
-              value={lessonTopic} 
-              onChangeText={setLessonTopic}
-            />
-            <TouchableOpacity 
-              style={[styles.modalSubmitBtn, !lessonTopic.trim() && { opacity: 0.5 }]} 
-              onPress={handleGenerateLesson}
-              disabled={!lessonTopic.trim() || isGenerating}
-            >
-              {isGenerating ? (
-                <ActivityIndicator color="white" />
-              ) : (
-                <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 14 }}>Generate Lesson</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      {/* GENERATE LESSON MODAL */}
+<Modal
+  visible={isGenerateLessonModalOpen}
+  animationType="slide"
+>
+  <LessonGenerator
+    onLessonGenerated={(lesson) => {
+      setLessons(prev => [lesson, ...prev]);
+      setIsGenerateLessonModalOpen(false);
+      Alert.alert(
+        'Success',
+        'Lesson generated successfully!'
+      );
+    }}
+    onCancel={() => setIsGenerateLessonModalOpen(false)}
+  />
+</Modal>
 
       {/* GENERATE LESSON FAB */}
       {selectedTab === 'lessons' && (

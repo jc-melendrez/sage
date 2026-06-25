@@ -16,6 +16,9 @@ from .serializers import (
     BadgeSerializer, RecommendationSerializer, 
     SessionSerializer, ActivitySerializer
 )
+from .utils.file_parser import extract_text_from_file
+from rest_framework.decorators import api_view, permission_classes, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser
 
 PALETTE = ['#7F77DD', '#1D9E75', '#D85A30', '#D4537E', '#378ADD', '#639922']
 
@@ -283,7 +286,7 @@ class TestModelConfigView(APIView):
 
     def get(self, request):
         """Test endpoint to verify model configuration"""
-        model_name = os.getenv('GROQ_MODEL_NAME', 'llama-3.1-70b-versatile')
+        model_name = os.getenv('GROQ_MODEL_NAME', 'llama-3.3-70b-versatile')
         api_key = os.getenv('GROQ_API_KEY', 'not_set')
         
         return Response({
@@ -313,59 +316,108 @@ def sync_user_to_firestore(user):
         print(f'[Firebase Sync Error] {e}')
 
 # --- AI Lesson Generation Endpoint ---
+# --- AI Lesson Generation Endpoint ---
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
 def generate_lesson(request):
-    """Generate an AI-powered lesson using GroQ API"""
-    topic = request.data.get('topic')
-    
-    if not topic:
-        return Response({"error": "Topic is required"}, status=status.HTTP_400_BAD_REQUEST)
-    
+    """
+    Generate an AI-powered lesson using Groq API.
+    File upload ONLY (PDF, DOCX, TXT)
+    """
+
+    print("\n===== GENERATE LESSON DEBUG =====")
+    print("CONTENT TYPE:", request.content_type)
+    print("POST DATA:", request.data)
+    print("FILES:", request.FILES)
+
+    uploaded_file = request.FILES.get('file')
+    extracted_text = ""
+
+    # -----------------------------
+    # 1. Validate file exists
+    # -----------------------------
+    if not uploaded_file:
+        return Response(
+            {"error": "File is required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    print("📄 FILE RECEIVED:")
+    print("Name:", uploaded_file.name)
+    print("Size:", uploaded_file.size)
+
+    # -----------------------------
+    # 2. Extract file content
+    # -----------------------------
     try:
-        # Get GroQ API key from environment
+        extracted_text = extract_text_from_file(uploaded_file)
+    except Exception as e:
+        print(f"[File Extract Error] {e}")
+        return Response(
+            {"error": "Failed to process uploaded file"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not extracted_text.strip():
+        return Response(
+            {"error": "Could not extract text from file"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    clean_text = " ".join(extracted_text.split())
+
+    try:
         api_key = os.getenv('GROQ_API_KEY')
+
         if not api_key:
-            return Response({"error": "GroQ API key not configured"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-        # Prepare the prompt for structured lesson generation
+            return Response(
+                {"error": "Groq API key not configured"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # -----------------------------
+        # 3. Build prompt (FILE ONLY)
+        # -----------------------------
         prompt = f"""
-        Generate a comprehensive educational lesson on the topic: "{topic}"
-        
-        Please return the response in JSON format with the following structure:
-        {{
-            "title": "A descriptive title for the lesson",
-            "subject": "The main subject area (e.g., Science, History, Mathematics)",
-            "sections": [
-                {{
-                    "title": "Section title",
-                    "content": "Detailed content for this section",
-                    "key_concepts": ["concept1", "concept2", "concept3"]
-                }}
-            ],
-            "learning_objectives": ["Learning objective 1", "Learning objective 2"],
-            "estimated_duration": "Estimated time to complete (e.g., '30 minutes')"
-        }}
-        
-        Make the content educational, engaging, and appropriate for general learners.
-        Include key concepts that should be highlighted.
-        """
-        
-        # Call GroQ API
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        # Get model name from environment or use default
-        model_name = os.getenv('GROQ_MODEL_NAME', 'llama-3.1-70b-versatile')
-        
-        data = {
+Generate a structured educational lesson from the following material.
+
+STUDY MATERIAL:
+
+{clean_text[:12000]}
+
+Return ONLY valid JSON:
+
+{{
+  "title": "Lesson title",
+  "subject": "Subject area",
+  "sections": [
+    {{
+      "title": "Section title",
+      "content": "Detailed explanation",
+      "key_concepts": ["concept1", "concept2"]
+    }}
+  ],
+  "learning_objectives": [
+    "Objective 1",
+    "Objective 2"
+  ],
+  "estimated_duration": "30 minutes"
+}}
+"""
+
+        model_name = os.getenv('GROQ_MODEL_NAME', 'llama-3.3-70b-versatile')
+
+        payload = {
             "model": model_name,
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are an expert educational content creator. Generate structured, engaging lessons with clear sections and key concepts."
+                    "content": (
+                        "You are an expert educator. "
+                        "Return ONLY valid JSON. "
+                        "No markdown. No explanations."
+                    )
                 },
                 {
                     "role": "user",
@@ -373,47 +425,85 @@ def generate_lesson(request):
                 }
             ],
             "temperature": 0.7,
-            "max_tokens": 2000
+            "max_tokens": 4000,
+            "response_format": {"type": "json_object"}
         }
-        
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+        print("🧠 Sending request to Groq...")
+
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers=headers,
-            json=data
+            json=payload,
+            timeout=60
         )
-        
+
         if response.status_code != 200:
-            return Response({"error": f"GroQ API error: {response.text}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-        # Parse the response
-        ai_response = response.json()
-        lesson_content = ai_response['choices'][0]['message']['content']
-        
-        # Parse JSON from the response
-        try:
-            lesson_data = json.loads(lesson_content)
-        except json.JSONDecodeError:
-            # Fallback: if AI returns malformed JSON, create a basic structure
+            print("❌ Groq error:", response.text)
+            return Response(
+                {"error": response.text},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        data = response.json()
+        lesson_content = data["choices"][0]["message"]["content"]
+
+        print("🔥 GROQ RAW OUTPUT:")
+        print(lesson_content[:1000])
+
+        # -----------------------------
+        # 4. Safe JSON parser
+        # -----------------------------
+        def safe_json_parse(text):
+            try:
+                return json.loads(text)
+            except:
+                import re
+                match = re.search(r"\{[\s\S]*\}", text)
+                if match:
+                    try:
+                        return json.loads(match.group())
+                    except:
+                        pass
+            return None
+
+        lesson_data = safe_json_parse(lesson_content)
+
+        # -----------------------------
+        # 5. Fallback (NEVER FAIL FRONTEND)
+        # -----------------------------
+        if not lesson_data:
             lesson_data = {
-                "title": f"Lesson on {topic}",
+                "title": "Generated Lesson",
                 "subject": "General",
                 "sections": [
                     {
                         "title": "Introduction",
-                        "content": f"Here's a lesson about {topic}.",
-                        "key_concepts": ["topic", "learning"]
+                        "content": extracted_text[:1000],
+                        "key_concepts": ["learning"]
                     }
                 ],
-                "learning_objectives": ["Understand the basics of the topic"],
+                "learning_objectives": [
+                    "Understand the material"
+                ],
                 "estimated_duration": "30 minutes"
             }
-        
-        # Add user ID and ensure required fields
-        lesson_data['user_id'] = request.user.id
-        lesson_data['created_at'] = lesson_data.get('created_at', None)
-        
+
+        # -----------------------------
+        # 6. Attach metadata
+        # -----------------------------
+        lesson_data["user_id"] = request.user.id
+
         return Response(lesson_data, status=status.HTTP_201_CREATED)
-        
+
     except Exception as e:
-        print(f"[Lesson Generation Error] {e}")
-        return Response({"error": "Failed to generate lesson"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        print(f"[generate_lesson error] {e}")
+        return Response(
+            {"error": "Internal server error"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

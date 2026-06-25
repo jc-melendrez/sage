@@ -5,6 +5,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
 import { colors } from '@/constants/theme';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 
 interface LessonGeneratorProps {
   onLessonGenerated: (lesson: any) => void;
@@ -12,41 +14,83 @@ interface LessonGeneratorProps {
 }
 
 export default function LessonGenerator({ onLessonGenerated, onCancel }: LessonGeneratorProps) {
-  const [topic, setTopic] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleGenerateLesson = async () => {
-    if (!topic.trim()) {
-      Alert.alert('Error', 'Please enter a topic for the lesson');
+  const [selectedFile, setSelectedFile] =
+  useState<DocumentPicker.DocumentPickerAsset | null>(null);
+
+  const handleSelectFile = async () => {
+  try {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: [
+        'application/pdf',
+        'text/plain',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      ],
+      copyToCacheDirectory: true,
+    });
+
+    if (result.canceled) return;
+
+    setSelectedFile(result.assets[0]);
+  } catch (err) {
+    console.error('File picker error:', err);
+    Alert.alert('Error', 'Failed to select file.');
+  }
+};
+const handleGenerateLesson = async () => {
+  if (!selectedFile) {
+    Alert.alert('Error', 'Please select a study file.');
+    return;
+  }
+
+  setLoading(true);
+
+  try {
+    const token = await getToken();
+
+    const formData = new FormData();
+
+    formData.append("file", {
+      uri: selectedFile.uri,
+      name: selectedFile.name,
+      type: selectedFile.mimeType || "application/pdf",
+    } as any);
+
+    console.log("🚀 Sending file only request...");
+    console.log("Selected file:", selectedFile);
+
+    const response = await fetch(
+      `${API_BASE_URL}/users/lessons/generate/`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        body: formData,
+      }
+    );
+
+    const rawText = await response.text();
+    console.log("📩 RAW RESPONSE:", rawText);
+
+    const data = JSON.parse(rawText);
+
+    if (!response.ok) {
+      Alert.alert('Error', data.error || 'Failed to generate lesson');
       return;
     }
 
-    setLoading(true);
-    try {
-      const token = await getToken();
-      const response = await fetch(`${API_BASE_URL}/users/lessons/generate/`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({ topic }),
-      });
+    onLessonGenerated(data);
 
-      if (response.ok) {
-        const lesson = await response.json();
-        onLessonGenerated(lesson);
-      } else {
-        const errorData = await response.json();
-        Alert.alert('Error', errorData.error || 'Failed to generate lesson');
-      }
-    } catch (error) {
-      console.error('Error generating lesson:', error);
-      Alert.alert('Error', 'Failed to generate lesson');
-    } finally {
-      setLoading(false);
-    }
-  };
+  } catch (error) {
+    console.error(error);
+    Alert.alert('Error', 'Failed to generate lesson');
+  } finally {
+    setLoading(false);
+  }
+};
 
   return (
     <View style={styles.container}>
@@ -64,26 +108,59 @@ export default function LessonGenerator({ onLessonGenerated, onCancel }: LessonG
       </LinearGradient>
 
       <View style={styles.content}>
-        <View style={styles.inputContainer}>
-          <Ionicons name="search" size={20} color={colors.primary} style={styles.inputIcon} />
-          <TextInput
-            style={styles.input}
-            placeholder="Enter a topic (e.g., Photosynthesis, World War II, Algebra)"
-            value={topic}
-            onChangeText={setTopic}
-            placeholderTextColor={colors.textSecondary}
-          />
-        </View>
+  
 
-        <Text style={styles.description}>
-          Our AI will create a comprehensive lesson with structured sections and key concepts tailored to your topic.
-        </Text>
+  {/* FILE PICKER */}
+  <Text
+    style={{
+      fontSize: 14,
+      color: colors.textSecondary,
+      marginBottom: 8,
+      fontWeight: '600',
+    }}
+  >
+    Study Material (Optional)
+  </Text>
 
-        <TouchableOpacity 
-          style={[styles.generateButton, loading && { opacity: 0.7 }]} 
-          onPress={handleGenerateLesson}
-          disabled={loading}
-        >
+  <TouchableOpacity
+    onPress={handleSelectFile}
+    style={{
+      backgroundColor: 'white',
+      padding: 16,
+      borderRadius: 12,
+      marginBottom: 16,
+      flexDirection: 'row',
+      alignItems: 'center',
+    }}
+  >
+    <Ionicons
+      name="document-outline"
+      size={20}
+      color={colors.primary}
+    />
+
+    <Text
+      style={{
+        marginLeft: 12,
+        flex: 1,
+        color: colors.text,
+      }}
+    >
+      {selectedFile
+        ? selectedFile.name
+        : 'Select PDF, TXT, DOC or DOCX'}
+    </Text>
+  </TouchableOpacity>
+
+  <Text style={styles.description}>
+    Upload a study material or enter a topic. AI will generate a structured lesson from it.
+  </Text>
+
+  <TouchableOpacity
+    style={[styles.generateButton, loading && { opacity: 0.7 }]}
+    onPress={handleGenerateLesson}
+    disabled={loading}
+  >
           {loading ? (
             <>
               <Ionicons name="refresh" size={20} color="white" />
