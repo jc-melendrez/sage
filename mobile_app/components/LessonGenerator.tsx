@@ -8,159 +8,114 @@ import { colors } from '@/constants/theme';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 
+// --- Updated props: onCourseGenerated instead of onLessonGenerated ---
 interface LessonGeneratorProps {
-  onLessonGenerated: (lesson: any) => void;
+  onCourseGenerated: (course: any) => void;
   onCancel: () => void;
 }
 
-export default function LessonGenerator({ onLessonGenerated, onCancel }: LessonGeneratorProps) {
+export default function LessonGenerator({ onCourseGenerated, onCancel }: LessonGeneratorProps) {
   const [loading, setLoading] = useState(false);
-
-  const [selectedFile, setSelectedFile] =
-  useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [selectedFile, setSelectedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
 
   const handleSelectFile = async () => {
-  try {
-    const result = await DocumentPicker.getDocumentAsync({
-      type: [
-        'application/pdf',
-        'text/plain',
-        'application/msword',
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      ],
-      copyToCacheDirectory: true,
-    });
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: [
+          'application/pdf',
+          'text/plain',
+          'application/msword',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ],
+        copyToCacheDirectory: true,
+      });
 
-    if (result.canceled) return;
+      if (result.canceled) return;
+      setSelectedFile(result.assets[0]);
+    } catch (err) {
+      console.error('File picker error:', err);
+      Alert.alert('Error', 'Failed to select file.');
+    }
+  };
 
-    setSelectedFile(result.assets[0]);
-  } catch (err) {
-    console.error('File picker error:', err);
-    Alert.alert('Error', 'Failed to select file.');
-  }
-};
-const handleGenerateLesson = async () => {
-  if (!selectedFile) {
-    Alert.alert('Error', 'Please select a study file.');
-    return;
-  }
+  const handleGenerateLesson = async () => {
+    if (!selectedFile) {
+      Alert.alert('Error', 'Please select a study file.');
+      return;
+    }
 
-  setLoading(true);
+    setLoading(true);
 
-  try {
-    const token = await getToken();
+    try {
+      const token = await getToken();
+      const formData = new FormData();
+      formData.append("file", {
+        uri: selectedFile.uri,
+        name: selectedFile.name,
+        type: selectedFile.mimeType || "application/pdf",
+      } as any);
 
-    const formData = new FormData();
+      console.log("🚀 Sending file only request...");
+      console.log("Selected file:", selectedFile);
 
-    formData.append("file", {
-      uri: selectedFile.uri,
-      name: selectedFile.name,
-      type: selectedFile.mimeType || "application/pdf",
-    } as any);
-
-    console.log("🚀 Sending file only request...");
-    console.log("Selected file:", selectedFile);
-
-    const response = await fetch(
-      `${API_BASE_URL}/users/lessons/generate/`,
-      {
+      const response = await fetch(`${API_BASE_URL}/users/lessons/generate/`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
         },
         body: formData,
+      });
+
+      const rawText = await response.text();
+      console.log("📩 RAW RESPONSE:", rawText);
+
+      const data = JSON.parse(rawText);
+
+      if (!response.ok) {
+        Alert.alert('Error', data.error || 'Failed to generate lesson');
+        return;
       }
-    );
 
-    const rawText = await response.text();
-    console.log("📩 RAW RESPONSE:", rawText);
-
-    const data = JSON.parse(rawText);
-
-    if (!response.ok) {
-      Alert.alert('Error', data.error || 'Failed to generate lesson');
-      return;
+      // ✅ Call the updated callback
+      onCourseGenerated(data);
+    } catch (error) {
+      console.error(error);
+      Alert.alert('Error', 'Failed to generate lesson');
+    } finally {
+      setLoading(false);
     }
-
-    onLessonGenerated(data);
-
-  } catch (error) {
-    console.error(error);
-    Alert.alert('Error', 'Failed to generate lesson');
-  } finally {
-    setLoading(false);
-  }
-};
+  };
 
   return (
     <View style={styles.container}>
-      <LinearGradient
-        colors={colors.gradients.primary as any}
-        style={styles.headerGradient}
-      >
+      <LinearGradient colors={colors.gradients.primary as any} style={styles.headerGradient}>
         <View style={styles.header}>
           <TouchableOpacity onPress={onCancel} style={styles.closeButton}>
             <Ionicons name="close" size={24} color="white" />
           </TouchableOpacity>
-          <Text style={styles.title}>Generate AI Lesson</Text>
+          <Text style={styles.title}>Generate AI Course</Text>
           <View style={styles.placeholder} />
         </View>
       </LinearGradient>
 
       <View style={styles.content}>
-  
+        <Text style={styles.label}>Study Material</Text>
+        <TouchableOpacity onPress={handleSelectFile} style={styles.filePicker}>
+          <Ionicons name="document-outline" size={20} color={colors.primary} />
+          <Text style={styles.filePickerText}>
+            {selectedFile ? selectedFile.name : 'Select PDF, TXT, DOC or DOCX'}
+          </Text>
+        </TouchableOpacity>
 
-  {/* FILE PICKER */}
-  <Text
-    style={{
-      fontSize: 14,
-      color: colors.textSecondary,
-      marginBottom: 8,
-      fontWeight: '600',
-    }}
-  >
-    Study Material (Optional)
-  </Text>
+        <Text style={styles.description}>
+          Upload a study material. AI will generate a structured course with three difficulty levels.
+        </Text>
 
-  <TouchableOpacity
-    onPress={handleSelectFile}
-    style={{
-      backgroundColor: 'white',
-      padding: 16,
-      borderRadius: 12,
-      marginBottom: 16,
-      flexDirection: 'row',
-      alignItems: 'center',
-    }}
-  >
-    <Ionicons
-      name="document-outline"
-      size={20}
-      color={colors.primary}
-    />
-
-    <Text
-      style={{
-        marginLeft: 12,
-        flex: 1,
-        color: colors.text,
-      }}
-    >
-      {selectedFile
-        ? selectedFile.name
-        : 'Select PDF, TXT, DOC or DOCX'}
-    </Text>
-  </TouchableOpacity>
-
-  <Text style={styles.description}>
-    Upload a study material or enter a topic. AI will generate a structured lesson from it.
-  </Text>
-
-  <TouchableOpacity
-    style={[styles.generateButton, loading && { opacity: 0.7 }]}
-    onPress={handleGenerateLesson}
-    disabled={loading}
-  >
+        <TouchableOpacity
+          style={[styles.generateButton, loading && styles.disabled]}
+          onPress={handleGenerateLesson}
+          disabled={loading}
+        >
           {loading ? (
             <>
               <Ionicons name="refresh" size={20} color="white" />
@@ -169,7 +124,7 @@ const handleGenerateLesson = async () => {
           ) : (
             <>
               <Ionicons name="sparkles" size={20} color="white" />
-              <Text style={styles.generateButtonText}>Generate Lesson</Text>
+              <Text style={styles.generateButtonText}>Generate Course</Text>
             </>
           )}
         </TouchableOpacity>
@@ -214,26 +169,23 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: 20,
   },
-  inputContainer: {
+  label: {
+    fontSize: 14,
+    color: colors.textSecondary,
+    marginBottom: 8,
+    fontWeight: '600',
+  },
+  filePicker: {
+    backgroundColor: 'white',
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 16,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'white',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    marginBottom: 16,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
   },
-  inputIcon: {
-    marginRight: 12,
-  },
-  input: {
+  filePickerText: {
+    marginLeft: 12,
     flex: 1,
-    fontSize: 16,
     color: colors.text,
   },
   description: {
@@ -254,6 +206,9 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.2,
     shadowRadius: 8,
+  },
+  disabled: {
+    opacity: 0.7,
   },
   generateButtonText: {
     color: 'white',

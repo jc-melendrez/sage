@@ -3,13 +3,13 @@
   "main": "expo-router/entry",
   "version": "1.0.0",
   "scripts": {
-  "start": "expo start",
-  "reset-project": "node ./scripts/reset-project.js",
-  "android": "node ./scripts/patch-gradle.js && expo run:android",
-  "ios": "expo run:ios",
-  "web": "expo start --web",
-  "lint": "expo lint"
-},
+    "start": "expo start",
+    "reset-project": "node ./scripts/reset-project.js",
+    "android": "node ./scripts/patch-gradle.js && expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "lint": "expo lint"
+  },
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",
     "@react-native-firebase/app": "^24.1.1",
@@ -18,6 +18,7 @@
     "@react-navigation/bottom-tabs": "^7.4.0",
     "@react-navigation/elements": "^2.6.3",
     "@react-navigation/native": "^7.1.8",
+    "@tabler/icons-react-native": "^3.44.0",
     "expo": "~55.0.26",
     "expo-clipboard": "~55.0.13",
     "expo-constants": "~55.0.16",
@@ -28,6 +29,7 @@
     "expo-image": "~55.0.11",
     "expo-linear-gradient": "~55.0.14",
     "expo-linking": "~55.0.15",
+    "expo-navigation-bar": "~55.0.14",
     "expo-router": "~55.0.16",
     "expo-secure-store": "~55.0.14",
     "expo-splash-screen": "~55.0.21",

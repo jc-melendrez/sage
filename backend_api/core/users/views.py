@@ -2,6 +2,7 @@ import threading
 import os
 import json
 import requests
+import re
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
@@ -12,31 +13,40 @@ from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
 from .serializers import (
-    UserSerializer, UserRegistrationSerializer, 
-    BadgeSerializer, RecommendationSerializer, 
+    UserSerializer, UserRegistrationSerializer,
+    BadgeSerializer, RecommendationSerializer,
     SessionSerializer, ActivitySerializer
 )
 from .utils.file_parser import extract_text_from_file
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 
+# ---------- Helper: safe JSON parsing ----------
+def safe_json_parse(text):
+    """Try to parse JSON from text, with fallback to regex extraction."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Try to extract a JSON object using regex
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+    return None
+
 PALETTE = ['#7F77DD', '#1D9E75', '#D85A30', '#D4537E', '#378ADD', '#639922']
 
+# ---------- Views ----------
 class CurrentUserProfileView(APIView):
-    # This acts as the bouncer: No token = No access
-    permission_classes = [IsAuthenticated] 
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # request.user is automatically populated by Django because of the token!
-        user = request.user 
-        
-        # Pass the user object to our serializer
+        user = request.user
         serializer = UserProfileSerializer(user)
-        
-        # Return the clean JSON data
         return Response(serializer.data)
 
-# --- 1. REGISTRATION ENDPOINT ---
 class RegisterUserView(APIView):
     permission_classes = [AllowAny]
 
@@ -50,16 +60,13 @@ class RegisterUserView(APIView):
             except Exception as e:
                 print(f'[Registration Warning] Firebase sync failed: {e}')
             return Response(
-                {"message": "User registered successfully!"}, 
+                {"message": "User registered successfully!"},
                 status=status.HTTP_201_CREATED
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-# --- 2. DATA FETCHING ENDPOINTS (Using your Serializers) ---
-
 @api_view(['GET'])
 def user_detail(request, user_id):
-    """Get user profile data"""
     try:
         user = User.objects.get(id=user_id)
         serializer = UserSerializer(user)
@@ -69,34 +76,29 @@ def user_detail(request, user_id):
 
 @api_view(['GET'])
 def user_recommendations(request, user_id):
-    """Get user's AI recommendations"""
     recommendations = Recommendation.objects.filter(user_id=user_id)
     serializer = RecommendationSerializer(recommendations, many=True)
     return Response(serializer.data)
 
 @api_view(['GET'])
 def user_sessions(request, user_id):
-    """Get user's group sessions"""
     sessions = Session.objects.filter(user_id=user_id)
     serializer = SessionSerializer(sessions, many=True)
     return Response(serializer.data)
 
 @api_view(['GET'])
 def user_activities(request, user_id):
-    """Get user's activity history"""
     activities = Activity.objects.filter(user_id=user_id)
     serializer = ActivitySerializer(activities, many=True)
     return Response(serializer.data)
 
 @api_view(['GET'])
 def user_badges(request, user_id):
-    """Get user's earned badges"""
     badges = Badge.objects.filter(user_id=user_id)
     serializer = BadgeSerializer(badges, many=True)
     return Response(serializer.data)
 
 def sync_group_to_firestore(group):
-    """Sync group metadata from Django to Firestore. Non-blocking."""
     try:
         db = get_firestore()
         db.collection('groups').document(str(group.id)).set({
@@ -118,23 +120,15 @@ class CreateGroupView(APIView):
     def post(self, request):
         name = request.data.get('name')
         description = request.data.get('description', '')
-
         if not name:
             return Response({"error": "Group name is required"}, status=400)
-
-        # Create the group
         group = StudyGroup.objects.create(
             name=name,
             description=description,
             created_by=request.user
         )
-        
-        # Add the creator to the members list automatically
         group.members.add(request.user)
-
-        # Sync the new group to Firestore
         sync_group_to_firestore(group)
-
         return Response({
             "message": "Group created successfully!",
             "group_id": group.id,
@@ -146,20 +140,12 @@ class JoinGroupView(APIView):
 
     def post(self, request):
         join_code = request.data.get('join_code')
-        
         if not join_code:
             return Response({"error": "Join code is required"}, status=400)
-
         try:
-            # Find the group by its secret code
             group = StudyGroup.objects.get(join_code=join_code.upper())
-            
-            # Add the user to the group
             group.members.add(request.user)
-            
-            # Sync the updated group details and members list to Firestore
             sync_group_to_firestore(group)
-            
             return Response({
                 "message": f"Successfully joined {group.name}!",
                 "group_id": group.id,
@@ -186,7 +172,6 @@ class MyGroupsView(APIView):
         return Response(data)
 
 def sync_group_messages_to_firestore(group, messages):
-    """Sync all SQLite messages for a group to Firestore. Runs in background."""
     if not messages:
         return
     try:
@@ -213,10 +198,7 @@ class GroupChatView(APIView):
         try:
             group = StudyGroup.objects.get(id=group_id, members=request.user)
             messages = group.messages.all().order_by('created_at')
-            
-            # Start background thread to sync SQLite messages to Firestore
             threading.Thread(target=sync_group_messages_to_firestore, args=(group, list(messages))).start()
-
             data = [{
                 "id": m.id,
                 "text": m.text,
@@ -232,13 +214,9 @@ class GroupChatView(APIView):
         try:
             group = StudyGroup.objects.get(id=group_id, members=request.user)
             text = request.data.get('text')
-            
             if not text:
                 return Response({"error": "Message text is required"}, status=400)
-                
             msg = GroupMessage.objects.create(group=group, sender=request.user, text=text)
-            
-            # Sync this new message to Firestore
             try:
                 db = get_firestore()
                 db.collection('groups').document(str(group.id)).collection('messages').document(str(msg.id)).set({
@@ -251,7 +229,6 @@ class GroupChatView(APIView):
                 })
             except Exception as e:
                 print(f'[Firebase Sync Error on POST] {e}')
-
             return Response({
                 "id": msg.id,
                 "text": msg.text,
@@ -262,18 +239,15 @@ class GroupChatView(APIView):
         except StudyGroup.DoesNotExist:
             return Response({"error": "Group not found"}, status=404)
 
-
 class AddXpTestView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         amount = request.data.get('amount', 500)
         user = request.user
-        
         old_level = user.level
         user.add_xp(int(amount))
         sync_user_to_firestore(user)
-        
         return Response({
             "message": f"Added {amount} XP!",
             "new_xp": user.current_xp,
@@ -285,19 +259,15 @@ class TestModelConfigView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        """Test endpoint to verify model configuration"""
         model_name = os.getenv('GROQ_MODEL_NAME', 'llama-3.3-70b-versatile')
         api_key = os.getenv('GROQ_API_KEY', 'not_set')
-        
         return Response({
             "model_name": model_name,
             "api_key_status": "set" if api_key != 'not_set' else "not_set",
             "message": "Model configuration loaded successfully"
         })
 
-
 def sync_user_to_firestore(user):
-    """Sync user data from Django to Firestore. Non-blocking."""
     try:
         db = get_firestore()
         display_name = f"{user.first_name} {user.last_name}".strip() or user.username
@@ -315,14 +285,13 @@ def sync_user_to_firestore(user):
     except Exception as e:
         print(f'[Firebase Sync Error] {e}')
 
-# --- AI Lesson Generation Endpoint ---
-# --- AI Lesson Generation Endpoint ---
+# ---------- AI Lesson Generation (Multi‑Level Course) ----------
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, FormParser])
 def generate_lesson(request):
     """
-    Generate an AI-powered lesson using Groq API.
+    Generate an AI-powered multi‑level course using Groq API.
     File upload ONLY (PDF, DOCX, TXT)
     """
 
@@ -334,9 +303,7 @@ def generate_lesson(request):
     uploaded_file = request.FILES.get('file')
     extracted_text = ""
 
-    # -----------------------------
     # 1. Validate file exists
-    # -----------------------------
     if not uploaded_file:
         return Response(
             {"error": "File is required"},
@@ -347,9 +314,7 @@ def generate_lesson(request):
     print("Name:", uploaded_file.name)
     print("Size:", uploaded_file.size)
 
-    # -----------------------------
     # 2. Extract file content
-    # -----------------------------
     try:
         extracted_text = extract_text_from_file(uploaded_file)
     except Exception as e:
@@ -369,41 +334,59 @@ def generate_lesson(request):
 
     try:
         api_key = os.getenv('GROQ_API_KEY')
-
         if not api_key:
             return Response(
                 {"error": "Groq API key not configured"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        # -----------------------------
-        # 3. Build prompt (FILE ONLY)
-        # -----------------------------
+        # 3. Build the multi‑level prompt
         prompt = f"""
-Generate a structured educational lesson from the following material.
+You are an expert curriculum designer. Given the uploaded study material, create a structured course with **three distinct difficulty levels**.
 
-STUDY MATERIAL:
+**Requirements:**
+- Level 1: **Beginner** – high‑level overview, simple definitions, analogies. (Flesch reading ease > 70)
+- Level 2: **Intermediate** – practical applications, comparisons, cause‑effect. (Moderate complexity)
+- Level 3: **Advanced** – edge cases, trade‑offs, synthesis, and architectural decisions. (Expert level)
 
-{clean_text[:12000]}
+Each level must have:
+- A `content` field (about 300–500 words).
+- A `quiz` array of **4 multiple‑choice questions**.
+- A `passing_score` (70% for Beginner, 75% for Intermediate, 80% for Advanced).
 
-Return ONLY valid JSON:
-
+**Output MUST be pure JSON** with this exact schema:
 {{
-  "title": "Lesson title",
+  "course_title": "Generated Course Title",
   "subject": "Subject area",
-  "sections": [
+  "levels": [
     {{
-      "title": "Section title",
-      "content": "Detailed explanation",
-      "key_concepts": ["concept1", "concept2"]
+      "level_id": 1,
+      "difficulty": "Beginner",
+      "content": "Full content text...",
+      "quiz": [
+        {{ "question": "What is X?", "options": ["A", "B", "C", "D"], "correct_answer": 0 }}
+      ],
+      "passing_score": 70
+    }},
+    {{
+      "level_id": 2,
+      "difficulty": "Intermediate",
+      "content": "...",
+      "quiz": [ ... ],
+      "passing_score": 75
+    }},
+    {{
+      "level_id": 3,
+      "difficulty": "Advanced",
+      "content": "...",
+      "quiz": [ ... ],
+      "passing_score": 80
     }}
-  ],
-  "learning_objectives": [
-    "Objective 1",
-    "Objective 2"
-  ],
-  "estimated_duration": "30 minutes"
+  ]
 }}
+
+**Study Material:**
+{clean_text[:12000]}
 """
 
         model_name = os.getenv('GROQ_MODEL_NAME', 'llama-3.3-70b-versatile')
@@ -456,47 +439,28 @@ Return ONLY valid JSON:
         print("🔥 GROQ RAW OUTPUT:")
         print(lesson_content[:1000])
 
-        # -----------------------------
-        # 4. Safe JSON parser
-        # -----------------------------
-        def safe_json_parse(text):
-            try:
-                return json.loads(text)
-            except:
-                import re
-                match = re.search(r"\{[\s\S]*\}", text)
-                if match:
-                    try:
-                        return json.loads(match.group())
-                    except:
-                        pass
-            return None
-
+        # 4. Parse JSON safely
         lesson_data = safe_json_parse(lesson_content)
 
-        # -----------------------------
-        # 5. Fallback (NEVER FAIL FRONTEND)
-        # -----------------------------
-        if not lesson_data:
+        # 5. Fallback if parsing fails or structure is invalid
+        if not lesson_data or 'levels' not in lesson_data:
             lesson_data = {
-                "title": "Generated Lesson",
+                "course_title": "Generated Course",
                 "subject": "General",
-                "sections": [
+                "levels": [
                     {
-                        "title": "Introduction",
+                        "level_id": 1,
+                        "difficulty": "Beginner",
                         "content": extracted_text[:1000],
-                        "key_concepts": ["learning"]
+                        "quiz": [
+                            {"question": "What is the main idea?", "options": ["A", "B", "C", "D"], "correct_answer": 0}
+                        ],
+                        "passing_score": 70
                     }
-                ],
-                "learning_objectives": [
-                    "Understand the material"
-                ],
-                "estimated_duration": "30 minutes"
+                ]
             }
 
-        # -----------------------------
-        # 6. Attach metadata
-        # -----------------------------
+        # 6. Attach user ID
         lesson_data["user_id"] = request.user.id
 
         return Response(lesson_data, status=status.HTTP_201_CREATED)

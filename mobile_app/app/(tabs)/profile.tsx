@@ -1,19 +1,54 @@
 import { useState, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useAuth } from '@/hooks/useAuth';
 import { getCurrentUser } from '@/services/authService';
 
+// 🎨 Exact same tokens as Dashboard for a unified Design System
+const COLORS = {
+  bg: '#baaeda',              // Soft muted purple background
+  bgSecondary: '#dad6e7',     // Slightly lighter purple
+  surface: '#cdc2dd',         // Card surface
+  surfaceLight: '#5A4F6C',    
+  
+  // Purple spectrum
+  purpleDeep: '#4C1D95',      
+  purpleDark: '#6D28D9',      
+  purplePrimary: '#7C3AED',   
+  purpleVibrant: '#8B5CF6',   
+  purpleLight: '#A78BFA',     
+  purplePale: '#C4B5FD',      
+  purpleGhost: '#DDD6FE',     
+  
+  accent: '#22D3EE',          
+  success: '#10B981',         
+  warning: '#F59E0B',         
+  danger: '#EF4444',          
+  
+  textPrimary: '#010910',     // Dark text for light background
+  textSecondary: '#4B5563',   // Adjusted for contrast on light bg
+  textMuted: '#6B7280',       // Adjusted for contrast
+  border: 'rgba(167, 139, 250, 0.25)', // Slightly more visible border on light bg
+};
+
+const FONTS = {
+  black: 'Montserrat-Black',
+  extraBold: 'Montserrat-ExtraBold',
+  bold: 'Montserrat-Bold',
+  semiBold: 'Montserrat-SemiBold',
+  medium: 'Montserrat-Medium',
+  regular: 'Montserrat-Regular',
+};
+
 export default function ProfileScreen() {
   const { logout } = useAuth();
   const router = useRouter();
 
-  // Dynamic Data State
   const [userData, setUserData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
-  // Fetch the real user data on load
   useEffect(() => {
     const fetchProfile = async () => {
       try {
@@ -36,7 +71,7 @@ export default function ProfileScreen() {
   if (loading) {
     return (
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator size="large" color="#6D28D9" />
+        <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
       </View>
     );
   }
@@ -60,12 +95,24 @@ export default function ProfileScreen() {
   return (
     <View style={styles.container}>
       
-      {/* 🌟 FIGMA DESIGN: Purple Gradient-Style Header */}
-      <View style={styles.header}>
+      {/* 🌟 PREMIUM GRADIENT HEADER */}
+      <LinearGradient
+        colors={[COLORS.purpleDeep, COLORS.purpleDark]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.header}
+      >
         <View style={styles.headerTop}>
-          <View style={styles.avatarContainer}>
+          {/* Gradient Avatar */}
+          <LinearGradient
+            colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.avatarContainer}
+          >
             <Text style={styles.avatarText}>{initials}</Text>
-          </View>
+          </LinearGradient>
+          
           <View style={styles.userInfo}>
             <Text style={styles.userName}>{fullName}</Text>
             <Text style={styles.userEmail}>{userData?.email || 'No email provided'}</Text>
@@ -75,43 +122,54 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        {/* 🌟 FIGMA DESIGN: Glassmorphic Level Progress inside Header */}
+        {/* 🌟 GLASSMORPHIC LEVEL PROGRESS */}
         <View style={styles.glassCard}>
           <View style={styles.glassCardHeader}>
             <View style={styles.levelBadge}>
-              <Ionicons name="star" size={16} color="#FBBF24" />
+              <Ionicons name="star" size={16} color={COLORS.warning} />
               <Text style={styles.levelText}>Level {userData?.level || 1}</Text>
             </View>
             <Text style={styles.xpText}>{currentXP} / {nextLevelXP} XP</Text>
           </View>
           <View style={styles.progressBarBg}>
-            <View style={[styles.progressBarFill, { width: `${progressPercent}%` }]} />
+            <LinearGradient
+              colors={[COLORS.purplePrimary, COLORS.purpleLight]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={[styles.progressBarFill, { width: `${progressPercent}%` }]}
+            />
           </View>
           <Text style={styles.xpRemainingText}>{nextLevelXP - currentXP} XP to next level</Text>
         </View>
-      </View>
+      </LinearGradient>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
         
-        {/* 🌟 FIGMA DESIGN: Overview Colored Stat Blocks */}
+        {/* 🌟 OVERVIEW STATS (Matches Dashboard Style) */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Overview</Text>
           <View style={styles.overviewGrid}>
             
-            <View style={[styles.overviewCard, { backgroundColor: '#FFF7ED' }]}>
-              <Ionicons name="flame" size={32} color="#F97316" style={styles.overviewIcon} />
+            <View style={styles.overviewCard}>
+              <View style={[styles.overviewIconBg, { backgroundColor: 'rgba(245, 158, 11, 0.15)' }]}>
+                <Ionicons name="flame" size={24} color={COLORS.warning} />
+              </View>
               <Text style={styles.overviewValue}>{userData?.streak || 0}</Text>
               <Text style={styles.overviewLabel}>Day Streak</Text>
             </View>
 
-            <View style={[styles.overviewCard, { backgroundColor: '#FEFCE8' }]}>
-              <Ionicons name="trophy" size={32} color="#EAB308" style={styles.overviewIcon} />
+            <View style={styles.overviewCard}>
+              <View style={[styles.overviewIconBg, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
+                <Ionicons name="trophy" size={24} color={COLORS.purpleVibrant} />
+              </View>
               <Text style={styles.overviewValue}>{userData?.total_points || 0}</Text>
               <Text style={styles.overviewLabel}>Total Points</Text>
             </View>
 
-            <View style={[styles.overviewCard, { backgroundColor: '#ECFDF5' }]}>
-              <Ionicons name="trending-up" size={32} color="#10B981" style={styles.overviewIcon} />
+            <View style={styles.overviewCard}>
+              <View style={[styles.overviewIconBg, { backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}>
+                <Ionicons name="trending-up" size={24} color={COLORS.success} />
+              </View>
               <Text style={styles.overviewValue}>Lv {userData?.level || 1}</Text>
               <Text style={styles.overviewLabel}>Level</Text>
             </View>
@@ -119,15 +177,15 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        {/* 🌟 FIGMA DESIGN: Detailed Statistics List */}
+        {/* 🌟 DETAILED STATISTICS LIST */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Statistics</Text>
           <View style={styles.listCard}>
             
             <View style={styles.listItem}>
               <View style={styles.listItemLeft}>
-                <View style={styles.listIconBg}>
-                  <Ionicons name="trophy-outline" size={20} color="#7C3AED" />
+                <View style={[styles.listIconBg, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
+                  <Ionicons name="trophy-outline" size={20} color={COLORS.purpleVibrant} />
                 </View>
                 <Text style={styles.listItemText}>Courses Completed</Text>
               </View>
@@ -136,8 +194,8 @@ export default function ProfileScreen() {
 
             <View style={[styles.listItem, styles.borderTop]}>
               <View style={styles.listItemLeft}>
-                <View style={styles.listIconBg}>
-                  <Ionicons name="time-outline" size={20} color="#7C3AED" />
+                <View style={[styles.listIconBg, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
+                  <Ionicons name="time-outline" size={20} color={COLORS.purpleVibrant} />
                 </View>
                 <Text style={styles.listItemText}>Study Hours</Text>
               </View>
@@ -146,8 +204,8 @@ export default function ProfileScreen() {
 
             <View style={[styles.listItem, styles.borderTop]}>
               <View style={styles.listItemLeft}>
-                <View style={styles.listIconBg}>
-                  <Ionicons name="analytics-outline" size={20} color="#7C3AED" />
+                <View style={[styles.listIconBg, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
+                  <Ionicons name="analytics-outline" size={20} color={COLORS.purpleVibrant} />
                 </View>
                 <Text style={styles.listItemText}>Quizzes Taken</Text>
               </View>
@@ -157,7 +215,7 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        {/* 🌟 FIGMA DESIGN: Badges Grid */}
+        {/* 🌟 BADGES GRID */}
         <View style={styles.section}>
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>Badges</Text>
@@ -168,127 +226,211 @@ export default function ProfileScreen() {
             {earnedBadges.length > 0 ? (
               earnedBadges.map((badge: any) => (
                 <View key={badge.id} style={styles.badgeCard}>
-                  <Text style={styles.badgeEmoji}>{badge.icon || badge.icon_url || '🏆'}</Text>
+                  <LinearGradient
+                    colors={[COLORS.purpleDark, COLORS.purpleVibrant]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.badgeIconContainer}
+                  >
+                    <Text style={styles.badgeEmoji}>{badge.icon || badge.icon_url || '🏆'}</Text>
+                  </LinearGradient>
                   <Text style={styles.badgeName} numberOfLines={1}>{badge.name}</Text>
                   <View style={styles.earnedPill}>
-                    <Ionicons name="checkmark-circle" size={12} color="#16A34A" />
+                    <Ionicons name="checkmark-circle" size={12} color={COLORS.success} />
                     <Text style={styles.earnedText}>Earned</Text>
                   </View>
                 </View>
               ))
             ) : (
-              <View style={{ padding: 20, alignItems: 'center', width: '100%' }}>
-                <Text style={{ color: '#999', textAlign: 'center' }}>Complete activities to earn badges!</Text>
+              <View style={styles.emptyBadges}>
+                <Text style={styles.emptyBadgesText}>Complete activities to earn badges!</Text>
               </View>
             )}
           </View>
         </View>
 
-        {/* 🌟 FIGMA DESIGN: Menu Items */}
+        {/* 🌟 MENU ITEMS */}
         <View style={styles.section}>
           <View style={styles.listCard}>
             
             <TouchableOpacity style={styles.menuItem}>
               <View style={styles.menuItemLeft}>
-                <Ionicons name="notifications-outline" size={22} color="#1F2937" />
+                <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />
                 <Text style={styles.menuItemText}>Notifications</Text>
               </View>
-              <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+              <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
             </TouchableOpacity>
 
             <TouchableOpacity style={[styles.menuItem, styles.borderTop]}>
               <View style={styles.menuItemLeft}>
-                <Ionicons name="settings-outline" size={22} color="#1F2937" />
+                <Ionicons name="settings-outline" size={22} color={COLORS.textSecondary} />
                 <Text style={styles.menuItemText}>Settings</Text>
               </View>
-              <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+              <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
             </TouchableOpacity>
 
             <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={handleLogout}>
               <View style={styles.menuItemLeft}>
-                <Ionicons name="log-out-outline" size={22} color="#DC2626" />
-                <Text style={[styles.menuItemText, { color: '#DC2626' }]}>Log Out</Text>
+                <Ionicons name="log-out-outline" size={22} color={COLORS.danger} />
+                <Text style={[styles.menuItemText, { color: COLORS.danger }]}>Log Out</Text>
               </View>
-              <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+              <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
             </TouchableOpacity>
 
           </View>
         </View>
 
-        {/* Member Since */}
+        {/* Member Since Footer */}
         <View style={styles.footer}>
-          <Ionicons name="calendar-outline" size={16} color="#6B7280" />
+          <Ionicons name="calendar-outline" size={16} color={COLORS.textMuted} />
           <Text style={styles.footerText}>Member since {userData?.date_joined ? new Date(userData.date_joined).getFullYear() : '2026'}</Text>
         </View>
 
       </ScrollView>
-      <TouchableOpacity onPress={() => router.push('/game')}>
-        <Text>Play Classic Mode</Text>
-      </TouchableOpacity>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F9FAFB' },
+  container: { flex: 1, backgroundColor: COLORS.bg },
   
   // Header Styles
-  header: { backgroundColor: '#6D28D9', paddingTop: 20, paddingBottom: 24, paddingHorizontal: 20, borderBottomLeftRadius: 32, borderBottomRightRadius: 32, elevation: 4 },
+  header: { 
+    paddingTop: 20, 
+    paddingBottom: 28, 
+    paddingHorizontal: 24, 
+    borderBottomLeftRadius: 32, 
+    borderBottomRightRadius: 32, 
+  },
   headerTop: { flexDirection: 'row', alignItems: 'center', gap: 16, marginBottom: 24 },
-  avatarContainer: { width: 80, height: 80, borderRadius: 40, backgroundColor: 'rgba(255,255,255,0.2)', justifyContent: 'center', alignItems: 'center' },
-  avatarText: { fontSize: 24, fontWeight: 'bold', color: 'white' },
+  avatarContainer: { 
+    width: 76, 
+    height: 76, 
+    borderRadius: 38, 
+    justifyContent: 'center', 
+    alignItems: 'center',
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  avatarText: { fontSize: 26, fontFamily: FONTS.black, color: 'white' },
   userInfo: { flex: 1 },
-  userName: { fontSize: 24, fontWeight: '700', color: 'white', marginBottom: 4 },
-  userEmail: { fontSize: 14, color: '#DDD6FE', marginBottom: 8 },
-  roleBadge: { alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.2)', paddingHorizontal: 12, paddingVertical: 4, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' },
-  roleText: { color: 'white', fontSize: 12, fontWeight: '600' },
+  userName: { fontSize: 26, fontFamily: FONTS.bold, color: 'white', marginBottom: 4, letterSpacing: -0.5 },
+  userEmail: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.purplePale, marginBottom: 8 },
+  roleBadge: { 
+    alignSelf: 'flex-start', 
+    backgroundColor: 'rgba(255,255,255,0.15)', 
+    paddingHorizontal: 12, 
+    paddingVertical: 4, 
+    borderRadius: 16, 
+    borderWidth: 1, 
+    borderColor: 'rgba(255,255,255,0.2)' 
+  },
+  roleText: { color: 'white', fontSize: 12, fontFamily: FONTS.semiBold },
   
   // Glassmorphic Progress Card
-  glassCard: { backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 16, padding: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
-  glassCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  glassCard: { 
+    backgroundColor: 'rgba(255,255,255,0.1)', 
+    borderRadius: 20, 
+    padding: 18, 
+    borderWidth: 1, 
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  glassCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
   levelBadge: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  levelText: { color: 'white', fontWeight: '600', fontSize: 16 },
-  xpText: { color: 'white', fontSize: 14 },
-  progressBarBg: { height: 8, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 4, overflow: 'hidden', marginBottom: 8 },
-  progressBarFill: { height: '100%', backgroundColor: 'white', borderRadius: 4 },
-  xpRemainingText: { color: '#DDD6FE', fontSize: 12 },
+  levelText: { color: 'white', fontFamily: FONTS.bold, fontSize: 16 },
+  xpText: { color: COLORS.purplePale, fontSize: 14, fontFamily: FONTS.medium },
+  progressBarBg: { height: 8, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 4, overflow: 'hidden', marginBottom: 8 },
+  progressBarFill: { height: '100%', borderRadius: 4 },
+  xpRemainingText: { color: 'rgba(255,255,255,0.7)', fontSize: 12, fontFamily: FONTS.regular },
 
-  content: { flex: 1, padding: 20 },
-  section: { marginBottom: 24 },
-  sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  sectionTitle: { fontSize: 18, fontWeight: '600', color: '#111827', marginBottom: 12 },
-  viewAllText: { color: '#7C3AED', fontSize: 14, fontWeight: '500' },
+  content: { flex: 1, paddingHorizontal: 24, paddingTop: 24 },
+  section: { marginBottom: 28 },
+  sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  sectionTitle: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginBottom: 16 },
+  viewAllText: { color: COLORS.purpleDeep, fontSize: 14, fontFamily: FONTS.semiBold },
 
-  // Colored Overview Grid
+  // Overview Grid (Matches Dashboard Stats)
   overviewGrid: { flexDirection: 'row', gap: 12 },
-  overviewCard: { flex: 1, paddingVertical: 16, paddingHorizontal: 8, borderRadius: 16, alignItems: 'center', elevation: 1 },
-  overviewIcon: { marginBottom: 8 },
-  overviewValue: { fontSize: 22, fontWeight: 'bold', color: '#111827', marginBottom: 4 },
-  overviewLabel: { fontSize: 12, color: '#4B5563', textAlign: 'center' },
+  overviewCard: { 
+    flex: 1, 
+    backgroundColor: COLORS.surface, 
+    paddingVertical: 20, 
+    paddingHorizontal: 12, 
+    borderRadius: 20, 
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  overviewIconBg: { 
+    width: 48, 
+    height: 48, 
+    borderRadius: 24, 
+    justifyContent: 'center', 
+    alignItems: 'center', 
+    marginBottom: 12 
+  },
+  overviewValue: { fontSize: 24, fontFamily: FONTS.black, color: COLORS.textPrimary, marginBottom: 4, letterSpacing: -0.5 },
+  overviewLabel: { fontSize: 11, color: COLORS.textSecondary, fontFamily: FONTS.semiBold, textTransform: 'uppercase', letterSpacing: 0.5 },
 
   // List Cards
-  listCard: { backgroundColor: 'white', borderRadius: 16, elevation: 2, overflow: 'hidden' },
-  listItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16 },
-  borderTop: { borderTopWidth: 1, borderTopColor: '#F3F4F6' },
-  listItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  listIconBg: { backgroundColor: '#F3E8FF', padding: 8, borderRadius: 50 },
-  listItemText: { fontSize: 15, color: '#374151', fontWeight: '500' },
-  listItemValue: { fontSize: 18, fontWeight: '600', color: '#111827' },
+  listCard: { 
+    backgroundColor: COLORS.surface, 
+    borderRadius: 20, 
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  listItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 18 },
+  borderTop: { borderTopWidth: 1, borderTopColor: COLORS.border },
+  listItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  listIconBg: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
+  listItemText: { fontSize: 15, color: COLORS.textPrimary, fontFamily: FONTS.medium },
+  listItemValue: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary },
 
   // Badges Grid
   badgesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  badgeCard: { width: '31%', backgroundColor: '#FEFCE8', paddingVertical: 16, paddingHorizontal: 8, borderRadius: 16, alignItems: 'center', elevation: 1 },
-  badgeEmoji: { fontSize: 32, marginBottom: 8 },
-  badgeName: { fontSize: 12, color: '#374151', fontWeight: '500', marginBottom: 8, textAlign: 'center' },
-  earnedPill: { flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderColor: '#22C55E', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 12 },
-  earnedText: { fontSize: 10, color: '#16A34A', fontWeight: '600' },
+  badgeCard: { 
+    width: '31%', 
+    backgroundColor: COLORS.surface, 
+    paddingVertical: 18, 
+    paddingHorizontal: 8, 
+    borderRadius: 20, 
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  badgeIconContainer: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  badgeEmoji: { fontSize: 28 },
+  badgeName: { fontSize: 12, color: COLORS.textSecondary, fontFamily: FONTS.medium, marginBottom: 8, textAlign: 'center' },
+  earnedPill: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    gap: 4, 
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 8, 
+    paddingVertical: 3, 
+    borderRadius: 12 
+  },
+  earnedText: { fontSize: 10, color: COLORS.success, fontFamily: FONTS.semiBold },
+  emptyBadges: { padding: 24, alignItems: 'center', width: '100%', backgroundColor: COLORS.surface, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border },
+  emptyBadgesText: { color: COLORS.textSecondary, fontFamily: FONTS.medium, textAlign: 'center' },
 
   // Menu Items
-  menuItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16, backgroundColor: 'white' },
-  menuItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  menuItemText: { fontSize: 16, color: '#111827', fontWeight: '500' },
+  menuItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 18 },
+  menuItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  menuItemText: { fontSize: 16, color: COLORS.textPrimary, fontFamily: FONTS.medium },
 
   // Footer
   footer: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 8, paddingBottom: 20 },
-  footerText: { color: '#6B7280', fontSize: 14 },
+  footerText: { color: COLORS.textMuted, fontSize: 14, fontFamily: FONTS.medium },
 });

@@ -1,17 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal, 
+  View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
   TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Switch
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import * as Clipboard from 'expo-clipboard'; // 🌟 NEW: Clipboard for the Copy Button
+import * as Clipboard from 'expo-clipboard';
 import firestore from '@react-native-firebase/firestore';
 import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser } from '@/services/authService';
 import TakeQuiz from '../../components/TakeQuiz';
 import LessonDisplay from '../../components/LessonDisplay';
 import LessonGenerator from '@/components/LessonGenerator';
-
 
 // --- Interfaces ---
 interface StudyGroup {
@@ -31,42 +30,59 @@ interface GroupMessage {
   time: string;
 }
 
-interface Lesson {
-  id: number;
-  user_id: number;
-  title: string;
+// --- NEW: Course & Level Interfaces ---
+interface Course {
+  course_title: string;
   subject: string;
-  sections: Array<{
-    title: string;
-    content: string;
-    key_concepts: string[];
-  }>;
-  learning_objectives: string[];
-  estimated_duration: string;
-  created_at?: string;
+  user_id?: number;
+  levels: Level[];
 }
 
+interface Level {
+  level_id: number;
+  difficulty: 'Beginner' | 'Intermediate' | 'Advanced';
+  content: string;
+  quiz: QuizQuestion[];
+  passing_score: number;
+}
+
+interface QuizQuestion {
+  question: string;
+  options: string[];
+  correct_answer: number;
+}
+
+// Legacy quiz interface (from backend)
 interface Quiz {
   id: number;
   title: string;
   created_at: string;
   quiz_type?: string;
   questions: any[];
-  difficulty?: string; // Optional since backend might not store it yet
 }
 
 export default function ActivitiesScreen() {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [selectedTab, setSelectedTab] = useState('groups');
-  
-  // Real API State
+
+  // Group & Quiz state
   const [groups, setGroups] = useState<StudyGroup[]>([]);
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // Quiz Player State
+  // --- NEW: Courses state ---
+  const [courses, setCourses] = useState<Course[]>([]);
+
+  // --- Progress tracking (levelId -> score percentage) ---
+  const [levelProgress, setLevelProgress] = useState<{ [levelId: number]: number }>({});
+
+  // --- Course detail modal ---
+  const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
+  const [isCourseModalOpen, setIsCourseModalOpen] = useState(false);
+
+  // --- Quiz Player State (reused for level quizzes) ---
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
-  const [quizToTake, setQuizToTake] = useState<Quiz | null>(null);
+  const [quizToTake, setQuizToTake] = useState<{ title: string; questions: any[]; levelId: number; passingScore: number } | null>(null);
 
   // --- Messenger & Chat State ---
   const [activeGroup, setActiveGroup] = useState<StudyGroup | null>(null);
@@ -85,45 +101,19 @@ export default function ActivitiesScreen() {
 
   // --- Generate Lesson Modal ---
   const [isGenerateLessonModalOpen, setIsGenerateLessonModalOpen] = useState(false);
-  
-  // --- Lesson Display Modal ---
+
+  // --- Legacy Lesson Display (optional) ---
   const [isLessonDisplayModalOpen, setIsLessonDisplayModalOpen] = useState(false);
-  const [lessonToDisplay, setLessonToDisplay] = useState<Lesson | null>(null);
-  const [lessons, setLessons] = useState<Lesson[]>([
-    { 
-      id: 1, 
-      user_id: 1,
-      title: 'Introduction to Calculus', 
-      subject: 'Mathematics', 
-      sections: [
-        { title: 'Introduction to Derivatives', content: 'Learn the basics of derivatives and their applications.', key_concepts: ['derivative', 'slope', 'rate of change'] }
-      ], 
-      learning_objectives: ['Understand the concept of derivatives', 'Apply basic derivative rules'],
-      estimated_duration: '45 min', 
-      created_at: new Date().toISOString()
-    },
-    { 
-      id: 2, 
-      user_id: 1,
-      title: "Newton's Laws of Motion", 
-      subject: 'Physics', 
-      sections: [
-        { title: 'First Law of Motion', content: 'An object at rest stays at rest unless acted upon by a force.', key_concepts: ['inertia', 'force', 'mass'] },
-        { title: 'Second Law of Motion', content: 'F = ma - Force equals mass times acceleration.', key_concepts: ['force', 'mass', 'acceleration'] }
-      ], 
-      learning_objectives: ['Understand Newton\'s three laws', 'Apply laws to solve problems'],
-      estimated_duration: '30 min', 
-      created_at: new Date().toISOString()
-    },
-  ]);
+  const [lessonToDisplay, setLessonToDisplay] = useState<any>(null);
+
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
 
+  // --- Lifecycle ---
   useEffect(() => {
     loadInitialData();
   }, []);
 
-  // Cleanup chat unsubscribe listener when leaving the chat screen
   useEffect(() => {
     if (!activeGroup && chatUnsubscribeRef.current) {
       chatUnsubscribeRef.current();
@@ -137,15 +127,14 @@ export default function ActivitiesScreen() {
     };
   }, [activeGroup]);
 
+  // --- Data Loading ---
   const loadInitialData = async () => {
     try {
       setLoading(true);
       const user = await getCurrentUser();
       setCurrentUser(user);
-
       const token = await getToken();
 
-      // Fetch Groups and Quizzes in parallel
       const [groupRes, quizRes] = await Promise.all([
         fetch(`${API_BASE_URL}/users/groups/mine/`, { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch(`${API_BASE_URL}/ai/quizzes/`, { headers: { 'Authorization': `Bearer ${token}` } })
@@ -153,7 +142,6 @@ export default function ActivitiesScreen() {
 
       if (groupRes.ok) setGroups(await groupRes.json());
       if (quizRes.ok) setQuizzes(await quizRes.json());
-
     } catch (error) {
       console.error(error);
     } finally {
@@ -161,7 +149,7 @@ export default function ActivitiesScreen() {
     }
   };
 
-  // --- 🌟 NEW: Copy to Clipboard Function ---
+  // --- Clipboard ---
   const copyToClipboard = async (code: string) => {
     await Clipboard.setStringAsync(code);
     Alert.alert("Code Copied!", "The join code has been copied to your clipboard.");
@@ -171,8 +159,7 @@ export default function ActivitiesScreen() {
   const openChat = async (group: StudyGroup) => {
     setActiveGroup(group);
     setIsActionMenuOpen(false);
-    
-    // Unsubscribe from any existing listener first
+
     if (chatUnsubscribeRef.current) {
       chatUnsubscribeRef.current();
       chatUnsubscribeRef.current = null;
@@ -192,7 +179,6 @@ export default function ActivitiesScreen() {
       console.error("Failed to load initial messages:", error);
     }
 
-    // Connect real-time Firestore listener for this group's messages
     try {
       const unsub = firestore()
         .collection('groups')
@@ -213,9 +199,8 @@ export default function ActivitiesScreen() {
             });
 
             setMessages(prev => {
-              // Filter out local temporary messages that are already synced (matching by text and sender)
               const tempMessages = prev.filter(m => m.id > 1000000000000);
-              const unsyncedTemp = tempMessages.filter(temp => 
+              const unsyncedTemp = tempMessages.filter(temp =>
                 !firestoreMsgs.some(f => f.sender_id === temp.sender_id && f.text === temp.text)
               );
               return [...firestoreMsgs, ...unsyncedTemp];
@@ -237,9 +222,13 @@ export default function ActivitiesScreen() {
     if (!chatInput.trim() || !activeGroup) return;
     const textToSend = chatInput.trim();
     setChatInput('');
-    
+
     const tempMsg: GroupMessage = {
-      id: Date.now(), text: textToSend, sender_id: currentUser?.id, sender_name: currentUser?.first_name || 'Me', time: 'Just now'
+      id: Date.now(),
+      text: textToSend,
+      sender_id: currentUser?.id,
+      sender_name: currentUser?.first_name || 'Me',
+      time: 'Just now'
     };
     setMessages(prev => [...prev, tempMsg]);
     setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
@@ -260,7 +249,7 @@ export default function ActivitiesScreen() {
     }
   };
 
-  // --- Group Management Functions ---
+  // --- Group Management ---
   const handleCreateGroup = async () => {
     if (!newGroupName.trim()) return;
     try {
@@ -276,7 +265,9 @@ export default function ActivitiesScreen() {
         setIsCreateModalOpen(false);
         loadInitialData();
       }
-    } finally { setIsSubmitting(false); }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleJoinGroup = async () => {
@@ -296,21 +287,125 @@ export default function ActivitiesScreen() {
       } else {
         Alert.alert("Error", "Invalid Join Code");
       }
-    } finally { setIsSubmitting(false); }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  // --- Generate Lesson Function ---
+  // --- Course & Level Helpers ---
+  const getLevelScore = (levelId: number): number => {
+    return levelProgress[levelId] ?? 0;
+  };
 
+  const isLevelUnlocked = (course: Course, levelIndex: number): boolean => {
+    if (levelIndex === 0) return true;
+    const prevLevel = course.levels[levelIndex - 1];
+    const prevScore = getLevelScore(prevLevel.level_id);
+    return prevScore >= prevLevel.passing_score;
+  };
 
+  const updateLevelProgress = (levelId: number, score: number) => {
+    setLevelProgress(prev => ({ ...prev, [levelId]: score }));
+    // Optionally save to AsyncStorage here
+  };
+
+  const handleCourseGenerated = (course: Course) => {
+    setCourses(prev => [course, ...prev]);
+    setIsGenerateLessonModalOpen(false);
+    Alert.alert('Success', 'Course generated successfully!');
+  };
+
+  const openCourseDetail = (course: Course) => {
+    setSelectedCourse(course);
+    setIsCourseModalOpen(true);
+  };
+
+  const takeQuizForLevel = (level: Level) => {
+    const quizQuestions = level.quiz.map((q, idx) => ({
+      id: idx + 1,
+      question: q.question,
+      type: 'Multiple Choice',
+      options: q.options,
+      correct_answer: q.correct_answer,
+    }));
+    setQuizToTake({
+      title: `${level.difficulty} Quiz`,
+      questions: quizQuestions,
+      levelId: level.level_id,
+      passingScore: level.passing_score,
+    });
+    setIsQuizModalOpen(true);
+  };
+
+  // --- Render level cards ---
+  const renderLevels = (course: Course) => {
+    return course.levels.map((level, index) => {
+      const unlocked = isLevelUnlocked(course, index);
+      const score = getLevelScore(level.level_id);
+      const passed = score >= level.passing_score;
+
+      return (
+        <View key={level.level_id} style={styles.levelCard}>
+          <View style={styles.levelHeader}>
+            <View style={styles.levelLeft}>
+              <Text style={styles.levelDifficulty}>
+                {unlocked ? '🔓' : '🔒'} {level.difficulty}
+              </Text>
+              {score > 0 && (
+                <View style={styles.levelScoreBadge}>
+                  <Text style={styles.levelScoreText}>{score}%</Text>
+                </View>
+              )}
+              {passed && (
+                <View style={styles.levelPassBadge}>
+                  <Text style={styles.levelPassText}>✅ Passed</Text>
+                </View>
+              )}
+            </View>
+            <Text style={styles.levelPassingScore}>Pass: {level.passing_score}%</Text>
+          </View>
+
+          <View style={styles.levelActions}>
+            <TouchableOpacity
+              style={[styles.levelButton, !unlocked && styles.levelButtonDisabled]}
+              disabled={!unlocked}
+              onPress={() => {
+                Alert.alert('Content', level.content.substring(0, 200) + '...');
+              }}
+            >
+              <Ionicons name="book-outline" size={16} color={unlocked ? 'white' : '#9CA3AF'} />
+              <Text style={[styles.levelButtonText, !unlocked && { color: '#9CA3AF' }]}>
+                View Content
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.levelButton, styles.levelQuizButton, !unlocked && styles.levelButtonDisabled]}
+              disabled={!unlocked}
+              onPress={() => takeQuizForLevel(level)}
+            >
+              <Ionicons name="help-circle-outline" size={16} color={unlocked ? 'white' : '#9CA3AF'} />
+              <Text style={[styles.levelButtonText, !unlocked && { color: '#9CA3AF' }]}>
+                Take Quiz
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {index < course.levels.length - 1 && (
+            <View style={styles.levelDivider}>
+              <Ionicons name="arrow-down" size={20} color="#D1D5DB" />
+            </View>
+          )}
+        </View>
+      );
+    });
+  };
 
   // --- ACTIVE CHAT VIEW ---
   if (activeGroup) {
     const isAdmin = currentUser?.id === activeGroup.created_by;
-
     return (
       <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        
-        {/* 🌟 HEADER PADDING REDUCED */}
         <View style={styles.chatHeader}>
           <TouchableOpacity onPress={() => setActiveGroup(null)} style={{ padding: 4 }}>
             <Ionicons name="chevron-back" size={24} color="white" />
@@ -324,7 +419,6 @@ export default function ActivitiesScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Chat Messages */}
         <ScrollView ref={scrollViewRef} style={styles.chatArea} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
           {messages.map((msg) => {
             const isMe = msg.sender_id === currentUser?.id;
@@ -340,7 +434,6 @@ export default function ActivitiesScreen() {
           })}
         </ScrollView>
 
-        {/* Action Menu (+ Button) */}
         {isActionMenuOpen && (
           <View style={styles.actionMenuContainer}>
             <View style={styles.actionRow}>
@@ -352,8 +445,6 @@ export default function ActivitiesScreen() {
                 <View style={[styles.actionIconBox, { backgroundColor: '#10B981' }]}><Ionicons name="image" size={20} color="white" /></View>
                 <Text style={styles.actionBtnText}>Photo</Text>
               </TouchableOpacity>
-              
-              {/* ADMIN ONLY FEATURES */}
               {isAdmin && (
                 <>
                   <TouchableOpacity style={styles.actionBtn} onPress={() => Alert.alert("Admin Tool", "Launching Mock Quiz...")}>
@@ -370,7 +461,6 @@ export default function ActivitiesScreen() {
           </View>
         )}
 
-        {/* Chat Input */}
         <View style={styles.inputContainer}>
           <TouchableOpacity onPress={() => setIsActionMenuOpen(!isActionMenuOpen)} style={styles.plusButton}>
             <Ionicons name={isActionMenuOpen ? "close" : "add"} size={28} color="#6D28D9" />
@@ -390,57 +480,44 @@ export default function ActivitiesScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* 🌟 UPGRADED GROUP SETTINGS MODAL */}
         <Modal visible={isSettingsOpen} animationType="slide" transparent={true}>
           <View style={styles.modalOverlay}>
             <View style={[styles.modalContent, { minHeight: '65%' }]}>
-              
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Group Info</Text>
                 <TouchableOpacity onPress={() => setIsSettingsOpen(false)}>
                   <Ionicons name="close" size={24} color="#1F2937" />
                 </TouchableOpacity>
               </View>
-
               <ScrollView showsVerticalScrollIndicator={false}>
-                
-                {/* Avatar & Title */}
                 <View style={{ alignItems: 'center', marginBottom: 24 }}>
                   <View style={styles.bigAvatar}><Text style={styles.bigAvatarText}>{activeGroup.name.substring(0, 2).toUpperCase()}</Text></View>
                   <Text style={styles.settingsGroupName}>{activeGroup.name}</Text>
                   <Text style={styles.settingsGroupDesc}>{activeGroup.description || 'No description provided.'}</Text>
                   {isAdmin && <Text style={styles.adminBadge}>Admin</Text>}
                 </View>
-
-                {/* Invite Code Block */}
                 <View style={styles.settingsSection}>
                   <Text style={styles.settingsSectionTitle}>Invite Members</Text>
                   <Text style={styles.settingsDesc}>Share this secret code with classmates so they can join.</Text>
                   <View style={styles.codeBox}>
                     <Text style={styles.codeText}>{activeGroup.join_code}</Text>
-                    {/* 🌟 FULLY FUNCTIONAL COPY BUTTON */}
                     <TouchableOpacity style={styles.copyBtn} onPress={() => copyToClipboard(activeGroup.join_code)}>
                       <Ionicons name="copy-outline" size={16} color="white" />
                       <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 13, marginLeft: 6 }}>Copy</Text>
                     </TouchableOpacity>
                   </View>
                 </View>
-
-                {/* Settings Options List */}
                 <View style={styles.settingsOptionsBlock}>
-                  
                   <View style={styles.settingsOptionRow}>
                     <View style={styles.settingsOptionIcon}><Ionicons name="notifications-outline" size={20} color="#4B5563" /></View>
                     <Text style={styles.settingsOptionText}>Mute Notifications</Text>
                     <Switch value={isMuted} onValueChange={setIsMuted} trackColor={{ false: '#D1D5DB', true: '#8B5CF6' }} />
                   </View>
-                  
                   <TouchableOpacity style={styles.settingsOptionRow}>
                     <View style={styles.settingsOptionIcon}><Ionicons name="people-outline" size={20} color="#4B5563" /></View>
                     <Text style={styles.settingsOptionText}>View Members ({activeGroup.members_count})</Text>
                     <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
                   </TouchableOpacity>
-
                   {isAdmin && (
                     <TouchableOpacity style={styles.settingsOptionRow}>
                       <View style={styles.settingsOptionIcon}><Ionicons name="create-outline" size={20} color="#4B5563" /></View>
@@ -448,14 +525,11 @@ export default function ActivitiesScreen() {
                       <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
                     </TouchableOpacity>
                   )}
-
                   <TouchableOpacity style={[styles.settingsOptionRow, { borderBottomWidth: 0 }]} onPress={() => { setIsSettingsOpen(false); setActiveGroup(null); }}>
                     <View style={[styles.settingsOptionIcon, { backgroundColor: '#FEE2E2' }]}><Ionicons name="log-out-outline" size={20} color="#EF4444" /></View>
                     <Text style={[styles.settingsOptionText, { color: '#EF4444' }]}>Leave Group</Text>
                   </TouchableOpacity>
-
                 </View>
-                
               </ScrollView>
             </View>
           </View>
@@ -467,7 +541,6 @@ export default function ActivitiesScreen() {
   // --- MAIN TABS VIEW ---
   return (
     <View style={styles.container}>
-      {/* 🌟 HEADER PADDING REDUCED */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Activities</Text>
         <Text style={styles.headerSubtitle}>Lessons, quizzes, and group tasks</Text>
@@ -475,7 +548,7 @@ export default function ActivitiesScreen() {
 
       <View style={styles.tabsContainer}>
         <TouchableOpacity style={[styles.tab, selectedTab === 'lessons' && styles.tabActive]} onPress={() => setSelectedTab('lessons')}>
-          <Text style={[styles.tabText, selectedTab === 'lessons' && styles.tabTextActive]}>Lessons</Text>
+          <Text style={[styles.tabText, selectedTab === 'lessons' && styles.tabTextActive]}>Courses</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.tab, selectedTab === 'quizzes' && styles.tabActive]} onPress={() => setSelectedTab('quizzes')}>
           <Text style={[styles.tabText, selectedTab === 'quizzes' && styles.tabTextActive]}>Quizzes</Text>
@@ -486,69 +559,46 @@ export default function ActivitiesScreen() {
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        
-        {/* LESSONS VIEW */}
-{selectedTab === 'lessons' && (
-  <View style={styles.itemsList}>
-    {lessons.map((lesson, index) => (
-      <TouchableOpacity
-        key={`${lesson.id ?? 'lesson'}-${index}`}
-        style={styles.card}
-        onPress={() => {
-          setLessonToDisplay(lesson);
-          setIsLessonDisplayModalOpen(true);
-        }}
-      >
-        <View style={styles.cardHeader}>
-          <View style={{ flex: 1 }}>
-            <View style={styles.subjectBadge}>
-              <View
-                style={[
-                  styles.colorDot,
-                  { backgroundColor: '#6D28D9' },
-                ]}
-              />
-              <Text style={styles.subjectText}>
-                {lesson.subject}
-              </Text>
-            </View>
-
-            <Text style={styles.cardTitle}>
-              {lesson.title}
-            </Text>
-
-            <View style={styles.metaInfo}>
-              <View style={styles.metaItem}>
-                <Ionicons
-                  name="time-outline"
-                  size={12}
-                  color="#6B7280"
-                />
-                <Text style={styles.metaText}>
-                  {lesson.estimated_duration}
-                </Text>
-              </View>
-            </View>
+        {/* COURSES VIEW */}
+        {selectedTab === 'lessons' && (
+          <View style={styles.itemsList}>
+            {courses.length === 0 && (
+              <Text style={styles.emptyText}>No courses yet. Tap + to generate one.</Text>
+            )}
+            {courses.map((course, index) => (
+              <TouchableOpacity
+                key={`course-${index}`}
+                style={styles.card}
+                onPress={() => openCourseDetail(course)}
+              >
+                <View style={styles.cardHeader}>
+                  <View style={{ flex: 1 }}>
+                    <View style={styles.subjectBadge}>
+                      <View style={[styles.colorDot, { backgroundColor: '#6D28D9' }]} />
+                      <Text style={styles.subjectText}>{course.subject}</Text>
+                    </View>
+                    <Text style={styles.cardTitle}>{course.course_title}</Text>
+                    <View style={styles.metaInfo}>
+                      <View style={styles.metaItem}>
+                        <Ionicons name="layers-outline" size={12} color="#6B7280" />
+                        <Text style={styles.metaText}>{course.levels.length} levels</Text>
+                      </View>
+                    </View>
+                  </View>
+                  <View style={styles.statusIcon}>
+                    <Ionicons name="chevron-forward" size={24} color="#6D28D9" />
+                  </View>
+                </View>
+              </TouchableOpacity>
+            ))}
           </View>
-
-          <View style={styles.statusIcon}>
-            <Ionicons
-              name="book-outline"
-              size={24}
-              color="#6D28D9"
-            />
-          </View>
-        </View>
-      </TouchableOpacity>
-    ))}
-  </View>
-)}
+        )}
 
         {/* QUIZZES VIEW */}
         {selectedTab === 'quizzes' && (
           <View style={styles.itemsList}>
             {quizzes.length === 0 && !loading && (
-              <Text style={{ textAlign: 'center', color: '#6B7280', marginTop: 20 }}>No quizzes generated yet.</Text>
+              <Text style={styles.emptyText}>No quizzes generated yet.</Text>
             )}
             {quizzes.map((quiz) => (
               <View key={quiz.id} style={styles.card}>
@@ -564,10 +614,21 @@ export default function ActivitiesScreen() {
                     <Text style={styles.cardTitle}>{quiz.title}</Text>
                     <Text style={styles.metaText}>Created {new Date(quiz.created_at).toLocaleDateString()}</Text>
                   </View>
-                  <TouchableOpacity 
-                    style={styles.takeQuizBtn} 
+                  <TouchableOpacity
+                    style={styles.takeQuizBtn}
                     onPress={() => {
-                      setQuizToTake(quiz);
+                      setQuizToTake({
+                        title: quiz.title,
+                        questions: quiz.questions.map((q: any) => ({
+                          id: q.id,
+                          question: q.question_text,
+                          type: (quiz.quiz_type || 'Multiple Choice') as any,
+                          options: q.options,
+                          correct_answer: q.correct_answer,
+                        })),
+                        levelId: -1,
+                        passingScore: 0,
+                      });
                       setIsQuizModalOpen(true);
                     }}
                   >
@@ -580,7 +641,7 @@ export default function ActivitiesScreen() {
           </View>
         )}
 
-        {/* MESSENGER-STYLE INBOX */}
+        {/* GROUPS VIEW */}
         {selectedTab === 'groups' && (
           <View style={styles.inboxContainer}>
             <View style={styles.inboxActions}>
@@ -594,7 +655,7 @@ export default function ActivitiesScreen() {
               </TouchableOpacity>
             </View>
 
-            {loading ? <ActivityIndicator size="large" color="#6D28D9" style={{ marginTop: 40 }} /> : 
+            {loading ? <ActivityIndicator size="large" color="#6D28D9" style={{ marginTop: 40 }} /> :
               groups.map((group) => (
                 <TouchableOpacity key={group.id} style={styles.inboxRow} onPress={() => openChat(group)}>
                   <View style={styles.inboxAvatar}>
@@ -616,7 +677,9 @@ export default function ActivitiesScreen() {
         )}
       </ScrollView>
 
-      {/* CREATE & JOIN MODALS */}
+      {/* --- MODALS --- */}
+
+      {/* Create Group Modal */}
       <Modal visible={isCreateModalOpen} animationType="fade" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -632,6 +695,7 @@ export default function ActivitiesScreen() {
         </View>
       </Modal>
 
+      {/* Join Group Modal */}
       <Modal visible={isJoinModalOpen} animationType="fade" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -649,16 +713,22 @@ export default function ActivitiesScreen() {
 
       {/* TAKE QUIZ MODAL */}
       <Modal visible={isQuizModalOpen} animationType="slide">
-        <TakeQuiz 
+        <TakeQuiz
           quizTitle={quizToTake?.title || 'Quiz'}
-          questions={quizToTake?.questions.map((q: any) => ({
-            id: q.id,
-            question: q.question_text,
-            type: (quizToTake.quiz_type || 'Multiple Choice') as any,
-            options: q.options,
-            correct_answer: q.correct_answer
-          })) || []}
+          questions={quizToTake?.questions || []}
           onFinish={(score) => {
+            if (quizToTake && quizToTake.levelId !== -1) {
+              const levelId = quizToTake.levelId;
+              const passingScore = quizToTake.passingScore;
+              updateLevelProgress(levelId, score);
+              if (score >= passingScore) {
+                Alert.alert('🎉 Passed!', `You scored ${score}% and unlocked the next level.`);
+              } else {
+                Alert.alert('Keep trying!', `You scored ${score}%. Need ${passingScore}% to unlock the next level.`);
+              }
+            } else {
+              Alert.alert('Quiz Finished', `Your score: ${score}%`);
+            }
             setIsQuizModalOpen(false);
             setQuizToTake(null);
           }}
@@ -669,64 +739,88 @@ export default function ActivitiesScreen() {
         />
       </Modal>
 
-      {/* GENERATE LESSON MODAL */}
-      {/* GENERATE LESSON MODAL */}
-<Modal
-  visible={isGenerateLessonModalOpen}
-  animationType="slide"
->
-  <LessonGenerator
-    onLessonGenerated={(lesson) => {
-      setLessons(prev => [lesson, ...prev]);
-      setIsGenerateLessonModalOpen(false);
-      Alert.alert(
-        'Success',
-        'Lesson generated successfully!'
-      );
-    }}
-    onCancel={() => setIsGenerateLessonModalOpen(false)}
-  />
-</Modal>
+      {/* GENERATE COURSE MODAL */}
+      <Modal visible={isGenerateLessonModalOpen} animationType="slide">
+        <LessonGenerator
+          onCourseGenerated={handleCourseGenerated}
+          onCancel={() => setIsGenerateLessonModalOpen(false)}
+        />
+      </Modal>
 
-      {/* GENERATE LESSON FAB */}
+      {/* COURSE DETAIL MODAL */}
+      <Modal visible={isCourseModalOpen} animationType="slide">
+        <View style={styles.courseModalContainer}>
+          <View style={styles.courseModalHeader}>
+            <TouchableOpacity onPress={() => setIsCourseModalOpen(false)} style={styles.courseModalBack}>
+              <Ionicons name="arrow-back" size={24} color="white" />
+            </TouchableOpacity>
+            <View style={styles.courseModalTitleBox}>
+              <Text style={styles.courseModalTitle}>{selectedCourse?.course_title}</Text>
+              <Text style={styles.courseModalSubtitle}>{selectedCourse?.subject}</Text>
+            </View>
+            <View style={{ width: 40 }} />
+          </View>
+          <ScrollView style={styles.courseModalContent}>
+            {selectedCourse && renderLevels(selectedCourse)}
+          </ScrollView>
+        </View>
+      </Modal>
+
+      {/* LEGACY LESSON DISPLAY MODAL */}
+      <Modal visible={isLessonDisplayModalOpen} animationType="slide">
+        {lessonToDisplay && (
+          <LessonDisplay
+            lesson={lessonToDisplay}
+            onClose={() => setIsLessonDisplayModalOpen(false)}
+          />
+        )}
+      </Modal>
+
+      {/* FAB */}
       {selectedTab === 'lessons' && (
-        <TouchableOpacity 
-          style={styles.generateLessonFab} 
+        <TouchableOpacity
+          style={styles.generateLessonFab}
           onPress={() => setIsGenerateLessonModalOpen(true)}
         >
           <Ionicons name="add" size={24} color="white" />
         </TouchableOpacity>
       )}
-
-      {/* LESSON DISPLAY MODAL */}
-      <Modal visible={isLessonDisplayModalOpen} animationType="slide">
-        {lessonToDisplay && (
-          <LessonDisplay 
-            lesson={lessonToDisplay} 
-            onClose={() => setIsLessonDisplayModalOpen(false)} 
-          />
-        )}
-      </Modal>
-
     </View>
   );
 }
 
-const styles = StyleSheet.create({ container: { flex: 1, backgroundColor: '#F9FAFB' },
-  
-  // Standard header padding used with SafeAreaView
+// --- Styles ---
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#F9FAFB' },
   header: { backgroundColor: '#6D28D9', paddingTop: 20, paddingBottom: 24, paddingHorizontal: 20, borderBottomLeftRadius: 32, borderBottomRightRadius: 32 },
   headerTitle: { fontSize: 22, fontWeight: '700', color: 'white' },
   headerSubtitle: { fontSize: 12, color: '#DDD6FE', marginTop: 2 },
-  
   tabsContainer: { flexDirection: 'row', backgroundColor: '#F9FAFB', paddingHorizontal: 16, paddingTop: 16 },
   tab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
   tabActive: { borderBottomColor: '#6D28D9' },
   tabText: { fontSize: 13, color: '#6B7280', fontWeight: '500' },
   tabTextActive: { color: '#6D28D9', fontWeight: '700' },
   content: { flex: 1 },
+  itemsList: { paddingHorizontal: 16, paddingBottom: 20, paddingTop: 16 },
+  emptyText: { textAlign: 'center', color: '#6B7280', marginTop: 20, fontSize: 14 },
 
-  // Inbox Styles 
+  card: { backgroundColor: 'white', borderRadius: 14, padding: 14, marginBottom: 14, elevation: 1, borderWidth: 1, borderColor: '#F3F4F6' },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 },
+  colorDot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
+  subjectBadge: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
+  subjectText: { fontSize: 11, color: '#6B7280', fontWeight: '500' },
+  cardTitle: { fontSize: 15, fontWeight: '600', color: '#111827', marginBottom: 6 },
+  metaInfo: { flexDirection: 'row', gap: 14 },
+  metaItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  metaText: { fontSize: 12, color: '#6B7280', fontWeight: '500' },
+  statusIcon: { justifyContent: 'center', paddingLeft: 12 },
+
+  badgesRow: { flexDirection: 'row', gap: 6, marginBottom: 8 },
+  badgePill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#E5E7EB', backgroundColor: 'white' },
+  badgePillText: { fontSize: 10, color: '#4B5563', fontWeight: '600' },
+  takeQuizBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#7C3AED', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, gap: 4, alignSelf: 'center' },
+  takeQuizBtnText: { color: 'white', fontWeight: 'bold', fontSize: 13 },
+
   inboxContainer: { paddingTop: 8 },
   inboxActions: { flexDirection: 'row', paddingHorizontal: 16, paddingBottom: 16, gap: 12 },
   inboxBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#F3E8FF', paddingVertical: 8, borderRadius: 10, gap: 6 },
@@ -745,7 +839,6 @@ const styles = StyleSheet.create({ container: { flex: 1, backgroundColor: '#F9FA
   chatHeaderTitle: { color: 'white', fontSize: 16, fontWeight: 'bold' },
   chatHeaderSubtitle: { color: '#DDD6FE', fontSize: 11, marginTop: 2 },
   chatArea: { flex: 1, backgroundColor: '#F3F4F6' },
-  
   messageWrapper: { marginBottom: 16, maxWidth: '80%' },
   messageMe: { alignSelf: 'flex-end', alignItems: 'flex-end' },
   messageOther: { alignSelf: 'flex-start', alignItems: 'flex-start' },
@@ -761,67 +854,61 @@ const styles = StyleSheet.create({ container: { flex: 1, backgroundColor: '#F9FA
   actionBtn: { alignItems: 'center', width: '22%', marginBottom: 12 },
   actionIconBox: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center', marginBottom: 6 },
   actionBtnText: { fontSize: 10, color: '#4B5563', fontWeight: '500', textAlign: 'center' },
-  
+
   inputContainer: { flexDirection: 'row', alignItems: 'flex-end', padding: 10, backgroundColor: 'white', borderTopWidth: 1, borderTopColor: '#E5E7EB' },
   plusButton: { padding: 4, marginRight: 6 },
-  textInputWrapper: { flex: 1, backgroundColor: '#F3F4F6', borderRadius: 20, paddingHorizontal: 14,maxHeight: 100 },
+  textInputWrapper: { flex: 1, backgroundColor: '#F3F4F6', borderRadius: 20, paddingHorizontal: 14, maxHeight: 100 },
   textInput: { fontSize: 14, color: '#1F2937' },
   sendButton: { backgroundColor: '#6D28D9', width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center', marginLeft: 8, marginBottom: 2 },
 
-  itemsList: { paddingHorizontal: 16, paddingBottom: 20, paddingTop: 16 },
-  card: { backgroundColor: 'white', borderRadius: 14, padding: 14, marginBottom: 14, elevation: 1, borderWidth: 1, borderColor: '#F3F4F6' },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 },
-  colorDot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
-  subjectBadge: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
-  subjectText: { fontSize: 11, color: '#6B7280', fontWeight: '500' },
-  cardTitle: { fontSize: 15, fontWeight: '600', color: '#111827', marginBottom: 6 },
-  
-  metaInfo: { flexDirection: 'row', gap: 14 },
-  metaItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  metaText: { fontSize: 12, color: '#6B7280', fontWeight: '500' },
-  statusIcon: { justifyContent: 'center', paddingLeft: 12 },
-  
-  progressSection: { marginBottom: 14 },
-  progressHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
-  progressLabel: { fontSize: 12, color: '#6B7280', fontWeight: '500' },
-  progressPercent: { fontSize: 12, color: '#111827', fontWeight: '600' },
-  progressBar: { height: 6, backgroundColor: '#F3F4F6', borderRadius: 3, overflow: 'hidden' },
-  progressFill: { height: '100%', borderRadius: 3 },
-  
-  badgesRow: { flexDirection: 'row', gap: 6, marginBottom: 8 },
-  badgePill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#E5E7EB', backgroundColor: 'white' },
-  badgePillText: { fontSize: 10, color: '#4B5563', fontWeight: '600' },
-  
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 20 },
   modalContent: { backgroundColor: 'white', borderRadius: 20, padding: 20 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   modalTitle: { fontSize: 18, fontWeight: 'bold', color: '#1F2937' },
-  modalSubtitle: { fontSize: 14, color: '#6B7280', marginBottom: 16, textAlign: 'center' },
   modalInput: { backgroundColor: '#F3F4F6', borderRadius: 10, padding: 14, fontSize: 15, marginBottom: 16 },
   modalSubmitBtn: { backgroundColor: '#6D28D9', padding: 14, borderRadius: 10, alignItems: 'center' },
 
-  // 🌟 UPGRADED SETTINGS UI STYLES 
+  generateLessonFab: { position: 'absolute', bottom: 80, right: 20, width: 56, height: 56, borderRadius: 28, backgroundColor: '#6D28D9', justifyContent: 'center', alignItems: 'center', elevation: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4, zIndex: 10 },
+
+  // Course detail styles
+  courseModalContainer: { flex: 1, backgroundColor: '#F9FAFB' },
+  courseModalHeader: { backgroundColor: '#6D28D9', paddingTop: 20, paddingBottom: 16, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', borderBottomLeftRadius: 24, borderBottomRightRadius: 24 },
+  courseModalBack: { padding: 4 },
+  courseModalTitleBox: { flex: 1, alignItems: 'center' },
+  courseModalTitle: { color: 'white', fontSize: 18, fontWeight: 'bold' },
+  courseModalSubtitle: { color: '#DDD6FE', fontSize: 12, marginTop: 2 },
+  courseModalContent: { padding: 16 },
+
+  levelCard: { backgroundColor: 'white', borderRadius: 14, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#E5E7EB' },
+  levelHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  levelLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  levelDifficulty: { fontSize: 15, fontWeight: '600', color: '#1F2937' },
+  levelScoreBadge: { backgroundColor: '#F3E8FF', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12 },
+  levelScoreText: { fontSize: 12, color: '#6D28D9', fontWeight: '600' },
+  levelPassBadge: { backgroundColor: '#D1FAE5', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12 },
+  levelPassText: { fontSize: 12, color: '#065F46', fontWeight: '600' },
+  levelPassingScore: { fontSize: 12, color: '#6B7280' },
+  levelActions: { flexDirection: 'row', gap: 10 },
+  levelButton: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#6D28D9', paddingVertical: 10, borderRadius: 8, gap: 6 },
+  levelQuizButton: { backgroundColor: '#7C3AED' },
+  levelButtonDisabled: { backgroundColor: '#E5E7EB' },
+  levelButtonText: { color: 'white', fontWeight: '600', fontSize: 13 },
+  levelDivider: { alignItems: 'center', marginVertical: 6 },
+
+  // Settings modal styles (unchanged)
   bigAvatar: { width: 64, height: 64, borderRadius: 32, backgroundColor: '#6D28D9', justifyContent: 'center', alignItems: 'center', marginBottom: 8 },
   bigAvatarText: { color: 'white', fontSize: 24, fontWeight: 'bold' },
   settingsGroupName: { fontSize: 20, fontWeight: 'bold', color: '#1F2937' },
   settingsGroupDesc: { fontSize: 13, color: '#6B7280', marginTop: 4, textAlign: 'center', paddingHorizontal: 20 },
   adminBadge: { backgroundColor: '#FEE2E2', color: '#EF4444', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, fontSize: 11, fontWeight: 'bold', marginTop: 8, overflow: 'hidden' },
-  
   settingsSection: { backgroundColor: '#F9FAFB', borderRadius: 14, padding: 16, borderWidth: 1, borderColor: '#E5E7EB', marginTop: 16 },
   settingsSectionTitle: { fontSize: 15, fontWeight: 'bold', color: '#1F2937', marginBottom: 4 },
   settingsDesc: { fontSize: 12, color: '#6B7280', marginBottom: 16 },
   codeBox: { flexDirection: 'row', backgroundColor: '#1F2937', borderRadius: 10, padding: 4, alignItems: 'center' },
   codeText: { flex: 1, color: 'white', fontSize: 20, letterSpacing: 4, textAlign: 'center', fontWeight: 'bold' },
   copyBtn: { backgroundColor: '#6D28D9', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8, flexDirection: 'row', alignItems: 'center' },
-
   settingsOptionsBlock: { marginTop: 16, backgroundColor: '#F9FAFB', borderRadius: 14, borderWidth: 1, borderColor: '#E5E7EB', paddingHorizontal: 16 },
   settingsOptionRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
   settingsOptionIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F3F4F6', justifyContent: 'center', alignItems: 'center', marginRight: 12 },
   settingsOptionText: { flex: 1, fontSize: 15, fontWeight: '500', color: '#1F2937' },
-
-  takeQuizBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#7C3AED', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, gap: 4, alignSelf: 'center' },
-  takeQuizBtnText: { color: 'white', fontWeight: 'bold', fontSize: 13 },
-  
-  // Generate Lesson FAB
-  generateLessonFab: { position: 'absolute', bottom: 80, right: 20, width: 56, height: 56, borderRadius: 28, backgroundColor: '#6D28D9', justifyContent: 'center', alignItems: 'center', elevation: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4, zIndex: 10 },
 });
