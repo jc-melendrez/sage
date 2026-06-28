@@ -23,9 +23,23 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework_simplejwt.tokens import RefreshToken
 from core.firebase import verify_firebase_token
 from .models import User
+from core.firestore_service import get_user_profile, get_badges
 
 
+class UserMeView(APIView):
+    permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        firebase_uid = request.user.firebase_uid  # Still resolved via JWT
+        profile = get_user_profile(firebase_uid)
+        if not profile:
+            return Response({'error': 'User not found'}, status=404)
+        
+        # Attach badges (sub-collection)
+        profile['badges'] = get_badges(firebase_uid)
+        profile['id'] = firebase_uid  # Use UID as the ID
+        return Response(profile)
+    
 class FirebaseLoginView(APIView):
     permission_classes = [AllowAny]
 
@@ -332,7 +346,7 @@ def sync_user_to_firestore(user):
     try:
         db = get_firestore()
         display_name = f"{user.first_name} {user.last_name}".strip() or user.username
-        db.collection('users').document(str(user.id)).set({
+        db.collection('users').document(user.firebase_uid).set({
             'djangoUserId': user.id,
             'username': user.username,
             'displayName': display_name,

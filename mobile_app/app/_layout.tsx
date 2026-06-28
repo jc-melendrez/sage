@@ -5,9 +5,10 @@ import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { isAuthenticated, getToken, getCurrentUser } from '@/services/authService';
-import { getFirebaseUid, initFirebaseAuth } from '@/services/firebaseAuthService';
+import { isAuthenticated } from '@/services/authService';
 import { testFirebase } from "@/services/firebaseTest";
+import { startSyncManager } from '@/services/syncManager';
+import { initOfflineQueue } from '@/services/offlineQueue';
 
 export const unstable_settings = {
   initialRouteName: '(tabs)',
@@ -20,7 +21,15 @@ export default function RootLayout() {
   const navigationState = useRootNavigationState();
 
   const [isReady, setIsReady] = useState(false);
-
+  useEffect(() => {
+    initOfflineQueue();
+    const stop = startSyncManager();
+    return () => stop();
+  }, []);
+  useEffect(() => {
+    const stop = startSyncManager();
+    return () => stop();
+  }, []);
   useEffect(() => {
     testFirebase();
     const verifyAuth = async () => {
@@ -33,21 +42,6 @@ export default function RootLayout() {
         router.replace('/login');
       } else if (loggedIn && segments[0] === 'login') {
         router.replace('/(tabs)');
-      }
-
-      if (loggedIn) {
-        const token = await getToken();
-        const fbUid = await getFirebaseUid();
-        if (token && !fbUid) {
-          try {
-            const user = await getCurrentUser();
-            if (user) {
-              await initFirebaseAuth(user);
-            }
-          } catch (error) {
-            console.error('Firebase recovery initialization failed:', error);
-          }
-        }
       }
 
       setIsReady(true);

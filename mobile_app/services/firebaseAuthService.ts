@@ -1,35 +1,22 @@
 import * as SecureStore from 'expo-secure-store';
+import auth from '@react-native-firebase/auth';
 
 const FIREBASE_UID_KEY = 'firebase_uid';
-const FIREBASE_API_KEY = 'AIzaSyDiz2Aeh8lytaGRfEqB3VlpNzVVe_sLU84';
 
-/**
- * Initialize Firebase Auth.
- * Uses REST API to avoid native SDK SSL issues on some devices.
- */
 export async function initFirebaseAuth(): Promise<void> {
   console.log("Firebase Auth service initialized");
 }
 
 /**
- * Sign in a user with email and password using Firebase Auth REST API.
- * Returns the Firebase ID Token which will be sent to Django.
+ * Sign in with email and password using native Firebase SDK.
+ * Returns the Firebase ID Token.
  */
 export async function signInWithEmail(email: string, password: string): Promise<string> {
   try {
-    const res = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, returnSecureToken: true }),
-      }
-    );
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error?.message || 'Sign in failed');
-
-    await SecureStore.setItemAsync(FIREBASE_UID_KEY, data.localId);
-    return data.idToken;
+    const userCredential = await auth().signInWithEmailAndPassword(email, password);
+    const idToken = await userCredential.user.getIdToken();
+    await SecureStore.setItemAsync(FIREBASE_UID_KEY, userCredential.user.uid);
+    return idToken;
   } catch (error) {
     console.error('Firebase sign in failed:', error);
     throw error;
@@ -37,24 +24,15 @@ export async function signInWithEmail(email: string, password: string): Promise<
 }
 
 /**
- * Create a new user with email and password using Firebase Auth REST API.
- * Returns the Firebase ID Token which will be sent to Django.
+ * Sign up with email and password using native Firebase SDK.
+ * Returns the Firebase ID Token.
  */
 export async function signUpWithEmail(email: string, password: string): Promise<string> {
   try {
-    const res = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${FIREBASE_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, returnSecureToken: true }),
-      }
-    );
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error?.message || 'Sign up failed');
-
-    await SecureStore.setItemAsync(FIREBASE_UID_KEY, data.localId);
-    return data.idToken;
+    const userCredential = await auth().createUserWithEmailAndPassword(email, password);
+    const idToken = await userCredential.user.getIdToken();
+    await SecureStore.setItemAsync(FIREBASE_UID_KEY, userCredential.user.uid);
+    return idToken;
   } catch (error) {
     console.error('Firebase sign up failed:', error);
     throw error;
@@ -62,10 +40,11 @@ export async function signUpWithEmail(email: string, password: string): Promise<
 }
 
 /**
- * Sign out from Firebase Auth REST API.
+ * Sign out from Firebase.
  */
 export async function signOutFirebase(): Promise<void> {
   try {
+    await auth().signOut();
     await SecureStore.deleteItemAsync(FIREBASE_UID_KEY);
   } catch (error) {
     console.error('Firebase sign out failed (non-blocking):', error);
@@ -73,16 +52,18 @@ export async function signOutFirebase(): Promise<void> {
 }
 
 /**
- * Get the stored Firebase UID from SecureStore.
+ * Get the stored Firebase UID.
  */
 export async function getFirebaseUid(): Promise<string | null> {
   return await SecureStore.getItemAsync(FIREBASE_UID_KEY);
 }
 
 /**
- * Get the current Firebase user info from stored data.
+ * Get the current Firebase user.
  */
 export async function getCurrentFirebaseUser(): Promise<{ uid: string } | null> {
+  const user = auth().currentUser;
+  if (user) return { uid: user.uid };
   const uid = await SecureStore.getItemAsync(FIREBASE_UID_KEY);
   return uid ? { uid } : null;
 }

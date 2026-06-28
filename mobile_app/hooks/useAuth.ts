@@ -9,7 +9,7 @@ import {
   RegisterCredentials,
   AuthResponse,
 } from '../services/authService';
-import { initFirebaseAuth, signOutFirebase } from '../services/firebaseAuthService';
+
 
 interface UseAuthReturn {
   isAuthenticated: boolean;
@@ -34,7 +34,6 @@ export function useAuth(): UseAuthReturn {
       setError(null);
       
       const response = await login(credentials);
-      await initFirebaseAuth(response.user);
       setUser(response.user);
       setIsAuthenticatedState(true);
     } catch (err) {
@@ -52,7 +51,6 @@ export function useAuth(): UseAuthReturn {
       setError(null);
       
       const response = await register(credentials);
-      await initFirebaseAuth(response.user);
       setUser(response.user);
       setIsAuthenticatedState(true);
     } catch (err) {
@@ -67,7 +65,6 @@ export function useAuth(): UseAuthReturn {
   const handleLogout = useCallback(async () => {
     try {
       setLoading(true);
-      await signOutFirebase();
       await logout();
       setUser(null);
       setIsAuthenticatedState(false);
