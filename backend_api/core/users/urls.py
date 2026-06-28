@@ -25,5 +25,7 @@ urlpatterns = [
     path('test-xp/', views.AddXpTestView.as_view(), name='add_xp_test'),
     path('test-model-config/', views.TestModelConfigView.as_view(), name='test_model_config'),
     path('lessons/generate/', views.generate_lesson, name='generate_lesson'),
+
+    path('firebase-login/', views.FirebaseLoginView.as_view(), name='firebase_login'),
     
 ]

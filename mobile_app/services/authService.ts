@@ -1,5 +1,11 @@
 import { API_BASE_URL } from '../config/api';
 import * as SecureStore from 'expo-secure-store';
+import { 
+  signInWithEmail, 
+  signUpWithEmail, 
+  signOutFirebase, 
+  getFirebaseUid 
+} from './firebaseAuthService';
 
 export interface LoginCredentials {
   username: string;
@@ -25,6 +31,7 @@ export interface AuthResponse {
     email: string;
     first_name?: string;
     last_name?: string;
+    firebase_uid?: string;
   };
 }
 
@@ -54,55 +61,91 @@ function extractErrorMessage(error: any, fallback: string): string {
 }
 
 /**
- * Register a new user, then automatically log them in to return tokens.
- */
-export async function register(credentials: RegisterCredentials): Promise<AuthResponse> {
-  const response = await fetch(`${API_BASE_URL}/users/register/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(credentials),
-  });
-
-  if (!response.ok) {
-    const error = await safeJson(response);
-    throw new Error(extractErrorMessage(error, `Registration failed (${response.status})`));
-  }
-
-  // Registration succeeded — now log in to get tokens
-  return await login({
-    username: credentials.username,
-    password: credentials.password,
-  });
-}
-
-/**
- * Login user with username and password.
+ * Hybrid Login: Uses Firebase Auth first, then exchanges the ID token for a Django JWT.
  */
 export async function login(credentials: LoginCredentials): Promise<AuthResponse> {
-  const response = await fetch(`${API_BASE_URL}/users/login/`, {
+  // 1. Authenticate with Firebase using email/password
+  // Note: We use the username field as the email for Firebase lookup if the user enters an email
+  const email = credentials.username.includes('@') ? credentials.username : `${credentials.username}@sage.local`; 
+  // Ideally, you should update your UI to ask for Email specifically for Firebase Auth
+  
+  let idToken: string;
+  try {
+    // Attempt to sign in. If this fails, we fall back or throw.
+    // For Phase 1, let's assume the user is entering their email in the username field
+    idToken = await signInWithEmail(credentials.username, credentials.password);
+  } catch (firebaseError) {
+    // If Firebase fails, you might want to fall back to legacy Django login here
+    // or just throw the Firebase error to the user.
+    throw new Error('Firebase authentication failed. Please check your email and password.');
+  }
+
+  // 2. Exchange Firebase ID Token for Django JWT
+  const response = await fetch(`${API_BASE_URL}/users/firebase-login/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(credentials),
+    body: JSON.stringify({ id_token: idToken }),
   });
 
   if (!response.ok) {
     const error = await safeJson(response);
-    throw new Error(extractErrorMessage(error, `Login failed (${response.status})`));
+    throw new Error(extractErrorMessage(error, 'Login handshake with server failed'));
   }
 
   const data: AuthResponse = await response.json();
+  
+  // 3. Store Django JWTs
   await SecureStore.setItemAsync(TOKEN_KEY, data.access);
   await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, data.refresh);
+  
   return data;
 }
 
 /**
- * Get the current user profile using stored token.
+ * Hybrid Register: Creates Firebase user first, then syncs to Django.
+ */
+export async function register(credentials: RegisterCredentials): Promise<AuthResponse> {
+  // 1. Create user in Firebase Auth
+  let idToken: string;
+  try {
+    idToken = await signUpWithEmail(credentials.email, credentials.password);
+  } catch (firebaseError) {
+    throw new Error('Firebase registration failed. This email may already be in use.');
+  }
+
+  // 2. Send Firebase ID token to Django to create the profile and get JWTs
+  const response = await fetch(`${API_BASE_URL}/users/firebase-login/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ 
+      id_token: idToken,
+      // We can pass extra profile data here if we update the Django view to accept it
+      username: credentials.username,
+      first_name: credentials.first_name,
+      last_name: credentials.last_name
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await safeJson(response);
+    throw new Error(extractErrorMessage(error, 'Registration sync with server failed'));
+  }
+
+  const data: AuthResponse = await response.json();
+  
+  // 3. Store Django JWTs
+  await SecureStore.setItemAsync(TOKEN_KEY, data.access);
+  await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, data.refresh);
+  
+  return data;
+}
+
+/**
+ * Get the current user profile using stored Django token.
  */
 export async function getCurrentUser() {
   const token = await getToken();
   if (!token) return null;
-
   const response = await fetch(`${API_BASE_URL}/users/me/`, {
     method: 'GET',
     headers: {
@@ -110,12 +153,10 @@ export async function getCurrentUser() {
       'Authorization': `Bearer ${token}`,
     },
   });
-
   if (!response.ok) {
     const error = await safeJson(response);
     throw new Error(extractErrorMessage(error, 'Failed to fetch user profile'));
   }
-
   return await response.json();
 }
 
@@ -137,6 +178,7 @@ export async function getRefreshToken(): Promise<string | null> {
  * Logout and clear stored tokens.
  */
 export async function logout(): Promise<void> {
+  await signOutFirebase(); // Sign out of Firebase first
   await SecureStore.deleteItemAsync(TOKEN_KEY);
   await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
 }

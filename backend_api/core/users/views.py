@@ -20,7 +20,68 @@ from .serializers import (
 from .utils.file_parser import extract_text_from_file
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework_simplejwt.tokens import RefreshToken
+from core.firebase import verify_firebase_token
+from .models import User
 
+
+
+class FirebaseLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        id_token = request.data.get('id_token')
+        if not id_token:
+            return Response({"error": "ID token is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. Verify the token with Firebase Admin SDK
+        decoded_token = verify_firebase_token(id_token)
+        if not decoded_token:
+            return Response({"error": "Invalid or expired Firebase token"}, status=status.HTTP_401_UNAUTHORIZED)
+
+        firebase_uid = decoded_token['uid']
+        email = decoded_token.get('email', '')
+
+        # 2. Find or Create the Django User linked to this Firebase UID
+        try:
+            user = User.objects.get(firebase_uid=firebase_uid)
+        except User.DoesNotExist:
+            # If the user doesn't exist in Django yet, create them using data from the request
+            username = request.data.get('username', email.split('@')[0] if email else f"user_{firebase_uid[:8]}")
+            first_name = request.data.get('first_name', '')
+            last_name = request.data.get('last_name', '')
+            
+            # Ensure username is unique; if taken, append a random string from the UID
+            if User.objects.filter(username=username).exists():
+                username = f"{username}_{firebase_uid[:6]}"
+
+            user = User.objects.create_user(
+                username=username,
+                email=email,
+                firebase_uid=firebase_uid,
+                first_name=first_name,
+                last_name=last_name,
+                password=None # Password is managed by Firebase now
+            )
+            # Sync the new user to Firestore immediately
+            sync_user_to_firestore(user)
+
+        # 3. Issue a Django JWT for the rest of the app to use
+        refresh = RefreshToken.for_user(user)
+        
+        return Response({
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "firebase_uid": user.firebase_uid
+            }
+        })
+    
 # ---------- Helper: safe JSON parsing ----------
 def safe_json_parse(text):
     """Try to parse JSON from text, with fallback to regex extraction."""

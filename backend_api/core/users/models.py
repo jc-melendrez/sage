@@ -15,6 +15,8 @@ class User(AbstractUser):
     is_educator = models.BooleanField(default=False)
     is_admin = models.BooleanField(default=False)
 
+    firebase_uid = models.CharField(max_length=128, unique=True, null=True, blank=True)
+    
     # --- Gamification Overview ---
     level = models.IntegerField(default=1)
     current_xp = models.IntegerField(default=0)

@@ -18,7 +18,8 @@ from dotenv import load_dotenv
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 # (This points to: Development/SAGE_Project/backend_api/core)
 BASE_DIR = Path(__file__).resolve().parent.parent
-
+FIREBASE_CREDENTIALS_PATH = os.path.join(BASE_DIR.parent.parent, 'serviceAccountKey.json')
+FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', 'sage-a47b8') 
 # --- SAGE SECRETS CONFIGURATION ---
 # Go up two more folders to reach SAGE_Project, then look for .env
 ENV_FILE_PATH = BASE_DIR.parent.parent / '.env'

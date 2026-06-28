@@ -7,6 +7,7 @@ import 'react-native-reanimated';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { isAuthenticated, getToken, getCurrentUser } from '@/services/authService';
 import { getFirebaseUid, initFirebaseAuth } from '@/services/firebaseAuthService';
+import { testFirebase } from "@/services/firebaseTest";
 
 export const unstable_settings = {
   initialRouteName: '(tabs)',
@@ -21,6 +22,7 @@ export default function RootLayout() {
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
+    testFirebase();
     const verifyAuth = async () => {
       if (!navigationState?.key) return;
 
