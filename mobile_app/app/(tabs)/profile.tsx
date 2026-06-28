@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, StatusBar, Platform } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -8,29 +8,25 @@ import { getCurrentUser } from '@/services/authService';
 
 // 🎨 Exact same tokens as Dashboard for a unified Design System
 const COLORS = {
-  bg: '#baaeda',              // Soft muted purple background
-  bgSecondary: '#dad6e7',     // Slightly lighter purple
-  surface: '#cdc2dd',         // Card surface
-  surfaceLight: '#5A4F6C',    
-  
-  // Purple spectrum
-  purpleDeep: '#4C1D95',      
-  purpleDark: '#6D28D9',      
-  purplePrimary: '#7C3AED',   
-  purpleVibrant: '#8B5CF6',   
-  purpleLight: '#A78BFA',     
-  purplePale: '#C4B5FD',      
-  purpleGhost: '#DDD6FE',     
-  
-  accent: '#22D3EE',          
-  success: '#10B981',         
-  warning: '#F59E0B',         
-  danger: '#EF4444',          
-  
-  textPrimary: '#010910',     // Dark text for light background
-  textSecondary: '#4B5563',   // Adjusted for contrast on light bg
-  textMuted: '#6B7280',       // Adjusted for contrast
-  border: 'rgba(167, 139, 250, 0.25)', // Slightly more visible border on light bg
+  bg: '#baaeda',
+  bgSecondary: '#dad6e7',
+  surface: '#cdc2dd',
+  surfaceLight: '#5A4F6C',
+  purpleDeep: '#4C1D95',
+  purpleDark: '#6D28D9',
+  purplePrimary: '#7C3AED',
+  purpleVibrant: '#8B5CF6',
+  purpleLight: '#A78BFA',
+  purplePale: '#C4B5FD',
+  purpleGhost: '#DDD6FE',
+  accent: '#22D3EE',
+  success: '#10B981',
+  warning: '#F59E0B',
+  danger: '#EF4444',
+  textPrimary: '#010910',
+  textSecondary: '#4B5563',
+  textMuted: '#6B7280',
+  border: 'rgba(167, 139, 250, 0.25)',
 };
 
 const FONTS = {
@@ -45,7 +41,6 @@ const FONTS = {
 export default function ProfileScreen() {
   const { logout } = useAuth();
   const router = useRouter();
-
   const [userData, setUserData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
@@ -76,26 +71,25 @@ export default function ProfileScreen() {
     );
   }
 
-  // --- Dynamic Data Mapping ---
   const firstName = userData?.first_name || '';
   const lastName = userData?.last_name || '';
   const username = userData?.username || 'Student';
-  
   const fullName = firstName || lastName ? `${firstName} ${lastName}`.trim() : username;
-  const initials = firstName 
-    ? `${firstName[0]}${lastName ? lastName[0] : ''}`.toUpperCase() 
+  const initials = firstName
+    ? `${firstName[0]}${lastName ? lastName[0] : ''}`.toUpperCase()
     : username.substring(0, 2).toUpperCase();
 
   const currentXP = userData?.current_xp || 0;
   const nextLevelXP = userData?.next_level_xp || 1000;
   const progressPercent = Math.min((currentXP / nextLevelXP) * 100, 100);
-
   const earnedBadges = userData?.badges || [];
-  
+
   return (
     <View style={styles.container}>
-      
-      {/* 🌟 PREMIUM GRADIENT HEADER */}
+      {/* ✅ Status bar configured for light-on-dark header */}
+      <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
+
+      {/* 🌟 PREMIUM GRADIENT HEADER with safe top padding */}
       <LinearGradient
         colors={[COLORS.purpleDeep, COLORS.purpleDark]}
         start={{ x: 0, y: 0 }}
@@ -103,7 +97,6 @@ export default function ProfileScreen() {
         style={styles.header}
       >
         <View style={styles.headerTop}>
-          {/* Gradient Avatar */}
           <LinearGradient
             colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
             start={{ x: 0, y: 0 }}
@@ -112,7 +105,7 @@ export default function ProfileScreen() {
           >
             <Text style={styles.avatarText}>{initials}</Text>
           </LinearGradient>
-          
+
           <View style={styles.userInfo}>
             <Text style={styles.userName}>{fullName}</Text>
             <Text style={styles.userEmail}>{userData?.email || 'No email provided'}</Text>
@@ -144,12 +137,10 @@ export default function ProfileScreen() {
       </LinearGradient>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
-        
-        {/* 🌟 OVERVIEW STATS (Matches Dashboard Style) */}
+        {/* Overview Stats */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Overview</Text>
           <View style={styles.overviewGrid}>
-            
             <View style={styles.overviewCard}>
               <View style={[styles.overviewIconBg, { backgroundColor: 'rgba(245, 158, 11, 0.15)' }]}>
                 <Ionicons name="flame" size={24} color={COLORS.warning} />
@@ -157,7 +148,6 @@ export default function ProfileScreen() {
               <Text style={styles.overviewValue}>{userData?.streak || 0}</Text>
               <Text style={styles.overviewLabel}>Day Streak</Text>
             </View>
-
             <View style={styles.overviewCard}>
               <View style={[styles.overviewIconBg, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
                 <Ionicons name="trophy" size={24} color={COLORS.purpleVibrant} />
@@ -165,7 +155,6 @@ export default function ProfileScreen() {
               <Text style={styles.overviewValue}>{userData?.total_points || 0}</Text>
               <Text style={styles.overviewLabel}>Total Points</Text>
             </View>
-
             <View style={styles.overviewCard}>
               <View style={[styles.overviewIconBg, { backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}>
                 <Ionicons name="trending-up" size={24} color={COLORS.success} />
@@ -173,15 +162,13 @@ export default function ProfileScreen() {
               <Text style={styles.overviewValue}>Lv {userData?.level || 1}</Text>
               <Text style={styles.overviewLabel}>Level</Text>
             </View>
-
           </View>
         </View>
 
-        {/* 🌟 DETAILED STATISTICS LIST */}
+        {/* Statistics List */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Statistics</Text>
           <View style={styles.listCard}>
-            
             <View style={styles.listItem}>
               <View style={styles.listItemLeft}>
                 <View style={[styles.listIconBg, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
@@ -191,7 +178,6 @@ export default function ProfileScreen() {
               </View>
               <Text style={styles.listItemValue}>{userData?.courses_completed || 0}</Text>
             </View>
-
             <View style={[styles.listItem, styles.borderTop]}>
               <View style={styles.listItemLeft}>
                 <View style={[styles.listIconBg, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
@@ -201,7 +187,6 @@ export default function ProfileScreen() {
               </View>
               <Text style={styles.listItemValue}>{userData?.study_hours || 0}</Text>
             </View>
-
             <View style={[styles.listItem, styles.borderTop]}>
               <View style={styles.listItemLeft}>
                 <View style={[styles.listIconBg, { backgroundColor: 'rgba(139, 92, 246, 0.15)' }]}>
@@ -211,17 +196,15 @@ export default function ProfileScreen() {
               </View>
               <Text style={styles.listItemValue}>{userData?.quizzes_taken || 0}</Text>
             </View>
-
           </View>
         </View>
 
-        {/* 🌟 BADGES GRID */}
+        {/* Badges Grid */}
         <View style={styles.section}>
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>Badges</Text>
             <TouchableOpacity><Text style={styles.viewAllText}>View All</Text></TouchableOpacity>
           </View>
-          
           <View style={styles.badgesGrid}>
             {earnedBadges.length > 0 ? (
               earnedBadges.map((badge: any) => (
@@ -249,10 +232,9 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        {/* 🌟 MENU ITEMS */}
+        {/* Menu Items */}
         <View style={styles.section}>
           <View style={styles.listCard}>
-            
             <TouchableOpacity style={styles.menuItem}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />
@@ -260,7 +242,6 @@ export default function ProfileScreen() {
               </View>
               <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
             </TouchableOpacity>
-
             <TouchableOpacity style={[styles.menuItem, styles.borderTop]}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="settings-outline" size={22} color={COLORS.textSecondary} />
@@ -268,7 +249,6 @@ export default function ProfileScreen() {
               </View>
               <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
             </TouchableOpacity>
-
             <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={handleLogout}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="log-out-outline" size={22} color={COLORS.danger} />
@@ -276,16 +256,14 @@ export default function ProfileScreen() {
               </View>
               <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
             </TouchableOpacity>
-
           </View>
         </View>
 
-        {/* Member Since Footer */}
+        {/* Footer */}
         <View style={styles.footer}>
           <Ionicons name="calendar-outline" size={16} color={COLORS.textMuted} />
           <Text style={styles.footerText}>Member since {userData?.date_joined ? new Date(userData.date_joined).getFullYear() : '2026'}</Text>
         </View>
-
       </ScrollView>
     </View>
   );
@@ -293,21 +271,21 @@ export default function ProfileScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
-  
-  // Header Styles
-  header: { 
-    paddingTop: 20, 
-    paddingBottom: 28, 
-    paddingHorizontal: 24, 
-    borderBottomLeftRadius: 32, 
-    borderBottomRightRadius: 32, 
+
+  // ✅ Header with platform-aware top padding to avoid status bar overlap
+  header: {
+    paddingTop: Platform.OS === 'ios' ? 60 : 40,
+    paddingBottom: 28,
+    paddingHorizontal: 24,
+    borderBottomLeftRadius: 32,
+    borderBottomRightRadius: 32,
   },
   headerTop: { flexDirection: 'row', alignItems: 'center', gap: 16, marginBottom: 24 },
-  avatarContainer: { 
-    width: 76, 
-    height: 76, 
-    borderRadius: 38, 
-    justifyContent: 'center', 
+  avatarContainer: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    justifyContent: 'center',
     alignItems: 'center',
     shadowColor: COLORS.purpleDeep,
     shadowOffset: { width: 0, height: 4 },
@@ -319,23 +297,22 @@ const styles = StyleSheet.create({
   userInfo: { flex: 1 },
   userName: { fontSize: 26, fontFamily: FONTS.bold, color: 'white', marginBottom: 4, letterSpacing: -0.5 },
   userEmail: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.purplePale, marginBottom: 8 },
-  roleBadge: { 
-    alignSelf: 'flex-start', 
-    backgroundColor: 'rgba(255,255,255,0.15)', 
-    paddingHorizontal: 12, 
-    paddingVertical: 4, 
-    borderRadius: 16, 
-    borderWidth: 1, 
-    borderColor: 'rgba(255,255,255,0.2)' 
+  roleBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
   },
   roleText: { color: 'white', fontSize: 12, fontFamily: FONTS.semiBold },
-  
-  // Glassmorphic Progress Card
-  glassCard: { 
-    backgroundColor: 'rgba(255,255,255,0.1)', 
-    borderRadius: 20, 
-    padding: 18, 
-    borderWidth: 1, 
+
+  glassCard: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 20,
+    padding: 18,
+    borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.2)',
   },
   glassCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
@@ -352,33 +329,31 @@ const styles = StyleSheet.create({
   sectionTitle: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginBottom: 16 },
   viewAllText: { color: COLORS.purpleDeep, fontSize: 14, fontFamily: FONTS.semiBold },
 
-  // Overview Grid (Matches Dashboard Stats)
   overviewGrid: { flexDirection: 'row', gap: 12 },
-  overviewCard: { 
-    flex: 1, 
-    backgroundColor: COLORS.surface, 
-    paddingVertical: 20, 
-    paddingHorizontal: 12, 
-    borderRadius: 20, 
+  overviewCard: {
+    flex: 1,
+    backgroundColor: COLORS.surface,
+    paddingVertical: 20,
+    paddingHorizontal: 12,
+    borderRadius: 20,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.border,
   },
-  overviewIconBg: { 
-    width: 48, 
-    height: 48, 
-    borderRadius: 24, 
-    justifyContent: 'center', 
-    alignItems: 'center', 
-    marginBottom: 12 
+  overviewIconBg: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
   },
   overviewValue: { fontSize: 24, fontFamily: FONTS.black, color: COLORS.textPrimary, marginBottom: 4, letterSpacing: -0.5 },
   overviewLabel: { fontSize: 11, color: COLORS.textSecondary, fontFamily: FONTS.semiBold, textTransform: 'uppercase', letterSpacing: 0.5 },
 
-  // List Cards
-  listCard: { 
-    backgroundColor: COLORS.surface, 
-    borderRadius: 20, 
+  listCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 20,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: COLORS.border,
@@ -390,14 +365,13 @@ const styles = StyleSheet.create({
   listItemText: { fontSize: 15, color: COLORS.textPrimary, fontFamily: FONTS.medium },
   listItemValue: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary },
 
-  // Badges Grid
   badgesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  badgeCard: { 
-    width: '31%', 
-    backgroundColor: COLORS.surface, 
-    paddingVertical: 18, 
-    paddingHorizontal: 8, 
-    borderRadius: 20, 
+  badgeCard: {
+    width: '31%',
+    backgroundColor: COLORS.surface,
+    paddingVertical: 18,
+    paddingHorizontal: 8,
+    borderRadius: 20,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.border,
@@ -412,25 +386,23 @@ const styles = StyleSheet.create({
   },
   badgeEmoji: { fontSize: 28 },
   badgeName: { fontSize: 12, color: COLORS.textSecondary, fontFamily: FONTS.medium, marginBottom: 8, textAlign: 'center' },
-  earnedPill: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    gap: 4, 
+  earnedPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
     backgroundColor: 'rgba(16, 185, 129, 0.15)',
-    paddingHorizontal: 8, 
-    paddingVertical: 3, 
-    borderRadius: 12 
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
   },
   earnedText: { fontSize: 10, color: COLORS.success, fontFamily: FONTS.semiBold },
   emptyBadges: { padding: 24, alignItems: 'center', width: '100%', backgroundColor: COLORS.surface, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border },
   emptyBadgesText: { color: COLORS.textSecondary, fontFamily: FONTS.medium, textAlign: 'center' },
 
-  // Menu Items
   menuItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 18 },
   menuItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 14 },
   menuItemText: { fontSize: 16, color: COLORS.textPrimary, fontFamily: FONTS.medium },
 
-  // Footer
   footer: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 8, paddingBottom: 20 },
   footerText: { color: COLORS.textMuted, fontSize: 14, fontFamily: FONTS.medium },
 });
