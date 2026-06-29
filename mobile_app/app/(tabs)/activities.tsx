@@ -13,7 +13,7 @@ import TakeQuiz from '../../components/TakeQuiz';
 import LessonDisplay from '../../components/LessonDisplay';
 import LessonGenerator from '@/components/LessonGenerator';
 
-// 🎨 Rich Purple Palette (Matching Dashboard)
+//  Rich Purple Palette (Matching Dashboard)
 const COLORS = {
   bg: '#baaeda',
   bgSecondary: '#dad6e7',
@@ -367,7 +367,7 @@ export default function ActivitiesScreen() {
           <View style={styles.levelHeader}>
             <View style={styles.levelLeft}>
               <Text style={styles.levelDifficulty}>
-                {unlocked ? '🔓' : '🔒'} {level.difficulty}
+                {unlocked ? '' : '🔒'} {level.difficulty}
               </Text>
               {score > 0 && (
                 <View style={styles.levelScoreBadge}>
@@ -593,6 +593,7 @@ export default function ActivitiesScreen() {
         <Text style={styles.headerSubtitle}>Lessons, quizzes, and group tasks</Text>
       </LinearGradient>
 
+      {/* ✅ UPDATED: High-visibility tabs */}
       <View style={styles.tabsContainer}>
         <TouchableOpacity 
           style={[styles.tab, selectedTab === 'lessons' && styles.tabActive]} 
@@ -601,6 +602,7 @@ export default function ActivitiesScreen() {
           <Text style={[styles.tabText, selectedTab === 'lessons' && styles.tabTextActive]}>Courses</Text>
           {selectedTab === 'lessons' && <View style={styles.activeTabIndicator} />}
         </TouchableOpacity>
+        
         <TouchableOpacity 
           style={[styles.tab, selectedTab === 'quizzes' && styles.tabActive]} 
           onPress={() => setSelectedTab('quizzes')}
@@ -608,6 +610,7 @@ export default function ActivitiesScreen() {
           <Text style={[styles.tabText, selectedTab === 'quizzes' && styles.tabTextActive]}>Quizzes</Text>
           {selectedTab === 'quizzes' && <View style={styles.activeTabIndicator} />}
         </TouchableOpacity>
+        
         <TouchableOpacity 
           style={[styles.tab, selectedTab === 'groups' && styles.tabActive]} 
           onPress={() => setSelectedTab('groups')}
@@ -819,7 +822,7 @@ export default function ActivitiesScreen() {
               const passingScore = quizToTake.passingScore;
               updateLevelProgress(levelId, score);
               if (score >= passingScore) {
-                Alert.alert('🎉 Passed!', `You scored ${score}% and unlocked the next level.`);
+                Alert.alert(' Passed!', `You scored ${score}% and unlocked the next level.`);
               } else {
                 Alert.alert('Keep trying!', `You scored ${score}%. Need ${passingScore}% to unlock the next level.`);
               }
@@ -925,19 +928,39 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
-  tabsContainer: { flexDirection: 'row', backgroundColor: 'transparent', paddingHorizontal: 24, paddingBottom: 8 },
-  tab: { flex: 1, paddingVertical: 12, alignItems: 'center', position: 'relative' },
+  // ✅ UPDATED: Tabs with high visibility
+  tabsContainer: { 
+    flexDirection: 'row', 
+    backgroundColor: 'transparent', 
+    paddingHorizontal: 24, 
+    paddingTop: 16, 
+    paddingBottom: 8 
+  },
+  tab: { 
+    flex: 1, 
+    paddingVertical: 12, 
+    alignItems: 'center', 
+    position: 'relative' 
+  },
   tabActive: { },
   activeTabIndicator: {
     position: 'absolute',
     bottom: 0,
-    width: 20,
+    width: 24,
     height: 3,
     borderRadius: 1.5,
     backgroundColor: COLORS.purpleDeep,
   },
-  tabText: { fontSize: 14, color: COLORS.textMuted, fontFamily: FONTS.semiBold },
-  tabTextActive: { color: COLORS.purpleDeep, fontFamily: FONTS.bold },
+  tabText: { 
+    fontSize: 15, 
+    color: COLORS.purpleLight, // Visible light purple for inactive
+    fontFamily: FONTS.semiBold 
+  },
+  tabTextActive: { 
+    color: COLORS.purpleDeep, // Deep purple for active
+    fontFamily: FONTS.bold, 
+    fontSize: 16 
+  },
   
   content: { flex: 1 },
   itemsList: { paddingHorizontal: 24, paddingBottom: 20, paddingTop: 16 },
