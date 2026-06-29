@@ -48,3 +48,4 @@ urllib3==2.6.3
 virtualenv==20.35.4
 firebase-admin
 python-dotenv
+pypdf==5.9.0
