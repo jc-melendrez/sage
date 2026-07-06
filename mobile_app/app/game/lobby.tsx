@@ -3,8 +3,7 @@ import { View, Text, FlatList, TouchableOpacity, StyleSheet, Alert, ActivityIndi
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getToken, getCurrentUser } from '@/services/authService';
-
-const API_BASE_URL = 'http://192.168.1.16:8000/api';
+import { API_BASE_URL } from '@/config/api';
 
 export default function LobbyScreen() {
   const router = useRouter();
@@ -23,7 +22,7 @@ export default function LobbyScreen() {
       .doc(roomCode)
       .collection('players')
       .onSnapshot(snap => {
-        setPlayers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        setPlayers(snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []);
       });
 
     // Listen for game start
@@ -31,7 +30,7 @@ export default function LobbyScreen() {
       .collection('gameRooms')
       .doc(roomCode)
       .onSnapshot(snap => {
-        if (snap.data()?.status === 'active') {
+        if (snap?.data()?.status === 'active') {
           router.replace({ pathname: '/game/question', params: { roomCode, isHost } });
         }
       });

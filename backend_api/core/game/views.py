@@ -4,10 +4,12 @@ import json
 import requests
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from django.conf import settings
 from core.firebase import get_firestore
 from firebase_admin import firestore as fs
+from users.utils.file_parser import extract_text_from_file
 
 
 def generate_room_code():
@@ -20,14 +22,19 @@ def get_display_name(user):
 
 class CreateGameView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        file_content = request.data.get('fileContent')
+        uploaded_file = request.FILES.get('file')
         question_count = int(request.data.get('questionCount', 10))
         time_per_question = int(request.data.get('timePerQuestion', 15))
 
+        if not uploaded_file:
+            return Response({'error': 'No file uploaded'}, status=400)
+
+        file_content = extract_text_from_file(uploaded_file)
         if not file_content:
-            return Response({'error': 'No content provided to generate quiz'}, status=400)
+            return Response({'error': 'Could not extract text from file'}, status=400)
 
         # Generate Topic and Questions via AI
         ai_data = self.process_content(file_content, question_count)
@@ -101,7 +108,7 @@ Content:
                 },
                 timeout=45
             )
-            return response.json()['choices'][0]['message']['content']
+            return json.loads(response.json()['choices'][0]['message']['content'])
         except Exception as e:
             print(f'[AI Error] {e}')
             return None

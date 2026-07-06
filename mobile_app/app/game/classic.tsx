@@ -7,7 +7,6 @@ import { useRouter } from 'expo-router';
 import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 
@@ -53,7 +52,7 @@ export default function ClassicGameSetupScreen() {
   const [timePerQuestion, setTimePerQuestion] = useState('15');
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<'home' | 'create' | 'join'>('home');
-  const [selectedFile, setSelectedFile] = useState<{ name: string; content: string } | null>(null);
+  const [selectedFile, setSelectedFile] = useState<{ name: string; uri: string; mimeType: string } | null>(null);
 
   const pickDocument = async () => {
     try {
@@ -64,22 +63,7 @@ export default function ClassicGameSetupScreen() {
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const file = result.assets[0];
-        let content: string;
-        
-        if (file.mimeType === 'application/pdf') {
-          Alert.alert(
-            'PDF Info', 
-            'PDF files are not fully supported yet. For best results, please upload a .txt file. Attempting to extract any available text...'
-          );
-          try {
-            content = await FileSystem.readAsStringAsync(file.uri);
-          } catch (readErr) {
-            content = `[PDF file: ${file.name} - content extraction requires PDF parsing library]`;
-          }
-        } else {
-          content = await FileSystem.readAsStringAsync(file.uri);
-        }
-        setSelectedFile({ name: file.name, content });
+        setSelectedFile({ name: file.name, uri: file.uri, mimeType: file.mimeType || 'application/octet-stream' });
       }
     } catch (err: any) {
       console.error('Document pick error:', err);
@@ -95,17 +79,15 @@ export default function ClassicGameSetupScreen() {
     setLoading(true);
     try {
       const token = await getToken();
+      const formData = new FormData();
+      formData.append('file', { uri: selectedFile.uri, name: selectedFile.name, type: selectedFile.mimeType } as any);
+      formData.append('questionCount', questionCount);
+      formData.append('timePerQuestion', timePerQuestion);
+
       const response = await fetch(`${API_BASE_URL}/game/create/`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          fileContent: selectedFile.content,
-          questionCount: parseInt(questionCount),
-          timePerQuestion: parseInt(timePerQuestion),
-        }),
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: formData,
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Failed to create room');

@@ -3,8 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet, Animated } from 'react-native
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getToken, getCurrentUser } from '@/services/authService';
-
-const API_BASE_URL = 'http://192.168.1.16:8000/api';
+import { API_BASE_URL } from '@/config/api';
 
 export default function QuestionScreen() {
   const router = useRouter();
