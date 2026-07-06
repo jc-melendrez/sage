@@ -20,7 +20,7 @@ urlpatterns = [
     path('groups/create/', views.CreateGroupView.as_view(), name='create_group'),
     path('groups/join/', views.JoinGroupView.as_view(), name='join_group'),
     path('groups/mine/', views.MyGroupsView.as_view(), name='my_groups'),
-    path('groups/<int:group_id>/chat/', views.GroupChatView.as_view(), name='group_chat'),
+    path('groups/<str:group_id>/chat/', views.GroupChatView.as_view(), name='group_chat'),
 
     path('test-xp/', views.AddXpTestView.as_view(), name='add_xp_test'),
     path('test-model-config/', views.TestModelConfigView.as_view(), name='test_model_config'),

@@ -1,7 +1,9 @@
 from firebase_admin import firestore
+from core.firebase import initialize_firebase
 import random, string
 
 def get_db():
+    initialize_firebase()
     return firestore.client()
 
 

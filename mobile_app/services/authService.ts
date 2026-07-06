@@ -37,6 +37,20 @@ export interface AuthResponse {
 const TOKEN_KEY = 'auth_token';
 const REFRESH_TOKEN_KEY = 'refresh_token';
 
+export async function refreshAccessToken(): Promise<string | null> {
+  const refresh = await getRefreshToken();
+  if (!refresh) return null;
+  const response = await fetch(`${API_BASE_URL}/users/token/refresh/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh }),
+  });
+  if (!response.ok) { await logout(); return null; }
+  const data = await response.json();
+  await SecureStore.setItemAsync(TOKEN_KEY, data.access);
+  return data.access;
+}
+
 async function safeJson(response: Response): Promise<any> {
   try {
     return await response.json();
@@ -122,15 +136,19 @@ export async function register(credentials: RegisterCredentials): Promise<AuthRe
  * Get the current user profile using stored Django token.
  */
 export async function getCurrentUser() {
-  const token = await getToken();
+  let token = await getToken();
   if (!token) return null;
-  const response = await fetch(`${API_BASE_URL}/users/me/`, {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-  });
+  const doFetch = async (tok: string) => {
+    return fetch(`${API_BASE_URL}/users/me/`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tok}` },
+    });
+  };
+  let response = await doFetch(token);
+  if (response.status === 401) {
+    const newToken = await refreshAccessToken();
+    if (newToken) response = await doFetch(newToken);
+  }
   if (!response.ok) {
     const error = await safeJson(response);
     throw new Error(extractErrorMessage(error, 'Failed to fetch user profile'));
@@ -152,7 +170,19 @@ export async function logout(): Promise<void> {
   await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
 }
 
+function decodeJwtPayload(token: string): { exp?: number } | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(payload));
+  } catch { return null; }
+}
+
 export async function isAuthenticated(): Promise<boolean> {
   const token = await getToken();
-  return token !== null;
+  if (!token) return false;
+  const payload = decodeJwtPayload(token);
+  if (!payload || !payload.exp) return true;
+  return payload.exp * 1000 > Date.now();
 }

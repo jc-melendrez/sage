@@ -205,7 +205,7 @@ export default function ActivitiesScreen() {
 
     try {
       const unsub = firestore()
-        .collection('groups')
+        .collection('studyGroups')
         .doc(String(group.id))
         .collection('messages')
         .orderBy('created_at', 'asc')
@@ -214,7 +214,7 @@ export default function ActivitiesScreen() {
             const firestoreMsgs = snapshot.docs.map(doc => {
               const data = doc.data();
               return {
-                id: data.id,
+                id: doc.id,
                 text: data.text,
                 sender_id: data.sender_id,
                 sender_name: data.sender_name,

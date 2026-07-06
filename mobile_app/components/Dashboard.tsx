@@ -15,9 +15,9 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { API_BASE_URL } from '@/config/api';
-import { getCurrentUser, getToken } from '@/services/authService';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
+import { getCurrentUser, getToken, logout } from '@/services/authService';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -253,9 +253,18 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       if (activitiesRes.ok) setActivities(await activitiesRes.json());
 
       setLoading(false);
-    } catch (err) {
+    }  catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'An error occurred';
       console.error('Error fetching data:', errorMessage);
+      if (
+        errorMessage.toLowerCase().includes('token') ||
+        errorMessage.toLowerCase().includes('session expired') ||
+        errorMessage.toLowerCase().includes('unauthorized')
+      ) {
+        await logout();
+        router.replace('/login');
+        return;
+      }
       setError(errorMessage);
       setLoading(false);
     }
