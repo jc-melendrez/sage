@@ -12,6 +12,8 @@ import { getToken, getCurrentUser } from '@/services/authService';
 import TakeQuiz from '../../components/TakeQuiz';
 import LessonDisplay from '../../components/LessonDisplay';
 import LessonGenerator from '@/components/LessonGenerator';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 
 //  Rich Purple Palette (Matching Dashboard)
 const COLORS = {
@@ -136,6 +138,19 @@ export default function ActivitiesScreen() {
   const [isLessonDisplayModalOpen, setIsLessonDisplayModalOpen] = useState(false);
   const [lessonToDisplay, setLessonToDisplay] = useState<any>(null);
 
+  // --- Quiz Generator State ---
+  const [isGenerateQuizModalOpen, setIsGenerateQuizModalOpen] = useState(false);
+  const [quizFile, setQuizFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [quizDifficulty, setQuizDifficulty] = useState('Medium');
+  const [quizCount, setQuizCount] = useState('10');
+  const [quizType, setQuizType] = useState('Multiple Choice');
+  const [isQuizTypeDropdownOpen, setIsQuizTypeDropdownOpen] = useState(false);
+  const [quizInstructions, setQuizInstructions] = useState('');
+  const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
+  const [quizGenerationStatus, setQuizGenerationStatus] = useState('');
+  const [quizGenerationProgress, setQuizGenerationProgress] = useState(0);
+  const questionTypeOptions = ['Multiple Choice', 'True/False', 'Short Answer', 'Fill-in-the-Blank'];
+
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
 
@@ -153,6 +168,79 @@ export default function ActivitiesScreen() {
       }
     };
   }, [activeGroup]);
+
+  const pickQuizFile = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      setQuizFile(result.assets[0]);
+    } catch (err) {
+      console.error("File picker error:", err);
+      Alert.alert("Error", "Failed to select file.");
+    }
+  };
+
+  const handleGenerateQuiz = async () => {
+    if (!quizFile) {
+      Alert.alert("Material Required", "Please select a study material (PDF or Text) before generating a quiz.");
+      return;
+    }
+    setIsGeneratingQuiz(true);
+    try {
+      setQuizGenerationStatus("Analyzing study material...");
+      setQuizGenerationProgress(0.1);
+
+      let extractedText = "";
+      if (quizFile.mimeType === 'text/plain') {
+        extractedText = await FileSystem.readAsStringAsync(quizFile.uri);
+      } else {
+        extractedText = `[Context from ${quizFile.name}]`;
+      }
+
+      setQuizGenerationStatus("Generating questions...");
+      setQuizGenerationProgress(0.4);
+
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/ai/generate-quiz/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          content: extractedText,
+          difficulty: quizDifficulty,
+          count: parseInt(quizCount),
+          type: quizType,
+          instructions: quizInstructions
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || "Failed to generate quiz");
+      }
+
+      setQuizGenerationProgress(1.0);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      Alert.alert("Quiz Ready!", `Successfully generated ${quizCount} ${quizDifficulty} ${quizType} questions.`);
+      setIsGenerateQuizModalOpen(false);
+      setQuizFile(null);
+      setQuizInstructions('');
+      loadInitialData();
+    } catch (err) {
+      console.error("Generation Error Details:", err);
+      Alert.alert("Generation Failed", err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setIsGeneratingQuiz(false);
+      setQuizGenerationStatus('');
+      setQuizGenerationProgress(0);
+    }
+  };
 
   const loadInitialData = async () => {
     try {
@@ -881,19 +969,172 @@ export default function ActivitiesScreen() {
         )}
       </Modal>
 
-      {/* FAB */}
+      {/* QUIZ GENERATOR MODAL */}
+      <Modal
+        animationType="slide"
+        transparent={true}
+        visible={isGenerateQuizModalOpen}
+        onRequestClose={() => setIsGenerateQuizModalOpen(false)}
+      >
+        <View style={styles.quizGenModalOverlay}>
+          <View style={styles.quizGenModalContent}>
+            <View style={styles.quizGenModalHeader}>
+              <Text style={styles.quizGenModalTitle}>Quiz Generator</Text>
+              <TouchableOpacity onPress={() => setIsGenerateQuizModalOpen(false)}>
+                <Ionicons name="close" size={24} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+
+            {isGeneratingQuiz ? (
+              <View style={styles.quizGenLoadingContainer}>
+                <View style={styles.quizGenLoadingIconContainer}>
+                  <ActivityIndicator size="large" color="#7C3AED" />
+                  <Ionicons name="sparkles" size={24} color="#7C3AED" style={styles.quizGenSparkleIcon} />
+                </View>
+                <Text style={styles.quizGenStatusTitle}>{quizGenerationStatus}</Text>
+                <Text style={styles.quizGenStatusSubtitle}>SAGE AI is crafting the perfect assessment for you.</Text>
+                <View style={styles.quizGenProgressTrack}>
+                  <View style={[styles.quizGenProgressFill, { width: `${quizGenerationProgress * 100}%` }]} />
+                </View>
+                <Text style={styles.quizGenProgressText}>{Math.round(quizGenerationProgress * 100)}% Complete</Text>
+              </View>
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false} style={styles.quizGenModalForm}>
+                <Text style={styles.quizGenLabel}>Selected Material</Text>
+                <View style={styles.quizGenMaterialPreview}>
+                  <View style={styles.quizGenMaterialIconBg}>
+                    <Ionicons name={quizFile ? "document-text" : "cloud-upload-outline"} size={24} color="#7C3AED" />
+                  </View>
+                  <View style={{ flex: 1, marginLeft: 12 }}>
+                    <Text style={styles.quizGenMaterialName} numberOfLines={1}>
+                      {quizFile ? quizFile.name : "No file selected"}
+                    </Text>
+                    <Text style={styles.quizGenMaterialMeta}>
+                      {quizFile
+                        ? `${quizFile.name.split('.').pop()?.toUpperCase() || 'FILE'} • ${quizFile.size ? (quizFile.size / (1024 * 1024)).toFixed(1) + ' MB' : 'Unknown size'}`
+                        : "Select a PDF or text file"}
+                    </Text>
+                  </View>
+                  <TouchableOpacity style={styles.quizGenChangeBtn} onPress={pickQuizFile}>
+                    <Text style={styles.quizGenChangeBtnText}>{quizFile ? "Change" : "Select"}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.quizGenLabel}>Difficulty</Text>
+                <View style={styles.quizGenDifficultyRow}>
+                  {['Easy', 'Medium', 'Hard'].map((d) => (
+                    <TouchableOpacity
+                      key={d}
+                      style={[styles.quizGenChip, quizDifficulty === d && styles.quizGenChipActive]}
+                      onPress={() => setQuizDifficulty(d)}
+                    >
+                      <Text style={[styles.quizGenChipText, quizDifficulty === d && styles.quizGenChipTextActive]}>{d}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <View style={styles.quizGenRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.quizGenLabel}>Questions</Text>
+                    <TextInput
+                      style={styles.quizGenInput}
+                      value={quizCount}
+                      onChangeText={setQuizCount}
+                      keyboardType="numeric"
+                    />
+                  </View>
+                  <View style={{ width: 16 }} />
+                  <View style={{ flex: 2 }}>
+                    <Text style={styles.quizGenLabel}>Question Type</Text>
+                    <TouchableOpacity
+                      style={styles.quizGenSelector}
+                      onPress={() => setIsQuizTypeDropdownOpen(!isQuizTypeDropdownOpen)}
+                    >
+                      <Text style={styles.quizGenSelectorText}>{quizType}</Text>
+                      <Ionicons name="chevron-down" size={20} color="#6B7280" />
+                    </TouchableOpacity>
+                    {isQuizTypeDropdownOpen && (
+                      <ScrollView style={styles.quizGenDropdown} nestedScrollEnabled={true}>
+                        {questionTypeOptions.map((type) => (
+                          <TouchableOpacity
+                            key={type}
+                            style={styles.quizGenDropdownItem}
+                            onPress={() => {
+                              setQuizType(type);
+                              setIsQuizTypeDropdownOpen(false);
+                            }}
+                            activeOpacity={0.7}
+                          >
+                            <Text style={styles.quizGenDropdownItemText}>{type}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+                    )}
+                  </View>
+                </View>
+
+                <Text style={styles.quizGenLabel}>Additional Instruction (Optional)</Text>
+                <TextInput
+                  style={[styles.quizGenInput, styles.quizGenTextArea]}
+                  placeholder="e.g. Include more questions about Newton's Second Law"
+                  placeholderTextColor="#9CA3AF"
+                  multiline
+                  numberOfLines={3}
+                  value={quizInstructions}
+                  onChangeText={setQuizInstructions}
+                />
+
+                <TouchableOpacity
+                  style={[styles.quizGenGenerateButton, isGeneratingQuiz && { opacity: 0.7 }]}
+                  onPress={handleGenerateQuiz}
+                  disabled={isGeneratingQuiz}
+                >
+                  {isGeneratingQuiz ? <ActivityIndicator color="white" /> : (
+                    <>
+                      <Ionicons name="sparkles" size={20} color="white" style={{ marginRight: 8 }} />
+                      <Text style={styles.quizGenGenerateButtonText}>Generate Quiz</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* FAB - Courses */}
       {selectedTab === 'lessons' && (
         <LinearGradient
           colors={[COLORS.purpleDeep, COLORS.purpleVibrant]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={styles.generateLessonFab}
+          style={styles.fab}
         >
           <TouchableOpacity
             onPress={() => setIsGenerateLessonModalOpen(true)}
             style={{ width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}
           >
             <Ionicons name="add" size={24} color="white" />
+          </TouchableOpacity>
+        </LinearGradient>
+      )}
+
+      {/* FAB - Quizzes */}
+      {selectedTab === 'quizzes' && (
+        <LinearGradient
+          colors={[COLORS.purpleDeep, COLORS.purpleVibrant]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.fab}
+        >
+          <TouchableOpacity
+            onPress={() => {
+              setIsGenerateQuizModalOpen(true);
+              setIsQuizTypeDropdownOpen(false);
+            }}
+            style={{ width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}
+          >
+            <Ionicons name="sparkles" size={24} color="white" />
           </TouchableOpacity>
         </LinearGradient>
       )}
@@ -1084,7 +1325,7 @@ const styles = StyleSheet.create({
   modalSubmitBtnGradient: { borderRadius: 12, overflow: 'hidden' },
   modalSubmitBtn: { padding: 16, alignItems: 'center' },
 
-  generateLessonFab: { position: 'absolute', bottom: 24, right: 24, width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 8, shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.4, shadowRadius: 12, zIndex: 10 },
+  fab: { position: 'absolute', bottom: 24, right: 24, width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 8, shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.4, shadowRadius: 12, zIndex: 10 },
 
   // Course detail styles
   courseModalContainer: { flex: 1, backgroundColor: COLORS.bg },
@@ -1127,4 +1368,151 @@ const styles = StyleSheet.create({
   settingsOptionRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: COLORS.border },
   settingsOptionIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: COLORS.surface, justifyContent: 'center', alignItems: 'center', marginRight: 14 },
   settingsOptionText: { flex: 1, fontSize: 15, fontFamily: FONTS.medium, color: COLORS.textDark },
+
+  // Quiz Generator Styles
+  quizGenModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    justifyContent: 'flex-end',
+  },
+  quizGenModalContent: {
+    backgroundColor: '#F9FAFB',
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
+    padding: 24,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+    width: '100%',
+    maxHeight: '90%',
+    elevation: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+  },
+  quizGenModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  quizGenModalTitle: { fontSize: 22, fontWeight: 'bold', color: '#111827' },
+  quizGenModalForm: { marginBottom: 10 },
+  quizGenLabel: { fontSize: 14, fontWeight: '600', color: '#4B5563', marginBottom: 8, marginTop: 16 },
+  quizGenMaterialPreview: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'white',
+    padding: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  quizGenMaterialIconBg: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: '#F3F0FF',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  quizGenMaterialName: { fontSize: 15, fontWeight: '600', color: '#1F2937' },
+  quizGenMaterialMeta: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  quizGenChangeBtn: { paddingHorizontal: 12, paddingVertical: 6 },
+  quizGenChangeBtnText: { color: '#7C3AED', fontSize: 13, fontWeight: '600' },
+  quizGenDifficultyRow: { flexDirection: 'row', gap: 10 },
+  quizGenChip: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: 'white',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  quizGenChipActive: { backgroundColor: '#7C3AED', borderColor: '#7C3AED' },
+  quizGenChipText: { fontSize: 14, fontWeight: '500', color: '#4B5563' },
+  quizGenChipTextActive: { color: 'white', fontWeight: '600' },
+  quizGenRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
+  quizGenInput: {
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 12,
+    fontSize: 15,
+    color: '#1F2937',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  quizGenSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    height: 48,
+  },
+  quizGenSelectorText: { fontSize: 15, color: '#1F2937' },
+  quizGenTextArea: { minHeight: 80, textAlignVertical: 'top' },
+  quizGenDropdown: {
+    position: 'absolute',
+    top: 52,
+    left: 0,
+    right: 0,
+    backgroundColor: 'white',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    zIndex: 1000,
+    maxHeight: 200,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  quizGenGenerateButton: {
+    backgroundColor: '#7C3AED',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
+    borderRadius: 16,
+    marginTop: 32,
+    marginBottom: 20,
+    elevation: 4,
+    shadowColor: '#7C3AED',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  quizGenGenerateButtonText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
+  quizGenDropdownItem: {
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F4F6',
+  },
+  quizGenDropdownItemText: {
+    fontSize: 15,
+    color: '#1F2937',
+  },
+  quizGenLoadingContainer: { paddingVertical: 40, alignItems: 'center', justifyContent: 'center' },
+  quizGenLoadingIconContainer: { position: 'relative', marginBottom: 24, width: 80, height: 80, justifyContent: 'center', alignItems: 'center' },
+  quizGenSparkleIcon: { position: 'absolute', top: 0, right: 0 },
+  quizGenStatusTitle: { fontSize: 20, fontWeight: '700', color: '#1F2937', marginBottom: 8, textAlign: 'center' },
+  quizGenStatusSubtitle: { fontSize: 14, color: '#6B7280', textAlign: 'center', marginBottom: 32, paddingHorizontal: 20 },
+  quizGenProgressTrack: {
+    width: '100%',
+    height: 8,
+    backgroundColor: '#E5E7EB',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  quizGenProgressFill: {
+    height: '100%',
+    backgroundColor: '#7C3AED',
+  },
+  quizGenProgressText: { fontSize: 12, fontWeight: '600', color: '#7C3AED' },
 });
