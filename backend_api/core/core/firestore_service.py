@@ -1,5 +1,5 @@
 from firebase_admin import firestore
-
+import random, string
 
 def get_db():
     return firestore.client()
@@ -30,6 +30,8 @@ def create_user_profile(firebase_uid: str, data: dict):
         'created_at': firestore.SERVER_TIMESTAMP,
     })
 
+def generate_join_code():
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 def get_user_profile(firebase_uid: str):
     db = get_db()

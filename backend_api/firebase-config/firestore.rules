@@ -1,0 +1,36 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Users can only read/write their own profile
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      
+      // Sub-collections (badges, activities, etc.)
+      match /{subcollection}/{docId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
+    // Study groups — members can read; creator can write
+    match /studyGroups/{groupId} {
+      allow read: if request.auth != null && 
+                     request.auth.uid in resource.data.members;
+      allow create: if request.auth != null;
+      allow update, delete: if request.auth != null && 
+                               request.auth.uid == resource.data.created_by;
+      
+      // Messages — any member can read and write
+      match /messages/{messageId} {
+        allow read, write: if request.auth != null && 
+                              request.auth.uid in get(/databases/$(database)/documents/studyGroups/$(groupId)).data.members;
+      }
+    }
+
+    // Quizzes — readable by group members
+    match /quizzes/{quizId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+  }
+}

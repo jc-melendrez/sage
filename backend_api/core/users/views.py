@@ -23,7 +23,11 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework_simplejwt.tokens import RefreshToken
 from core.firebase import verify_firebase_token
 from .models import User
-from core.firestore_service import get_user_profile, get_badges
+from core.firestore_service import (
+    get_user_profile, get_badges,
+    create_study_group, join_group_by_code, get_user_groups,
+    send_message, get_messages, generate_join_code,
+)
 
 
 class UserMeView(APIView):
@@ -173,21 +177,7 @@ def user_badges(request, user_id):
     serializer = BadgeSerializer(badges, many=True)
     return Response(serializer.data)
 
-def sync_group_to_firestore(group):
-    try:
-        db = get_firestore()
-        db.collection('groups').document(str(group.id)).set({
-            'id': group.id,
-            'name': group.name,
-            'description': group.description or '',
-            'join_code': group.join_code,
-            'created_by': group.created_by.id,
-            'members_count': group.members.count(),
-            'members': [m.id for m in group.members.all()],
-            'created_at': group.created_at.isoformat() if group.created_at else None
-        }, merge=True)
-    except Exception as e:
-        print(f'[Firebase Group Sync Error] {e}')
+
 
 class CreateGroupView(APIView):
     permission_classes = [IsAuthenticated]
@@ -197,17 +187,12 @@ class CreateGroupView(APIView):
         description = request.data.get('description', '')
         if not name:
             return Response({"error": "Group name is required"}, status=400)
-        group = StudyGroup.objects.create(
-            name=name,
-            description=description,
-            created_by=request.user
-        )
-        group.members.add(request.user)
-        sync_group_to_firestore(group)
+        join_code = generate_join_code()
+        group_id = create_study_group(request.user.firebase_uid, name, description, join_code)
         return Response({
             "message": "Group created successfully!",
-            "group_id": group.id,
-            "join_code": group.join_code
+            "group_id": group_id,
+            "join_code": join_code
         })
 
 class JoinGroupView(APIView):
@@ -217,102 +202,37 @@ class JoinGroupView(APIView):
         join_code = request.data.get('join_code')
         if not join_code:
             return Response({"error": "Join code is required"}, status=400)
-        try:
-            group = StudyGroup.objects.get(join_code=join_code.upper())
-            group.members.add(request.user)
-            sync_group_to_firestore(group)
-            return Response({
-                "message": f"Successfully joined {group.name}!",
-                "group_id": group.id,
-                "name": group.name
-            })
-        except StudyGroup.DoesNotExist:
+        group = join_group_by_code(request.user.firebase_uid, join_code.upper())
+        if not group:
             return Response({"error": "Invalid join code. Group not found."}, status=404)
+        return Response({
+            "message": f"Successfully joined {group['name']}!",
+            "group_id": group['id'],
+            "name": group['name']
+        })
 
 class MyGroupsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        groups = request.user.joined_groups.all().order_by('-created_at')
-        data = [
-            {
-                "id": group.id,
-                "name": group.name,
-                "description": group.description,
-                "members_count": group.members.count(),
-                "join_code": group.join_code,
-                "created_by": group.created_by.id,
-            } for group in groups
-        ]
-        return Response(data)
+        return Response(get_user_groups(request.user.firebase_uid))
 
-def sync_group_messages_to_firestore(group, messages):
-    if not messages:
-        return
-    try:
-        db = get_firestore()
-        batch = db.batch()
-        for m in messages:
-            doc_ref = db.collection('groups').document(str(group.id)).collection('messages').document(str(m.id))
-            batch.set(doc_ref, {
-                'id': m.id,
-                'text': m.text,
-                'sender_id': m.sender.id,
-                'sender_name': m.sender.first_name or m.sender.username,
-                'time': m.created_at.strftime("%I:%M %p"),
-                'created_at': m.created_at.isoformat()
-            }, merge=True)
-        batch.commit()
-    except Exception as e:
-        print(f'[Firebase Group Chat Sync Error] {e}')
+
 
 class GroupChatView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, group_id):
-        try:
-            group = StudyGroup.objects.get(id=group_id, members=request.user)
-            messages = group.messages.all().order_by('created_at')
-            threading.Thread(target=sync_group_messages_to_firestore, args=(group, list(messages))).start()
-            data = [{
-                "id": m.id,
-                "text": m.text,
-                "sender_id": m.sender.id,
-                "sender_name": m.sender.first_name or m.sender.username,
-                "time": m.created_at.strftime("%I:%M %p")
-            } for m in messages]
-            return Response(data)
-        except StudyGroup.DoesNotExist:
-            return Response({"error": "Group not found or you are not a member"}, status=404)
+        return Response(get_messages(group_id))
 
     def post(self, request, group_id):
-        try:
-            group = StudyGroup.objects.get(id=group_id, members=request.user)
-            text = request.data.get('text')
-            if not text:
-                return Response({"error": "Message text is required"}, status=400)
-            msg = GroupMessage.objects.create(group=group, sender=request.user, text=text)
-            try:
-                db = get_firestore()
-                db.collection('groups').document(str(group.id)).collection('messages').document(str(msg.id)).set({
-                    'id': msg.id,
-                    'text': msg.text,
-                    'sender_id': msg.sender.id,
-                    'sender_name': msg.sender.first_name or msg.sender.username,
-                    'time': msg.created_at.strftime("%I:%M %p"),
-                    'created_at': msg.created_at.isoformat()
-                })
-            except Exception as e:
-                print(f'[Firebase Sync Error on POST] {e}')
-            return Response({
-                "id": msg.id,
-                "text": msg.text,
-                "sender_id": msg.sender.id,
-                "sender_name": msg.sender.first_name or msg.sender.username,
-                "time": msg.created_at.strftime("%I:%M %p")
-            })
-        except StudyGroup.DoesNotExist:
-            return Response({"error": "Group not found"}, status=404)
+        text = request.data.get('text')
+        if not text:
+            return Response({"error": "Message text is required"}, status=400)
+        msg_id = send_message(group_id, request.user.firebase_uid, text)
+        return Response({"id": msg_id, "text": text})
+
+    
 
 class AddXpTestView(APIView):
     permission_classes = [IsAuthenticated]
