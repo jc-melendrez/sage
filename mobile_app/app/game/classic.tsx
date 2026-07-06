@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView
+  StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StatusBar
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { getToken } from '@/services/authService';
@@ -9,6 +9,42 @@ import { API_BASE_URL } from '@/config/api';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+
+// 🎨 Unified Purple Palette (Dark Theme Variant)
+const COLORS = {
+  bg: '#0f0c29',
+  bgSecondary: '#1a1640',
+  surface: '#252158',
+  surfaceLight: '#3a3570',
+  
+  purpleDeep: '#4C1D95',
+  purpleDark: '#6D28D9',
+  purplePrimary: '#7C3AED',
+  purpleVibrant: '#8B5CF6',
+  purpleLight: '#A78BFA',
+  purplePale: '#C4B5FD',
+  purpleGhost: '#DDD6FE',
+  
+  accent: '#22D3EE',
+  success: '#10B981',
+  warning: '#F59E0B',
+  danger: '#EF4444',
+  
+  textPrimary: '#FFFFFF',
+  textSecondary: '#CBD5E1',
+  textMuted: '#94A3B8',
+  border: 'rgba(139, 92, 246, 0.2)',
+};
+
+const FONTS = {
+  black: 'Montserrat-Black',
+  extraBold: 'Montserrat-ExtraBold',
+  bold: 'Montserrat-Bold',
+  semiBold: 'Montserrat-SemiBold',
+  medium: 'Montserrat-Medium',
+  regular: 'Montserrat-Regular',
+};
 
 export default function ClassicGameSetupScreen() {
   const router = useRouter();
@@ -30,21 +66,17 @@ export default function ClassicGameSetupScreen() {
         const file = result.assets[0];
         let content: string;
         
-        // Check if it's a PDF file
         if (file.mimeType === 'application/pdf') {
-          // PDF files need special handling - show info that only text files are fully supported
           Alert.alert(
             'PDF Info', 
             'PDF files are not fully supported yet. For best results, please upload a .txt file. Attempting to extract any available text...'
           );
-          // Try to read as text, but handle encoding issues gracefully
           try {
             content = await FileSystem.readAsStringAsync(file.uri);
           } catch (readErr) {
             content = `[PDF file: ${file.name} - content extraction requires PDF parsing library]`;
           }
         } else {
-          // Regular text file
           content = await FileSystem.readAsStringAsync(file.uri);
         }
         setSelectedFile({ name: file.name, content });
@@ -111,92 +143,733 @@ export default function ClassicGameSetupScreen() {
     }
   };
 
+  // Home Screen
   if (mode === 'home') {
     return (
-      <View style={styles.container}>
-        <TouchableOpacity style={{ position: 'absolute', top: 50, left: 20 }} onPress={() => router.back()}>
-           <Text style={{ color: '#7F77DD', fontWeight: 'bold' }}>← Back to Hub</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>Classic Quiz Battle</Text>
-        <Text style={styles.subtitle}>Compete with others in real-time!</Text>
-        <TouchableOpacity style={styles.primaryBtn} onPress={() => setMode('create')}>
-          <Text style={styles.primaryBtnText}>Create Room</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.secondaryBtn} onPress={() => setMode('join')}>
-          <Text style={styles.secondaryBtnText}>Join Room</Text>
-        </TouchableOpacity>
-      </View>
+      <LinearGradient
+        colors={[COLORS.bg, COLORS.bgSecondary]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={styles.container}
+      >
+        <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
+        
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity 
+            style={styles.backButton} 
+            onPress={() => router.back()}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="arrow-back" size={24} color={COLORS.purpleLight} />
+            <Text style={styles.backButtonText}>Back to Hub</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Hero Section */}
+        <View style={styles.heroSection}>
+          <LinearGradient
+            colors={[COLORS.purpleDeep, COLORS.purpleDark, COLORS.purplePrimary]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.heroIconContainer}
+          >
+            <Ionicons name="trophy" size={48} color="white" />
+          </LinearGradient>
+          
+          <Text style={styles.title}>Classic Quiz Battle</Text>
+          <Text style={styles.subtitle}>Challenge friends in real-time multiplayer quizzes</Text>
+        </View>
+
+        {/* Action Cards */}
+        <View style={styles.actionCards}>
+          <TouchableOpacity 
+            style={styles.actionCard} 
+            onPress={() => setMode('create')}
+            activeOpacity={0.8}
+          >
+            <LinearGradient
+              colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.actionCardGradient}
+            >
+              <View style={styles.actionIconWrapper}>
+                <Ionicons name="add-circle" size={24} color="white" />
+              </View>
+              <Text style={styles.actionTitle}>Create Room</Text>
+              <Text style={styles.actionDescription}>Upload materials and host a quiz</Text>
+              <View style={styles.actionArrow}>
+                <Ionicons name="arrow-forward" size={16} color="white" />
+              </View>
+            </LinearGradient>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.actionCard} 
+            onPress={() => setMode('join')}
+            activeOpacity={0.8}
+          >
+            <View style={styles.actionCardOutline}>
+              <View style={styles.actionIconWrapperOutline}>
+                <Ionicons name="enter" size={24} color={COLORS.purpleVibrant} />
+              </View>
+              <Text style={styles.actionTitleOutline}>Join Room</Text>
+              <Text style={styles.actionDescriptionOutline}>Enter a room code to compete</Text>
+              <View style={styles.actionArrowOutline}>
+                <Ionicons name="arrow-forward" size={16} color={COLORS.purpleVibrant} />
+              </View>
+            </View>
+          </TouchableOpacity>
+        </View>
+
+        {/* Features */}
+        <View style={styles.featuresSection}>
+          <Text style={styles.featuresTitle}>Why Classic Mode?</Text>
+          <View style={styles.featuresGrid}>
+            <View style={styles.featureItem}>
+              <Ionicons name="flash" size={20} color={COLORS.warning} />
+              <Text style={styles.featureText}>Real-time battles</Text>
+            </View>
+            <View style={styles.featureItem}>
+              <Ionicons name="people" size={20} color={COLORS.accent} />
+              <Text style={styles.featureText}>Multiplayer fun</Text>
+            </View>
+            <View style={styles.featureItem}>
+              <Ionicons name="document-text" size={20} color={COLORS.success} />
+              <Text style={styles.featureText}>Custom content</Text>
+            </View>
+          </View>
+        </View>
+      </LinearGradient>
     );
   }
 
+  // Create or Join Screen
   return (
-     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView contentContainerStyle={{ alignItems: 'center', width: '100%' }}>
-          <Text style={styles.title}>{mode === 'create' ? 'Create Room' : 'Join Room'}</Text>
+    <KeyboardAvoidingView 
+      style={styles.container} 
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <LinearGradient
+        colors={[COLORS.bg, COLORS.bgSecondary]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={styles.fullScreen}
+      >
+        <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
+        
+        <ScrollView 
+          contentContainerStyle={styles.scrollContent} 
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Header */}
+          <View style={styles.formHeader}>
+            <TouchableOpacity 
+              style={styles.backButtonSmall} 
+              onPress={() => setMode('home')}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="arrow-back" size={18} color={COLORS.purpleLight} />
+            </TouchableOpacity>
+            <Text style={styles.formTitle}>
+              {mode === 'create' ? 'Create Quiz Room' : 'Join Quiz Room'}
+            </Text>
+          </View>
+
           {mode === 'create' ? (
             <>
-              <Text style={styles.label}>1. Upload Study Material</Text>
-              <TouchableOpacity style={styles.uploadBox} onPress={pickDocument}>
-                <Ionicons name={selectedFile ? "document-attach" : "cloud-upload"} size={32} color="#7F77DD" />
-                <Text style={styles.uploadText}>
-                  {selectedFile ? selectedFile.name : 'Select PDF or Text file'}
-                </Text>
-                {selectedFile && <Text style={styles.changeText}>Tap to change</Text>}
-              </TouchableOpacity>
-
-              <Text style={styles.label}>2. Settings</Text>
-              <View style={styles.row}>
-                <View style={{ flex: 1, marginRight: 8 }}>
-                  <Text style={styles.smallLabel}>Questions</Text>
-                  <TextInput 
-                    style={styles.input} 
-                    value={questionCount} 
-                    onChangeText={setQuestionCount} 
-                    keyboardType="numeric" 
-                  />
+              {/* Upload Section */}
+              <View style={styles.section}>
+                <View style={styles.sectionHeader}>
+                  <View style={styles.stepBadge}>
+                    <Text style={styles.stepNumber}>1</Text>
+                  </View>
+                  <Text style={styles.sectionTitle}>Upload Study Material</Text>
                 </View>
-                <View style={{ flex: 1, marginLeft: 8 }}>
-                  <Text style={styles.smallLabel}>Seconds/Q</Text>
-                  <TextInput 
-                    style={styles.input} 
-                    value={timePerQuestion} 
-                    onChangeText={setTimePerQuestion} 
-                    keyboardType="numeric" 
-                  />
+                
+                <TouchableOpacity 
+                  style={[
+                    styles.uploadBox,
+                    selectedFile && styles.uploadBoxSuccess
+                  ]} 
+                  onPress={pickDocument}
+                  activeOpacity={0.7}
+                >
+                  {selectedFile ? (
+                    <>
+                      <LinearGradient
+                        colors={[COLORS.success, '#34D399']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={styles.uploadIconSuccess}
+                      >
+                        <Ionicons name="checkmark" size={22} color="white" />
+                      </LinearGradient>
+                      <Text style={styles.fileName}>{selectedFile.name}</Text>
+                      <Text style={styles.changeFileText}>Tap to change file</Text>
+                    </>
+                  ) : (
+                    <>
+                      <LinearGradient
+                        colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={styles.uploadIcon}
+                      >
+                        <Ionicons name="cloud-upload" size={22} color="white" />
+                      </LinearGradient>
+                      <Text style={styles.uploadTitle}>Select File</Text>
+                      <Text style={styles.uploadSubtitle}>Supports .txt and .pdf files</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              {/* Settings Section */}
+              <View style={styles.section}>
+                <View style={styles.sectionHeader}>
+                  <View style={styles.stepBadge}>
+                    <Text style={styles.stepNumber}>2</Text>
+                  </View>
+                  <Text style={styles.sectionTitle}>Quiz Settings</Text>
+                </View>
+                
+                <View style={styles.settingsCard}>
+                  <View style={styles.settingRow}>
+                    <View style={styles.settingIconBox}>
+                      <Ionicons name="list" size={16} color={COLORS.purpleVibrant} />
+                    </View>
+                    <View style={styles.settingContent}>
+                      <Text style={styles.settingLabel}>Number of Questions</Text>
+                      <TextInput 
+                        style={styles.settingInput} 
+                        value={questionCount} 
+                        onChangeText={setQuestionCount} 
+                        keyboardType="numeric"
+                        placeholder="5"
+                        placeholderTextColor={COLORS.textMuted}
+                      />
+                    </View>
+                  </View>
+                  
+                  <View style={styles.settingDivider} />
+                  
+                  <View style={styles.settingRow}>
+                    <View style={styles.settingIconBox}>
+                      <Ionicons name="time" size={16} color={COLORS.purpleVibrant} />
+                    </View>
+                    <View style={styles.settingContent}>
+                      <Text style={styles.settingLabel}>Time per Question (seconds)</Text>
+                      <TextInput 
+                        style={styles.settingInput} 
+                        value={timePerQuestion} 
+                        onChangeText={setTimePerQuestion} 
+                        keyboardType="numeric"
+                        placeholder="15"
+                        placeholderTextColor={COLORS.textMuted}
+                      />
+                    </View>
+                  </View>
                 </View>
               </View>
 
-              <TouchableOpacity style={styles.primaryBtn} onPress={handleCreate} disabled={loading}>
-                {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Generate Room</Text>}
+              {/* Create Button */}
+              <TouchableOpacity 
+                style={[
+                  styles.primaryBtn,
+                  (!selectedFile || loading) && styles.primaryBtnDisabled
+                ]} 
+                onPress={handleCreate} 
+                disabled={loading || !selectedFile}
+                activeOpacity={0.8}
+              >
+                <LinearGradient
+                  colors={(!selectedFile || loading) 
+                    ? [COLORS.surfaceLight, COLORS.surface] 
+                    : [COLORS.purplePrimary, COLORS.purpleVibrant]
+                  }
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.primaryBtnGradient}
+                >
+                  {loading ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <>
+                      <Ionicons name="rocket" size={18} color="white" style={{ marginRight: 8 }} />
+                      <Text style={styles.primaryBtnText}>Generate Room</Text>
+                    </>
+                  )}
+                </LinearGradient>
               </TouchableOpacity>
             </>
           ) : (
             <>
-              <TextInput style={styles.input} placeholder="Room Code" value={joinCode} onChangeText={setJoinCode} autoCapitalize="characters" />
-              <TouchableOpacity style={styles.primaryBtn} onPress={handleJoin} disabled={loading}>
-                {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Join</Text>}
+              {/* Join Code Section */}
+              <View style={styles.section}>
+                <View style={styles.joinCodeCard}>
+                  <View style={styles.joinCodeIcon}>
+                    <Ionicons name="key" size={24} color={COLORS.purpleVibrant} />
+                  </View>
+                  <Text style={styles.joinCodeLabel}>Enter Room Code</Text>
+                  <TextInput 
+                    style={styles.joinCodeInput} 
+                    placeholder="ABC123" 
+                    value={joinCode} 
+                    onChangeText={(text) => setJoinCode(text.toUpperCase())} 
+                    autoCapitalize="characters"
+                    maxLength={6}
+                    placeholderTextColor={COLORS.textMuted}
+                  />
+                  <Text style={styles.joinCodeHint}>Ask your host for the 6-character code</Text>
+                </View>
+              </View>
+
+              {/* Join Button */}
+              <TouchableOpacity 
+                style={[
+                  styles.primaryBtn,
+                  (!joinCode.trim() || loading) && styles.primaryBtnDisabled
+                ]} 
+                onPress={handleJoin} 
+                disabled={loading || !joinCode.trim()}
+                activeOpacity={0.8}
+              >
+                <LinearGradient
+                  colors={(!joinCode.trim() || loading) 
+                    ? [COLORS.surfaceLight, COLORS.surface] 
+                    : [COLORS.purplePrimary, COLORS.purpleVibrant]
+                  }
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.primaryBtnGradient}
+                >
+                  {loading ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <>
+                      <Ionicons name="enter" size={18} color="white" style={{ marginRight: 8 }} />
+                      <Text style={styles.primaryBtnText}>Join Room</Text>
+                    </>
+                  )}
+                </LinearGradient>
               </TouchableOpacity>
             </>
           )}
-          <TouchableOpacity style={styles.secondaryBtn} onPress={() => setMode('home')}><Text style={styles.secondaryBtnText}>Back</Text></TouchableOpacity>
         </ScrollView>
-     </KeyboardAvoidingView>
+      </LinearGradient>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24, backgroundColor: '#0f0c29' },
-  title: { fontSize: 28, fontWeight: 'bold', color: '#fff', marginBottom: 8 },
-  subtitle: { fontSize: 14, color: '#aaa', marginBottom: 40 },
-  input: { width: '100%', backgroundColor: '#1e1b4b', color: '#fff', borderRadius: 12, padding: 14, marginBottom: 12, fontSize: 16 },
-  primaryBtn: { width: '100%', backgroundColor: '#7F77DD', borderRadius: 12, padding: 16, alignItems: 'center', marginBottom: 12 },
-  primaryBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  secondaryBtn: { width: '100%', borderWidth: 1, borderColor: '#7F77DD', borderRadius: 12, padding: 16, alignItems: 'center' },
-  secondaryBtnText: { color: '#7F77DD', fontWeight: 'bold', fontSize: 16 },
-  label: { alignSelf: 'flex-start', color: '#fff', fontSize: 16, fontWeight: 'bold', marginBottom: 12, marginTop: 10 },
-  smallLabel: { color: '#aaa', fontSize: 12, marginBottom: 4 },
-  uploadBox: { width: '100%', borderStyle: 'dashed', borderWidth: 2, borderColor: '#7F77DD', borderRadius: 16, padding: 24, alignItems: 'center', marginBottom: 20, backgroundColor: '#1e1b4b' },
-  uploadText: { color: '#fff', marginTop: 8, fontSize: 14, textAlign: 'center' },
-  changeText: { color: '#7F77DD', fontSize: 12, marginTop: 4 },
-  row: { flexDirection: 'row', width: '100%', marginBottom: 20 },
+  container: { 
+    flex: 1,
+  },
+  fullScreen: {
+    flex: 1,
+  },
+  
+  // Header
+  header: {
+    paddingHorizontal: 24,
+    paddingTop: Platform.OS === 'ios' ? 60 : 40,
+    paddingBottom: 12,
+  },
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  backButtonText: {
+    color: COLORS.purpleLight,
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+  },
+  
+  // Hero Section
+  heroSection: {
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    marginTop: 16,
+    marginBottom: 28,
+  },
+  heroIconContainer: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  title: {
+    fontSize: 28,
+    fontFamily: FONTS.black,
+    fontWeight: '900',
+    color: COLORS.textPrimary,
+    marginBottom: 4,
+    letterSpacing: -1,
+    textAlign: 'center',
+  },
+  subtitle: {
+    fontSize: 14,
+    fontFamily: FONTS.regular,
+    color: COLORS.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  
+  // Action Cards
+  actionCards: {
+    paddingHorizontal: 24,
+    gap: 12,
+    marginBottom: 28,
+  },
+  actionCard: {
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  actionCardGradient: {
+    padding: 18,
+    minHeight: 110,
+    justifyContent: 'space-between',
+  },
+  actionCardOutline: {
+    padding: 18,
+    minHeight: 110,
+    backgroundColor: COLORS.surface,
+    borderWidth: 2,
+    borderColor: COLORS.border,
+    justifyContent: 'space-between',
+  },
+  actionIconWrapper: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  actionIconWrapperOutline: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(139, 92, 246, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  actionTitle: {
+    fontSize: 18,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: 'white',
+    marginBottom: 2,
+  },
+  actionTitleOutline: {
+    fontSize: 18,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+    marginBottom: 2,
+  },
+  actionDescription: {
+    fontSize: 12,
+    fontFamily: FONTS.regular,
+    color: 'rgba(255, 255, 255, 0.85)',
+    lineHeight: 18,
+  },
+  actionDescriptionOutline: {
+    fontSize: 12,
+    fontFamily: FONTS.regular,
+    color: COLORS.textSecondary,
+    lineHeight: 18,
+  },
+  actionArrow: {
+    alignSelf: 'flex-end',
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  actionArrowOutline: {
+    alignSelf: 'flex-end',
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(139, 92, 246, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  
+  // Features
+  featuresSection: {
+    paddingHorizontal: 24,
+  },
+  featuresTitle: {
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  featuresGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+  },
+  featureItem: {
+    alignItems: 'center',
+    gap: 4,
+  },
+  featureText: {
+    fontSize: 11,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+  },
+  
+  // Form Header
+  formHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingTop: Platform.OS === 'ios' ? 60 : 40,
+    paddingBottom: 20,
+    gap: 12,
+  },
+  backButtonSmall: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: COLORS.surface,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  formTitle: {
+    fontSize: 22,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+    flex: 1,
+  },
+  
+  // Scroll Content
+  scrollContent: {
+    paddingHorizontal: 24,
+    paddingBottom: 32,
+  },
+  
+  // Sections
+  section: {
+    marginBottom: 24,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  stepBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: COLORS.purplePrimary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  stepNumber: {
+    color: 'white',
+    fontSize: 12,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontFamily: FONTS.extraBold,
+    fontWeight: '900',
+    color: COLORS.textPrimary,
+    letterSpacing: 0.5,
+  },
+  
+  // Upload Box
+  uploadBox: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 24,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: COLORS.border,
+    borderStyle: 'dashed',
+  },
+  uploadBoxSuccess: {
+    borderColor: COLORS.success,
+    borderStyle: 'solid',
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+  },
+  uploadIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  uploadIconSuccess: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  uploadTitle: {
+    fontSize: 16,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+    marginBottom: 2,
+  },
+  uploadSubtitle: {
+    fontSize: 12,
+    fontFamily: FONTS.regular,
+    color: COLORS.textMuted,
+  },
+  fileName: {
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.success,
+    marginBottom: 2,
+    textAlign: 'center',
+  },
+  changeFileText: {
+    fontSize: 12,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+  },
+  
+  // Settings Card
+  settingsCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  settingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  settingIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(139, 92, 246, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  settingContent: {
+    flex: 1,
+  },
+  settingLabel: {
+    fontSize: 12,
+    fontFamily: FONTS.medium,
+    color: COLORS.textSecondary,
+    marginBottom: 6,
+  },
+  settingInput: {
+    fontSize: 16,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+    backgroundColor: COLORS.bgSecondary,
+    borderRadius: 10,
+    padding: 10,
+  },
+  settingDivider: {
+    height: 1,
+    backgroundColor: COLORS.border,
+    marginVertical: 12,
+  },
+  
+  // Join Code Card
+  joinCodeCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 24,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  joinCodeIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: 'rgba(139, 92, 246, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  joinCodeLabel: {
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+    marginBottom: 12,
+  },
+  joinCodeInput: {
+    width: '100%',
+    fontSize: 22,
+    fontFamily: FONTS.black,
+    fontWeight: '900',
+    color: COLORS.textPrimary,
+    backgroundColor: COLORS.bgSecondary,
+    borderRadius: 12,
+    padding: 14,
+    textAlign: 'center',
+    letterSpacing: 4,
+    marginBottom: 8,
+  },
+  joinCodeHint: {
+    fontSize: 12,
+    fontFamily: FONTS.regular,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+  },
+  
+  // Primary Button
+  primaryBtn: {
+    borderRadius: 14,
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  primaryBtnGradient: {
+    padding: 14,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  primaryBtnText: {
+    color: 'white',
+    fontSize: 16,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+  },
+  primaryBtnDisabled: {
+    opacity: 0.5,
+  },
 });

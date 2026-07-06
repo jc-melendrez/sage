@@ -1,15 +1,51 @@
 import { useState, useRef, useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Ionicons } from '@expo/vector-icons';
 import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
+import { LinearGradient } from 'expo-linear-gradient';
 
-// 🌟 NEW: Enable Layout Animations for Android
+// 🌟 Enable Layout Animations for Android
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
+
+// 🎨 Unified Purple Palette
+const COLORS = {
+  bg: '#baaeda',
+  bgSecondary: '#dad6e7',
+  surface: '#cdc2dd',
+  surfaceLight: '#5A4F6C',
+  
+  purpleDeep: '#4C1D95',
+  purpleDark: '#6D28D9',
+  purplePrimary: '#7C3AED',
+  purpleVibrant: '#8B5CF6',
+  purpleLight: '#A78BFA',
+  purplePale: '#C4B5FD',
+  purpleGhost: '#DDD6FE',
+  
+  accent: '#22D3EE',
+  success: '#10B981',
+  warning: '#F59E0B',
+  danger: '#EF4444',
+  
+  textPrimary: '#3a107a',
+  textSecondary: '#CBD5E1',
+  textMuted: '#94A3B8',
+  border: 'rgba(44, 29, 0, 0.15)',
+};
+
+const FONTS = {
+  black: 'Montserrat-Black',
+  extraBold: 'Montserrat-ExtraBold',
+  bold: 'Montserrat-Bold',
+  semiBold: 'Montserrat-SemiBold',
+  medium: 'Montserrat-Medium',
+  regular: 'Montserrat-Regular',
+};
 
 interface Message {
   id: number;
@@ -39,9 +75,9 @@ export default function AIAssistantScreen() {
   const [attachedFile, setAttachedFile] = useState<any>(null);
 
   const quickActions = [
-    { id: 1, label: 'Study Plan', icon: 'book', color: '#3B82F6' },
-    { id: 2, label: 'Set Goals', icon: 'flag', color: '#10B981' },
-    { id: 3, label: 'Schedule', icon: 'calendar', color: '#7C3AED' }, 
+    { id: 1, label: 'Study Plan', icon: 'book', color: COLORS.warning },
+    { id: 2, label: 'Set Goals', icon: 'flag', color: COLORS.success },
+    { id: 3, label: 'Schedule', icon: 'calendar', color: COLORS.purplePrimary }, 
     { id: 4, label: 'Progress', icon: 'trending-up', color: '#F97316' },
   ];
 
@@ -241,198 +277,643 @@ export default function AIAssistantScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <LinearGradient
+      colors={[COLORS.bgSecondary, COLORS.bg]}
+      start={{ x: 0, y: 0 }}
+      end={{ x: 0, y: 1 }}
+      style={styles.container}
+    >
+      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
       
       {/* Header */}
-      <View style={styles.header}>
+      <LinearGradient
+        colors={[COLORS.purpleDeep, COLORS.purpleDark]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.header}
+      >
         <View style={styles.headerContent}>
-          <TouchableOpacity onPress={() => setIsMenuVisible(true)} style={styles.menuButton}>
-            <Ionicons name="menu" size={28} color="white" />
+          <TouchableOpacity 
+            onPress={() => setIsMenuVisible(true)} 
+            style={styles.menuButton}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="menu" size={26} color="white" />
           </TouchableOpacity>
           <View>
-            <Text style={styles.headerTitle}>SAGE Chat</Text>
+            <Text style={styles.headerTitle}>SAGE AI</Text>
             <Text style={styles.headerSubtitle}>
               {activeSessionId ? "Active Session" : "New Conversation"}
             </Text>
           </View>
         </View>
-        <TouchableOpacity onPress={startNewChat} style={styles.newChatHeaderBtn}>
-          <Ionicons name="create-outline" size={24} color="white" />
+        <TouchableOpacity 
+          onPress={startNewChat} 
+          style={styles.newChatHeaderBtn}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="create-outline" size={22} color="white" />
         </TouchableOpacity>
-      </View>
+      </LinearGradient>
 
-      {/* 🌟 NEW: Sidebar Modal */}
+      {/* 🌟 Sidebar Modal */}
       <Modal visible={isMenuVisible} animationType="fade" transparent={true}>
         <View style={styles.modalOverlay}>
-          
-          {/* Drawer Content */}
           <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
+            <LinearGradient
+              colors={[COLORS.purpleDeep, COLORS.purpleDark]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.modalHeader}
+            >
               <Text style={styles.modalTitle}>Chat History</Text>
-            </View>
+              <TouchableOpacity 
+                onPress={() => setIsMenuVisible(false)}
+                style={styles.closeButton}
+              >
+                <Ionicons name="close" size={24} color="white" />
+              </TouchableOpacity>
+            </LinearGradient>
 
-            <TouchableOpacity style={styles.newChatButton} onPress={startNewChat}>
-              <Ionicons name="add" size={20} color="white" />
-              <Text style={styles.newChatText}>Start New Chat</Text>
+            <TouchableOpacity 
+              style={styles.newChatButton} 
+              onPress={startNewChat}
+              activeOpacity={0.8}
+            >
+              <LinearGradient
+                colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.newChatButtonGradient}
+              >
+                <Ionicons name="add" size={20} color="white" />
+                <Text style={styles.newChatText}>Start New Chat</Text>
+              </LinearGradient>
             </TouchableOpacity>
 
-            <ScrollView style={styles.sessionList}>
+            <ScrollView style={styles.sessionList} showsVerticalScrollIndicator={false}>
               {sessions.map(session => (
                 <TouchableOpacity 
                   key={session.id} 
-                  style={[styles.sessionItem, activeSessionId === session.id && styles.activeSessionItem]}
+                  style={[
+                    styles.sessionItem, 
+                    activeSessionId === session.id && styles.activeSessionItem
+                  ]}
                   onPress={() => loadHistory(session.id)}
+                  activeOpacity={0.7}
                 >
-                  <Ionicons name="chatbubble-outline" size={20} color={activeSessionId === session.id ? "#7C3AED" : "#6B7280"} />
-                  <Text style={[styles.sessionText, activeSessionId === session.id && styles.activeSessionText]} numberOfLines={1}>
+                  <View style={[
+                    styles.sessionIconBox,
+                    activeSessionId === session.id && styles.activeSessionIconBox
+                  ]}>
+                    <Ionicons 
+                      name="chatbubble" 
+                      size={18} 
+                      color={activeSessionId === session.id ? "white" : COLORS.purpleVibrant} 
+                    />
+                  </View>
+                  <Text 
+                    style={[
+                      styles.sessionText, 
+                      activeSessionId === session.id && styles.activeSessionText
+                    ]} 
+                    numberOfLines={1}
+                  >
                     {session.title}
                   </Text>
+                  {activeSessionId === session.id && (
+                    <View style={styles.activeIndicator}>
+                      <View style={styles.activeDot} />
+                    </View>
+                  )}
                 </TouchableOpacity>
               ))}
             </ScrollView>
           </View>
 
-          {/* Invisible tap area to close the sidebar */}
-          <TouchableOpacity style={styles.modalCloseArea} onPress={() => setIsMenuVisible(false)} />
+          <TouchableOpacity 
+            style={styles.modalCloseArea} 
+            onPress={() => setIsMenuVisible(false)} 
+          />
         </View>
       </Modal>
 
       {/* Messages Scroll Area */}
-      <ScrollView ref={scrollViewRef} style={styles.messagesContainer} showsVerticalScrollIndicator={false}>
-        <View style={styles.messagesList}>
-          {messages.map((message) => (
-            <View key={message.id} style={[styles.messageWrapper, message.type === 'user' ? styles.userMessageWrapper : styles.aiMessageWrapper]}>
-              <View style={[styles.messageBubble, message.type === 'user' ? [styles.userMessage, { backgroundColor: '#7C3AED' }] : [styles.aiMessage, { backgroundColor: 'white' }]]}>
-                {message.type === 'ai' && (
-                  <View style={styles.aiMessageHeader}>
-                    <Ionicons name="sparkles" size={14} color="#7C3AED" />
-                    <Text style={styles.aiLabel}>SAGE AI</Text>
-                  </View>
-                )}
-                <Text style={[styles.messageText, message.type === 'user' ? { color: 'white' } : { color: '#1F2937' }]}>{message.text}</Text>
-                <Text style={[styles.messageTime, message.type === 'user' ? { color: 'rgba(255,255,255,0.7)' } : { color: '#999' }]}>{message.time}</Text>
-              </View>
-            </View>
-          ))}
-          
-          {isLoading && (
-            <View style={[styles.messageWrapper, styles.aiMessageWrapper]}>
-              <View style={[styles.messageBubble, styles.aiMessage, { backgroundColor: 'white', flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
-                <ActivityIndicator size="small" color="#7C3AED" />
-                <Text style={{ color: '#666', fontSize: 12, fontStyle: 'italic' }}>SAGE AI is thinking...</Text>
-              </View>
-            </View>
-          )}
-
-          {messages.length === 1 && !isLoading && (
-            <View style={styles.quickActionsContainer}>
-              <Text style={styles.quickActionsTitle}>Suggested Topics</Text>
-              <View style={styles.quickActionsGrid}>
-                {quickActions.map((action) => (
-                  <TouchableOpacity 
-                    key={action.id} 
-                    style={styles.quickActionButton}
-                    onPress={() => {
-                      setTimeout(() => {
-                        handleSend(`Help me with my ${action.label.toLowerCase()}`);
-                      }, 250);
-                    }}
+      <ScrollView 
+        ref={scrollViewRef} 
+        style={styles.messagesContainer} 
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.messagesContent}
+      >
+        {messages.map((message) => (
+          <View 
+            key={message.id} 
+            style={[
+              styles.messageWrapper, 
+              message.type === 'user' ? styles.userMessageWrapper : styles.aiMessageWrapper
+            ]}
+          >
+            <View style={[
+              styles.messageBubble, 
+              message.type === 'user' 
+                ? styles.userMessage 
+                : styles.aiMessage
+            ]}>
+              {message.type === 'ai' && (
+                <View style={styles.aiMessageHeader}>
+                  <LinearGradient
+                    colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.aiIconBox}
                   >
-                    <View style={[styles.quickActionIcon, { backgroundColor: `${action.color}15` }]}>
-                      <Ionicons name={action.icon as any} size={24} color={action.color} />
-                    </View>
-                    <Text style={styles.quickActionLabel}>{action.label}</Text>
-                  </TouchableOpacity>
-                ))}
+                    <Ionicons name="sparkles" size={14} color="white" />
+                  </LinearGradient>
+                  <Text style={styles.aiLabel}>SAGE AI</Text>
+                </View>
+              )}
+              <Text style={[
+                styles.messageText, 
+                message.type === 'user' ? styles.userMessageText : styles.aiMessageText
+              ]}>
+                {message.text}
+              </Text>
+              <Text style={[
+                styles.messageTime, 
+                message.type === 'user' ? styles.userMessageTime : styles.aiMessageTime
+              ]}>
+                {message.time}
+              </Text>
+            </View>
+          </View>
+        ))}
+        
+        {isLoading && (
+          <View style={[styles.messageWrapper, styles.aiMessageWrapper]}>
+            <View style={[styles.messageBubble, styles.aiMessage, styles.typingBubble]}>
+              <View style={styles.typingIndicator}>
+                <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
+                <Text style={styles.typingText}>SAGE AI is thinking...</Text>
               </View>
             </View>
-          )}
+          </View>
+        )}
 
-        </View>
+        {messages.length === 1 && !isLoading && (
+          <View style={styles.quickActionsContainer}>
+            <Text style={styles.quickActionsTitle}>Suggested Topics</Text>
+            <View style={styles.quickActionsGrid}>
+              {quickActions.map((action) => (
+                <TouchableOpacity 
+                  key={action.id} 
+                  style={styles.quickActionButton}
+                  onPress={() => {
+                    setTimeout(() => {
+                      handleSend(`Help me with my ${action.label.toLowerCase()}`);
+                    }, 250);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.quickActionIcon, { backgroundColor: `${action.color}15` }]}>
+                    <Ionicons name={action.icon as any} size={24} color={action.color} />
+                  </View>
+                  <Text style={styles.quickActionLabel}>{action.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        )}
       </ScrollView>
 
       {/* Input Area */}
       <View style={styles.inputContainer}>
-        {/* Attached File Preview - Now inside the input area container */}
         {attachedFileName && (
           <View style={styles.attachmentPreview}>
             <View style={styles.attachmentBadge}>
-              <Ionicons name="document" size={16} color="#7C3AED" />
+              <LinearGradient
+                colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.attachmentIcon}
+              >
+                <Ionicons name="document" size={14} color="white" />
+              </LinearGradient>
               <Text style={styles.attachmentName} numberOfLines={1}>{attachedFileName}</Text>
-              <TouchableOpacity onPress={clearAttachment}>
-                <Ionicons name="close-circle" size={18} color="#999" />
+              <TouchableOpacity onPress={clearAttachment} style={styles.removeAttachment}>
+                <Ionicons name="close-circle" size={18} color={COLORS.textMuted} />
               </TouchableOpacity>
             </View>
           </View>
         )}
 
         <View style={styles.inputBox}>
-          <TouchableOpacity onPress={handleFileUpload} style={styles.attachButton}>
-            <Ionicons name="attach" size={26} color="#7C3AED" />
+          <TouchableOpacity 
+            onPress={handleFileUpload} 
+            style={styles.attachButton}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="attach" size={24} color={COLORS.purpleVibrant} />
           </TouchableOpacity>
           <View style={styles.inputField}>
-            <TextInput style={styles.input} placeholder="Ask me anything..." placeholderTextColor="#999" value={inputValue} onChangeText={setInputValue} onSubmitEditing={() => handleSend()} editable={!isLoading} />
+            <TextInput 
+              style={styles.input} 
+              placeholder="Ask me anything..." 
+              placeholderTextColor={COLORS.textMuted} 
+              value={inputValue} 
+              onChangeText={setInputValue} 
+              onSubmitEditing={() => handleSend()} 
+              editable={!isLoading}
+              multiline
+            />
           </View>
-          <TouchableOpacity style={[styles.sendButton, { backgroundColor: isLoading || !inputValue.trim() ? '#E5E7EB' : '#7C3AED' }]} onPress={() => handleSend()} disabled={isLoading || !inputValue.trim()}>
-            <Ionicons name="send" size={18} color={isLoading || !inputValue.trim() ? '#999' : 'white'} />
+          <TouchableOpacity 
+            style={[
+              styles.sendButton, 
+              { backgroundColor: isLoading || !inputValue.trim() ? COLORS.surface : COLORS.purplePrimary }
+            ]} 
+            onPress={() => handleSend()} 
+            disabled={isLoading || !inputValue.trim()}
+            activeOpacity={0.8}
+          >
+            <Ionicons 
+              name="send" 
+              size={18} 
+              color={isLoading || !inputValue.trim() ? COLORS.textMuted : 'white'} 
+            />
           </TouchableOpacity>
         </View>
       </View>
-    </View>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F9FAFB' },
-  header: { backgroundColor: '#7C3AED', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 20, paddingBottom: 20, paddingHorizontal: 16, borderBottomLeftRadius: 24, borderBottomRightRadius: 24 },
-  headerContent: { flexDirection: 'row', gap: 12, alignItems: 'center' },
-  menuButton: { padding: 4 },
-  headerTitle: { fontSize: 18, fontWeight: '600', color: 'white' },
-  headerSubtitle: { fontSize: 12, color: 'rgba(255,255,255,0.7)', marginTop: 2 },
-  newChatHeaderBtn: { backgroundColor: 'rgba(255,255,255,0.2)', padding: 10, borderRadius: 12 },
+  container: { 
+    flex: 1,
+  },
+  
+  // Header
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: Platform.OS === 'ios' ? 60 : 40,
+    paddingBottom: 20,
+    paddingHorizontal: 20,
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  headerContent: { 
+    flexDirection: 'row', 
+    gap: 14, 
+    alignItems: 'center' 
+  },
+  menuButton: { 
+    padding: 6,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  headerTitle: { 
+    fontSize: 22, 
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: 'white',
+    letterSpacing: -0.5,
+  },
+  headerSubtitle: { 
+    fontSize: 12, 
+    fontFamily: FONTS.medium,
+    color: COLORS.purplePale,
+    marginTop: 2,
+  },
+  newChatHeaderBtn: { 
+    backgroundColor: 'rgba(255,255,255,0.2)', 
+    padding: 10, 
+    borderRadius: 14,
+  },
   
   // Sidebar Styles
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', flexDirection: 'row' },
-  modalContent: { backgroundColor: 'white', width: '75%', height: '100%', borderTopRightRadius: 24, borderBottomRightRadius: 24, padding: 20, paddingTop: 60, elevation: 5, shadowColor: '#000', shadowOffset: { width: 2, height: 0 }, shadowOpacity: 0.1, shadowRadius: 10 },
-  modalCloseArea: { flex: 1 }, // Invisible area to tap and close
-  modalHeader: { marginBottom: 24 },
-  modalTitle: { fontSize: 22, fontWeight: 'bold', color: '#1F2937' },
-  newChatButton: { backgroundColor: '#7C3AED', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 14, borderRadius: 12, gap: 8, marginBottom: 20 },
-  newChatText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
-  sessionList: { flex: 1 },
-  sessionItem: { flexDirection: 'row', alignItems: 'center', padding: 16, borderBottomWidth: 1, borderBottomColor: '#F3F4F6', gap: 12 },
-  activeSessionItem: { backgroundColor: '#F3F0FF', borderRadius: 12, borderBottomWidth: 0 },
-  sessionText: { fontSize: 15, color: '#4B5563', flex: 1 },
-  activeSessionText: { color: '#7C3AED', fontWeight: 'bold' },
+  modalOverlay: { 
+    flex: 1, 
+    backgroundColor: 'rgba(0,0,0,0.5)', 
+    flexDirection: 'row' 
+  },
+  modalContent: { 
+    backgroundColor: COLORS.surface,
+    width: '80%', 
+    height: '100%', 
+    borderTopRightRadius: 28, 
+    borderBottomRightRadius: 28,
+    shadowColor: '#000',
+    shadowOffset: { width: 4, height: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  modalCloseArea: { 
+    flex: 1
+  },
+  modalHeader: { 
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 24,
+    paddingTop: Platform.OS === 'ios' ? 60 : 40,
+  },
+  closeButton: {
+    padding: 4,
+  },
+  modalTitle: { 
+    fontSize: 22, 
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: 'white',
+  },
+  newChatButton: { 
+    marginHorizontal: 16,
+    marginBottom: 16,
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  newChatButtonGradient: {
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    justifyContent: 'center', 
+    padding: 16, 
+    gap: 10,
+  },
+  newChatText: { 
+    color: 'white', 
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    fontSize: 16,
+  },
+  sessionList: { 
+    flex: 1,
+    paddingHorizontal: 16,
+  },
+  sessionItem: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    padding: 16, 
+    marginBottom: 8,
+    borderRadius: 16,
+    gap: 12,
+    backgroundColor: COLORS.bgSecondary,
+  },
+  activeSessionItem: { 
+    backgroundColor: COLORS.purplePrimary,
+  },
+  sessionIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(139, 92, 246, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  activeSessionIconBox: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  sessionText: { 
+    fontSize: 15, 
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary, 
+    flex: 1,
+  },
+  activeSessionText: { 
+    color: 'white', 
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+  },
+  activeIndicator: {
+    marginLeft: 4,
+  },
+  activeDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'white',
+  },
 
-  messagesContainer: { flex: 1 },
-  messagesList: { paddingHorizontal: 16, paddingVertical: 12, paddingBottom: 40 },
-  messageWrapper: { marginBottom: 12, flexDirection: 'row' },
-  userMessageWrapper: { justifyContent: 'flex-end' },
-  aiMessageWrapper: { justifyContent: 'flex-start' },
-  messageBubble: { maxWidth: '80%', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16, shadowColor: '#111', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 },
-  userMessage: { borderBottomRightRadius: 4 },
-  aiMessage: { borderBottomLeftRadius: 4, borderWidth: 1, borderColor: '#F3F4F6' },
-  aiMessageHeader: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 4 },
-  aiLabel: { fontSize: 10, color: '#7C3AED', fontWeight: '600' },
-  messageText: { fontSize: 13, lineHeight: 18 },
-  messageTime: { fontSize: 10, marginTop: 4, alignSelf: 'flex-end' },
+  // Messages
+  messagesContainer: { 
+    flex: 1,
+  },
+  messagesContent: {
+    paddingHorizontal: 20, 
+    paddingVertical: 16, 
+    paddingBottom: 20,
+  },
+  messageWrapper: { 
+    marginBottom: 16, 
+    flexDirection: 'row' 
+  },
+  userMessageWrapper: { 
+    justifyContent: 'flex-end' 
+  },
+  aiMessageWrapper: { 
+    justifyContent: 'flex-start' 
+  },
+  messageBubble: { 
+    maxWidth: '85%', 
+    paddingHorizontal: 16, 
+    paddingVertical: 12, 
+    borderRadius: 20,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  userMessage: { 
+    borderBottomRightRadius: 6,
+    backgroundColor: COLORS.purplePrimary,
+  },
+  aiMessage: { 
+    borderBottomLeftRadius: 6,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  typingBubble: {
+    minWidth: 120,
+  },
+  aiMessageHeader: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    gap: 6, 
+    marginBottom: 6 
+  },
+  aiIconBox: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  aiLabel: { 
+    fontSize: 11, 
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: COLORS.purplePrimary,
+  },
+  messageText: { 
+    fontSize: 14, 
+    lineHeight: 20,
+  },
+  userMessageText: {
+    color: 'white',
+    fontFamily: FONTS.regular,
+  },
+  aiMessageText: {
+    color: COLORS.textPrimary,
+    fontFamily: FONTS.regular,
+  },
+  messageTime: { 
+    fontSize: 10, 
+    marginTop: 6, 
+    alignSelf: 'flex-end',
+    fontFamily: FONTS.medium,
+  },
+  userMessageTime: {
+    color: 'rgba(255,255,255,0.7)',
+  },
+  aiMessageTime: {
+    color: COLORS.textMuted,
+  },
+  typingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  typingText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontFamily: FONTS.medium,
+    fontStyle: 'italic',
+  },
   
-  // Centered Quick Actions Styles
-  quickActionsContainer: { marginTop: 40, alignItems: 'center' },
-  quickActionsTitle: { fontSize: 14, color: '#6B7280', marginBottom: 16, fontWeight: '500' },
-  quickActionsGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 16 },
-  quickActionButton: { alignItems: 'center', width: '42%', paddingVertical: 16, backgroundColor: 'white', borderRadius: 16, elevation: 2, shadowColor: '#111', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 4 },
-  quickActionIcon: { width: 50, height: 50, borderRadius: 16, justifyContent: 'center', alignItems: 'center', marginBottom: 10 },
-  quickActionLabel: { fontSize: 13, fontWeight: '600', color: '#1F2937' },
+  // Quick Actions
+  quickActionsContainer: { 
+    marginTop: 32, 
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  quickActionsTitle: { 
+    fontSize: 15, 
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.textPrimary, 
+    marginBottom: 16,
+  },
+  quickActionsGrid: { 
+    flexDirection: 'row', 
+    flexWrap: 'wrap', 
+    justifyContent: 'center', 
+    gap: 12,
+  },
+  quickActionButton: { 
+    alignItems: 'center', 
+    width: '45%', 
+    paddingVertical: 18, 
+    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  quickActionIcon: { 
+    width: 52, 
+    height: 52, 
+    borderRadius: 18, 
+    justifyContent: 'center', 
+    alignItems: 'center', 
+    marginBottom: 10,
+  },
+  quickActionLabel: { 
+    fontSize: 13, 
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+  },
 
-  inputContainer: { paddingHorizontal: 16, paddingBottom: 30, paddingTop: 12, backgroundColor: 'white', borderTopWidth: 1, borderTopColor: '#E5E7EB' },
-  inputBox: { flexDirection: 'row', gap: 8, alignItems: 'flex-end' },
-  inputField: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 24, gap: 8, backgroundColor: '#F3F4F6' },
-  attachButton: { padding: 4, marginBottom: 4 },
-  input: { flex: 1, fontSize: 13, paddingVertical: 4, color: '#1F2937' },
-  sendButton: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
-  attachmentPreview: { marginBottom: 10, paddingLeft: 4 },
-  attachmentBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F3F0FF', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, alignSelf: 'flex-start', gap: 8, maxWidth: '90%' },
-  attachmentName: { fontSize: 12, color: '#7C3AED', fontWeight: '500', flexShrink: 1 },
+  // Input Area
+  inputContainer: { 
+    paddingHorizontal: 20, 
+    paddingBottom: Platform.OS === 'ios' ? 30 : 20, 
+    paddingTop: 12, 
+    backgroundColor: COLORS.surface,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  inputBox: { 
+    flexDirection: 'row', 
+    gap: 10, 
+    alignItems: 'flex-end' 
+  },
+  attachButton: { 
+    padding: 8,
+    marginBottom: 4,
+  },
+  inputField: { 
+    flex: 1, 
+    backgroundColor: COLORS.bgSecondary,
+    borderRadius: 24,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    minHeight: 44,
+  },
+  input: { 
+    fontSize: 14, 
+    fontFamily: FONTS.regular,
+    color: COLORS.textPrimary,
+    maxHeight: 100,
+  },
+  sendButton: { 
+    width: 44, 
+    height: 44, 
+    borderRadius: 22, 
+    justifyContent: 'center', 
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  
+  // Attachment
+  attachmentPreview: { 
+    marginBottom: 12,
+  },
+  attachmentBadge: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    backgroundColor: COLORS.bgSecondary,
+    paddingHorizontal: 14, 
+    paddingVertical: 8, 
+    borderRadius: 16, 
+    alignSelf: 'flex-start', 
+    gap: 10, 
+    maxWidth: '90%',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  attachmentIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  attachmentName: { 
+    fontSize: 13, 
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary, 
+    flexShrink: 1,
+  },
+  removeAttachment: {
+    padding: 2,
+  },
 });

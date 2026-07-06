@@ -9,6 +9,7 @@ import {
   Animated,
   Platform,
   StatusBar,
+  Dimensions,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
@@ -18,13 +19,18 @@ import { getCurrentUser, getToken } from '@/services/authService';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
 
-// 🎨 Rich Purple Palette with Contrasting Shades
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+// --- Carousel dimensions ---
+const CAROUSEL_PAGE_WIDTH = SCREEN_WIDTH - 72;
+const AUTO_SLIDE_INTERVAL = 4000; // Increased to 4 seconds for better readability
+
+// 🎨 Colors
 const COLORS = {
   bg: '#baaeda',
   bgSecondary: '#dad6e7',
   surface: '#cdc2dd',
   surfaceLight: '#5A4F6C',
-  
   purpleDeep: '#4C1D95',
   purpleDark: '#6D28D9',
   purplePrimary: '#7C3AED',
@@ -32,19 +38,16 @@ const COLORS = {
   purpleLight: '#A78BFA',
   purplePale: '#C4B5FD',
   purpleGhost: '#DDD6FE',
-  
   accent: '#22D3EE',
   success: '#10B981',
   warning: '#F59E0B',
   danger: '#EF4444',
-  
   textPrimary: '#3a107a',
   textSecondary: '#CBD5E1',
   textMuted: '#94A3B8',
   border: 'rgba(44, 29, 0, 0.15)',
 };
 
-// 🔠 Typography System
 const FONTS = {
   black: 'Montserrat-Black',
   extraBold: 'Montserrat-ExtraBold',
@@ -54,13 +57,41 @@ const FONTS = {
   regular: 'Montserrat-Regular',
 };
 
-interface User { id: number; name?: string; first_name?: string; username?: string; streak?: number; level?: number; total_points?: number; }
-interface Badge { id: number; icon_url?: string; icon?: string; name: string; }
-interface Recommendation { id: number; title: string; description: string; }
-interface Session { id: number; title: string; description: string; participants: number; }
-interface Activity { id: number; title: string; description: string; activity_type: string; }
+interface User {
+  id: number;
+  name?: string;
+  first_name?: string;
+  username?: string;
+  streak?: number;
+  level?: number;
+  total_points?: number;
+}
+interface Badge {
+  id: number;
+  icon_url?: string;
+  icon?: string;
+  name: string;
+}
+interface Recommendation {
+  id: number;
+  title: string;
+  description: string;
+}
+interface Session {
+  id: number;
+  title: string;
+  description: string;
+  participants: number;
+}
+interface Activity {
+  id: number;
+  title: string;
+  description: string;
+  activity_type: string;
+}
 
 export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => void }) {
+  const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
   const [badges, setBadges] = useState<Badge[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
@@ -68,7 +99,6 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
   const [activities, setActivities] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const router = useRouter();
 
   const [lesson, setLesson] = useState<any>(null);
   const [showLessonGenerator, setShowLessonGenerator] = useState(false);
@@ -76,7 +106,109 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
   const [isFabOpen, setIsFabOpen] = useState(false);
   const fabAnim = useRef(new Animated.Value(0)).current;
 
-  useEffect(() => { fetchUserData(); }, []);
+  // Carousel state
+  const [currentPage, setCurrentPage] = useState(0);
+  const currentPageRef = useRef(0);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const autoSlideTimerRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Animation value for smooth dot transition
+  const scrollX = useRef(new Animated.Value(0)).current;
+
+  const streakCount = user?.streak || 0;
+
+  const featurePages = [
+    {
+      id: 'streak',
+      icon: 'flame',
+      title: 'Day Streak',
+      description: `${streakCount} days ${streakCount > 0 ? '– keep it up! 🔥' : '– start your journey today!'}`,
+      color: '#FBBF24',
+      route: null,
+    },
+    {
+      id: 'quiz',
+      icon: 'game-controller',
+      title: 'Play a Quiz',
+      description: 'Join or create a quiz room and challenge friends in real‑time.',
+      color: '#F59E0B',
+      route: '/game/classic-setup',
+    },
+    {
+      id: 'assistant',
+      icon: 'chatbubbles',
+      title: 'AI Assistant',
+      description: 'Ask SAGE anything – get instant help and explanations.',
+      color: '#22D3EE',
+      route: '/assistant',
+    },
+    {
+      id: 'groups',
+      icon: 'people',
+      title: 'Study Groups',
+      description: 'Collaborate with friends, share materials, and learn together.',
+      color: '#10B981',
+      route: '/groups',
+    },
+  ];
+
+  // --- Auto-slide Logic ---
+  const scrollToPage = (pageIndex: number) => {
+    if (scrollViewRef.current) {
+      scrollViewRef.current.scrollTo({
+        x: pageIndex * CAROUSEL_PAGE_WIDTH,
+        animated: true,
+      });
+      currentPageRef.current = pageIndex;
+      setCurrentPage(pageIndex);
+    }
+  };
+
+  const startAutoSlide = () => {
+    if (autoSlideTimerRef.current) clearInterval(autoSlideTimerRef.current);
+    autoSlideTimerRef.current = setInterval(() => {
+      const nextPage = (currentPageRef.current + 1) % featurePages.length;
+      scrollToPage(nextPage);
+    }, AUTO_SLIDE_INTERVAL);
+  };
+
+  const stopAutoSlide = () => {
+    if (autoSlideTimerRef.current) {
+      clearInterval(autoSlideTimerRef.current);
+      autoSlideTimerRef.current = null;
+    }
+  };
+
+  // Handle user scroll end (Snap logic)
+  const handleMomentumScrollEnd = (event: any) => {
+    const offsetX = event.nativeEvent.contentOffset.x;
+    const page = Math.round(offsetX / CAROUSEL_PAGE_WIDTH);
+    
+    // Update state
+    if (page !== currentPageRef.current) {
+      currentPageRef.current = page;
+      setCurrentPage(page);
+    }
+    
+    // Reset timer
+    stopAutoSlide();
+    startAutoSlide();
+  };
+
+  useEffect(() => {
+    startAutoSlide();
+    return () => stopAutoSlide();
+  }, []);
+
+  useEffect(() => {
+    stopAutoSlide();
+    startAutoSlide();
+  }, [featurePages.length]);
+
+  // --- Data fetching ---
+  useEffect(() => {
+    fetchUserData();
+  }, []);
 
   const fetchUserData = async () => {
     try {
@@ -84,26 +216,40 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       setError(null);
       const userProfile = await getCurrentUser();
       if (!userProfile || !userProfile.id) {
-        setError("Session expired. Please log in again.");
+        setError('Session expired. Please log in again.');
         setLoading(false);
         return;
       }
       setUser(userProfile);
       const realUserId = userProfile.id;
       const token = await getToken();
-      const authHeaders = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` };
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      };
 
-      if (userProfile.badges) { setBadges(userProfile.badges); }
-      else {
-        const badgesRes = await fetch(`${API_BASE_URL}/users/${realUserId}/badges/`, { headers: authHeaders });
+      if (userProfile.badges) {
+        setBadges(userProfile.badges);
+      } else {
+        const badgesRes = await fetch(`${API_BASE_URL}/users/${realUserId}/badges/`, {
+          headers: authHeaders,
+        });
         if (badgesRes.ok) setBadges(await badgesRes.json());
       }
 
-      const recsRes = await fetch(`${API_BASE_URL}/users/${realUserId}/recommendations/`, { headers: authHeaders });
+      const recsRes = await fetch(`${API_BASE_URL}/users/${realUserId}/recommendations/`, {
+        headers: authHeaders,
+      });
       if (recsRes.ok) setRecommendations(await recsRes.json());
-      const sessionsRes = await fetch(`${API_BASE_URL}/users/${realUserId}/sessions/`, { headers: authHeaders });
+
+      const sessionsRes = await fetch(`${API_BASE_URL}/users/${realUserId}/sessions/`, {
+        headers: authHeaders,
+      });
       if (sessionsRes.ok) setSessions(await sessionsRes.json());
-      const activitiesRes = await fetch(`${API_BASE_URL}/users/${realUserId}/activities/`, { headers: authHeaders });
+
+      const activitiesRes = await fetch(`${API_BASE_URL}/users/${realUserId}/activities/`, {
+        headers: authHeaders,
+      });
       if (activitiesRes.ok) setActivities(await activitiesRes.json());
 
       setLoading(false);
@@ -117,40 +263,88 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
 
   const toggleFab = () => {
     if (isFabOpen) {
-      Animated.timing(fabAnim, { toValue: 0, duration: 200, useNativeDriver: true }).start(() => setIsFabOpen(false));
+      Animated.timing(fabAnim, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: true,
+      }).start(() => setIsFabOpen(false));
     } else {
       setIsFabOpen(true);
       requestAnimationFrame(() => {
-        Animated.spring(fabAnim, { toValue: 1, friction: 5, tension: 60, useNativeDriver: true }).start();
+        Animated.spring(fabAnim, {
+          toValue: 1,
+          friction: 5,
+          tension: 60,
+          useNativeDriver: true,
+        }).start();
       });
     }
   };
 
-  const spin = fabAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] });
-  const item1Anim = { opacity: fabAnim, transform: [{ translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [45, 0] }) }, { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) }] };
-  const item2Anim = { opacity: fabAnim, transform: [{ translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }, { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) }] };
-  const item3Anim = { opacity: fabAnim, transform: [{ translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) }, { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) }] };
+  const spin = fabAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '180deg'],
+  });
+  const item1Anim = {
+    opacity: fabAnim,
+    transform: [
+      { translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [45, 0] }) },
+      { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) },
+    ],
+  };
+  const item2Anim = {
+    opacity: fabAnim,
+    transform: [
+      { translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) },
+      { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) },
+    ],
+  };
+  const item3Anim = {
+    opacity: fabAnim,
+    transform: [
+      { translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) },
+      { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) },
+    ],
+  };
 
-  if (loading) return (<View style={styles.loadingContainer}><ActivityIndicator size="large" color={COLORS.purpleVibrant} /></View>);
-  if (error) return (<View style={styles.loadingContainer}><Ionicons name="alert-circle-outline" size={48} color={COLORS.danger} /><Text style={styles.errorText}>{error}</Text></View>);
+  const handleLessonGenerated = (generatedLesson: any) => {
+    setLesson(generatedLesson);
+    setShowLessonGenerator(false);
+  };
+  const handleLessonDisplayClose = () => {
+    setLesson(null);
+  };
 
-  const displayName = user?.first_name || user?.name || user?.username || 'User';
-  const streakCount = user?.streak || 0;
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
+      </View>
+    );
+  }
+  if (error) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Ionicons name="alert-circle-outline" size={48} color={COLORS.danger} />
+        <Text style={styles.errorText}>{error}</Text>
+      </View>
+    );
+  }
 
-  const handleLessonGenerated = (generatedLesson: any) => { setLesson(generatedLesson); setShowLessonGenerator(false); };
-  const handleLessonDisplayClose = () => { setLesson(null); };
+  if (showLessonGenerator) {
+    return (
+      <LessonGenerator
+        onLessonGenerated={handleLessonGenerated}
+        onCancel={() => setShowLessonGenerator(false)}
+      />
+    );
+  }
+  if (lesson) {
+    return <LessonDisplay lesson={lesson} onClose={handleLessonDisplayClose} />;
+  }
 
-  const fabMenuItem1 = (
-    <Animated.View style={[styles.fabMenuItemWrapper, item1Anim]}>
-      <TouchableOpacity style={styles.fabMenuItem} onPress={() => { toggleFab(); onGenerateQuiz?.(); }}>
-        <Text style={styles.fabMenuText}>Generate Quiz</Text>
-        <View style={styles.fabMenuIconBox}><Ionicons name="document-text" size={20} color={COLORS.purpleVibrant} /></View>
-      </TouchableOpacity>
-    </Animated.View>
-  );
-
-  if (showLessonGenerator) return (<LessonGenerator onLessonGenerated={handleLessonGenerated} onCancel={() => setShowLessonGenerator(false)} />);
-  if (lesson) return (<LessonDisplay lesson={lesson} onClose={handleLessonDisplayClose} />);
+  const totalPoints = user?.total_points || badges.length * 100 || 0;
+  const level = user?.level || 1;
 
   return (
     <LinearGradient
@@ -160,9 +354,12 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       style={styles.mainWrapper}
     >
       <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
-      <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 120 }} showsVerticalScrollIndicator={false}>
-
-        {/* 🌟 HEADER with Gradient */}
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={{ paddingBottom: 120 }}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* HEADER */}
         <LinearGradient
           colors={[COLORS.purpleDeep, COLORS.purpleDark]}
           start={{ x: 0, y: 0 }}
@@ -186,37 +383,115 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
           </View>
         </LinearGradient>
 
-        {/* 🔥 DAY STREAK - Compact Horizontal Card */}
-        <View style={styles.streakSection}>
+        {/* CAROUSEL with Smooth Transitions */}
+        <View style={styles.carouselWrapper}>
           <LinearGradient
             colors={['#4C1D95', '#6D28D9', '#7C3AED']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
-            style={styles.streakCard}
+            style={styles.carouselCard}
           >
-            <View style={styles.streakLeft}>
-              <View style={styles.streakIconContainer}>
-                <Ionicons name="flame" size={28} color="white" />
-              </View>
-            </View>
-            
-            <View style={styles.streakContent}>
-              <View style={styles.streakHeader}>
-                <Text style={styles.streakLabel}>Day Streak</Text>
-                <View style={styles.streakBadge}>
-                  <Ionicons name="flash" size={10} color="#FBBF24" />
-                  <Text style={styles.streakBadgeText}>Active</Text>
+            <Animated.ScrollView
+              ref={scrollViewRef}
+              horizontal
+              // pagingEnabled is removed to allow custom deceleration
+              showsHorizontalScrollIndicator={false}
+              onMomentumScrollEnd={handleMomentumScrollEnd}
+              onScroll={Animated.event(
+                [{ nativeEvent: { contentOffset: { x: scrollX } } }],
+                { useNativeDriver: false } // False because we are modifying state in JS
+              )}
+              scrollEventThrottle={16}
+              decelerationRate="normal" // Makes the scroll feel heavier/smoother
+              snapToInterval={CAROUSEL_PAGE_WIDTH} // Helps align pages
+              snapToOffsets={featurePages.map((_, i) => i * CAROUSEL_PAGE_WIDTH)}
+              style={styles.carouselScroll}
+              contentContainerStyle={{ paddingHorizontal: 0 }}
+            >
+              {featurePages.map((page) => (
+                <View key={page.id} style={styles.carouselPageContainer}>
+                  <View style={styles.featurePage}>
+                    <View
+                      style={[
+                        styles.featureIconContainer,
+                        { backgroundColor: `${page.color}30` },
+                      ]}
+                    >
+                      <Ionicons name={page.icon as any} size={28} color={page.color} />
+                    </View>
+                    <View style={styles.featureContent}>
+                      <Text style={styles.featureTitle}>{page.title}</Text>
+                      <Text style={styles.featureDescription}>{page.description}</Text>
+                      {page.route ? (
+                        <TouchableOpacity
+                          style={styles.featureButton}
+                          onPress={() => router.push(page.route)}
+                          activeOpacity={0.8}
+                        >
+                          <LinearGradient
+                            colors={[page.color, page.color + 'CC']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 0 }}
+                            style={styles.featureButtonGradient}
+                          >
+                            <Text style={styles.featureButtonText}>Go</Text>
+                            <Ionicons name="arrow-forward" size={14} color="white" />
+                          </LinearGradient>
+                        </TouchableOpacity>
+                      ) : (
+                        <View style={styles.streakBadgeInline}>
+                          <Ionicons name="flash" size={12} color="#FBBF24" />
+                          <Text style={styles.streakBadgeInlineText}>
+                            {streakCount > 0 ? 'Active' : 'Start now'}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  </View>
                 </View>
-              </View>
-              <Text style={styles.streakValue}>{streakCount}</Text>
-              <Text style={styles.streakSubtext}>
-                {streakCount > 0 ? 'Keep the fire burning! 🔥' : 'Start your journey today!'}
-              </Text>
+              ))}
+            </Animated.ScrollView>
+
+            {/* Animated Dot Indicator */}
+            <View style={styles.dotContainer}>
+              {featurePages.map((_, idx) => {
+                const inputRange = [
+                  (idx - 1) * CAROUSEL_PAGE_WIDTH,
+                  idx * CAROUSEL_PAGE_WIDTH,
+                  (idx + 1) * CAROUSEL_PAGE_WIDTH,
+                ];
+                
+                const dotWidth = scrollX.interpolate({
+                  inputRange,
+                  outputRange: [7, 18, 7],
+                  extrapolate: 'clamp',
+                });
+                
+                const opacity = scrollX.interpolate({
+                  inputRange,
+                  outputRange: [0.4, 1, 0.4],
+                  extrapolate: 'clamp',
+                });
+
+                return (
+                  <Animated.View
+                    key={idx}
+                    style={[
+                      styles.dot,
+                      {
+                        width: dotWidth,
+                        opacity: opacity,
+                        backgroundColor: 'white',
+                      },
+                    ]}
+                  />
+                );
+              })}
             </View>
           </LinearGradient>
         </View>
 
-        {/* 🌟 STATS CARDS - Points & Level (Compact) */}
+        {/* STATS CARDS */}
         <View style={styles.statsContainer}>
           <LinearGradient
             colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
@@ -227,7 +502,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
             <View style={styles.statIconContainer}>
               <Ionicons name="trophy" size={20} color="white" />
             </View>
-            <Text style={styles.statValue}>{user?.total_points || badges.length * 100 || 0}</Text>
+            <Text style={styles.statValue}>{totalPoints}</Text>
             <Text style={styles.statLabel}>Points</Text>
           </LinearGradient>
 
@@ -240,12 +515,12 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
             <View style={styles.statIconContainer}>
               <Ionicons name="trending-up" size={20} color="white" />
             </View>
-            <Text style={styles.statValue}>Lv {user?.level || 1}</Text>
+            <Text style={styles.statValue}>Lv {level}</Text>
             <Text style={styles.statLabel}>Level</Text>
           </LinearGradient>
         </View>
 
-        {/*  ACTIVE SESSIONS */}
+        {/* Active Sessions */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <View style={styles.sectionTitleContainer}>
@@ -259,21 +534,31 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
               </LinearGradient>
               <Text style={styles.sectionTitle}>Active</Text>
             </View>
-            <TouchableOpacity><Text style={styles.viewAllText}>View all</Text></TouchableOpacity>
+            <TouchableOpacity>
+              <Text style={styles.viewAllText}>View all</Text>
+            </TouchableOpacity>
           </View>
 
           {sessions.length > 0 ? (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.scrollContent}
+            >
               {sessions.slice(0, 4).map((session) => (
                 <TouchableOpacity key={session.id} style={styles.sessionCard} activeOpacity={0.7}>
                   <View style={styles.sessionCardHeader}>
-                    <Text style={styles.sessionTitle} numberOfLines={1}>{session.title}</Text>
+                    <Text style={styles.sessionTitle} numberOfLines={1}>
+                      {session.title}
+                    </Text>
                     <View style={styles.liveBadge}>
                       <View style={styles.liveDot} />
                       <Text style={styles.liveText}>LIVE</Text>
                     </View>
                   </View>
-                  <Text style={styles.sessionDesc} numberOfLines={2}>{session.description}</Text>
+                  <Text style={styles.sessionDesc} numberOfLines={2}>
+                    {session.description}
+                  </Text>
                   <View style={styles.sessionFooter}>
                     <Ionicons name="people" size={14} color={COLORS.textMuted} />
                     <Text style={styles.sessionFooterText}>{session.participants} joined</Text>
@@ -300,7 +585,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
           )}
         </View>
 
-        {/* 🌟 FOR YOU - RECOMMENDATIONS */}
+        {/* For You */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <View style={styles.sectionTitleContainer}>
@@ -314,17 +599,23 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
               </LinearGradient>
               <Text style={styles.sectionTitle}>For You</Text>
             </View>
-            <TouchableOpacity><Text style={styles.viewAllText}>View all</Text></TouchableOpacity>
+            <TouchableOpacity>
+              <Text style={styles.viewAllText}>View all</Text>
+            </TouchableOpacity>
           </View>
 
           {recommendations.length > 0 ? (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.scrollContent}
+            >
               {recommendations.slice(0, 4).map((rec, index) => {
                 const gradients = [
                   [COLORS.purpleDeep, COLORS.purplePrimary],
                   [COLORS.danger, '#F87171'],
                   [COLORS.success, '#34D399'],
-                  [COLORS.purpleVibrant, COLORS.purpleLight]
+                  [COLORS.purpleVibrant, COLORS.purpleLight],
                 ];
                 return (
                   <TouchableOpacity key={rec.id} activeOpacity={0.7}>
@@ -334,8 +625,12 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
                       end={{ x: 1, y: 1 }}
                       style={styles.recommendationCard}
                     >
-                      <Text style={styles.recommendationTitle} numberOfLines={2}>{rec.title}</Text>
-                      <Text style={styles.recommendationDesc} numberOfLines={3}>{rec.description}</Text>
+                      <Text style={styles.recommendationTitle} numberOfLines={2}>
+                        {rec.title}
+                      </Text>
+                      <Text style={styles.recommendationDesc} numberOfLines={3}>
+                        {rec.description}
+                      </Text>
                       <Text style={styles.recommendationCTA}>Start learning →</Text>
                     </LinearGradient>
                   </TouchableOpacity>
@@ -348,21 +643,30 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
                 <Ionicons name="bulb-outline" size={48} color={COLORS.purpleVibrant} />
               </View>
               <Text style={styles.emptyStateTitle}>No recommendations yet</Text>
-              <Text style={styles.emptyStateText}>Complete more lessons to get personalized suggestions</Text>
+              <Text style={styles.emptyStateText}>
+                Complete more lessons to get personalized suggestions
+              </Text>
             </View>
           )}
         </View>
 
-        {/* 🌟 RECENT ACTIVITY */}
+        {/* Recent Activity */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <View style={styles.sectionTitleContainer}>
-              <View style={[styles.sectionIconBox, { backgroundColor: 'rgba(156, 163, 175, 0.2)' }]}>
+              <View
+                style={[
+                  styles.sectionIconBox,
+                  { backgroundColor: 'rgba(156, 163, 175, 0.2)' },
+                ]}
+              >
                 <Ionicons name="time" size={18} color={COLORS.textSecondary} />
               </View>
               <Text style={styles.sectionTitle}>Recent Activity</Text>
             </View>
-            <TouchableOpacity><Text style={styles.viewAllText}>View all</Text></TouchableOpacity>
+            <TouchableOpacity>
+              <Text style={styles.viewAllText}>View all</Text>
+            </TouchableOpacity>
           </View>
 
           {activities.length > 0 ? (
@@ -374,7 +678,9 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
                   </View>
                   <View style={styles.activityContent}>
                     <Text style={styles.activityTitle}>{activity.title}</Text>
-                    <Text style={styles.activityDesc} numberOfLines={1}>{activity.description}</Text>
+                    <Text style={styles.activityDesc} numberOfLines={1}>
+                      {activity.description}
+                    </Text>
                   </View>
                 </View>
               ))}
@@ -390,7 +696,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
           )}
         </View>
 
-        {/* 🌟 BADGES */}
+        {/* Badges */}
         {badges.length > 0 && (
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
@@ -405,9 +711,15 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
                 </LinearGradient>
                 <Text style={styles.sectionTitle}>Badges</Text>
               </View>
-              <TouchableOpacity><Text style={styles.viewAllText}>View all</Text></TouchableOpacity>
+              <TouchableOpacity>
+                <Text style={styles.viewAllText}>View all</Text>
+              </TouchableOpacity>
             </View>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.badgeScroll}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.badgeScroll}
+            >
               {badges.slice(0, 6).map((badge) => (
                 <View key={badge.id} style={styles.badgeItem}>
                   <LinearGradient
@@ -418,44 +730,66 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
                   >
                     <Text style={styles.badgeEmoji}>{badge.icon || badge.icon_url || '🏆'}</Text>
                   </LinearGradient>
-                  <Text style={styles.badgeName} numberOfLines={1}>{badge.name}</Text>
+                  <Text style={styles.badgeName} numberOfLines={1}>
+                    {badge.name}
+                  </Text>
                 </View>
               ))}
             </ScrollView>
           </View>
         )}
-
       </ScrollView>
 
       {/* FAB Menu */}
       {isFabOpen && (
         <View style={styles.fabMenu}>
-          {fabMenuItem1}
+          <Animated.View style={[styles.fabMenuItemWrapper, item1Anim]}>
+            <TouchableOpacity
+              style={styles.fabMenuItem}
+              onPress={() => {
+                toggleFab();
+                onGenerateQuiz?.();
+              }}
+            >
+              <Text style={styles.fabMenuText}>Generate Quiz</Text>
+              <View style={styles.fabMenuIconBox}>
+                <Ionicons name="document-text" size={20} color={COLORS.purpleVibrant} />
+              </View>
+            </TouchableOpacity>
+          </Animated.View>
           <Animated.View style={[styles.fabMenuItemWrapper, item2Anim]}>
             <TouchableOpacity style={styles.fabMenuItem} activeOpacity={0.8}>
               <Text style={styles.fabMenuText}>Create Group</Text>
-              <View style={styles.fabMenuIconBox}><Ionicons name="people" size={20} color={COLORS.purpleVibrant} /></View>
+              <View style={styles.fabMenuIconBox}>
+                <Ionicons name="people" size={20} color={COLORS.purpleVibrant} />
+              </View>
             </TouchableOpacity>
           </Animated.View>
           <Animated.View style={[styles.fabMenuItemWrapper, item3Anim]}>
             <TouchableOpacity style={styles.fabMenuItem} activeOpacity={0.8}>
               <Text style={styles.fabMenuText}>Study Plan</Text>
-              <View style={styles.fabMenuIconBox}><Ionicons name="calendar" size={20} color={COLORS.purpleVibrant} /></View>
+              <View style={styles.fabMenuIconBox}>
+                <Ionicons name="calendar" size={20} color={COLORS.purpleVibrant} />
+              </View>
             </TouchableOpacity>
           </Animated.View>
         </View>
       )}
 
-      {/* Main FAB with Gradient */}
+      {/* Main FAB */}
       <LinearGradient
-        colors={isFabOpen ? [COLORS.danger, '#F87171'] : [COLORS.purpleDeep, COLORS.purpleVibrant]}
+        colors={
+          isFabOpen
+            ? [COLORS.danger, '#F87171']
+            : [COLORS.purpleDeep, COLORS.purpleVibrant]
+        }
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={styles.fabMain}
       >
         <TouchableOpacity onPress={toggleFab} activeOpacity={0.85}>
           <Animated.View style={{ transform: [{ rotate: spin }] }}>
-            <Ionicons name={isFabOpen ? "remove" : "add"} size={32} color="white" />
+            <Ionicons name={isFabOpen ? 'remove' : 'add'} size={32} color="white" />
           </Animated.View>
         </TouchableOpacity>
       </LinearGradient>
@@ -465,11 +799,21 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
 
 const styles = StyleSheet.create({
   mainWrapper: { flex: 1 },
-  loadingContainer: { flex: 1, backgroundColor: COLORS.bg, justifyContent: 'center', alignItems: 'center' },
-  errorText: { marginTop: 16, color: COLORS.danger, fontSize: 15, textAlign: 'center', fontFamily: FONTS.medium },
+  loadingContainer: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  errorText: {
+    marginTop: 16,
+    color: COLORS.danger,
+    fontSize: 15,
+    textAlign: 'center',
+    fontFamily: FONTS.medium,
+  },
   container: { flex: 1 },
 
-  // Header
   header: {
     paddingHorizontal: 24,
     paddingTop: Platform.OS === 'ios' ? 60 : 40,
@@ -516,82 +860,104 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
 
-  // Streak Card – Compact
-  streakSection: {
+  carouselWrapper: {
     paddingHorizontal: 24,
     marginBottom: 16,
     marginTop: 12,
   },
-  streakCard: {
+  carouselCard: {
+    borderRadius: 16,
+    padding: 12,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    elevation: 5,
+    overflow: 'hidden',
+  },
+  carouselScroll: {
+    height: 110,
+  },
+  carouselPageContainer: {
+    width: CAROUSEL_PAGE_WIDTH,
+    justifyContent: 'center',
+  },
+  featurePage: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderRadius: 20,
-    padding: 16,
-    shadowColor: COLORS.purpleDeep,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 6,
-  },
-  streakLeft: {
-    marginRight: 16,
-  },
-  streakIconContainer: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  streakContent: {
+    paddingVertical: 4,
+    gap: 12,
     flex: 1,
   },
-  streakHeader: {
+  featureIconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  featureContent: {
+    flex: 1,
+    flexShrink: 1,
+  },
+  featureTitle: {
+    color: 'white',
+    fontSize: 15,
+    fontFamily: FONTS.bold,
+    marginBottom: 2,
+  },
+  featureDescription: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 12,
+    fontFamily: FONTS.regular,
+    lineHeight: 16,
+    marginBottom: 4,
+    flexShrink: 1,
+  },
+  featureButton: {
+    alignSelf: 'flex-start',
+  },
+  featureButtonGradient: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 2,
-    gap: 6,
+    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 16,
   },
-  streakLabel: {
-    color: 'rgba(255, 255, 255, 0.9)',
+  featureButtonText: {
+    color: 'white',
     fontSize: 12,
     fontFamily: FONTS.semiBold,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    fontWeight: '600',
   },
-  streakBadge: {
+  streakBadgeInline: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(251, 191, 36, 0.2)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-    gap: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 12,
+    gap: 4,
+    alignSelf: 'flex-start',
   },
-  streakBadgeText: {
+  streakBadgeInlineText: {
     color: '#FBBF24',
-    fontSize: 9,
+    fontSize: 11,
     fontFamily: FONTS.bold,
     letterSpacing: 0.3,
   },
-  streakValue: {
-    color: 'white',
-    fontSize: 32,
-    fontFamily: FONTS.black,
-    letterSpacing: -1.5,
-    lineHeight: 38,
-    marginBottom: 1,
+  dotContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginTop: 6,
+    gap: 6,
   },
-  streakSubtext: {
-    color: 'rgba(255, 255, 255, 0.7)',
-    fontSize: 12,
-    fontFamily: FONTS.medium,
+  dot: {
+    height: 7,
+    borderRadius: 3.5,
   },
 
-  // Stats Cards – Compact
   statsContainer: {
     flexDirection: 'row',
     paddingHorizontal: 24,
@@ -633,7 +999,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.3,
   },
 
-  // Sections (unchanged)
   section: {
     paddingHorizontal: 24,
     marginBottom: 32,
@@ -672,8 +1037,6 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingRight: 24,
   },
-
-  // Empty State (unchanged)
   emptyStateCard: {
     backgroundColor: COLORS.surface,
     borderRadius: 20,
@@ -706,7 +1069,6 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
 
-  // Session Cards (unchanged)
   sessionCard: {
     width: 260,
     backgroundColor: COLORS.surface,
@@ -782,7 +1144,6 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.semiBold,
   },
 
-  // Recommendation Cards (unchanged)
   recommendationCard: {
     width: 240,
     borderRadius: 20,
@@ -809,7 +1170,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  // Activity (unchanged)
   activityList: {},
   activityItem: {
     flexDirection: 'row',
@@ -842,7 +1202,6 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.regular,
   },
 
-  // Badges (unchanged)
   badgeScroll: {
     gap: 16,
     paddingRight: 24,
@@ -870,7 +1229,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // FAB (unchanged)
   fabMain: {
     position: 'absolute',
     bottom: 24,

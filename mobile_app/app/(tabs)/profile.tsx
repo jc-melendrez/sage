@@ -23,10 +23,10 @@ const COLORS = {
   success: '#10B981',
   warning: '#F59E0B',
   danger: '#EF4444',
-  textPrimary: '#010910',
-  textSecondary: '#4B5563',
-  textMuted: '#6B7280',
-  border: 'rgba(167, 139, 250, 0.25)',
+  textPrimary: '#3a107a', // ✅ Updated to match Dashboard
+  textSecondary: '#CBD5E1', // ✅ Updated to match Dashboard
+  textMuted: '#94A3B8', // ✅ Updated to match Dashboard
+  border: 'rgba(44, 29, 0, 0.15)', // ✅ Updated to match Dashboard
 };
 
 const FONTS = {
@@ -295,8 +295,20 @@ const styles = StyleSheet.create({
   },
   avatarText: { fontSize: 26, fontFamily: FONTS.black, color: 'white' },
   userInfo: { flex: 1 },
-  userName: { fontSize: 26, fontFamily: FONTS.bold, color: 'white', marginBottom: 4, letterSpacing: -0.5 },
-  userEmail: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.purplePale, marginBottom: 8 },
+  userName: { 
+    fontSize: 26, 
+    fontFamily: FONTS.bold, 
+    fontWeight: '700', // ✅ Added fontWeight
+    color: 'white', 
+    marginBottom: 4, 
+    letterSpacing: -0.5 
+  },
+  userEmail: { 
+    fontSize: 14, 
+    fontFamily: FONTS.medium, 
+    color: COLORS.purplePale, 
+    marginBottom: 8 
+  },
   roleBadge: {
     alignSelf: 'flex-start',
     backgroundColor: 'rgba(255,255,255,0.15)',
@@ -306,7 +318,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.2)',
   },
-  roleText: { color: 'white', fontSize: 12, fontFamily: FONTS.semiBold },
+  roleText: { 
+    color: 'white', 
+    fontSize: 12, 
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600', // ✅ Added fontWeight
+  },
 
   glassCard: {
     backgroundColor: 'rgba(255,255,255,0.1)',
@@ -317,17 +334,44 @@ const styles = StyleSheet.create({
   },
   glassCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
   levelBadge: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  levelText: { color: 'white', fontFamily: FONTS.bold, fontSize: 16 },
-  xpText: { color: COLORS.purplePale, fontSize: 14, fontFamily: FONTS.medium },
+  levelText: { 
+    color: 'white', 
+    fontFamily: FONTS.bold, 
+    fontWeight: '700', // ✅ Added fontWeight
+    fontSize: 16 
+  },
+  xpText: { 
+    color: COLORS.purplePale, 
+    fontSize: 14, 
+    fontFamily: FONTS.medium,
+    fontWeight: '500', // ✅ Added fontWeight
+  },
   progressBarBg: { height: 8, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 4, overflow: 'hidden', marginBottom: 8 },
   progressBarFill: { height: '100%', borderRadius: 4 },
-  xpRemainingText: { color: 'rgba(255,255,255,0.7)', fontSize: 12, fontFamily: FONTS.regular },
+  xpRemainingText: { 
+    color: 'rgba(255,255,255,0.7)', 
+    fontSize: 12, 
+    fontFamily: FONTS.regular,
+    fontWeight: '400', // ✅ Added fontWeight
+  },
 
   content: { flex: 1, paddingHorizontal: 24, paddingTop: 24 },
   section: { marginBottom: 28 },
   sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  sectionTitle: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginBottom: 16 },
-  viewAllText: { color: COLORS.purpleDeep, fontSize: 14, fontFamily: FONTS.semiBold },
+  sectionTitle: { 
+    fontSize: 18, 
+    fontFamily: FONTS.extraBold, // ✅ Changed from bold to extraBold
+    fontWeight: '900', // ✅ Added fontWeight like Dashboard
+    letterSpacing: 1, // ✅ Added letterSpacing like Dashboard
+    color: COLORS.textPrimary, 
+    marginBottom: 16 
+  },
+  viewAllText: { 
+    color: COLORS.purpleDeep, 
+    fontSize: 14, 
+    fontFamily: FONTS.extraBold, // ✅ Changed to extraBold
+    fontWeight: '500', // ✅ Added fontWeight like Dashboard
+  },
 
   overviewGrid: { flexDirection: 'row', gap: 12 },
   overviewCard: {
@@ -348,8 +392,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
-  overviewValue: { fontSize: 24, fontFamily: FONTS.black, color: COLORS.textPrimary, marginBottom: 4, letterSpacing: -0.5 },
-  overviewLabel: { fontSize: 11, color: COLORS.textSecondary, fontFamily: FONTS.semiBold, textTransform: 'uppercase', letterSpacing: 0.5 },
+  overviewValue: { 
+    fontSize: 24, 
+    fontFamily: FONTS.black, 
+    fontWeight: '900', // ✅ Added fontWeight
+    color: COLORS.textPrimary, 
+    marginBottom: 4, 
+    letterSpacing: -0.5 
+  },
+  overviewLabel: { 
+    fontSize: 11, 
+    color: COLORS.textSecondary, 
+    fontFamily: FONTS.semiBold, 
+    fontWeight: '600', // ✅ Added fontWeight
+    textTransform: 'uppercase', 
+    letterSpacing: 0.5 
+  },
 
   listCard: {
     backgroundColor: COLORS.surface,
@@ -362,8 +420,18 @@ const styles = StyleSheet.create({
   borderTop: { borderTopWidth: 1, borderTopColor: COLORS.border },
   listItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 14 },
   listIconBg: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
-  listItemText: { fontSize: 15, color: COLORS.textPrimary, fontFamily: FONTS.medium },
-  listItemValue: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary },
+  listItemText: { 
+    fontSize: 15, 
+    color: COLORS.textPrimary, 
+    fontFamily: FONTS.medium,
+    fontWeight: '500', // ✅ Added fontWeight
+  },
+  listItemValue: { 
+    fontSize: 18, 
+    fontFamily: FONTS.bold, 
+    fontWeight: '700', // ✅ Added fontWeight
+    color: COLORS.textPrimary 
+  },
 
   badgesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   badgeCard: {
@@ -385,7 +453,14 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   badgeEmoji: { fontSize: 28 },
-  badgeName: { fontSize: 12, color: COLORS.textSecondary, fontFamily: FONTS.medium, marginBottom: 8, textAlign: 'center' },
+  badgeName: { 
+    fontSize: 12, 
+    color: COLORS.textSecondary, 
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600', // ✅ Added fontWeight
+    marginBottom: 8, 
+    textAlign: 'center' 
+  },
   earnedPill: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -395,14 +470,34 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     borderRadius: 12,
   },
-  earnedText: { fontSize: 10, color: COLORS.success, fontFamily: FONTS.semiBold },
+  earnedText: { 
+    fontSize: 10, 
+    color: COLORS.success, 
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600', // ✅ Added fontWeight
+  },
   emptyBadges: { padding: 24, alignItems: 'center', width: '100%', backgroundColor: COLORS.surface, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border },
-  emptyBadgesText: { color: COLORS.textSecondary, fontFamily: FONTS.medium, textAlign: 'center' },
+  emptyBadgesText: { 
+    color: COLORS.textSecondary, 
+    fontFamily: FONTS.medium,
+    fontWeight: '500', // ✅ Added fontWeight
+    textAlign: 'center' 
+  },
 
   menuItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 18 },
   menuItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  menuItemText: { fontSize: 16, color: COLORS.textPrimary, fontFamily: FONTS.medium },
+  menuItemText: { 
+    fontSize: 16, 
+    color: COLORS.textPrimary, 
+    fontFamily: FONTS.medium,
+    fontWeight: '500', // ✅ Added fontWeight
+  },
 
   footer: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 8, paddingBottom: 20 },
-  footerText: { color: COLORS.textMuted, fontSize: 14, fontFamily: FONTS.medium },
+  footerText: { 
+    color: COLORS.textMuted, 
+    fontSize: 14, 
+    fontFamily: FONTS.medium,
+    fontWeight: '500', // ✅ Added fontWeight
+  },
 });

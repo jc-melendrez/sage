@@ -8,8 +8,10 @@
 
     // ngrok tunnel URL (for testing multiple devices anywhere)
     TUNNEL: 'https://eloquent-flagpole-resupply.ngrok-free.dev/api',
+
+    DEPLOYED: 'https://sage-production-acb6.up.railway.app/api',
   };
 
   // Select which config to use
   // Change to API_CONFIG.LOCAL or API_CONFIG.LOCALHOST for other environments
-  export const API_BASE_URL = API_CONFIG.LOCAL;
+  export const API_BASE_URL = API_CONFIG.DEPLOYED;
