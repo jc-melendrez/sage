@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Animated } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getToken, getCurrentUser } from '@/services/authService';
@@ -13,11 +13,13 @@ export default function QuestionScreen() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [result, setResult] = useState<{ correct: boolean; correctAnswer: string; points: number } | null>(null);
+  const [standings, setStandings] = useState<{ id: string; displayName: string; score: number }[]>([]);
   const [timeLeft, setTimeLeft] = useState(15);
   const [timePerQuestion, setTimePerQuestion] = useState(15);
   const [userId, setUserId] = useState<number | null>(null);
   const timerRef = useRef<any>(null);
   const startTimeRef = useRef<number>(Date.now());
+  const standingsUnsubRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const init = async () => {
@@ -35,6 +37,19 @@ export default function QuestionScreen() {
       setQuestionOrder(player.data()?.questionOrder || []);
     };
     init();
+
+    const unsub = firestore()
+      .collection('gameRooms').doc(roomCode)
+      .collection('players')
+      .onSnapshot(snap => {
+        const sorted = snap.docs
+          .map(d => ({ id: d.id, displayName: d.data().displayName, score: d.data().score || 0 }))
+          .sort((a, b) => b.score - a.score);
+        setStandings(sorted);
+      });
+    standingsUnsubRef.current = unsub;
+
+    return () => { unsub(); };
   }, []);
 
   useEffect(() => {
@@ -99,6 +114,44 @@ export default function QuestionScreen() {
   const actualIndex = questionOrder[currentIndex];
   const question = questions[actualIndex];
 
+  if (result) {
+    return (
+      <View style={styles.resultContainer}>
+        <View style={styles.resultTop}>
+          <Text style={styles.resultBigIcon}>{result.correct ? '✅' : '❌'}</Text>
+          <Text style={styles.resultBigText}>{result.correct ? 'Correct!' : 'Wrong!'}</Text>
+          {result.correct && <Text style={styles.resultPoints}>+{result.points} pts</Text>}
+        </View>
+
+        <View style={styles.resultLeaderboard}>
+          <Text style={styles.standingsTitle}>Standings</Text>
+          <ScrollView showsVerticalScrollIndicator={false}>
+            {standings.map((p, i) => (
+              <View key={p.id} style={styles.standingsRow}>
+                <Text style={styles.standingsRank}>{i + 1}.</Text>
+                <Text
+                  style={[
+                    styles.standingsName,
+                    String(p.id) === String(userId) && styles.standingsYou,
+                  ]}
+                >
+                  {p.displayName}{String(p.id) === String(userId) ? ' (You)' : ''}
+                </Text>
+                <Text style={styles.standingsScore}>{p.score}</Text>
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+
+        <TouchableOpacity style={styles.nextBtnFull} onPress={handleNext}>
+          <Text style={styles.nextBtnText}>
+            {currentIndex + 1 >= questionOrder.length ? 'Finish' : 'Next →'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
@@ -110,34 +163,16 @@ export default function QuestionScreen() {
 
       <Text style={styles.question}>{question.question}</Text>
 
-      {question.choices.map((choice: string) => {
-        let bg = '#1e1b4b';
-        if (result) {
-          if (choice === result.correctAnswer) bg = '#1D9E75';
-          else if (choice === selected) bg = '#e53e3e';
-        } else if (choice === selected) bg = '#7F77DD';
-
-        return (
-          <TouchableOpacity
-            key={choice}
-            style={[styles.choice, { backgroundColor: bg }]}
-            onPress={() => handleAnswer(choice)}
-            disabled={!!selected}
-          >
-            <Text style={styles.choiceText}>{choice}</Text>
-          </TouchableOpacity>
-        );
-      })}
-
-      {result && (
-        <View style={styles.resultBox}>
-          <Text style={styles.resultText}>{result.correct ? '✅ Correct!' : '❌ Wrong!'}</Text>
-          {result.correct && <Text style={styles.points}>+{result.points} pts</Text>}
-          <TouchableOpacity style={styles.nextBtn} onPress={handleNext}>
-            <Text style={styles.nextBtnText}>{currentIndex + 1 >= questionOrder.length ? 'Finish' : 'Next →'}</Text>
-          </TouchableOpacity>
-        </View>
-      )}
+      {question.choices.map((choice: string) => (
+        <TouchableOpacity
+          key={choice}
+          style={[styles.choice, { backgroundColor: choice === selected ? '#7F77DD' : '#1e1b4b' }]}
+          onPress={() => handleAnswer(choice)}
+          disabled={!!selected}
+        >
+          <Text style={styles.choiceText}>{choice}</Text>
+        </TouchableOpacity>
+      ))}
     </View>
   );
 }
@@ -151,9 +186,79 @@ const styles = StyleSheet.create({
   question: { color: '#fff', fontSize: 20, fontWeight: 'bold', marginBottom: 28, lineHeight: 28 },
   choice: { borderRadius: 12, padding: 16, marginBottom: 12 },
   choiceText: { color: '#fff', fontSize: 16 },
-  resultBox: { marginTop: 16, alignItems: 'center' },
-  resultText: { color: '#fff', fontSize: 20, fontWeight: 'bold', marginBottom: 4 },
-  points: { color: '#7F77DD', fontSize: 16, marginBottom: 12 },
-  nextBtn: { backgroundColor: '#7F77DD', borderRadius: 12, paddingHorizontal: 32, paddingVertical: 14 },
   nextBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+
+  resultContainer: {
+    flex: 1,
+    backgroundColor: '#0f0c29',
+    padding: 24,
+    paddingTop: 60,
+    justifyContent: 'space-between',
+  },
+  resultTop: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  resultBigIcon: {
+    fontSize: 56,
+    marginBottom: 8,
+  },
+  resultBigText: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  resultPoints: {
+    color: '#7F77DD',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  resultLeaderboard: {
+    flex: 1,
+    backgroundColor: '#1e1b4b',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+  },
+  nextBtnFull: {
+    backgroundColor: '#7F77DD',
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+
+  standingsTitle: {
+    color: '#aaa',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  standingsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  standingsRank: {
+    color: '#94A3B8',
+    width: 24,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  standingsName: {
+    color: '#fff',
+    fontSize: 14,
+    flex: 1,
+  },
+  standingsYou: {
+    color: '#7F77DD',
+    fontWeight: '700',
+  },
+  standingsScore: {
+    color: '#7F77DD',
+    fontSize: 14,
+    fontWeight: '700',
+  },
 });
