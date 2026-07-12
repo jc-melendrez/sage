@@ -20,6 +20,7 @@ export default function QuestionScreen() {
   const timerRef = useRef<any>(null);
   const startTimeRef = useRef<number>(Date.now());
   const standingsUnsubRef = useRef<(() => void) | null>(null);
+  
 
   useEffect(() => {
     const init = async () => {
