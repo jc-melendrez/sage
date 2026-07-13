@@ -50,6 +50,7 @@ export default function ClassicGameSetupScreen() {
   const [joinCode, setJoinCode] = useState('');
   const [questionCount, setQuestionCount] = useState('5');
   const [timePerQuestion, setTimePerQuestion] = useState('15');
+  const [questionType, setQuestionType] = useState<'mcq' | 'identification'>('mcq');
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<'home' | 'create' | 'join'>('home');
   const [selectedFile, setSelectedFile] = useState<{ name: string; uri: string; mimeType: string } | null>(null);
@@ -83,6 +84,7 @@ export default function ClassicGameSetupScreen() {
       formData.append('file', { uri: selectedFile.uri, name: selectedFile.name, type: selectedFile.mimeType } as any);
       formData.append('questionCount', questionCount);
       formData.append('timePerQuestion', timePerQuestion);
+      formData.append('questionType', questionType);
 
       const response = await fetch(`${API_BASE_URL}/game/create/`, {
         method: 'POST',
@@ -351,6 +353,35 @@ export default function ClassicGameSetupScreen() {
                         placeholder="15"
                         placeholderTextColor={COLORS.textMuted}
                       />
+                    </View>
+                  </View>
+
+                  <View style={styles.settingDivider} />
+
+                  <View style={styles.settingRow}>
+                    <View style={styles.settingIconBox}>
+                      <Ionicons name="help-circle" size={16} color={COLORS.purpleVibrant} />
+                    </View>
+                    <View style={styles.settingContent}>
+                      <Text style={styles.settingLabel}>Question Type</Text>
+                      <View style={styles.typeToggle}>
+                        <TouchableOpacity
+                          style={[styles.typeOption, questionType === 'mcq' && styles.typeOptionActive]}
+                          onPress={() => setQuestionType('mcq')}
+                        >
+                          <Text style={[styles.typeOptionText, questionType === 'mcq' && styles.typeOptionTextActive]}>
+                            Multiple Choice
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.typeOption, questionType === 'identification' && styles.typeOptionActive]}
+                          onPress={() => setQuestionType('identification')}
+                        >
+                          <Text style={[styles.typeOptionText, questionType === 'identification' && styles.typeOptionTextActive]}>
+                            Identification
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
                     </View>
                   </View>
                 </View>
@@ -787,6 +818,11 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.border,
     marginVertical: 12,
   },
+  typeToggle: { flexDirection: 'row', gap: 8, marginTop: 6 },
+  typeOption: { flex: 1, paddingVertical: 8, borderRadius: 8, alignItems: 'center', backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border },
+  typeOptionActive: { backgroundColor: COLORS.purplePrimary, borderColor: COLORS.purplePrimary },
+  typeOptionText: { color: COLORS.textMuted, fontSize: 12, fontWeight: '600' },
+  typeOptionTextActive: { color: '#fff' },
   
   // Join Code Card
   joinCodeCard: {

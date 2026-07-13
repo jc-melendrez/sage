@@ -28,6 +28,7 @@ class CreateGameView(APIView):
         uploaded_file = request.FILES.get('file')
         question_count = int(request.data.get('questionCount', 10))
         time_per_question = int(request.data.get('timePerQuestion', 15))
+        question_type = request.data.get('questionType', 'mcq')
 
         if not uploaded_file:
             return Response({'error': 'No file uploaded'}, status=400)
@@ -37,7 +38,7 @@ class CreateGameView(APIView):
             return Response({'error': 'Could not extract text from file'}, status=400)
 
         # Generate Topic and Questions via AI
-        ai_data = self.process_content(file_content, question_count)
+        ai_data = self.process_content(file_content, question_count, question_type)
         if not ai_data:
             return Response({'error': 'AI failed to process content'}, status=500)
 
@@ -75,7 +76,33 @@ class CreateGameView(APIView):
             'message': 'Room created successfully!'
         })
 
-    def process_content(self, content, count):
+    def process_content(self, content, count, question_type='mcq'):
+        if question_type == 'identification':
+            format_block = '''{
+  "topic": "Concise Title",
+  "questions": [
+    {
+      "type": "identification",
+      "question": "...",
+      "correctAnswer": "short answer"
+    }
+  ]
+}'''
+            type_instruction = f'Generate {count} identification questions — short typed-answer questions where the answer is a name, term, date, or number (one to a few words). Do not include multiple choice options.'
+        else:
+            format_block = '''{
+  "topic": "Concise Title",
+  "questions": [
+    {
+      "type": "mcq",
+      "question": "...",
+      "choices": ["A. option", "B. option", "C. option", "D. option"],
+      "correctAnswer": "A. option"
+    }
+  ]
+}'''
+            type_instruction = f'Generate {count} multiple choice questions, each with exactly 4 options.'
+
         try:
             response = requests.post(
                 'https://api.groq.com/openai/v1/chat/completions',
@@ -87,18 +114,9 @@ class CreateGameView(APIView):
                     'model': 'llama-3.3-70b-versatile',
                     'messages': [{
                         'role': 'user',
-                        'content': f'''Based on the following content, 1) Provide a concise quiz title/topic (max 5 words). 2) Generate {count} multiple choice questions.
+                        'content': f'''Based on the following content, 1) Provide a concise quiz title/topic (max 5 words). 2) {type_instruction}
 Return ONLY valid JSON in this format:
-{{
-  "topic": "Concise Title",
-  "questions": [
-    {{
-      "question": "...",
-      "choices": ["A. option", "B. option", "C. option", "D. option"],
-      "correctAnswer": "A. option"
-    }}
-  ]
-}}
+{format_block}
 
 Content:
 {content[:10000]}'''
@@ -200,7 +218,11 @@ class AnswerQuestionView(APIView):
 
         questions = room['questions']
         correct_answer = questions[question_index]['correctAnswer']
-        is_correct = answer == correct_answer
+        q_type = questions[question_index].get('type', 'mcq')
+        if q_type == 'identification':
+            is_correct = answer.strip().lower() == correct_answer.strip().lower()
+        else:
+            is_correct = answer == correct_answer
 
         # Score: faster answers = more points
         points = 0
@@ -211,10 +233,17 @@ class AnswerQuestionView(APIView):
 
         # Update player in Firestore
         player_ref = room_ref.collection('players').document(str(request.user.id))
-        player_ref.update({
-            'score': fs.Increment(points),
-            'answeredCount': fs.Increment(1),
-        })
+        if is_correct:
+            player_ref.update({
+                'score': fs.Increment(points),
+                'answeredCount': fs.Increment(1),
+                'streak': fs.Increment(1),
+            })
+        else:
+            player_ref.update({
+                'answeredCount': fs.Increment(1),
+                'streak': 0,
+            })
 
         # Award XP in Django
         if is_correct:
