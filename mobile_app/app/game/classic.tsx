@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StatusBar
@@ -16,7 +16,7 @@ const COLORS = {
   bgSecondary: '#1a1640',
   surface: '#252158',
   surfaceLight: '#3a3570',
-  
+
   purpleDeep: '#4C1D95',
   purpleDark: '#6D28D9',
   purplePrimary: '#7C3AED',
@@ -24,12 +24,12 @@ const COLORS = {
   purpleLight: '#A78BFA',
   purplePale: '#C4B5FD',
   purpleGhost: '#DDD6FE',
-  
+
   accent: '#22D3EE',
   success: '#10B981',
   warning: '#F59E0B',
   danger: '#EF4444',
-  
+
   textPrimary: '#FFFFFF',
   textSecondary: '#CBD5E1',
   textMuted: '#94A3B8',
@@ -54,6 +54,7 @@ export default function ClassicGameSetupScreen() {
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<'home' | 'create' | 'join'>('home');
   const [selectedFile, setSelectedFile] = useState<{ name: string; uri: string; mimeType: string } | null>(null);
+  const joinInputRef = useRef<any>(null);
 
   const pickDocument = async () => {
     try {
@@ -137,11 +138,11 @@ export default function ClassicGameSetupScreen() {
         style={styles.container}
       >
         <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
-        
+
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity 
-            style={styles.backButton} 
+          <TouchableOpacity
+            style={styles.backButton}
             onPress={() => router.back()}
             activeOpacity={0.7}
           >
@@ -160,15 +161,15 @@ export default function ClassicGameSetupScreen() {
           >
             <Ionicons name="trophy" size={48} color="white" />
           </LinearGradient>
-          
+
           <Text style={styles.title}>Classic Quiz Battle</Text>
           <Text style={styles.subtitle}>Challenge friends in real-time multiplayer quizzes</Text>
         </View>
 
         {/* Action Cards */}
         <View style={styles.actionCards}>
-          <TouchableOpacity 
-            style={styles.actionCard} 
+          <TouchableOpacity
+            style={styles.actionCard}
             onPress={() => setMode('create')}
             activeOpacity={0.8}
           >
@@ -189,8 +190,8 @@ export default function ClassicGameSetupScreen() {
             </LinearGradient>
           </TouchableOpacity>
 
-          <TouchableOpacity 
-            style={styles.actionCard} 
+          <TouchableOpacity
+            style={styles.actionCard}
             onPress={() => setMode('join')}
             activeOpacity={0.8}
           >
@@ -231,8 +232,8 @@ export default function ClassicGameSetupScreen() {
 
   // Create or Join Screen
   return (
-    <KeyboardAvoidingView 
-      style={styles.container} 
+    <KeyboardAvoidingView
+      style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <LinearGradient
@@ -242,15 +243,15 @@ export default function ClassicGameSetupScreen() {
         style={styles.fullScreen}
       >
         <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
-        
-        <ScrollView 
-          contentContainerStyle={styles.scrollContent} 
+
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
           {/* Header */}
           <View style={styles.formHeader}>
-            <TouchableOpacity 
-              style={styles.backButtonSmall} 
+            <TouchableOpacity
+              style={styles.backButtonSmall}
               onPress={() => setMode('home')}
               activeOpacity={0.7}
             >
@@ -271,12 +272,12 @@ export default function ClassicGameSetupScreen() {
                   </View>
                   <Text style={styles.sectionTitle}>Upload Study Material</Text>
                 </View>
-                
-                <TouchableOpacity 
+
+                <TouchableOpacity
                   style={[
                     styles.uploadBox,
                     selectedFile && styles.uploadBoxSuccess
-                  ]} 
+                  ]}
                   onPress={pickDocument}
                   activeOpacity={0.7}
                 >
@@ -318,7 +319,7 @@ export default function ClassicGameSetupScreen() {
                   </View>
                   <Text style={styles.sectionTitle}>Quiz Settings</Text>
                 </View>
-                
+
                 <View style={styles.settingsCard}>
                   <View style={styles.settingRow}>
                     <View style={styles.settingIconBox}>
@@ -326,29 +327,29 @@ export default function ClassicGameSetupScreen() {
                     </View>
                     <View style={styles.settingContent}>
                       <Text style={styles.settingLabel}>Number of Questions</Text>
-                      <TextInput 
-                        style={styles.settingInput} 
-                        value={questionCount} 
-                        onChangeText={setQuestionCount} 
+                      <TextInput
+                        style={styles.settingInput}
+                        value={questionCount}
+                        onChangeText={setQuestionCount}
                         keyboardType="numeric"
                         placeholder="5"
                         placeholderTextColor={COLORS.textMuted}
                       />
                     </View>
                   </View>
-                  
+
                   <View style={styles.settingDivider} />
-                  
+
                   <View style={styles.settingRow}>
                     <View style={styles.settingIconBox}>
                       <Ionicons name="time" size={16} color={COLORS.purpleVibrant} />
                     </View>
                     <View style={styles.settingContent}>
                       <Text style={styles.settingLabel}>Time per Question (seconds)</Text>
-                      <TextInput 
-                        style={styles.settingInput} 
-                        value={timePerQuestion} 
-                        onChangeText={setTimePerQuestion} 
+                      <TextInput
+                        style={styles.settingInput}
+                        value={timePerQuestion}
+                        onChangeText={setTimePerQuestion}
                         keyboardType="numeric"
                         placeholder="15"
                         placeholderTextColor={COLORS.textMuted}
@@ -388,18 +389,18 @@ export default function ClassicGameSetupScreen() {
               </View>
 
               {/* Create Button */}
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={[
                   styles.primaryBtn,
                   (!selectedFile || loading) && styles.primaryBtnDisabled
-                ]} 
-                onPress={handleCreate} 
+                ]}
+                onPress={handleCreate}
                 disabled={loading || !selectedFile}
                 activeOpacity={0.8}
               >
                 <LinearGradient
-                  colors={(!selectedFile || loading) 
-                    ? [COLORS.surfaceLight, COLORS.surface] 
+                  colors={(!selectedFile || loading)
+                    ? [COLORS.surfaceLight, COLORS.surface]
                     : [COLORS.purplePrimary, COLORS.purpleVibrant]
                   }
                   start={{ x: 0, y: 0 }}
@@ -426,32 +427,48 @@ export default function ClassicGameSetupScreen() {
                     <Ionicons name="key" size={24} color={COLORS.purpleVibrant} />
                   </View>
                   <Text style={styles.joinCodeLabel}>Enter Room Code</Text>
-                  <TextInput 
-                    style={styles.joinCodeInput} 
-                    placeholder="ABC123" 
-                    value={joinCode} 
-                    onChangeText={(text) => setJoinCode(text.toUpperCase())} 
+
+                  <TouchableOpacity activeOpacity={1} onPress={() => joinInputRef.current?.focus()}>
+                    <View style={styles.codeBoxRow}>
+                      {Array.from({ length: 6 }).map((_, i) => {
+                        const char = joinCode[i] || '';
+                        const isCursor = i === joinCode.length;
+                        return (
+                          <View key={i} style={[styles.codeBox, isCursor && styles.codeBoxActive]}>
+                            <Text style={styles.codeBoxText}>{char.toUpperCase()}</Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </TouchableOpacity>
+
+                  <TextInput
+                    ref={joinInputRef}
+                    style={styles.hiddenInput}
+                    value={joinCode}
+                    onChangeText={(t) => setJoinCode(t.replace(/\s/g, '').slice(0, 6))}
+                    autoCorrect={false}
+                    spellCheck={false}
                     autoCapitalize="characters"
-                    maxLength={6}
-                    placeholderTextColor={COLORS.textMuted}
                   />
+
                   <Text style={styles.joinCodeHint}>Ask your host for the 6-character code</Text>
                 </View>
               </View>
 
               {/* Join Button */}
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={[
                   styles.primaryBtn,
                   (!joinCode.trim() || loading) && styles.primaryBtnDisabled
-                ]} 
-                onPress={handleJoin} 
+                ]}
+                onPress={handleJoin}
                 disabled={loading || !joinCode.trim()}
                 activeOpacity={0.8}
               >
                 <LinearGradient
-                  colors={(!joinCode.trim() || loading) 
-                    ? [COLORS.surfaceLight, COLORS.surface] 
+                  colors={(!joinCode.trim() || loading)
+                    ? [COLORS.surfaceLight, COLORS.surface]
                     : [COLORS.purplePrimary, COLORS.purpleVibrant]
                   }
                   start={{ x: 0, y: 0 }}
@@ -477,13 +494,13 @@ export default function ClassicGameSetupScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { 
+  container: {
     flex: 1,
   },
   fullScreen: {
     flex: 1,
   },
-  
+
   // Header
   header: {
     paddingHorizontal: 24,
@@ -501,7 +518,7 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.semiBold,
     fontWeight: '600',
   },
-  
+
   // Hero Section
   heroSection: {
     alignItems: 'center',
@@ -538,7 +555,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
   },
-  
+
   // Action Cards
   actionCards: {
     paddingHorizontal: 24,
@@ -624,7 +641,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  
+
   // Features
   featuresSection: {
     paddingHorizontal: 24,
@@ -651,7 +668,7 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     textAlign: 'center',
   },
-  
+
   // Form Header
   formHeader: {
     flexDirection: 'row',
@@ -678,13 +695,13 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     flex: 1,
   },
-  
+
   // Scroll Content
   scrollContent: {
     paddingHorizontal: 24,
     paddingBottom: 32,
   },
-  
+
   // Sections
   section: {
     marginBottom: 24,
@@ -716,7 +733,7 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     letterSpacing: 0.5,
   },
-  
+
   // Upload Box
   uploadBox: {
     backgroundColor: COLORS.surface,
@@ -773,7 +790,7 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.medium,
     color: COLORS.textMuted,
   },
-  
+
   // Settings Card
   settingsCard: {
     backgroundColor: COLORS.surface,
@@ -823,7 +840,7 @@ const styles = StyleSheet.create({
   typeOptionActive: { backgroundColor: COLORS.purplePrimary, borderColor: COLORS.purplePrimary },
   typeOptionText: { color: COLORS.textMuted, fontSize: 12, fontWeight: '600' },
   typeOptionTextActive: { color: '#fff' },
-  
+
   // Join Code Card
   joinCodeCard: {
     backgroundColor: COLORS.surface,
@@ -849,26 +866,27 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     marginBottom: 12,
   },
-  joinCodeInput: {
-    width: '100%',
-    fontSize: 22,
-    fontFamily: FONTS.black,
-    fontWeight: '900',
-    color: COLORS.textPrimary,
+  codeBoxRow: { flexDirection: 'row', gap: 8, marginBottom: 8, justifyContent: 'center' },
+  codeBox: {
+    width: 44,
+    height: 52,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: COLORS.border,
     backgroundColor: COLORS.bgSecondary,
-    borderRadius: 12,
-    padding: 14,
-    textAlign: 'center',
-    letterSpacing: 4,
-    marginBottom: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
+  codeBoxActive: { borderColor: COLORS.purpleVibrant },
+  codeBoxText: { color: COLORS.textPrimary, fontSize: 22, fontFamily: FONTS.black, fontWeight: '900' },
+  hiddenInput: { position: 'absolute', opacity: 0, height: 1, width: 1 },
   joinCodeHint: {
     fontSize: 12,
     fontFamily: FONTS.regular,
     color: COLORS.textMuted,
     textAlign: 'center',
   },
-  
+
   // Primary Button
   primaryBtn: {
     borderRadius: 14,
