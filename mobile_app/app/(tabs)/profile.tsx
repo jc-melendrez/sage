@@ -249,6 +249,32 @@ export default function ProfileScreen() {
               </View>
               <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
             </TouchableOpacity>
+            {/* 🔐 Admin / Super Admin access
+                NOTE: currently visible to everyone since the backend doesn't yet expose
+                a role/is_admin flag to the app. Once `userData.is_admin` (or similar)
+                is returned by the API, wrap these two items in that check, e.g.
+                {userData?.is_admin && ( ...Admin Panel item... )}
+                {userData?.is_superadmin && ( ...Developer Panel item... )} */}
+            <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/admin')}>
+              <View style={styles.menuItemLeft}>
+                <Ionicons name="shield-checkmark-outline" size={22} color={COLORS.purpleVibrant} />
+                <Text style={styles.menuItemText}>Admin Panel</Text>
+              </View>
+              <View style={styles.menuItemRight}>
+                <Text style={styles.menuItemHint}>Dean / Program Chair</Text>
+                <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/superadmin')}>
+              <View style={styles.menuItemLeft}>
+                <Ionicons name="terminal-outline" size={22} color={COLORS.purpleDeep} />
+                <Text style={styles.menuItemText}>Developer Panel</Text>
+              </View>
+              <View style={styles.menuItemRight}>
+                <Text style={styles.menuItemHint}>Super Admin</Text>
+                <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+              </View>
+            </TouchableOpacity>
             <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={handleLogout}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="log-out-outline" size={22} color={COLORS.danger} />
@@ -486,6 +512,13 @@ const styles = StyleSheet.create({
 
   menuItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 18 },
   menuItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  menuItemRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  menuItemHint: { 
+    fontSize: 11, 
+    color: COLORS.textMuted, 
+    fontFamily: FONTS.medium,
+    fontWeight: '500',
+  },
   menuItemText: { 
     fontSize: 16, 
     color: COLORS.textPrimary, 
