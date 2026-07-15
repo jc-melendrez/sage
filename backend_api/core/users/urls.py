@@ -26,6 +26,11 @@ urlpatterns = [
     path('test-model-config/', views.TestModelConfigView.as_view(), name='test_model_config'),
     path('lessons/generate/', views.generate_lesson, name='generate_lesson'),
 
+    # --- Admin Routes ---
+    path('all/', views.ListUsersView.as_view(), name='list_users'),
+    path('promote/', views.PromoteUserView.as_view(), name='promote_user'),
+    path('demote/', views.DemoteUserView.as_view(), name='demote_user'),
+
     path('firebase-login/', views.FirebaseLoginView.as_view(), name='firebase_login'),
     
 ]

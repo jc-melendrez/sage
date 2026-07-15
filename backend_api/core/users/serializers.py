@@ -20,8 +20,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'username', 'email', 'first_name', 'last_name', # 🌟 Unhidden here!
-            'is_student', 'is_educator', 'level', 'current_xp', 
+            'id', 'username', 'email', 'first_name', 'last_name',
+            'is_student', 'is_educator', 'is_admin', 'level', 'current_xp', 
             'next_level_xp', 'total_points', 'streak',
             'courses_completed', 'study_hours', 'quizzes_taken', 
             'group_activities_count', 'badges', 'date_joined'
@@ -57,7 +57,7 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         # Fixed field names to match the actual User model
-        fields = ['id', 'username', 'email', 'is_student', 'is_educator', 'level', 'current_xp', 'total_points', 'streak', 'courses_completed', 'study_hours', 'quizzes_taken', 'group_activities_count']
+        fields = ['id', 'username', 'email', 'is_student', 'is_educator', 'is_admin', 'level', 'current_xp', 'total_points', 'streak', 'courses_completed', 'study_hours', 'quizzes_taken', 'group_activities_count']
 
 # Use this ONLY when a brand new user is signing up
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -76,7 +76,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             password=validated_data['password'],
             first_name=validated_data.get('first_name', ''), # 🌟 Safely grab the first name
             last_name=validated_data.get('last_name', ''),   # 🌟 Safely grab the last name
-            is_student=validated_data.get('is_student', False),
+            is_student=validated_data.get('is_student', True),
             is_educator=validated_data.get('is_educator', False)
         )
         return user

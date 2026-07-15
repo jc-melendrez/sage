@@ -23,6 +23,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework_simplejwt.tokens import RefreshToken
 from core.firebase import verify_firebase_token
 from .models import User
+from .permissions import IsAdmin, IsEducator
 from core.firestore_service import (
     get_user_profile, get_badges,
     create_study_group, join_group_by_code, get_user_groups,
@@ -79,6 +80,7 @@ class FirebaseLoginView(APIView):
                 firebase_uid=firebase_uid,
                 first_name=first_name,
                 last_name=last_name,
+                is_student=True,
                 password=None # Password is managed by Firebase now
             )
             # Sync the new user to Firestore immediately
@@ -96,7 +98,10 @@ class FirebaseLoginView(APIView):
                 "email": user.email,
                 "first_name": user.first_name,
                 "last_name": user.last_name,
-                "firebase_uid": user.firebase_uid
+                "firebase_uid": user.firebase_uid,
+                "is_student": user.is_student,
+                "is_educator": user.is_educator,
+                "is_admin": user.is_admin,
             }
         })
     
@@ -262,6 +267,81 @@ class TestModelConfigView(APIView):
             "message": "Model configuration loaded successfully"
         })
 
+
+class ListUsersView(APIView):
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def get(self, request):
+        search = request.query_params.get('search', '').strip()
+        users = User.objects.all()
+        if search:
+            users = users.filter(username__icontains=search) | users.filter(email__icontains=search)
+        users = users.order_by('-date_joined')[:50]
+        return Response([{
+            'id': u.id,
+            'username': u.username,
+            'email': u.email,
+            'first_name': u.first_name,
+            'last_name': u.last_name,
+            'is_student': u.is_student,
+            'is_educator': u.is_educator,
+            'is_admin': u.is_admin,
+            'date_joined': u.date_joined,
+        } for u in users])
+
+
+class PromoteUserView(APIView):
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def post(self, request):
+        user_id = request.data.get('user_id')
+        role = request.data.get('role')
+        if role not in ('educator', 'admin'):
+            return Response({'error': 'Role must be "educator" or "admin"'}, status=400)
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=404)
+        if role == 'educator':
+            user.is_educator = True
+            user.is_student = False
+        elif role == 'admin':
+            user.is_admin = True
+            user.is_student = False
+            user.is_educator = True
+        user.save()
+        sync_user_to_firestore(user)
+        return Response({
+            'message': f'{user.username} promoted to {role}',
+            'is_student': user.is_student,
+            'is_educator': user.is_educator,
+            'is_admin': user.is_admin,
+        })
+
+
+class DemoteUserView(APIView):
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def post(self, request):
+        user_id = request.data.get('user_id')
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=404)
+        if user.id == request.user.id:
+            return Response({'error': 'Cannot demote yourself'}, status=400)
+        user.is_educator = False
+        user.is_admin = False
+        user.is_student = True
+        user.save()
+        sync_user_to_firestore(user)
+        return Response({
+            'message': f'{user.username} demoted to student',
+            'is_student': user.is_student,
+            'is_educator': user.is_educator,
+            'is_admin': user.is_admin,
+        })
+
 def sync_user_to_firestore(user):
     try:
         db = get_firestore()
@@ -271,6 +351,9 @@ def sync_user_to_firestore(user):
             'username': user.username,
             'displayName': display_name,
             'email': user.email,
+            'is_student': user.is_student,
+            'is_educator': user.is_educator,
+            'is_admin': user.is_admin,
             'level': user.level,
             'current_xp': user.current_xp,
             'total_points': user.total_points,
