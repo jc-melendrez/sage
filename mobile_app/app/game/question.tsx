@@ -56,6 +56,8 @@ export default function QuestionScreen() {
   const [timeLeft, setTimeLeft] = useState(15);
   const [timePerQuestion, setTimePerQuestion] = useState(15);
   const [userId, setUserId] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pendingAnswer, setPendingAnswer] = useState<string | null>(null);
   const timerRef = useRef<any>(null);
   const startTimeRef = useRef<number>(Date.now());
   const standingsUnsubRef = useRef<(() => void) | null>(null);
@@ -175,21 +177,57 @@ export default function QuestionScreen() {
     if (selected) return;
     clearInterval(timerRef.current);
     setSelected(answer || '');
+    setPendingAnswer(answer);
+    setError(null);
     const timeTaken = (Date.now() - startTimeRef.current) / 1000;
     const actualIndex = questionOrder[currentIndex];
 
     try {
       const token = await getToken();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+
       const res = await fetch(`${API_BASE_URL}/game/answer/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ roomCode, questionIndex: actualIndex, answer: answer || '', timeTaken }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Server error ${res.status}`);
+      }
+
       const data = await res.json();
       setResult({ correct: data.correct, correctAnswer: data.correctAnswer, points: data.pointsAwarded });
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
+      const msg = e.name === 'AbortError'
+        ? 'Server timed out. Check your connection and try again.'
+        : e.message || 'Network error. Check your connection.';
+      setError(msg);
+      setSelected(null);
+      setPendingAnswer(null);
+      startTimeRef.current = Date.now();
+      setTimeLeft(timePerQuestion);
+      timerRef.current = setInterval(() => {
+        setTimeLeft(t => {
+          if (t <= 1) {
+            clearInterval(timerRef.current);
+            if (!selected) handleAnswer(null);
+            return 0;
+          }
+          return t - 1;
+        });
+      }, 1000);
     }
+  };
+
+  const handleRetry = () => {
+    setError(null);
+    handleAnswer(pendingAnswer);
   };
 
   const handleNext = async () => {
@@ -253,6 +291,15 @@ export default function QuestionScreen() {
           <Text style={styles.timerText}>{timeLeft}s</Text>
         </View>
       </View>
+
+      {error ? (
+        <View style={styles.errorContainer}>
+          <Text style={styles.errorText}>{error}</Text>
+          <TouchableOpacity style={styles.retryBtn} onPress={handleRetry}>
+            <Text style={styles.retryBtnText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
 
       <Text style={styles.question}>{question.question}</Text>
 
@@ -323,6 +370,24 @@ const styles = StyleSheet.create({
   },
   submitBtn: { backgroundColor: '#7F77DD', borderRadius: 12, padding: 16, alignItems: 'center' },
   nextBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+  errorContainer: {
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.4)',
+  },
+  errorText: { color: '#FCA5A5', fontSize: 14, marginBottom: 12, textAlign: 'center' },
+  retryBtn: {
+    backgroundColor: '#e53e3e',
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+    alignItems: 'center',
+    alignSelf: 'center',
+  },
+  retryBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
 
   resultContainer: {
     flex: 1,
