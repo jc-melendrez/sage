@@ -124,7 +124,7 @@ Content:
                     'response_format': {"type": "json_object"},
                     'max_tokens': 3000,
                 },
-                timeout=45
+                timeout=20
             )
             return json.loads(response.json()['choices'][0]['message']['content'])
         except Exception as e:
@@ -207,78 +207,101 @@ class AnswerQuestionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        room_code = request.data.get('roomCode')
-        question_index = int(request.data.get('questionIndex'))
-        answer = request.data.get('answer')
-        time_taken = float(request.data.get('timeTaken', 15))
+        try:
+            room_code = request.data.get('roomCode')
+            question_index = int(request.data.get('questionIndex'))
+            answer = request.data.get('answer', '')
+            time_taken = float(request.data.get('timeTaken', 15))
 
-        db = get_firestore()
-        room_ref = db.collection('gameRooms').document(room_code)
-        room = room_ref.get().to_dict()
+            db = get_firestore()
+            room_ref = db.collection('gameRooms').document(room_code)
+            room_doc = room_ref.get()
 
-        questions = room['questions']
-        correct_answer = questions[question_index]['correctAnswer']
-        q_type = questions[question_index].get('type', 'mcq')
-        if q_type == 'identification':
-            is_correct = answer.strip().lower() == correct_answer.strip().lower()
-        else:
-            is_correct = answer == correct_answer
+            if not room_doc.exists:
+                return Response({'error': 'Game room not found'}, status=404)
 
-        # Score: faster answers = more points
-        points = 0
-        if is_correct:
-            time_per_q = room.get('timePerQuestion', 15)
-            points = int(1000 * (1 - (time_taken / time_per_q) * 0.5))
-            points = max(points, 500)
+            room = room_doc.to_dict()
+            questions = room.get('questions', [])
 
-        # Update player in Firestore
-        player_ref = room_ref.collection('players').document(str(request.user.id))
-        if is_correct:
-            player_ref.update({
-                'score': fs.Increment(points),
-                'answeredCount': fs.Increment(1),
-                'streak': fs.Increment(1),
+            if question_index < 0 or question_index >= len(questions):
+                return Response({'error': 'Invalid question index'}, status=400)
+
+            correct_answer = questions[question_index]['correctAnswer']
+            q_type = questions[question_index].get('type', 'mcq')
+            if q_type == 'identification':
+                is_correct = answer.strip().lower() == correct_answer.strip().lower()
+            else:
+                is_correct = answer == correct_answer
+
+            # Score: faster answers = more points
+            points = 0
+            if is_correct:
+                time_per_q = room.get('timePerQuestion', 15)
+                points = int(1000 * (1 - (time_taken / time_per_q) * 0.5))
+                points = max(points, 500)
+
+            # Update player in Firestore
+            player_ref = room_ref.collection('players').document(str(request.user.id))
+            if is_correct:
+                player_ref.update({
+                    'score': fs.Increment(points),
+                    'answeredCount': fs.Increment(1),
+                    'streak': fs.Increment(1),
+                })
+            else:
+                player_ref.update({
+                    'answeredCount': fs.Increment(1),
+                    'streak': 0,
+                })
+
+            # Award XP in Django
+            if is_correct:
+                request.user.add_xp(10)
+
+            return Response({
+                'correct': is_correct,
+                'correctAnswer': correct_answer,
+                'pointsAwarded': points,
             })
-        else:
-            player_ref.update({
-                'answeredCount': fs.Increment(1),
-                'streak': 0,
-            })
-
-        # Award XP in Django
-        if is_correct:
-            request.user.add_xp(10)
-
-        return Response({
-            'correct': is_correct,
-            'correctAnswer': correct_answer,
-            'pointsAwarded': points,
-        })
+        except ValueError as e:
+            return Response({'error': f'Invalid request data: {e}'}, status=400)
+        except Exception as e:
+            print(f'[AnswerQuestion Error] {e}')
+            return Response({'error': 'Failed to process answer'}, status=500)
 
 
 class FinishGameView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        room_code = request.data.get('roomCode')
-        db = get_firestore()
+        try:
+            room_code = request.data.get('roomCode')
+            if not room_code:
+                return Response({'error': 'roomCode is required'}, status=400)
 
-        player_ref = db.collection('gameRooms').document(room_code)\
-                       .collection('players').document(str(request.user.id))
-        player_ref.update({'isFinished': True})
+            db = get_firestore()
+            room_ref = db.collection('gameRooms').document(room_code)
 
-        # Check if all players are finished
-        players = db.collection('gameRooms').document(room_code)\
-                    .collection('players').stream()
-        all_finished = all(p.to_dict().get('isFinished', False) for p in players)
+            if not room_ref.get().exists:
+                return Response({'error': 'Game room not found'}, status=404)
 
-        if all_finished:
-            db.collection('gameRooms').document(room_code).update({
-                'status': 'finished',
-                'finishedAt': fs.SERVER_TIMESTAMP,
+            player_ref = room_ref.collection('players').document(str(request.user.id))
+            player_ref.update({'isFinished': True})
+
+            # Check if all players are finished
+            players = room_ref.collection('players').stream()
+            all_finished = all(p.to_dict().get('isFinished', False) for p in players)
+
+            if all_finished:
+                room_ref.update({
+                    'status': 'finished',
+                    'finishedAt': fs.SERVER_TIMESTAMP,
+                })
+
+            return Response({
+                'message': 'Marked as finished',
+                'allFinished': all_finished,
             })
-
-        return Response({
-            'message': 'Marked as finished',
-            'allFinished': all_finished,
-        })
+        except Exception as e:
+            print(f'[FinishGame Error] {e}')
+            return Response({'error': 'Failed to finish game'}, status=500)
