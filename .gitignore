@@ -70,6 +70,8 @@ venv.bak/
 SETUP_GUIDE.md
 FRONTEND_BACKEND_CONNECTION.md
 
+db.sqlite3
+
 serviceAccountKey.json
 
 .agents/
