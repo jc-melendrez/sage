@@ -58,10 +58,17 @@ export default function QuestionScreen() {
   const [userId, setUserId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingAnswer, setPendingAnswer] = useState<string | null>(null);
+  const [powerups, setPowerups] = useState({ freeze: 0, hint: 0, doublePoints: 0, shield: 0 });
+  const [activePowerups, setActivePowerups] = useState({ hint: false, doublePoints: false, shield: false });
+  const [hintedChoices, setHintedChoices] = useState<string[]>([]);
+  const [powerupEarned, setPowerupEarned] = useState<string | null>(null);
+  const [isFrozen, setIsFrozen] = useState(false);
   const timerRef = useRef<any>(null);
   const startTimeRef = useRef<number>(Date.now());
   const standingsUnsubRef = useRef<(() => void) | null>(null);
   const previousStateRef = useRef<{ [id: string]: { rank: number; score: number } }>({});
+  const floatAnim = useRef(new Animated.Value(0)).current;
+  const floatScale = useRef(new Animated.Value(0)).current;
   
 
   useEffect(() => {
@@ -78,6 +85,8 @@ export default function QuestionScreen() {
       const player = await firestore().collection('gameRooms').doc(roomCode)
         .collection('players').doc(String(user?.id)).get();
       setQuestionOrder(player.data()?.questionOrder || []);
+      const pPowerups = player.data()?.powerups;
+      if (pPowerups) setPowerups(pPowerups);
     };
     init();
 
@@ -115,6 +124,38 @@ export default function QuestionScreen() {
 
     return () => { unsub(); };
   }, []);
+
+  useEffect(() => {
+    if (!userId) return;
+    const unsub = firestore()
+      .collection('gameRooms').doc(roomCode)
+      .collection('players').doc(String(userId))
+      .onSnapshot(snap => {
+        const p = snap.data();
+        if (p?.powerups) setPowerups(p.powerups);
+      });
+    return () => { unsub(); };
+  }, [userId]);
+
+  useEffect(() => {
+    if (!powerupEarned) {
+      floatAnim.setValue(0);
+      floatScale.setValue(0);
+      return;
+    }
+    // Floating bounce animation
+    floatAnim.setValue(0);
+    floatScale.setValue(0);
+    Animated.parallel([
+      Animated.spring(floatAnim, { toValue: 1, friction: 5, tension: 80, useNativeDriver: true }),
+      Animated.sequence([
+        Animated.spring(floatScale, { toValue: 1.3, friction: 4, tension: 100, useNativeDriver: true }),
+        Animated.spring(floatScale, { toValue: 1, friction: 5, tension: 80, useNativeDriver: true }),
+      ]),
+    ]).start();
+    const t = setTimeout(() => setPowerupEarned(null), 2500);
+    return () => clearTimeout(t);
+  }, [powerupEarned]);
 
   useEffect(() => {
     if (questions.length === 0) return;
@@ -173,12 +214,61 @@ export default function QuestionScreen() {
     }
   };
 
+  const handleFreeze = async () => {
+    if (powerups.freeze <= 0 || selected || isFrozen) return;
+    clearInterval(timerRef.current);
+    setIsFrozen(true);
+    setPowerups(p => ({ ...p, freeze: p.freeze - 1 }));
+    const user = await getCurrentUser();
+    const playerRef = firestore().collection('gameRooms').doc(roomCode)
+      .collection('players').doc(String(user?.id));
+    playerRef.update({ 'powerups.freeze': firestore.FieldValue.increment(-1) });
+  };
+
+  const handleHint = async () => {
+    if (powerups.hint <= 0 || selected || activePowerups.hint) return;
+    setPowerups(p => ({ ...p, hint: p.hint - 1 }));
+    setActivePowerups(p => ({ ...p, hint: true }));
+    // Pick 2 wrong choices to hide for MCQ
+    const q = questions[questionOrder[currentIndex]];
+    if (q?.type === 'mcq' && q.choices) {
+      const wrong = q.choices.filter((c: string) => c !== q.correctAnswer);
+      const shuffled = wrong.sort(() => Math.random() - 0.5);
+      setHintedChoices(shuffled.slice(0, 2));
+    }
+    const user = await getCurrentUser();
+    const playerRef = firestore().collection('gameRooms').doc(roomCode)
+      .collection('players').doc(String(user?.id));
+    playerRef.update({ 'powerups.hint': firestore.FieldValue.increment(-1) });
+  };
+
+  const handleDoublePoints = async () => {
+    if (powerups.doublePoints <= 0 || selected || activePowerups.doublePoints) return;
+    setPowerups(p => ({ ...p, doublePoints: p.doublePoints - 1 }));
+    setActivePowerups(p => ({ ...p, doublePoints: true }));
+    const user = await getCurrentUser();
+    const playerRef = firestore().collection('gameRooms').doc(roomCode)
+      .collection('players').doc(String(user?.id));
+    playerRef.update({ 'powerups.doublePoints': firestore.FieldValue.increment(-1) });
+  };
+
+  const handleShield = async () => {
+    if (powerups.shield <= 0 || selected || activePowerups.shield) return;
+    setPowerups(p => ({ ...p, shield: p.shield - 1 }));
+    setActivePowerups(p => ({ ...p, shield: true }));
+    const user = await getCurrentUser();
+    const playerRef = firestore().collection('gameRooms').doc(roomCode)
+      .collection('players').doc(String(user?.id));
+    playerRef.update({ 'powerups.shield': firestore.FieldValue.increment(-1) });
+  };
+
   const handleAnswer = async (answer: string | null) => {
     if (selected) return;
     clearInterval(timerRef.current);
     setSelected(answer || '');
     setPendingAnswer(answer);
     setError(null);
+    setPowerupEarned(null);
     const timeTaken = (Date.now() - startTimeRef.current) / 1000;
     const actualIndex = questionOrder[currentIndex];
 
@@ -190,7 +280,15 @@ export default function QuestionScreen() {
       const res = await fetch(`${API_BASE_URL}/game/answer/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ roomCode, questionIndex: actualIndex, answer: answer || '', timeTaken }),
+        body: JSON.stringify({
+          roomCode,
+          questionIndex: actualIndex,
+          answer: answer || '',
+          timeTaken,
+          useHint: activePowerups.hint ? 'true' : 'false',
+          useDoublePoints: activePowerups.doublePoints ? 'true' : 'false',
+          useShield: activePowerups.shield ? 'true' : 'false',
+        }),
         signal: controller.signal,
       });
       clearTimeout(timeout);
@@ -202,6 +300,10 @@ export default function QuestionScreen() {
 
       const data = await res.json();
       setResult({ correct: data.correct, correctAnswer: data.correctAnswer, points: data.pointsAwarded });
+      if (data.powerupEarned) {
+        const icons: Record<string, string> = { freeze: '❄️', hint: '💡', doublePoints: '⚡', shield: '🛡️' };
+        setPowerupEarned(icons[data.powerupEarned] || data.powerupEarned);
+      }
     } catch (e: any) {
       console.error(e);
       const msg = e.name === 'AbortError'
@@ -246,10 +348,14 @@ export default function QuestionScreen() {
     setSelected(null);
     setResult(null);
     setTypedAnswer('');
+    setIsFrozen(false);
+    setActivePowerups({ hint: false, doublePoints: false, shield: false });
+    setHintedChoices([]);
+    setPowerupEarned(null);
   };
 
   if (questions.length === 0 || questionOrder.length === 0) {
-    return <View style={styles.container}><Text style={styles.title}>Loading questions...</Text></View>;
+    return <View style={styles.container}><Text style={styles.progress}>Loading questions...</Text></View>;
   }
 
   const actualIndex = questionOrder[currentIndex];
@@ -262,6 +368,9 @@ export default function QuestionScreen() {
           <Text style={styles.resultBigIcon}>{result.correct ? '✅' : '❌'}</Text>
           <Text style={styles.resultBigText}>{result.correct ? 'Correct!' : 'Wrong!'}</Text>
           {result.correct && <Text style={styles.resultPoints}>+{result.points} pts</Text>}
+          {activePowerups.doublePoints && <Text style={styles.powerupUsedText}>⚡ 2x applied</Text>}
+          {activePowerups.shield && <Text style={[styles.powerupUsedText, { color: '#67E8F9' }]}>🛡️ Shield used</Text>}
+          {activePowerups.hint && <Text style={[styles.powerupUsedText, { color: '#FDE68A' }]}>💡 Hint used</Text>}
         </View>
 
         {biggestMover && <Text style={styles.moverBanner}>🚀 {biggestMover.name} jumped {biggestMover.jump} spots!</Text>}
@@ -287,10 +396,84 @@ export default function QuestionScreen() {
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.progress}>{currentIndex + 1} / {questionOrder.length}</Text>
-        <View style={[styles.timerBadge, timeLeft <= 5 && { backgroundColor: '#e53e3e' }]}>
-          <Text style={styles.timerText}>{timeLeft}s</Text>
+        <View style={[styles.timerBadge, isFrozen && { backgroundColor: '#0E7490' }, !isFrozen && timeLeft <= 5 && { backgroundColor: '#e53e3e' }]}>
+          <Text style={styles.timerText}>{isFrozen ? '❄️ FROZEN' : `${timeLeft}s`}</Text>
         </View>
       </View>
+
+      {/* Powerup Earned — Floating Icon */}
+      {powerupEarned && (
+        <Animated.View style={[styles.floatOverlay, { opacity: floatAnim, transform: [{ translateY: floatAnim.interpolate({ inputRange: [0, 1], outputRange: [60, 0] }) }, { scale: floatScale }] }]}>
+          <Text style={styles.floatIcon}>{powerupEarned}</Text>
+          <Text style={styles.floatLabel}>Powerup earned!</Text>
+        </Animated.View>
+      )}
+
+      {/* Powerup Bar — only shows owned powerups */}
+      {!selected && !result && (powerups.freeze > 0 || powerups.hint > 0 || powerups.doublePoints > 0 || powerups.shield > 0) && (
+        <View style={styles.powerupBar}>
+          {powerups.freeze > 0 && (
+            <TouchableOpacity
+              style={[styles.powerupBtn, isFrozen && styles.powerupBtnActive]}
+              onPress={handleFreeze}
+              disabled={!!selected || isFrozen}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.powerupIcon}>❄️</Text>
+              <Text style={[styles.powerupLabel, isFrozen && { color: '#67E8F9' }]}>Freeze</Text>
+            </TouchableOpacity>
+          )}
+          {powerups.hint > 0 && (
+            <TouchableOpacity
+              style={[styles.powerupBtn, activePowerups.hint && styles.powerupBtnActive]}
+              onPress={handleHint}
+              disabled={!!selected || activePowerups.hint}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.powerupIcon}>💡</Text>
+              <Text style={[styles.powerupLabel, activePowerups.hint && { color: '#FDE68A' }]}>Hint</Text>
+            </TouchableOpacity>
+          )}
+          {powerups.doublePoints > 0 && (
+            <TouchableOpacity
+              style={[styles.powerupBtn, activePowerups.doublePoints && styles.powerupBtnActive]}
+              onPress={handleDoublePoints}
+              disabled={!!selected || activePowerups.doublePoints}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.powerupIcon}>⚡</Text>
+              <Text style={[styles.powerupLabel, activePowerups.doublePoints && { color: '#FDE68A' }]}>2x Pts</Text>
+            </TouchableOpacity>
+          )}
+          {powerups.shield > 0 && (
+            <TouchableOpacity
+              style={[styles.powerupBtn, activePowerups.shield && styles.powerupBtnActive]}
+              onPress={handleShield}
+              disabled={!!selected || activePowerups.shield}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.powerupIcon}>🛡️</Text>
+              <Text style={[styles.powerupLabel, activePowerups.shield && { color: '#67E8F9' }]}>Shield</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+
+      {/* Active Powerup Banners */}
+      {!selected && !result && (activePowerups.doublePoints || activePowerups.shield) && (
+        <View style={styles.powerupBannerRow}>
+          {activePowerups.doublePoints && (
+            <View style={[styles.powerupBanner, { backgroundColor: 'rgba(245, 158, 11, 0.2)', borderColor: '#F59E0B' }]}>
+              <Text style={styles.powerupBannerText}>⚡ 2x Points Active!</Text>
+            </View>
+          )}
+          {activePowerups.shield && (
+            <View style={[styles.powerupBanner, { backgroundColor: 'rgba(34, 211, 238, 0.2)', borderColor: '#22D3EE' }]}>
+              <Text style={styles.powerupBannerText}>🛡️ Shield Active!</Text>
+            </View>
+          )}
+        </View>
+      )}
 
       {error ? (
         <View style={styles.errorContainer}>
@@ -305,6 +488,11 @@ export default function QuestionScreen() {
 
       {question.type === 'identification' ? (
         <View>
+          {activePowerups.hint && question.correctAnswer && (
+            <View style={styles.hintHint}>
+              <Text style={styles.hintHintText}>💡 Starts with: "{question.correctAnswer.charAt(0).toUpperCase()}"</Text>
+            </View>
+          )}
           <View style={styles.boxRow}>
             {(() => {
               let idx = 0;
@@ -338,7 +526,7 @@ export default function QuestionScreen() {
             <Text style={styles.nextBtnText}>Submit</Text>
           </TouchableOpacity>
         </View>
-      ) : question.choices.map((choice: string) => (
+      ) : question.choices.filter((choice: string) => !hintedChoices.includes(choice)).map((choice: string) => (
         <TouchableOpacity
           key={choice}
           style={[styles.choice, { backgroundColor: choice === selected ? '#7F77DD' : '#1e1b4b' }]}
@@ -415,6 +603,12 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
   },
+  powerupUsedText: {
+    color: '#F59E0B',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 4,
+  },
   resultLeaderboard: {
     flex: 1,
     backgroundColor: '#1e1b4b',
@@ -467,4 +661,88 @@ const styles = StyleSheet.create({
   moveUp: { color: '#10B981', fontSize: 12, fontWeight: '700', marginRight: 6 },
   moveDown: { color: '#EF4444', fontSize: 12, fontWeight: '700', marginRight: 6 },
   moverBanner: { color: '#fff', fontSize: 14, fontWeight: '700', textAlign: 'center', marginBottom: 10 },
+
+  // Powerup styles
+  powerupBar: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 10,
+    marginBottom: 20,
+  },
+  powerupBtn: {
+    alignItems: 'center',
+    backgroundColor: '#1e1b4b',
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(139, 92, 246, 0.2)',
+    minWidth: 64,
+  },
+  powerupBtnActive: {
+    backgroundColor: '#0E7490',
+    borderColor: '#67E8F9',
+    opacity: 1,
+  },
+  powerupIcon: {
+    fontSize: 20,
+    marginBottom: 2,
+  },
+  powerupLabel: {
+    color: '#94A3B8',
+    fontSize: 9,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  powerupBannerRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  powerupBanner: {
+    flex: 1,
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    alignItems: 'center',
+  },
+  powerupBannerText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  floatOverlay: {
+    alignItems: 'center',
+    marginBottom: 8,
+    paddingVertical: 12,
+    borderRadius: 16,
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+  },
+  floatIcon: {
+    fontSize: 40,
+    marginBottom: 4,
+  },
+  floatLabel: {
+    color: '#10B981',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  hintHint: {
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.3)',
+  },
+  hintHintText: {
+    color: '#FDE68A',
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
 });

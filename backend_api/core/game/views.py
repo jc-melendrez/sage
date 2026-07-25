@@ -1,4 +1,5 @@
 import random
+import random as rng
 import string
 import json
 import requests
@@ -68,6 +69,7 @@ class CreateGameView(APIView):
             'questionOrder': [],
             'isReady': True,
             'isFinished': False,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
         })
 
         return Response({
@@ -157,6 +159,7 @@ class JoinGameView(APIView):
             'questionOrder': [],
             'isReady': True,
             'isFinished': False,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
         })
 
         return Response({
@@ -240,19 +243,66 @@ class AnswerQuestionView(APIView):
                 points = int(1000 * (1 - (time_taken / time_per_q) * 0.5))
                 points = max(points, 500)
 
+            # Parse powerup usage flags
+            use_hint = request.data.get('useHint', 'false') == 'true'
+            use_double = request.data.get('useDoublePoints', 'false') == 'true'
+            use_shield = request.data.get('useShield', 'false') == 'true'
+
             # Update player in Firestore
             player_ref = room_ref.collection('players').document(str(request.user.id))
+            player_data = player_ref.get().to_dict()
+
             if is_correct:
-                player_ref.update({
+                current_streak = player_data.get('streak', 0)
+                new_streak = current_streak + 1
+
+                # Apply 2x points powerup (frontend already decremented count)
+                if use_double:
+                    points *= 2
+
+                updates = {
                     'score': fs.Increment(points),
                     'answeredCount': fs.Increment(1),
                     'streak': fs.Increment(1),
-                })
+                }
+
+                # Random powerup reward (30% base + 5% per streak, capped at 45%)
+                # Max 1 of each type — if already owned, give consolation 50 pts
+                powerup_earned = None
+                current_powerups = player_data.get('powerups', {})
+                trigger_chance = min(0.30 + (new_streak * 0.05), 0.45)
+                if rng.random() < trigger_chance:
+                    roll = rng.random()
+                    if roll < 0.40:
+                        ptype = 'freeze'
+                    elif roll < 0.70:
+                        ptype = 'hint'
+                    elif roll < 0.90:
+                        ptype = 'doublePoints'
+                    else:
+                        ptype = 'shield'
+
+                    if current_powerups.get(ptype, 0) == 0:
+                        updates[f'powerups.{ptype}'] = fs.Increment(1)
+                        powerup_earned = ptype
+                    else:
+                        # Already have one — consolation bonus
+                        updates['score'] = fs.Increment(50)
+                        points += 50
+
+                player_ref.update(updates)
             else:
-                player_ref.update({
+                updates = {
                     'answeredCount': fs.Increment(1),
-                    'streak': 0,
-                })
+                }
+
+                # Apply shield powerup — protect streak (frontend already decremented count)
+                if use_shield:
+                    pass  # streak stays unchanged
+                else:
+                    updates['streak'] = 0
+
+                player_ref.update(updates)
 
             # Award XP in Django
             if is_correct:
@@ -262,6 +312,7 @@ class AnswerQuestionView(APIView):
                 'correct': is_correct,
                 'correctAnswer': correct_answer,
                 'pointsAwarded': points,
+                'powerupEarned': powerup_earned,
             })
         except ValueError as e:
             return Response({'error': f'Invalid request data: {e}'}, status=400)
