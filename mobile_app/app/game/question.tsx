@@ -1,9 +1,44 @@
 import { useEffect, useState, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Animated } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Animated, Dimensions } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getToken, getCurrentUser } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
+
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+// 🎨 Unified Purple Palette (Dark Theme Variant)
+const COLORS = {
+  bg: '#0f0c29',
+  bgSecondary: '#1a1640',
+  surface: '#1e1b4b',
+  surfaceLight: '#2d2a5e',
+  cardBg: '#232052',
+  purpleDeep: '#4C1D95',
+  purpleDark: '#6D28D9',
+  purplePrimary: '#7C3AED',
+  purpleVibrant: '#8B5CF6',
+  purpleLight: '#A78BFA',
+  accent: '#7F77DD',
+  accentBright: '#22D3EE',
+  success: '#10B981',
+  warning: '#F59E0B',
+  danger: '#EF4444',
+  textPrimary: '#FFFFFF',
+  textSecondary: '#CBD5E1',
+  textMuted: '#94A3B8',
+  border: 'rgba(139, 92, 246, 0.2)',
+  cardBorder: 'rgba(127, 119, 221, 0.3)',
+};
+
+const FONTS = {
+  black: 'Montserrat-Black',
+  extraBold: 'Montserrat-ExtraBold',
+  bold: 'Montserrat-Bold',
+  semiBold: 'Montserrat-SemiBold',
+  medium: 'Montserrat-Medium',
+  regular: 'Montserrat-Regular',
+};
 
 function StandingsRow({ player, index, isYou }: { player: any; index: number; isYou: boolean }) {
   const anim = useRef(new Animated.Value(0)).current;
@@ -63,13 +98,21 @@ export default function QuestionScreen() {
   const [hintedChoices, setHintedChoices] = useState<string[]>([]);
   const [powerupEarned, setPowerupEarned] = useState<string | null>(null);
   const [isFrozen, setIsFrozen] = useState(false);
+  const [showStandings, setShowStandings] = useState(false);
+  const standingsAnim = useRef(new Animated.Value(0)).current;
   const timerRef = useRef<any>(null);
   const startTimeRef = useRef<number>(Date.now());
   const standingsUnsubRef = useRef<(() => void) | null>(null);
   const previousStateRef = useRef<{ [id: string]: { rank: number; score: number } }>({});
   const floatAnim = useRef(new Animated.Value(0)).current;
   const floatScale = useRef(new Animated.Value(0)).current;
-  
+
+  // ─── Flash Card Animation Refs ───────────────────────────────────────────────
+  const cardTranslateX = useRef(new Animated.Value(0)).current;
+  const cardRotateY = useRef(new Animated.Value(0)).current;
+  const cardOpacity = useRef(new Animated.Value(1)).current;
+  const resultFlipAnim = useRef(new Animated.Value(0)).current;
+  const isAnimatingRef = useRef(false);
 
   useEffect(() => {
     const init = async () => {
@@ -182,6 +225,34 @@ export default function QuestionScreen() {
       boxRefs.current = [];
     }
   }, [currentIndex, questions]);
+
+  // ─── Card entrance animation when question changes ───────────────────────────
+  useEffect(() => {
+    if (questions.length === 0 || questionOrder.length === 0) return;
+    // Animate the new card sliding in from the right
+    cardTranslateX.setValue(SCREEN_WIDTH * 0.85);
+    cardRotateY.setValue(12);
+    cardOpacity.setValue(0);
+    Animated.parallel([
+      Animated.spring(cardTranslateX, { toValue: 0, friction: 8, tension: 60, useNativeDriver: true }),
+      Animated.timing(cardRotateY, { toValue: 0, duration: 350, useNativeDriver: true }),
+      Animated.timing(cardOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+    ]).start(() => {
+      isAnimatingRef.current = false;
+    });
+  }, [currentIndex]);
+
+  // ─── Result feedback banner animation ─────────────────────────────────────────
+  useEffect(() => {
+    if (result) {
+      resultFlipAnim.setValue(0);
+      Animated.timing(resultFlipAnim, {
+        toValue: 1,
+        duration: 400,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [result]);
 
   const joinWithSpaces = (chars: string[]) => {
     let result = '';
@@ -332,6 +403,17 @@ export default function QuestionScreen() {
     handleAnswer(pendingAnswer);
   };
 
+  const toggleStandings = () => {
+    const toValue = showStandings ? 0 : 1;
+    setShowStandings(!showStandings);
+    Animated.spring(standingsAnim, {
+      toValue,
+      friction: 8,
+      tension: 60,
+      useNativeDriver: true,
+    }).start();
+  };
+
   const handleNext = async () => {
     if (currentIndex + 1 >= questionOrder.length) {
       // Done — finish game
@@ -344,14 +426,43 @@ export default function QuestionScreen() {
       router.replace({ pathname: '/game/final', params: { roomCode } });
       return;
     }
-    setCurrentIndex(i => i + 1);
-    setSelected(null);
-    setResult(null);
-    setTypedAnswer('');
-    setIsFrozen(false);
-    setActivePowerups({ hint: false, doublePoints: false, shield: false });
-    setHintedChoices([]);
-    setPowerupEarned(null);
+
+    // ─── Flash card exit animation: slide + rotate off to the left ───────────
+    isAnimatingRef.current = true;
+    Animated.parallel([
+      Animated.timing(cardTranslateX, {
+        toValue: -SCREEN_WIDTH * 0.9,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.timing(cardRotateY, {
+        toValue: -14,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.timing(cardOpacity, {
+        toValue: 0,
+        duration: 250,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      // Reset card position for entrance
+      cardTranslateX.setValue(SCREEN_WIDTH * 0.85);
+      cardRotateY.setValue(12);
+      cardOpacity.setValue(0);
+
+      // ─── Original state transitions (unchanged logic) ──────────────────────
+      setCurrentIndex(i => i + 1);
+      setSelected(null);
+      setResult(null);
+      setTypedAnswer('');
+      setIsFrozen(false);
+      setShowStandings(false);
+      standingsAnim.setValue(0);
+      setActivePowerups({ hint: false, doublePoints: false, shield: false });
+      setHintedChoices([]);
+      setPowerupEarned(null);
+    });
   };
 
   if (questions.length === 0 || questionOrder.length === 0) {
@@ -361,45 +472,64 @@ export default function QuestionScreen() {
   const actualIndex = questionOrder[currentIndex];
   const question = questions[actualIndex];
 
-  if (result) {
-    return (
-      <View style={styles.resultContainer}>
-        <View style={styles.resultTop}>
-          <Text style={styles.resultBigIcon}>{result.correct ? '✅' : '❌'}</Text>
-          <Text style={styles.resultBigText}>{result.correct ? 'Correct!' : 'Wrong!'}</Text>
-          {result.correct && <Text style={styles.resultPoints}>+{result.points} pts</Text>}
-          {activePowerups.doublePoints && <Text style={styles.powerupUsedText}>⚡ 2x applied</Text>}
-          {activePowerups.shield && <Text style={[styles.powerupUsedText, { color: '#67E8F9' }]}>🛡️ Shield used</Text>}
-          {activePowerups.hint && <Text style={[styles.powerupUsedText, { color: '#FDE68A' }]}>💡 Hint used</Text>}
-        </View>
+  // Compute player's current rank for the header badge
+  const playerRank = standings.findIndex(p => String(p.id) === String(userId)) + 1;
 
-        {biggestMover && <Text style={styles.moverBanner}>🚀 {biggestMover.name} jumped {biggestMover.jump} spots!</Text>}
-        <View style={styles.resultLeaderboard}>
-          <Text style={styles.standingsTitle}>Standings</Text>
-          <ScrollView showsVerticalScrollIndicator={false}>
-            {standings.map((p, i) => (
-              <StandingsRow key={p.id} player={p} index={i} isYou={String(p.id) === String(userId)} />
-            ))}
-          </ScrollView>
-        </View>
-
-        <TouchableOpacity style={styles.nextBtnFull} onPress={handleNext}>
-          <Text style={styles.nextBtnText}>
-            {currentIndex + 1 >= questionOrder.length ? 'Finish' : 'Next →'}
-          </Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
+  // ─── Single Unified View (No Separate Result Screen) ─────────────────────────
   return (
     <View style={styles.container}>
+      {/* ─── Header: Progress | Standings Button | Timer ─────────────────────── */}
       <View style={styles.header}>
         <Text style={styles.progress}>{currentIndex + 1} / {questionOrder.length}</Text>
+
+        {/* Standings Toggle Button — always visible */}
+        <TouchableOpacity
+          style={[styles.standingsHeaderBtn, showStandings && styles.standingsHeaderBtnActive]}
+          onPress={toggleStandings}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.standingsHeaderIcon}>🏆</Text>
+          {playerRank > 0 && (
+            <Text style={styles.standingsHeaderRank}>#{playerRank}</Text>
+          )}
+        </TouchableOpacity>
+
         <View style={[styles.timerBadge, isFrozen && { backgroundColor: '#0E7490' }, !isFrozen && timeLeft <= 5 && { backgroundColor: '#e53e3e' }]}>
           <Text style={styles.timerText}>{isFrozen ? '❄️ FROZEN' : `${timeLeft}s`}</Text>
         </View>
       </View>
+
+      {/* ─── Standings Overlay Drawer (slides down below header) ─────────────── */}
+      {showStandings && (
+        <Animated.View
+          style={[
+            styles.standingsOverlay,
+            {
+              opacity: standingsAnim,
+              transform: [{
+                translateY: standingsAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [-20, 0],
+                }),
+              }],
+            },
+          ]}
+        >
+          <View style={styles.standingsOverlayInner}>
+            <View style={styles.standingsOverlayHeader}>
+              <Text style={styles.standingsTitle}>Standings</Text>
+              {biggestMover && (
+                <Text style={styles.moverBannerInline}>🚀 {biggestMover.name} +{biggestMover.jump}</Text>
+              )}
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false} style={styles.standingsScroll}>
+              {standings.map((p, i) => (
+                <StandingsRow key={p.id} player={p} index={i} isYou={String(p.id) === String(userId)} />
+              ))}
+            </ScrollView>
+          </View>
+        </Animated.View>
+      )}
 
       {/* Powerup Earned — Floating Icon */}
       {powerupEarned && (
@@ -484,152 +614,329 @@ export default function QuestionScreen() {
         </View>
       ) : null}
 
-      <Text style={styles.question}>{question.question}</Text>
+      {/* ─── Flash Card Container ─────────────────────────────────────────────── */}
+      <Animated.View
+        style={[
+          styles.flashCard,
+          {
+            opacity: cardOpacity,
+            transform: [
+              { perspective: 1200 },
+              { translateX: cardTranslateX },
+              { rotateY: cardRotateY.interpolate({ inputRange: [-14, 0, 12], outputRange: ['-14deg', '0deg', '12deg'] }) },
+            ],
+          },
+        ]}
+      >
+        {/* Top highlight edge for physical card feel */}
+        <View style={styles.cardTopHighlight} />
 
-      {question.type === 'identification' ? (
-        <View>
-          {activePowerups.hint && question.correctAnswer && (
-            <View style={styles.hintHint}>
-              <Text style={styles.hintHintText}>💡 Starts with: "{question.correctAnswer.charAt(0).toUpperCase()}"</Text>
-            </View>
-          )}
-          <View style={styles.boxRow}>
-            {(() => {
-              let idx = 0;
-              return wordLengths.map((len, wi) => {
-                const group = boxChars.slice(idx, idx + len).map((char, j) => {
-                  const globalIndex = idx + j;
-                  return (
-                    <TextInput
-                      key={globalIndex}
-                      ref={(r) => { boxRefs.current[globalIndex] = r; }}
-                      style={styles.charBox}
-                      value={char}
-                      onChangeText={(t) => handleBoxChange(t, globalIndex)}
-                      onKeyPress={(e) => handleBoxKeyPress(e, globalIndex)}
-                      maxLength={1}
-                      editable={!selected}
-                      autoCapitalize="characters"
-                    />
-                  );
-                });
-                idx += len;
-                return <View key={wi} style={styles.wordGroup}>{group}</View>;
-              });
-            })()}
-          </View>
-          <TouchableOpacity
-            style={[styles.submitBtn, !boxChars.every(c => c) && { opacity: 0.5 }]}
-            onPress={() => handleAnswer(joinWithSpaces(boxChars))}
-            disabled={!!selected || !boxChars.every(c => c)}
-          >
-            <Text style={styles.nextBtnText}>Submit</Text>
-          </TouchableOpacity>
+        {/* Card index tab */}
+        <View style={styles.cardIndexTab}>
+          <Text style={styles.cardIndexText}>Q{currentIndex + 1}</Text>
         </View>
-      ) : question.choices.filter((choice: string) => !hintedChoices.includes(choice)).map((choice: string) => (
-        <TouchableOpacity
-          key={choice}
-          style={[styles.choice, { backgroundColor: choice === selected ? '#7F77DD' : '#1e1b4b' }]}
-          onPress={() => handleAnswer(choice)}
-          disabled={!!selected}
+
+        <Text style={styles.question}>{question.question}</Text>
+
+        {question.type === 'identification' ? (
+          <View>
+            {activePowerups.hint && question.correctAnswer && (
+              <View style={styles.hintHint}>
+                <Text style={styles.hintHintText}>💡 Starts with: "{question.correctAnswer.charAt(0).toUpperCase()}"</Text>
+              </View>
+            )}
+            <View style={styles.boxRow}>
+              {(() => {
+                let idx = 0;
+                return wordLengths.map((len, wi) => {
+                  const group = boxChars.slice(idx, idx + len).map((char, j) => {
+                    const globalIndex = idx + j;
+                    return (
+                      <TextInput
+                        key={globalIndex}
+                        ref={(r) => { boxRefs.current[globalIndex] = r; }}
+                        style={styles.charBox}
+                        value={char}
+                        onChangeText={(t) => handleBoxChange(t, globalIndex)}
+                        onKeyPress={(e) => handleBoxKeyPress(e, globalIndex)}
+                        maxLength={1}
+                        editable={!selected}
+                        autoCapitalize="characters"
+                      />
+                    );
+                  });
+                  idx += len;
+                  return <View key={wi} style={styles.wordGroup}>{group}</View>;
+                });
+              })()}
+            </View>
+            <TouchableOpacity
+              style={[styles.submitBtn, !boxChars.every(c => c) && { opacity: 0.5 }]}
+              onPress={() => handleAnswer(joinWithSpaces(boxChars))}
+              disabled={!!selected || !boxChars.every(c => c)}
+            >
+              <Text style={styles.nextBtnText}>Submit</Text>
+            </TouchableOpacity>
+          </View>
+        ) : question.choices.filter((choice: string) => !hintedChoices.includes(choice)).map((choice: string) => {
+          const isCorrect = result && choice === result.correctAnswer;
+          const isWrongSelected = result && choice === selected && !result.correct;
+          return (
+            <TouchableOpacity
+              key={choice}
+              style={[
+                styles.choice,
+                isCorrect && styles.choiceCorrect,
+                isWrongSelected && styles.choiceWrong,
+                {
+                  opacity: result && choice !== result.correctAnswer && choice !== selected ? 0.4 : 1,
+                },
+              ]}
+              onPress={() => handleAnswer(choice)}
+              disabled={!!selected}
+            >
+              <Text style={[styles.choiceText, isCorrect && { color: '#10B981' }, isWrongSelected && { color: '#EF4444' }]}>
+                {isCorrect ? '✓ ' : isWrongSelected ? '✗ ' : ''}{choice}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </Animated.View>
+      {/* ─── End Flash Card ───────────────────────────────────────────────────── */}
+
+      {/* ─── Next Button (appears after answering) ────────────────────────────── */}
+      {result && (
+        <Animated.View
+          style={{
+            marginTop: 20,
+            opacity: resultFlipAnim.interpolate({
+              inputRange: [0, 0.5, 1],
+              outputRange: [0, 0.5, 1],
+            }),
+            transform: [{
+              translateY: resultFlipAnim.interpolate({
+                inputRange: [0, 1],
+                outputRange: [20, 0],
+              }),
+            }],
+          }}
         >
-          <Text style={styles.choiceText}>{choice}</Text>
-        </TouchableOpacity>
-      ))}
+          <TouchableOpacity style={styles.nextBtnFull} onPress={handleNext} activeOpacity={0.8}>
+            <Text style={styles.nextBtnText}>
+              {currentIndex + 1 >= questionOrder.length ? 'Finish 🏁' : 'Next →'}
+            </Text>
+          </TouchableOpacity>
+        </Animated.View>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0f0c29', padding: 24, paddingTop: 60 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
-  progress: { color: '#aaa', fontSize: 16 },
-  timerBadge: { backgroundColor: '#7F77DD', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6 },
-  timerText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  question: { color: '#fff', fontSize: 20, fontWeight: 'bold', marginBottom: 28, lineHeight: 28 },
-  choice: { borderRadius: 12, padding: 16, marginBottom: 12 },
-  choiceText: { color: '#fff', fontSize: 16 },
+  container: { flex: 1, backgroundColor: COLORS.bg, padding: 24, paddingTop: 60 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  progress: { color: '#aaa', fontSize: 16, fontFamily: FONTS.semiBold },
+  timerBadge: { backgroundColor: COLORS.accent, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, shadowColor: COLORS.accent, shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.4, shadowRadius: 6, elevation: 5 },
+  timerText: { color: '#fff', fontWeight: 'bold', fontSize: 16, fontFamily: FONTS.bold },
+
+  // ─── Standings Header Button ──────────────────────────────────────────────────
+  standingsHeaderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(127, 119, 221, 0.15)',
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(127, 119, 221, 0.3)',
+  },
+  standingsHeaderBtnActive: {
+    backgroundColor: 'rgba(127, 119, 221, 0.35)',
+    borderColor: COLORS.accent,
+  },
+  standingsHeaderIcon: {
+    fontSize: 14,
+  },
+  standingsHeaderRank: {
+    color: COLORS.purpleLight,
+    fontSize: 12,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+  },
+
+  // ─── Standings Overlay Drawer ─────────────────────────────────────────────────
+  standingsOverlay: {
+    position: 'absolute',
+    top: 100,
+    left: 24,
+    right: 24,
+    zIndex: 100,
+    maxHeight: SCREEN_HEIGHT * 0.55,
+  },
+  standingsOverlayInner: {
+    backgroundColor: 'rgba(15, 12, 41, 0.95)',
+    borderRadius: 20,
+    padding: 16,
+    borderWidth: 1.5,
+    borderColor: COLORS.cardBorder,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.6,
+    shadowRadius: 24,
+    elevation: 20,
+    maxHeight: SCREEN_HEIGHT * 0.55,
+  },
+  standingsOverlayHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  standingsScroll: {
+    maxHeight: SCREEN_HEIGHT * 0.4,
+  },
+  moverBannerInline: {
+    color: COLORS.warning,
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: FONTS.semiBold,
+  },
+
+  // ─── Flash Card Styles ────────────────────────────────────────────────────────
+  flashCard: {
+    backgroundColor: COLORS.cardBg,
+    borderRadius: 24,
+    padding: 24,
+    paddingTop: 28,
+    borderWidth: 1.5,
+    borderColor: COLORS.cardBorder,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.5,
+    shadowRadius: 24,
+    elevation: 16,
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  cardTopHighlight: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 3,
+    backgroundColor: 'rgba(127, 119, 221, 0.4)',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+  },
+  cardIndexTab: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(127, 119, 221, 0.2)',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(127, 119, 221, 0.3)',
+  },
+  cardIndexText: {
+    color: COLORS.accent,
+    fontSize: 12,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+  },
+
+  question: { color: '#fff', fontSize: 20, fontWeight: 'bold', marginBottom: 24, lineHeight: 28, fontFamily: FONTS.bold },
+  choice: {
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(127, 119, 221, 0.25)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  choiceText: { color: '#fff', fontSize: 16, fontFamily: FONTS.medium },
+  choiceCorrect: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    borderColor: '#10B981',
+  },
+  choiceWrong: {
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    borderColor: '#EF4444',
+  },
   boxRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 16, gap: 6 },
   wordGroup: { flexDirection: 'row', gap: 4, marginRight: 12, marginBottom: 6 },
   charBox: {
-    width: 32, height: 44, borderRadius: 6, borderWidth: 2, borderColor: '#7F77DD',
+    width: 32, height: 44, borderRadius: 8, borderWidth: 2, borderColor: COLORS.accent,
     backgroundColor: '#1e1b4b', color: '#fff', fontSize: 18, fontWeight: '700',
     textAlign: 'center', textAlignVertical: 'center', includeFontPadding: false, padding: 0,
+    shadowColor: 'rgba(127, 119, 221, 0.3)',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 4,
+    elevation: 2,
   },
-  submitBtn: { backgroundColor: '#7F77DD', borderRadius: 12, padding: 16, alignItems: 'center' },
-  nextBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+  submitBtn: {
+    backgroundColor: COLORS.accent,
+    borderRadius: 14,
+    padding: 16,
+    alignItems: 'center',
+    shadowColor: COLORS.accent,
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 6,
+  },
+  nextBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16, fontFamily: FONTS.bold },
   errorContainer: {
     backgroundColor: 'rgba(239, 68, 68, 0.15)',
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 16,
     marginBottom: 16,
     borderWidth: 1,
     borderColor: 'rgba(239, 68, 68, 0.4)',
   },
-  errorText: { color: '#FCA5A5', fontSize: 14, marginBottom: 12, textAlign: 'center' },
+  errorText: { color: '#FCA5A5', fontSize: 14, marginBottom: 12, textAlign: 'center', fontFamily: FONTS.medium },
   retryBtn: {
     backgroundColor: '#e53e3e',
-    borderRadius: 8,
+    borderRadius: 10,
     paddingVertical: 10,
     paddingHorizontal: 24,
     alignItems: 'center',
     alignSelf: 'center',
+    shadowColor: '#e53e3e',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 4,
   },
-  retryBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+  retryBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 14, fontFamily: FONTS.bold },
 
-  resultContainer: {
-    flex: 1,
-    backgroundColor: '#0f0c29',
-    padding: 24,
-    paddingTop: 60,
-    justifyContent: 'space-between',
-  },
-  resultTop: {
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  resultBigIcon: {
-    fontSize: 56,
-    marginBottom: 8,
-  },
-  resultBigText: {
-    color: '#fff',
-    fontSize: 28,
-    fontWeight: '800',
-    marginBottom: 4,
-  },
-  resultPoints: {
-    color: '#7F77DD',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  powerupUsedText: {
-    color: '#F59E0B',
-    fontSize: 13,
-    fontWeight: '600',
-    marginTop: 4,
-  },
-  resultLeaderboard: {
-    flex: 1,
-    backgroundColor: '#1e1b4b',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-  },
+  // ─── Next Button (below card) ─────────────────────────────────────────────────
   nextBtnFull: {
-    backgroundColor: '#7F77DD',
-    borderRadius: 12,
+    backgroundColor: COLORS.accent,
+    borderRadius: 16,
     paddingVertical: 16,
     alignItems: 'center',
+    shadowColor: COLORS.accent,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
   },
 
+  // ─── Standings (shared) ───────────────────────────────────────────────────────
   standingsTitle: {
     color: '#aaa',
     fontSize: 12,
     fontWeight: '600',
-    marginBottom: 8,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
+    fontFamily: FONTS.semiBold,
   },
   standingsRow: {
     flexDirection: 'row',
@@ -641,26 +948,30 @@ const styles = StyleSheet.create({
     width: 24,
     fontSize: 14,
     fontWeight: '700',
+    fontFamily: FONTS.bold,
   },
   standingsName: {
     color: '#fff',
     fontSize: 14,
     flex: 1,
+    fontFamily: FONTS.regular,
   },
   standingsYou: {
-    color: '#7F77DD',
+    color: COLORS.accent,
     fontWeight: '700',
+    fontFamily: FONTS.bold,
   },
   standingsScore: {
-    color: '#7F77DD',
+    color: COLORS.accent,
     fontSize: 14,
     fontWeight: '700',
+    fontFamily: FONTS.bold,
   },
   standingsRowTop3: { backgroundColor: 'rgba(139, 92, 246, 0.12)', borderRadius: 8, paddingHorizontal: 8 },
   streakBadge: { color: '#F59E0B', fontSize: 12, fontWeight: '700', marginLeft: 4 },
   moveUp: { color: '#10B981', fontSize: 12, fontWeight: '700', marginRight: 6 },
   moveDown: { color: '#EF4444', fontSize: 12, fontWeight: '700', marginRight: 6 },
-  moverBanner: { color: '#fff', fontSize: 14, fontWeight: '700', textAlign: 'center', marginBottom: 10 },
+  moverBanner: { color: '#fff', fontSize: 14, fontWeight: '700', textAlign: 'center', marginBottom: 10, fontFamily: FONTS.bold },
 
   // Powerup styles
   powerupBar: {
@@ -671,13 +982,18 @@ const styles = StyleSheet.create({
   },
   powerupBtn: {
     alignItems: 'center',
-    backgroundColor: '#1e1b4b',
-    borderRadius: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
     paddingVertical: 8,
     paddingHorizontal: 10,
     borderWidth: 1,
     borderColor: 'rgba(139, 92, 246, 0.2)',
     minWidth: 64,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 5,
+    elevation: 3,
   },
   powerupBtnActive: {
     backgroundColor: '#0E7490',
@@ -693,6 +1009,7 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: '600',
     marginTop: 2,
+    fontFamily: FONTS.semiBold,
   },
   powerupBannerRow: {
     flexDirection: 'row',
@@ -701,16 +1018,22 @@ const styles = StyleSheet.create({
   },
   powerupBanner: {
     flex: 1,
-    borderRadius: 10,
+    borderRadius: 12,
     paddingVertical: 8,
     paddingHorizontal: 12,
     borderWidth: 1,
     alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 2,
   },
   powerupBannerText: {
     color: '#fff',
     fontSize: 13,
     fontWeight: '700',
+    fontFamily: FONTS.bold,
   },
   floatOverlay: {
     alignItems: 'center',
@@ -720,6 +1043,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(16, 185, 129, 0.12)',
     borderWidth: 1,
     borderColor: 'rgba(16, 185, 129, 0.3)',
+    shadowColor: 'rgba(16, 185, 129, 0.3)',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 5,
   },
   floatIcon: {
     fontSize: 40,
@@ -729,10 +1057,11 @@ const styles = StyleSheet.create({
     color: '#10B981',
     fontSize: 14,
     fontWeight: '700',
+    fontFamily: FONTS.bold,
   },
   hintHint: {
     backgroundColor: 'rgba(245, 158, 11, 0.15)',
-    borderRadius: 8,
+    borderRadius: 10,
     paddingVertical: 6,
     paddingHorizontal: 12,
     marginBottom: 12,
@@ -744,5 +1073,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     textAlign: 'center',
+    fontFamily: FONTS.semiBold,
   },
 });

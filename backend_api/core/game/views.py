@@ -238,6 +238,7 @@ class AnswerQuestionView(APIView):
 
             # Score: faster answers = more points
             points = 0
+            powerup_earned = None
             if is_correct:
                 time_per_q = room.get('timePerQuestion', 15)
                 points = int(1000 * (1 - (time_taken / time_per_q) * 0.5))
@@ -250,7 +251,7 @@ class AnswerQuestionView(APIView):
 
             # Update player in Firestore
             player_ref = room_ref.collection('players').document(str(request.user.id))
-            player_data = player_ref.get().to_dict()
+            player_data = player_ref.get().to_dict() or {}
 
             if is_correct:
                 current_streak = player_data.get('streak', 0)
@@ -317,8 +318,10 @@ class AnswerQuestionView(APIView):
         except ValueError as e:
             return Response({'error': f'Invalid request data: {e}'}, status=400)
         except Exception as e:
+            import traceback
             print(f'[AnswerQuestion Error] {e}')
-            return Response({'error': 'Failed to process answer'}, status=500)
+            traceback.print_exc()
+            return Response({'error': f'Failed to process answer: {str(e)}'}, status=500)
 
 
 class FinishGameView(APIView):

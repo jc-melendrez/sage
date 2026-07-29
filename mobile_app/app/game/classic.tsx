@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StatusBar
+  StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Animated
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { getToken } from '@/services/authService';
@@ -16,7 +16,7 @@ const COLORS = {
   bgSecondary: '#1a1640',
   surface: '#252158',
   surfaceLight: '#3a3570',
-  
+
   purpleDeep: '#4C1D95',
   purpleDark: '#6D28D9',
   purplePrimary: '#7C3AED',
@@ -24,12 +24,12 @@ const COLORS = {
   purpleLight: '#A78BFA',
   purplePale: '#C4B5FD',
   purpleGhost: '#DDD6FE',
-  
+
   accent: '#22D3EE',
   success: '#10B981',
   warning: '#F59E0B',
   danger: '#EF4444',
-  
+
   textPrimary: '#FFFFFF',
   textSecondary: '#CBD5E1',
   textMuted: '#94A3B8',
@@ -54,6 +54,17 @@ export default function ClassicGameSetupScreen() {
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<'home' | 'create' | 'join'>('home');
   const [selectedFile, setSelectedFile] = useState<{ name: string; uri: string; mimeType: string } | null>(null);
+
+  // Animation refs for physical card press effect
+  const createCardScale = useRef(new Animated.Value(1)).current;
+  const joinCardScale = useRef(new Animated.Value(1)).current;
+
+  const animatePressIn = (anim: Animated.Value) => {
+    Animated.spring(anim, { toValue: 0.96, friction: 8, tension: 120, useNativeDriver: true }).start();
+  };
+  const animatePressOut = (anim: Animated.Value) => {
+    Animated.spring(anim, { toValue: 1, friction: 6, tension: 100, useNativeDriver: true }).start();
+  };
 
   const pickDocument = async () => {
     try {
@@ -137,11 +148,11 @@ export default function ClassicGameSetupScreen() {
         style={styles.container}
       >
         <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
-        
+
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity 
-            style={styles.backButton} 
+          <TouchableOpacity
+            style={styles.backButton}
             onPress={() => router.back()}
             activeOpacity={0.7}
           >
@@ -160,51 +171,63 @@ export default function ClassicGameSetupScreen() {
           >
             <Ionicons name="trophy" size={48} color="white" />
           </LinearGradient>
-          
+
           <Text style={styles.title}>Classic Quiz Battle</Text>
           <Text style={styles.subtitle}>Challenge friends in real-time multiplayer quizzes</Text>
         </View>
 
-        {/* Action Cards */}
+        {/* Action Cards — Physical Flash Card Style */}
         <View style={styles.actionCards}>
-          <TouchableOpacity 
-            style={styles.actionCard} 
-            onPress={() => setMode('create')}
-            activeOpacity={0.8}
-          >
-            <LinearGradient
-              colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.actionCardGradient}
+          <Animated.View style={{ transform: [{ scale: createCardScale }] }}>
+            <TouchableOpacity
+              style={styles.actionCard}
+              onPress={() => setMode('create')}
+              onPressIn={() => animatePressIn(createCardScale)}
+              onPressOut={() => animatePressOut(createCardScale)}
+              activeOpacity={1}
             >
-              <View style={styles.actionIconWrapper}>
-                <Ionicons name="add-circle" size={24} color="white" />
-              </View>
-              <Text style={styles.actionTitle}>Create Room</Text>
-              <Text style={styles.actionDescription}>Upload materials and host a quiz</Text>
-              <View style={styles.actionArrow}>
-                <Ionicons name="arrow-forward" size={16} color="white" />
-              </View>
-            </LinearGradient>
-          </TouchableOpacity>
+              <LinearGradient
+                colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.actionCardGradient}
+              >
+                {/* Top highlight edge for embossed card feel */}
+                <View style={styles.cardTopEdge} />
+                <View style={styles.actionIconWrapper}>
+                  <Ionicons name="add-circle" size={24} color="white" />
+                </View>
+                <Text style={styles.actionTitle}>Create Room</Text>
+                <Text style={styles.actionDescription}>Upload materials and host a quiz</Text>
+                <View style={styles.actionArrow}>
+                  <Ionicons name="arrow-forward" size={16} color="white" />
+                </View>
+              </LinearGradient>
+            </TouchableOpacity>
+          </Animated.View>
 
-          <TouchableOpacity 
-            style={styles.actionCard} 
-            onPress={() => setMode('join')}
-            activeOpacity={0.8}
-          >
-            <View style={styles.actionCardOutline}>
-              <View style={styles.actionIconWrapperOutline}>
-                <Ionicons name="enter" size={24} color={COLORS.purpleVibrant} />
+          <Animated.View style={{ transform: [{ scale: joinCardScale }] }}>
+            <TouchableOpacity
+              style={styles.actionCardOutlineWrapper}
+              onPress={() => setMode('join')}
+              onPressIn={() => animatePressIn(joinCardScale)}
+              onPressOut={() => animatePressOut(joinCardScale)}
+              activeOpacity={1}
+            >
+              <View style={styles.actionCardOutline}>
+                {/* Top highlight edge */}
+                <View style={styles.cardTopEdgeOutline} />
+                <View style={styles.actionIconWrapperOutline}>
+                  <Ionicons name="enter" size={24} color={COLORS.purpleVibrant} />
+                </View>
+                <Text style={styles.actionTitleOutline}>Join Room</Text>
+                <Text style={styles.actionDescriptionOutline}>Enter a room code to compete</Text>
+                <View style={styles.actionArrowOutline}>
+                  <Ionicons name="arrow-forward" size={16} color={COLORS.purpleVibrant} />
+                </View>
               </View>
-              <Text style={styles.actionTitleOutline}>Join Room</Text>
-              <Text style={styles.actionDescriptionOutline}>Enter a room code to compete</Text>
-              <View style={styles.actionArrowOutline}>
-                <Ionicons name="arrow-forward" size={16} color={COLORS.purpleVibrant} />
-              </View>
-            </View>
-          </TouchableOpacity>
+            </TouchableOpacity>
+          </Animated.View>
         </View>
 
         {/* Features */}
@@ -231,8 +254,8 @@ export default function ClassicGameSetupScreen() {
 
   // Create or Join Screen
   return (
-    <KeyboardAvoidingView 
-      style={styles.container} 
+    <KeyboardAvoidingView
+      style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <LinearGradient
@@ -242,15 +265,15 @@ export default function ClassicGameSetupScreen() {
         style={styles.fullScreen}
       >
         <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
-        
-        <ScrollView 
-          contentContainerStyle={styles.scrollContent} 
+
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
           {/* Header */}
           <View style={styles.formHeader}>
-            <TouchableOpacity 
-              style={styles.backButtonSmall} 
+            <TouchableOpacity
+              style={styles.backButtonSmall}
               onPress={() => setMode('home')}
               activeOpacity={0.7}
             >
@@ -271,12 +294,12 @@ export default function ClassicGameSetupScreen() {
                   </View>
                   <Text style={styles.sectionTitle}>Upload Study Material</Text>
                 </View>
-                
-                <TouchableOpacity 
+
+                <TouchableOpacity
                   style={[
                     styles.uploadBox,
                     selectedFile && styles.uploadBoxSuccess
-                  ]} 
+                  ]}
                   onPress={pickDocument}
                   activeOpacity={0.7}
                 >
@@ -318,7 +341,7 @@ export default function ClassicGameSetupScreen() {
                   </View>
                   <Text style={styles.sectionTitle}>Quiz Settings</Text>
                 </View>
-                
+
                 <View style={styles.settingsCard}>
                   <View style={styles.settingRow}>
                     <View style={styles.settingIconBox}>
@@ -326,29 +349,29 @@ export default function ClassicGameSetupScreen() {
                     </View>
                     <View style={styles.settingContent}>
                       <Text style={styles.settingLabel}>Number of Questions</Text>
-                      <TextInput 
-                        style={styles.settingInput} 
-                        value={questionCount} 
-                        onChangeText={setQuestionCount} 
+                      <TextInput
+                        style={styles.settingInput}
+                        value={questionCount}
+                        onChangeText={setQuestionCount}
                         keyboardType="numeric"
                         placeholder="5"
                         placeholderTextColor={COLORS.textMuted}
                       />
                     </View>
                   </View>
-                  
+
                   <View style={styles.settingDivider} />
-                  
+
                   <View style={styles.settingRow}>
                     <View style={styles.settingIconBox}>
                       <Ionicons name="time" size={16} color={COLORS.purpleVibrant} />
                     </View>
                     <View style={styles.settingContent}>
                       <Text style={styles.settingLabel}>Time per Question (seconds)</Text>
-                      <TextInput 
-                        style={styles.settingInput} 
-                        value={timePerQuestion} 
-                        onChangeText={setTimePerQuestion} 
+                      <TextInput
+                        style={styles.settingInput}
+                        value={timePerQuestion}
+                        onChangeText={setTimePerQuestion}
                         keyboardType="numeric"
                         placeholder="15"
                         placeholderTextColor={COLORS.textMuted}
@@ -388,18 +411,18 @@ export default function ClassicGameSetupScreen() {
               </View>
 
               {/* Create Button */}
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={[
                   styles.primaryBtn,
                   (!selectedFile || loading) && styles.primaryBtnDisabled
-                ]} 
-                onPress={handleCreate} 
+                ]}
+                onPress={handleCreate}
                 disabled={loading || !selectedFile}
                 activeOpacity={0.8}
               >
                 <LinearGradient
-                  colors={(!selectedFile || loading) 
-                    ? [COLORS.surfaceLight, COLORS.surface] 
+                  colors={(!selectedFile || loading)
+                    ? [COLORS.surfaceLight, COLORS.surface]
                     : [COLORS.purplePrimary, COLORS.purpleVibrant]
                   }
                   start={{ x: 0, y: 0 }}
@@ -426,11 +449,11 @@ export default function ClassicGameSetupScreen() {
                     <Ionicons name="key" size={24} color={COLORS.purpleVibrant} />
                   </View>
                   <Text style={styles.joinCodeLabel}>Enter Room Code</Text>
-                  <TextInput 
-                    style={styles.joinCodeInput} 
-                    placeholder="ABC123" 
-                    value={joinCode} 
-                    onChangeText={(text) => setJoinCode(text.toUpperCase())} 
+                  <TextInput
+                    style={styles.joinCodeInput}
+                    placeholder="ABC123"
+                    value={joinCode}
+                    onChangeText={(text) => setJoinCode(text.toUpperCase())}
                     autoCapitalize="characters"
                     maxLength={6}
                     placeholderTextColor={COLORS.textMuted}
@@ -440,18 +463,18 @@ export default function ClassicGameSetupScreen() {
               </View>
 
               {/* Join Button */}
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={[
                   styles.primaryBtn,
                   (!joinCode.trim() || loading) && styles.primaryBtnDisabled
-                ]} 
-                onPress={handleJoin} 
+                ]}
+                onPress={handleJoin}
                 disabled={loading || !joinCode.trim()}
                 activeOpacity={0.8}
               >
                 <LinearGradient
-                  colors={(!joinCode.trim() || loading) 
-                    ? [COLORS.surfaceLight, COLORS.surface] 
+                  colors={(!joinCode.trim() || loading)
+                    ? [COLORS.surfaceLight, COLORS.surface]
                     : [COLORS.purplePrimary, COLORS.purpleVibrant]
                   }
                   start={{ x: 0, y: 0 }}
@@ -477,13 +500,13 @@ export default function ClassicGameSetupScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { 
+  container: {
     flex: 1,
   },
   fullScreen: {
     flex: 1,
   },
-  
+
   // Header
   header: {
     paddingHorizontal: 24,
@@ -501,7 +524,7 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.semiBold,
     fontWeight: '600',
   },
-  
+
   // Hero Section
   heroSection: {
     alignItems: 'center',
@@ -538,29 +561,66 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
   },
-  
-  // Action Cards
+
+  // Action Cards — Physical Flash Card Style
   actionCards: {
     paddingHorizontal: 24,
-    gap: 12,
+    gap: 16,
     marginBottom: 28,
   },
   actionCard: {
-    borderRadius: 16,
+    borderRadius: 20,
     overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.45,
+    shadowRadius: 20,
+    elevation: 14,
   },
   actionCardGradient: {
-    padding: 18,
-    minHeight: 110,
+    padding: 20,
+    minHeight: 120,
     justifyContent: 'space-between',
+    position: 'relative',
+  },
+  cardTopEdge: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 3,
+    backgroundColor: 'rgba(255, 255, 255, 0.35)',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+  },
+  actionCardOutlineWrapper: {
+    borderRadius: 20,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    elevation: 10,
   },
   actionCardOutline: {
-    padding: 18,
-    minHeight: 110,
+    padding: 20,
+    minHeight: 120,
     backgroundColor: COLORS.surface,
     borderWidth: 2,
     borderColor: COLORS.border,
+    borderRadius: 20,
     justifyContent: 'space-between',
+    position: 'relative',
+  },
+  cardTopEdgeOutline: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 2,
+    backgroundColor: 'rgba(139, 92, 246, 0.3)',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
   },
   actionIconWrapper: {
     width: 44,
@@ -570,6 +630,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 8,
+    shadowColor: 'rgba(0,0,0,0.3)',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.5,
+    shadowRadius: 4,
+    elevation: 4,
   },
   actionIconWrapperOutline: {
     width: 44,
@@ -579,6 +644,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 8,
+    shadowColor: 'rgba(139, 92, 246, 0.2)',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.5,
+    shadowRadius: 4,
+    elevation: 3,
   },
   actionTitle: {
     fontSize: 18,
@@ -614,6 +684,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
+    shadowColor: 'rgba(0,0,0,0.2)',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 3,
+    elevation: 3,
   },
   actionArrowOutline: {
     alignSelf: 'flex-end',
@@ -624,7 +699,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  
+
   // Features
   featuresSection: {
     paddingHorizontal: 24,
@@ -651,7 +726,7 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     textAlign: 'center',
   },
-  
+
   // Form Header
   formHeader: {
     flexDirection: 'row',
@@ -670,6 +745,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
   },
   formTitle: {
     fontSize: 22,
@@ -678,13 +758,13 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     flex: 1,
   },
-  
+
   // Scroll Content
   scrollContent: {
     paddingHorizontal: 24,
     paddingBottom: 32,
   },
-  
+
   // Sections
   section: {
     marginBottom: 24,
@@ -702,6 +782,11 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.purplePrimary,
     justifyContent: 'center',
     alignItems: 'center',
+    shadowColor: COLORS.purplePrimary,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 4,
   },
   stepNumber: {
     color: 'white',
@@ -716,16 +801,21 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     letterSpacing: 0.5,
   },
-  
+
   // Upload Box
   uploadBox: {
     backgroundColor: COLORS.surface,
-    borderRadius: 16,
+    borderRadius: 20,
     padding: 24,
     alignItems: 'center',
     borderWidth: 2,
     borderColor: COLORS.border,
     borderStyle: 'dashed',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+    elevation: 6,
   },
   uploadBoxSuccess: {
     borderColor: COLORS.success,
@@ -739,6 +829,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 12,
+    shadowColor: COLORS.purplePrimary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 5,
   },
   uploadIconSuccess: {
     width: 48,
@@ -747,6 +842,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 12,
+    shadowColor: COLORS.success,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 5,
   },
   uploadTitle: {
     fontSize: 16,
@@ -773,14 +873,19 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.medium,
     color: COLORS.textMuted,
   },
-  
+
   // Settings Card
   settingsCard: {
     backgroundColor: COLORS.surface,
-    borderRadius: 16,
+    borderRadius: 20,
     padding: 16,
     borderWidth: 1,
     borderColor: COLORS.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 14,
+    elevation: 8,
   },
   settingRow: {
     flexDirection: 'row',
@@ -823,15 +928,20 @@ const styles = StyleSheet.create({
   typeOptionActive: { backgroundColor: COLORS.purplePrimary, borderColor: COLORS.purplePrimary },
   typeOptionText: { color: COLORS.textMuted, fontSize: 12, fontWeight: '600' },
   typeOptionTextActive: { color: '#fff' },
-  
+
   // Join Code Card
   joinCodeCard: {
     backgroundColor: COLORS.surface,
-    borderRadius: 16,
+    borderRadius: 20,
     padding: 24,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 14,
+    elevation: 8,
   },
   joinCodeIcon: {
     width: 56,
@@ -841,6 +951,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 12,
+    shadowColor: 'rgba(139, 92, 246, 0.3)',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.5,
+    shadowRadius: 6,
+    elevation: 4,
   },
   joinCodeLabel: {
     fontSize: 14,
@@ -868,12 +983,17 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     textAlign: 'center',
   },
-  
+
   // Primary Button
   primaryBtn: {
-    borderRadius: 14,
+    borderRadius: 16,
     overflow: 'hidden',
     marginBottom: 12,
+    shadowColor: COLORS.purplePrimary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
   },
   primaryBtnGradient: {
     padding: 14,
@@ -889,5 +1009,7 @@ const styles = StyleSheet.create({
   },
   primaryBtnDisabled: {
     opacity: 0.5,
+    shadowOpacity: 0,
+    elevation: 0,
   },
 });
