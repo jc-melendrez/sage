@@ -14,4 +14,4 @@
 
   // Select which config to use
   // Change to API_CONFIG.LOCAL or API_CONFIG.LOCALHOST for other environments
-  export const API_BASE_URL = API_CONFIG.LOCAL;
+  export const API_BASE_URL = API_CONFIG.LOCALHOST;

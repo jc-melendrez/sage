@@ -10,6 +10,16 @@ import { testFirebase } from "@/services/firebaseTest";
 import { startSyncManager } from '@/services/syncManager';
 import { initOfflineQueue } from '@/services/offlineQueue';
 
+import {
+  useFonts,
+  Montserrat_400Regular,
+  Montserrat_500Medium,
+  Montserrat_600SemiBold,
+  Montserrat_700Bold,
+  Montserrat_800ExtraBold,
+  Montserrat_900Black,
+} from '@expo-google-fonts/montserrat';
+
 export const unstable_settings = {
   initialRouteName: '(tabs)',
 };
@@ -21,12 +31,18 @@ export default function RootLayout() {
   const navigationState = useRootNavigationState();
 
   const [isReady, setIsReady] = useState(false);
+
+  const [fontsLoaded] = useFonts({
+    'Montserrat-Regular': Montserrat_400Regular,
+    'Montserrat-Medium': Montserrat_500Medium,
+    'Montserrat-SemiBold': Montserrat_600SemiBold,
+    'Montserrat-Bold': Montserrat_700Bold,
+    'Montserrat-ExtraBold': Montserrat_800ExtraBold,
+    'Montserrat-Black': Montserrat_900Black,
+  });
+
   useEffect(() => {
     initOfflineQueue();
-    const stop = startSyncManager();
-    return () => stop();
-  }, []);
-  useEffect(() => {
     const stop = startSyncManager();
     return () => stop();
   }, []);
@@ -50,7 +66,7 @@ export default function RootLayout() {
     verifyAuth();
   }, [segments, navigationState?.key]);
 
-  if (!isReady) return null;
+  if (!isReady || !fontsLoaded) return null;
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
@@ -61,6 +77,7 @@ export default function RootLayout() {
         <Stack.Screen name="game" options={{ headerShown: false }} />
         <Stack.Screen name="admin" options={{ headerShown: false }} />
         <Stack.Screen name="superadmin" options={{ headerShown: false }} />
+        <Stack.Screen name="educator" options={{ headerShown: false }} />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>

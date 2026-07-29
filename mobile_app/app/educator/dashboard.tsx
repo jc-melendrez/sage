@@ -1,11 +1,10 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
-import { StatCard, SectionHeader, Pill, EmptyState } from '@/components/educator/EducatorPrimitives';
+import { StatCard, SectionHeader, EmptyState } from '@/components/educator/EducatorPrimitives';
 import { StudentRow, StudentSummary } from '@/components/educator/StudentRow';
 
 // --- Mock data (wire up to your API layer, same shape as services/*) ---
