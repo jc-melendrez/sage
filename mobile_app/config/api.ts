@@ -9,7 +9,7 @@
     // ngrok tunnel URL (for testing multiple devices anywhere)
     TUNNEL: 'https://eloquent-flagpole-resupply.ngrok-free.dev/api',
 
-    DEPLOYED: 'https://sage-bozz.onrender.com',
+    DEPLOYED: 'https://sage-bozz.onrender.com/api',
   };
 
   // Select which config to use
