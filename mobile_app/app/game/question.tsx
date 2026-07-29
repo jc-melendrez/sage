@@ -1,5 +1,14 @@
 import { useEffect, useState, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Animated, Dimensions } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Animated,
+  Dimensions,
+} from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getToken, getCurrentUser } from '@/services/authService';
@@ -7,7 +16,6 @@ import { API_BASE_URL } from '@/config/api';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-// 🎨 Unified Purple Palette (Dark Theme Variant)
 const COLORS = {
   bg: '#0f0c29',
   bgSecondary: '#1a1640',
@@ -40,6 +48,13 @@ const FONTS = {
   regular: 'Montserrat-Regular',
 };
 
+/* ── helper: pull the letter chip out of "A. Paris" ── */
+const letterOf = (c: string) => c.charAt(0);
+const textOf = (c: string) => c;
+
+/* ═══════════════════════════════════════════════════════════════
+   StandingsRow — restyled to match the HTML drawer
+   ═══════════════════════════════════════════════════════════════ */
 function StandingsRow({ player, index, isYou }: { player: any; index: number; isYou: boolean }) {
   const anim = useRef(new Animated.Value(0)).current;
   const scoreAnim = useRef(new Animated.Value(player.prevScore)).current;
@@ -57,23 +72,37 @@ function StandingsRow({ player, index, isYou }: { player: any; index: number; is
   return (
     <Animated.View
       style={[
-        styles.standingsRow,
-        index < 3 && styles.standingsRowTop3,
-        { opacity: anim, transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }] },
+        styles.srRow,
+        index < 3 && styles.srRowTop3,
+        isYou && styles.srRowYou,
+        {
+          opacity: anim,
+          transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }],
+        },
       ]}
     >
-      <Text style={styles.standingsRank}>{medal || `${index + 1}.`}</Text>
-      <Text style={[styles.standingsName, isYou && styles.standingsYou]}>
-        {player.displayName}{isYou ? ' (You)' : ''}
-      </Text>
-      {player.streak >= 3 && <Text style={styles.streakBadge}>🔥{player.streak}</Text>}
-      {player.movement > 0 && <Text style={styles.moveUp}>▲{player.movement}</Text>}
-      {player.movement < 0 && <Text style={styles.moveDown}>▼{Math.abs(player.movement)}</Text>}
-      <Text style={styles.standingsScore}>{displayScore}</Text>
+      <Text style={styles.srRank}>{medal || `${index + 1}`}</Text>
+
+      <View style={styles.srNameWrap}>
+        <Text style={[styles.srName, isYou && styles.srNameYou]}>
+          {player.displayName}
+          {isYou && <Text style={styles.srYouTag}> (You)</Text>}
+        </Text>
+        {player.streak >= 3 && <Text style={styles.srStreak}>🔥{player.streak}</Text>}
+      </View>
+
+      {player.movement > 0 && <Text style={styles.srMoveUp}>▲{player.movement}</Text>}
+      {player.movement < 0 && <Text style={styles.srMoveDown}>▼{Math.abs(player.movement)}</Text>}
+      {player.movement === 0 && <Text style={styles.srMoveSame}>—</Text>}
+
+      <Text style={styles.srScore}>{displayScore.toLocaleString()}</Text>
     </Animated.View>
   );
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   QuestionScreen
+   ═══════════════════════════════════════════════════════════════ */
 export default function QuestionScreen() {
   const router = useRouter();
   const { roomCode } = useLocalSearchParams<{ roomCode: string }>();
@@ -107,24 +136,26 @@ export default function QuestionScreen() {
   const floatAnim = useRef(new Animated.Value(0)).current;
   const floatScale = useRef(new Animated.Value(0)).current;
 
-  // ─── Flash Card Animation Refs ───────────────────────────────────────────────
   const cardTranslateX = useRef(new Animated.Value(0)).current;
   const cardRotateY = useRef(new Animated.Value(0)).current;
   const cardOpacity = useRef(new Animated.Value(1)).current;
   const resultFlipAnim = useRef(new Animated.Value(0)).current;
   const isAnimatingRef = useRef(false);
+  const autoAdvanceRef = useRef<number | null>(null);
+  const [autoCountdown, setAutoCountdown] = useState(0);
+  const timerBarAnim = useRef(new Animated.Value(1)).current;
+
+  /* ── all useEffects below are UNCHANGED ── */
 
   useEffect(() => {
     const init = async () => {
       const user = await getCurrentUser();
       setUserId(user?.id);
-
       const room = await firestore().collection('gameRooms').doc(roomCode).get();
       const data = room.data();
       setQuestions(data?.questions || []);
       setTimePerQuestion(data?.timePerQuestion || 15);
       setTimeLeft(data?.timePerQuestion || 15);
-
       const player = await firestore().collection('gameRooms').doc(roomCode)
         .collection('players').doc(String(user?.id)).get();
       setQuestionOrder(player.data()?.questionOrder || []);
@@ -145,26 +176,18 @@ export default function QuestionScreen() {
             streak: d.data().streak || 0,
           }))
           .sort((a, b) => b.score - a.score);
-
         const withMovement = sorted.map((p, i) => {
           const prev = previousStateRef.current[p.id];
-          return {
-            ...p,
-            movement: prev ? prev.rank - i : 0,
-            prevScore: prev ? prev.score : p.score,
-          };
+          return { ...p, movement: prev ? prev.rank - i : 0, prevScore: prev ? prev.score : p.score };
         });
         previousStateRef.current = Object.fromEntries(
           withMovement.map((p, i) => [p.id, { rank: i, score: p.score }])
         );
-
         const top = withMovement.filter(p => p.movement >= 2).sort((a, b) => b.movement - a.movement)[0];
         setBiggestMover(top ? { name: String(top.id) === String(userId) ? 'You' : top.displayName, jump: top.movement } : null);
-
         setStandings(withMovement);
       });
     standingsUnsubRef.current = unsub;
-
     return () => { unsub(); };
   }, []);
 
@@ -181,12 +204,7 @@ export default function QuestionScreen() {
   }, [userId]);
 
   useEffect(() => {
-    if (!powerupEarned) {
-      floatAnim.setValue(0);
-      floatScale.setValue(0);
-      return;
-    }
-    // Floating bounce animation
+    if (!powerupEarned) { floatAnim.setValue(0); floatScale.setValue(0); return; }
     floatAnim.setValue(0);
     floatScale.setValue(0);
     Animated.parallel([
@@ -204,18 +222,24 @@ export default function QuestionScreen() {
     if (questions.length === 0) return;
     startTimeRef.current = Date.now();
     setTimeLeft(timePerQuestion);
+    timerBarAnim.setValue(1);
     timerRef.current = setInterval(() => {
       setTimeLeft(t => {
-        if (t <= 1) {
-          clearInterval(timerRef.current);
-          if (!selected) handleAnswer(null);
-          return 0;
-        }
+        if (t <= 1) { clearInterval(timerRef.current); if (!selected) handleAnswer(null); return 0; }
         return t - 1;
       });
     }, 1000);
     return () => clearInterval(timerRef.current);
   }, [currentIndex, questions]);
+
+  useEffect(() => {
+    const target = isFrozen ? (timePerQuestion > 0 ? timeLeft / timePerQuestion : 0) : (timePerQuestion > 0 ? timeLeft / timePerQuestion : 0);
+    Animated.timing(timerBarAnim, {
+      toValue: target,
+      duration: 900,
+      useNativeDriver: false,
+    }).start();
+  }, [timeLeft, isFrozen]);
 
   useEffect(() => {
     if (question?.type === 'identification') {
@@ -226,10 +250,8 @@ export default function QuestionScreen() {
     }
   }, [currentIndex, questions]);
 
-  // ─── Card entrance animation when question changes ───────────────────────────
   useEffect(() => {
     if (questions.length === 0 || questionOrder.length === 0) return;
-    // Animate the new card sliding in from the right
     cardTranslateX.setValue(SCREEN_WIDTH * 0.85);
     cardRotateY.setValue(12);
     cardOpacity.setValue(0);
@@ -237,22 +259,37 @@ export default function QuestionScreen() {
       Animated.spring(cardTranslateX, { toValue: 0, friction: 8, tension: 60, useNativeDriver: true }),
       Animated.timing(cardRotateY, { toValue: 0, duration: 350, useNativeDriver: true }),
       Animated.timing(cardOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
-    ]).start(() => {
-      isAnimatingRef.current = false;
-    });
+    ]).start(() => { isAnimatingRef.current = false; });
   }, [currentIndex]);
 
-  // ─── Result feedback banner animation ─────────────────────────────────────────
   useEffect(() => {
     if (result) {
       resultFlipAnim.setValue(0);
-      Animated.timing(resultFlipAnim, {
-        toValue: 1,
-        duration: 400,
-        useNativeDriver: true,
-      }).start();
+      Animated.timing(resultFlipAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
     }
   }, [result]);
+
+  /* ── auto-advance: countdown then skip ── */
+  useEffect(() => {
+    if (!result) { setAutoCountdown(0); return; }
+    const isLast = currentIndex + 1 >= questionOrder.length;
+    const total = isLast ? 3 : 2;
+    setAutoCountdown(total);
+    autoAdvanceRef.current = window.setInterval(() => {
+      setAutoCountdown(prev => {
+        if (prev <= 1) {
+          clearInterval(autoAdvanceRef.current!);
+          autoAdvanceRef.current = null;
+          handleNext();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => { if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; } };
+  }, [result]);
+
+  /* ── all handlers below are UNCHANGED ── */
 
   const joinWithSpaces = (chars: string[]) => {
     let result = '';
@@ -270,19 +307,13 @@ export default function QuestionScreen() {
     const next = [...boxChars];
     next[index] = char;
     setBoxChars(next);
-
-    if (char && index < boxChars.length - 1) {
-      boxRefs.current[index + 1]?.focus();
-    }
-    if (next.every(c => c)) {
-      setTypedAnswer(joinWithSpaces(next));
-    }
+    if (char && index < boxChars.length - 1) boxRefs.current[index + 1]?.focus();
+    if (next.every(c => c)) setTypedAnswer(joinWithSpaces(next));
   };
 
   const handleBoxKeyPress = (e: any, index: number) => {
-    if (e.nativeEvent.key === 'Backspace' && !boxChars[index] && index > 0) {
+    if (e.nativeEvent.key === 'Backspace' && !boxChars[index] && index > 0)
       boxRefs.current[index - 1]?.focus();
-    }
   };
 
   const handleFreeze = async () => {
@@ -300,7 +331,6 @@ export default function QuestionScreen() {
     if (powerups.hint <= 0 || selected || activePowerups.hint) return;
     setPowerups(p => ({ ...p, hint: p.hint - 1 }));
     setActivePowerups(p => ({ ...p, hint: true }));
-    // Pick 2 wrong choices to hide for MCQ
     const q = questions[questionOrder[currentIndex]];
     if (q?.type === 'mcq' && q.choices) {
       const wrong = q.choices.filter((c: string) => c !== q.correctAnswer);
@@ -342,12 +372,10 @@ export default function QuestionScreen() {
     setPowerupEarned(null);
     const timeTaken = (Date.now() - startTimeRef.current) / 1000;
     const actualIndex = questionOrder[currentIndex];
-
     try {
       const token = await getToken();
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
-
       const res = await fetch(`${API_BASE_URL}/game/answer/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -363,12 +391,7 @@ export default function QuestionScreen() {
         signal: controller.signal,
       });
       clearTimeout(timeout);
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `Server error ${res.status}`);
-      }
-
+      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || `Server error ${res.status}`); }
       const data = await res.json();
       setResult({ correct: data.correct, correctAnswer: data.correctAnswer, points: data.pointsAwarded });
       if (data.powerupEarned) {
@@ -387,36 +410,23 @@ export default function QuestionScreen() {
       setTimeLeft(timePerQuestion);
       timerRef.current = setInterval(() => {
         setTimeLeft(t => {
-          if (t <= 1) {
-            clearInterval(timerRef.current);
-            if (!selected) handleAnswer(null);
-            return 0;
-          }
+          if (t <= 1) { clearInterval(timerRef.current); if (!selected) handleAnswer(null); return 0; }
           return t - 1;
         });
       }, 1000);
     }
   };
 
-  const handleRetry = () => {
-    setError(null);
-    handleAnswer(pendingAnswer);
-  };
+  const handleRetry = () => { setError(null); handleAnswer(pendingAnswer); };
 
   const toggleStandings = () => {
     const toValue = showStandings ? 0 : 1;
     setShowStandings(!showStandings);
-    Animated.spring(standingsAnim, {
-      toValue,
-      friction: 8,
-      tension: 60,
-      useNativeDriver: true,
-    }).start();
+    Animated.spring(standingsAnim, { toValue, friction: 8, tension: 60, useNativeDriver: true }).start();
   };
 
   const handleNext = async () => {
     if (currentIndex + 1 >= questionOrder.length) {
-      // Done — finish game
       const token = await getToken();
       await fetch(`${API_BASE_URL}/game/finish/`, {
         method: 'POST',
@@ -426,32 +436,15 @@ export default function QuestionScreen() {
       router.replace({ pathname: '/game/final', params: { roomCode } });
       return;
     }
-
-    // ─── Flash card exit animation: slide + rotate off to the left ───────────
     isAnimatingRef.current = true;
     Animated.parallel([
-      Animated.timing(cardTranslateX, {
-        toValue: -SCREEN_WIDTH * 0.9,
-        duration: 300,
-        useNativeDriver: true,
-      }),
-      Animated.timing(cardRotateY, {
-        toValue: -14,
-        duration: 300,
-        useNativeDriver: true,
-      }),
-      Animated.timing(cardOpacity, {
-        toValue: 0,
-        duration: 250,
-        useNativeDriver: true,
-      }),
+      Animated.timing(cardTranslateX, { toValue: -SCREEN_WIDTH * 0.9, duration: 300, useNativeDriver: true }),
+      Animated.timing(cardRotateY, { toValue: -14, duration: 300, useNativeDriver: true }),
+      Animated.timing(cardOpacity, { toValue: 0, duration: 250, useNativeDriver: true }),
     ]).start(() => {
-      // Reset card position for entrance
       cardTranslateX.setValue(SCREEN_WIDTH * 0.85);
       cardRotateY.setValue(12);
       cardOpacity.setValue(0);
-
-      // ─── Original state transitions (unchanged logic) ──────────────────────
       setCurrentIndex(i => i + 1);
       setSelected(null);
       setResult(null);
@@ -465,614 +458,937 @@ export default function QuestionScreen() {
     });
   };
 
+  /* ── loading guard ── */
   if (questions.length === 0 || questionOrder.length === 0) {
-    return <View style={styles.container}><Text style={styles.progress}>Loading questions...</Text></View>;
+    return (
+      <View style={styles.container}>
+        <Text style={styles.loadingText}>Loading questions...</Text>
+      </View>
+    );
   }
 
   const actualIndex = questionOrder[currentIndex];
   const question = questions[actualIndex];
-
-  // Compute player's current rank for the header badge
   const playerRank = standings.findIndex(p => String(p.id) === String(userId)) + 1;
+  const isDanger = !isFrozen && timeLeft <= 5;
+  const hasPowerups = powerups.freeze > 0 || powerups.hint > 0 || powerups.doublePoints > 0 || powerups.shield > 0;
+  const visibleChoices = question.type === 'mcq'
+    ? question.choices.filter((c: string) => !hintedChoices.includes(c))
+    : [];
 
-  // ─── Single Unified View (No Separate Result Screen) ─────────────────────────
+  /* ═══════════════════════════════════════════════════════════
+     RENDER
+     ═══════════════════════════════════════════════════════════ */
   return (
     <View style={styles.container}>
-      {/* ─── Header: Progress | Standings Button | Timer ─────────────────────── */}
-      <View style={styles.header}>
-        <Text style={styles.progress}>{currentIndex + 1} / {questionOrder.length}</Text>
 
-        {/* Standings Toggle Button — always visible */}
+      {/* ── frozen screen tint ── */}
+      {isFrozen && <View style={styles.frozenTint} />}
+
+      {/* ── HEADER ROW ── */}
+      <View style={styles.header}>
+        <Text style={styles.progressText}>
+          <Text style={styles.progressCurrent}>{currentIndex + 1}</Text>
+          {' / '}
+          {questionOrder.length}
+        </Text>
+
         <TouchableOpacity
-          style={[styles.standingsHeaderBtn, showStandings && styles.standingsHeaderBtnActive]}
+          style={[styles.standingsToggle, showStandings && styles.standingsToggleActive]}
           onPress={toggleStandings}
           activeOpacity={0.7}
         >
-          <Text style={styles.standingsHeaderIcon}>🏆</Text>
+          <Text style={styles.standingsToggleIcon}>🏆</Text>
           {playerRank > 0 && (
-            <Text style={styles.standingsHeaderRank}>#{playerRank}</Text>
+            <View style={styles.rankBadge}>
+              <Text style={styles.rankBadgeText}>#{playerRank}</Text>
+            </View>
           )}
         </TouchableOpacity>
 
-        <View style={[styles.timerBadge, isFrozen && { backgroundColor: '#0E7490' }, !isFrozen && timeLeft <= 5 && { backgroundColor: '#e53e3e' }]}>
-          <Text style={styles.timerText}>{isFrozen ? '❄️ FROZEN' : `${timeLeft}s`}</Text>
+        <View style={[
+          styles.timerBadge,
+          isFrozen && styles.timerBadgeFrozen,
+          isDanger && styles.timerBadgeDanger,
+        ]}>
+          <Text style={[
+            styles.timerBadgeText,
+            isFrozen && styles.timerBadgeTextFrozen,
+            isDanger && styles.timerBadgeTextDanger,
+          ]}>
+            {isFrozen ? '❄️ FROZEN' : `${timeLeft}s`}
+          </Text>
         </View>
       </View>
 
-      {/* ─── Standings Overlay Drawer (slides down below header) ─────────────── */}
-      {showStandings && (
+      {/* ── TIMER PROGRESS BAR (smooth animated) ── */}
+      <View style={styles.timerBarTrack}>
+        <Animated.View style={[
+          styles.timerBarFill,
+          isDanger && styles.timerBarFillDanger,
+          isFrozen && styles.timerBarFillFrozen,
+          { width: timerBarAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) },
+        ]} />
+      </View>
+
+      {/* ── ACTIVE POWERUP BANNERS ── */}
+      {!selected && !result && (activePowerups.doublePoints || activePowerups.shield) && (
+        <View style={styles.bannerRow}>
+          {activePowerups.doublePoints && (
+            <View style={[styles.banner, styles.banner2x]}>
+              <Text style={styles.bannerText2x}>⚡ 2x Points Active!</Text>
+            </View>
+          )}
+          {activePowerups.shield && (
+            <View style={[styles.banner, styles.bannerShield]}>
+              <Text style={styles.bannerTextShield}>🛡️ Shield Active!</Text>
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* ── ERROR ── */}
+      {error && (
+        <View style={styles.errorBox}>
+          <Text style={styles.errorText}>{error}</Text>
+          <TouchableOpacity style={styles.retryBtn} onPress={handleRetry} activeOpacity={0.8}>
+            <Text style={styles.retryBtnText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* ── SCROLLABLE MIDDLE ── */}
+      <ScrollView
+        style={styles.scrollArea}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        scrollEnabled={!showStandings}
+      >
+        {/* ── FLASH CARD (animated) ── */}
         <Animated.View
           style={[
-            styles.standingsOverlay,
+            styles.flashCard,
             {
-              opacity: standingsAnim,
-              transform: [{
-                translateY: standingsAnim.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [-20, 0],
-                }),
-              }],
+              opacity: cardOpacity,
+              transform: [
+                { perspective: 1200 },
+                { translateX: cardTranslateX },
+                { rotateY: cardRotateY.interpolate({ inputRange: [-14, 0, 12], outputRange: ['-14deg', '0deg', '12deg'] }) },
+              ],
             },
           ]}
         >
-          <View style={styles.standingsOverlayInner}>
-            <View style={styles.standingsOverlayHeader}>
-              <Text style={styles.standingsTitle}>Standings</Text>
-              {biggestMover && (
-                <Text style={styles.moverBannerInline}>🚀 {biggestMover.name} +{biggestMover.jump}</Text>
-              )}
+          <View style={styles.cardHighlight} />
+
+          <View style={styles.qTab}>
+            <Text style={styles.qTabText}>Q{currentIndex + 1}</Text>
+          </View>
+
+          <Text style={styles.questionText}>{question.question}</Text>
+        </Animated.View>
+
+        {/* ── RESULT STRIP ── */}
+        {result && (
+          <Animated.View
+            style={[
+              styles.resultStrip,
+              result.correct ? styles.resultStripCorrect : styles.resultStripWrong,
+              {
+                opacity: resultFlipAnim,
+                transform: [{ translateY: resultFlipAnim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }],
+              },
+            ]}
+          >
+            <Text style={styles.resultStripLabel}>
+              {result.correct ? '✅ Correct!' : `✗ Wrong — Answer: ${result.correctAnswer}`}
+            </Text>
+            <Text style={[styles.resultStripPts, result.correct ? styles.ptsGreen : styles.ptsRed]}>
+              +{result.points}
+            </Text>
+          </Animated.View>
+        )}
+
+        {/* ── MCQ CHOICES ── */}
+        {question.type === 'mcq' && (
+          <View style={styles.choicesWrap}>
+            {visibleChoices.map((choice: string) => {
+              const isCorrect = result && choice === result.correctAnswer;
+              const isWrongPick = result && choice === selected && !result.correct;
+              const isDimmed = result && !isCorrect && choice !== selected;
+              return (
+                <TouchableOpacity
+                  key={choice}
+                  style={[
+                    styles.choice,
+                    isCorrect && styles.choiceCorrect,
+                    isWrongPick && styles.choiceWrong,
+                    isDimmed && styles.choiceDimmed,
+                  ]}
+                  onPress={() => handleAnswer(choice)}
+                  disabled={!!selected}
+                  activeOpacity={0.7}
+                >
+                  <View style={[
+                    styles.choiceChip,
+                    isCorrect && styles.choiceChipCorrect,
+                    isWrongPick && styles.choiceChipWrong,
+                  ]}>
+                    <Text style={[
+                      styles.choiceChipText,
+                      isCorrect && styles.choiceChipTextCorrect,
+                      isWrongPick && styles.choiceChipTextWrong,
+                    ]}>
+                      {isCorrect ? '✓' : isWrongPick ? '✗' : letterOf(choice)}
+                    </Text>
+                  </View>
+                  <Text style={[
+                    styles.choiceText,
+                    isCorrect && styles.choiceTextCorrect,
+                    isWrongPick && styles.choiceTextWrong,
+                  ]}>
+                    {textOf(choice)}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
+
+        {/* ── IDENTIFICATION INPUT ── */}
+        {question.type === 'identification' && (
+          <View style={styles.idArea}>
+            {activePowerups.hint && question.correctAnswer && (
+              <View style={styles.hintBanner}>
+                <Text style={styles.hintBannerText}>
+                  💡 Starts with: <Text style={styles.hintLetter}>{question.correctAnswer.charAt(0).toUpperCase()}</Text>
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.idWords}>
+              {(() => {
+                let idx = 0;
+                return wordLengths.map((len, wi) => {
+                  const group = boxChars.slice(idx, idx + len).map((char, j) => {
+                    const gi = idx + j;
+                    return (
+                      <TextInput
+                        key={gi}
+                        ref={(r) => { boxRefs.current[gi] = r; }}
+                        style={[styles.charBox, char ? styles.charBoxFilled : null]}
+                        value={char}
+                        onChangeText={(t) => handleBoxChange(t, gi)}
+                        onKeyPress={(e) => handleBoxKeyPress(e, gi)}
+                        maxLength={1}
+                        editable={!selected}
+                        autoCapitalize="characters"
+                        selectionColor={COLORS.accentBright}
+                      />
+                    );
+                  });
+                  idx += len;
+                  return <View key={wi} style={styles.idWord}>{group}</View>;
+                });
+              })()}
             </View>
+
+            {!result && (
+              <TouchableOpacity
+                style={[styles.submitBtn, !boxChars.every(c => c) && styles.submitBtnDisabled]}
+                onPress={() => handleAnswer(joinWithSpaces(boxChars))}
+                disabled={!!selected || !boxChars.every(c => c)}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.submitBtnText}>Submit</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {/* ── NEXT / FINISH (auto-advance countdown, tappable to skip) ── */}
+        {result && (
+          <Animated.View
+            style={[
+              styles.nextWrap,
+              {
+                opacity: resultFlipAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, 0.5, 1] }),
+                transform: [{ translateY: resultFlipAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }],
+              },
+            ]}
+          >
+            <TouchableOpacity
+              style={[
+                styles.nextBtn,
+                currentIndex + 1 >= questionOrder.length ? styles.nextBtnFinish : styles.nextBtnAccent,
+              ]}
+              onPress={() => { if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; } handleNext(); }}
+              activeOpacity={0.8}
+            >
+              <Text style={[
+                styles.nextBtnText,
+                currentIndex + 1 >= questionOrder.length ? styles.nextBtnTextFinish : styles.nextBtnTextAccent,
+              ]}>
+                {currentIndex + 1 >= questionOrder.length ? 'Finish 🏁' : 'Next →'}
+              </Text>
+              {autoCountdown > 0 && (
+                <Text style={styles.nextBtnCountdown}>{autoCountdown}s</Text>
+              )}
+            </TouchableOpacity>
+          </Animated.View>
+        )}
+      </ScrollView>
+
+      {/* ── POWERUP BAR (pinned bottom) ── */}
+      {!selected && !result && hasPowerups && (
+        <View style={styles.powerupBar}>
+          {powerups.freeze > 0 && (
+            <TouchableOpacity
+              style={[styles.puBtn, isFrozen && styles.puBtnFreezeActive]}
+              onPress={handleFreeze}
+              disabled={!!selected || isFrozen}
+              activeOpacity={0.7}
+            >
+              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{powerups.freeze}</Text></View>
+              <Text style={styles.puIcon}>❄️</Text>
+              <Text style={[styles.puLabel, isFrozen && styles.puLabelCyan]}>Freeze</Text>
+            </TouchableOpacity>
+          )}
+          {powerups.hint > 0 && (
+            <TouchableOpacity
+              style={[styles.puBtn, activePowerups.hint && styles.puBtnUsed]}
+              onPress={handleHint}
+              disabled={!!selected || activePowerups.hint}
+              activeOpacity={0.7}
+            >
+              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{powerups.hint}</Text></View>
+              <Text style={styles.puIcon}>💡</Text>
+              <Text style={[styles.puLabel, activePowerups.hint && styles.puLabelYellow]}>Hint</Text>
+            </TouchableOpacity>
+          )}
+          {powerups.doublePoints > 0 && (
+            <TouchableOpacity
+              style={[styles.puBtn, activePowerups.doublePoints && styles.puBtnUsed]}
+              onPress={handleDoublePoints}
+              disabled={!!selected || activePowerups.doublePoints}
+              activeOpacity={0.7}
+            >
+              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{powerups.doublePoints}</Text></View>
+              <Text style={styles.puIcon}>⚡</Text>
+              <Text style={[styles.puLabel, activePowerups.doublePoints && styles.puLabelYellow]}>2x Pts</Text>
+            </TouchableOpacity>
+          )}
+          {powerups.shield > 0 && (
+            <TouchableOpacity
+              style={[styles.puBtn, activePowerups.shield && styles.puBtnShieldActive]}
+              onPress={handleShield}
+              disabled={!!selected || activePowerups.shield}
+              activeOpacity={0.7}
+            >
+              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{powerups.shield}</Text></View>
+              <Text style={styles.puIcon}>🛡️</Text>
+              <Text style={[styles.puLabel, activePowerups.shield && styles.puLabelCyan]}>Shield</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+
+      {/* ── POWERUP EARNED TOAST ── */}
+      {powerupEarned && (
+        <Animated.View
+          style={[
+            styles.puToast,
+            {
+              opacity: floatAnim,
+              transform: [
+                { translateY: floatAnim.interpolate({ inputRange: [0, 1], outputRange: [60, 0] }) },
+                { scale: floatScale },
+              ],
+            },
+          ]}
+        >
+          <Text style={styles.puToastIcon}>{powerupEarned}</Text>
+          <View>
+            <Text style={styles.puToastTitle}>Powerup earned!</Text>
+            <Text style={styles.puToastSub}>Added to your kit</Text>
+          </View>
+        </Animated.View>
+      )}
+
+      {/* ── STANDINGS OVERLAY ── */}
+      {showStandings && (
+        <View style={styles.standingsOverlay}>
+          <TouchableOpacity style={styles.standingsBackdrop} activeOpacity={1} onPress={toggleStandings} />
+          <Animated.View
+            style={[
+              styles.standingsDrawer,
+              {
+                opacity: standingsAnim,
+                transform: [{ translateY: standingsAnim.interpolate({ inputRange: [0, 1], outputRange: [-30, 0] }) }],
+              },
+            ]}
+          >
+            <View style={styles.standingsDrawerHeader}>
+              <Text style={styles.standingsDrawerTitle}>STANDINGS</Text>
+            </View>
+            {biggestMover && (
+              <View style={styles.moverBanner}>
+                <Text style={styles.moverBannerText}>🚀 {biggestMover.name} jumped +{biggestMover.jump} ranks!</Text>
+              </View>
+            )}
             <ScrollView showsVerticalScrollIndicator={false} style={styles.standingsScroll}>
               {standings.map((p, i) => (
                 <StandingsRow key={p.id} player={p} index={i} isYou={String(p.id) === String(userId)} />
               ))}
             </ScrollView>
-          </View>
-        </Animated.View>
-      )}
-
-      {/* Powerup Earned — Floating Icon */}
-      {powerupEarned && (
-        <Animated.View style={[styles.floatOverlay, { opacity: floatAnim, transform: [{ translateY: floatAnim.interpolate({ inputRange: [0, 1], outputRange: [60, 0] }) }, { scale: floatScale }] }]}>
-          <Text style={styles.floatIcon}>{powerupEarned}</Text>
-          <Text style={styles.floatLabel}>Powerup earned!</Text>
-        </Animated.View>
-      )}
-
-      {/* Powerup Bar — only shows owned powerups */}
-      {!selected && !result && (powerups.freeze > 0 || powerups.hint > 0 || powerups.doublePoints > 0 || powerups.shield > 0) && (
-        <View style={styles.powerupBar}>
-          {powerups.freeze > 0 && (
-            <TouchableOpacity
-              style={[styles.powerupBtn, isFrozen && styles.powerupBtnActive]}
-              onPress={handleFreeze}
-              disabled={!!selected || isFrozen}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.powerupIcon}>❄️</Text>
-              <Text style={[styles.powerupLabel, isFrozen && { color: '#67E8F9' }]}>Freeze</Text>
-            </TouchableOpacity>
-          )}
-          {powerups.hint > 0 && (
-            <TouchableOpacity
-              style={[styles.powerupBtn, activePowerups.hint && styles.powerupBtnActive]}
-              onPress={handleHint}
-              disabled={!!selected || activePowerups.hint}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.powerupIcon}>💡</Text>
-              <Text style={[styles.powerupLabel, activePowerups.hint && { color: '#FDE68A' }]}>Hint</Text>
-            </TouchableOpacity>
-          )}
-          {powerups.doublePoints > 0 && (
-            <TouchableOpacity
-              style={[styles.powerupBtn, activePowerups.doublePoints && styles.powerupBtnActive]}
-              onPress={handleDoublePoints}
-              disabled={!!selected || activePowerups.doublePoints}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.powerupIcon}>⚡</Text>
-              <Text style={[styles.powerupLabel, activePowerups.doublePoints && { color: '#FDE68A' }]}>2x Pts</Text>
-            </TouchableOpacity>
-          )}
-          {powerups.shield > 0 && (
-            <TouchableOpacity
-              style={[styles.powerupBtn, activePowerups.shield && styles.powerupBtnActive]}
-              onPress={handleShield}
-              disabled={!!selected || activePowerups.shield}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.powerupIcon}>🛡️</Text>
-              <Text style={[styles.powerupLabel, activePowerups.shield && { color: '#67E8F9' }]}>Shield</Text>
-            </TouchableOpacity>
-          )}
+          </Animated.View>
         </View>
       )}
 
-      {/* Active Powerup Banners */}
-      {!selected && !result && (activePowerups.doublePoints || activePowerups.shield) && (
-        <View style={styles.powerupBannerRow}>
-          {activePowerups.doublePoints && (
-            <View style={[styles.powerupBanner, { backgroundColor: 'rgba(245, 158, 11, 0.2)', borderColor: '#F59E0B' }]}>
-              <Text style={styles.powerupBannerText}>⚡ 2x Points Active!</Text>
-            </View>
-          )}
-          {activePowerups.shield && (
-            <View style={[styles.powerupBanner, { backgroundColor: 'rgba(34, 211, 238, 0.2)', borderColor: '#22D3EE' }]}>
-              <Text style={styles.powerupBannerText}>🛡️ Shield Active!</Text>
-            </View>
-          )}
-        </View>
-      )}
-
-      {error ? (
-        <View style={styles.errorContainer}>
-          <Text style={styles.errorText}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={handleRetry}>
-            <Text style={styles.retryBtnText}>Retry</Text>
-          </TouchableOpacity>
-        </View>
-      ) : null}
-
-      {/* ─── Flash Card Container ─────────────────────────────────────────────── */}
-      <Animated.View
-        style={[
-          styles.flashCard,
-          {
-            opacity: cardOpacity,
-            transform: [
-              { perspective: 1200 },
-              { translateX: cardTranslateX },
-              { rotateY: cardRotateY.interpolate({ inputRange: [-14, 0, 12], outputRange: ['-14deg', '0deg', '12deg'] }) },
-            ],
-          },
-        ]}
-      >
-        {/* Top highlight edge for physical card feel */}
-        <View style={styles.cardTopHighlight} />
-
-        {/* Card index tab */}
-        <View style={styles.cardIndexTab}>
-          <Text style={styles.cardIndexText}>Q{currentIndex + 1}</Text>
-        </View>
-
-        <Text style={styles.question}>{question.question}</Text>
-
-        {question.type === 'identification' ? (
-          <View>
-            {activePowerups.hint && question.correctAnswer && (
-              <View style={styles.hintHint}>
-                <Text style={styles.hintHintText}>💡 Starts with: "{question.correctAnswer.charAt(0).toUpperCase()}"</Text>
-              </View>
-            )}
-            <View style={styles.boxRow}>
-              {(() => {
-                let idx = 0;
-                return wordLengths.map((len, wi) => {
-                  const group = boxChars.slice(idx, idx + len).map((char, j) => {
-                    const globalIndex = idx + j;
-                    return (
-                      <TextInput
-                        key={globalIndex}
-                        ref={(r) => { boxRefs.current[globalIndex] = r; }}
-                        style={styles.charBox}
-                        value={char}
-                        onChangeText={(t) => handleBoxChange(t, globalIndex)}
-                        onKeyPress={(e) => handleBoxKeyPress(e, globalIndex)}
-                        maxLength={1}
-                        editable={!selected}
-                        autoCapitalize="characters"
-                      />
-                    );
-                  });
-                  idx += len;
-                  return <View key={wi} style={styles.wordGroup}>{group}</View>;
-                });
-              })()}
-            </View>
-            <TouchableOpacity
-              style={[styles.submitBtn, !boxChars.every(c => c) && { opacity: 0.5 }]}
-              onPress={() => handleAnswer(joinWithSpaces(boxChars))}
-              disabled={!!selected || !boxChars.every(c => c)}
-            >
-              <Text style={styles.nextBtnText}>Submit</Text>
-            </TouchableOpacity>
-          </View>
-        ) : question.choices.filter((choice: string) => !hintedChoices.includes(choice)).map((choice: string) => {
-          const isCorrect = result && choice === result.correctAnswer;
-          const isWrongSelected = result && choice === selected && !result.correct;
-          return (
-            <TouchableOpacity
-              key={choice}
-              style={[
-                styles.choice,
-                isCorrect && styles.choiceCorrect,
-                isWrongSelected && styles.choiceWrong,
-                {
-                  opacity: result && choice !== result.correctAnswer && choice !== selected ? 0.4 : 1,
-                },
-              ]}
-              onPress={() => handleAnswer(choice)}
-              disabled={!!selected}
-            >
-              <Text style={[styles.choiceText, isCorrect && { color: '#10B981' }, isWrongSelected && { color: '#EF4444' }]}>
-                {isCorrect ? '✓ ' : isWrongSelected ? '✗ ' : ''}{choice}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </Animated.View>
-      {/* ─── End Flash Card ───────────────────────────────────────────────────── */}
-
-      {/* ─── Next Button (appears after answering) ────────────────────────────── */}
-      {result && (
-        <Animated.View
-          style={{
-            marginTop: 20,
-            opacity: resultFlipAnim.interpolate({
-              inputRange: [0, 0.5, 1],
-              outputRange: [0, 0.5, 1],
-            }),
-            transform: [{
-              translateY: resultFlipAnim.interpolate({
-                inputRange: [0, 1],
-                outputRange: [20, 0],
-              }),
-            }],
-          }}
-        >
-          <TouchableOpacity style={styles.nextBtnFull} onPress={handleNext} activeOpacity={0.8}>
-            <Text style={styles.nextBtnText}>
-              {currentIndex + 1 >= questionOrder.length ? 'Finish 🏁' : 'Next →'}
-            </Text>
-          </TouchableOpacity>
-        </Animated.View>
-      )}
+      <View style={styles.safeBottom} />
     </View>
   );
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   STYLES
+   ═══════════════════════════════════════════════════════════════ */
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg, padding: 24, paddingTop: 60 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  progress: { color: '#aaa', fontSize: 16, fontFamily: FONTS.semiBold },
-  timerBadge: { backgroundColor: COLORS.accent, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, shadowColor: COLORS.accent, shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.4, shadowRadius: 6, elevation: 5 },
-  timerText: { color: '#fff', fontWeight: 'bold', fontSize: 16, fontFamily: FONTS.bold },
-
-  // ─── Standings Header Button ──────────────────────────────────────────────────
-  standingsHeaderBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(127, 119, 221, 0.15)',
-    borderRadius: 16,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(127, 119, 221, 0.3)',
+  /* ── layout ── */
+  container: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+    paddingHorizontal: 24,
+    paddingTop: 60,
   },
-  standingsHeaderBtnActive: {
-    backgroundColor: 'rgba(127, 119, 221, 0.35)',
-    borderColor: COLORS.accent,
-  },
-  standingsHeaderIcon: {
-    fontSize: 14,
-  },
-  standingsHeaderRank: {
-    color: COLORS.purpleLight,
-    fontSize: 12,
-    fontFamily: FONTS.bold,
-    fontWeight: '700',
-  },
-
-  // ─── Standings Overlay Drawer ─────────────────────────────────────────────────
-  standingsOverlay: {
-    position: 'absolute',
-    top: 100,
-    left: 24,
-    right: 24,
-    zIndex: 100,
-    maxHeight: SCREEN_HEIGHT * 0.55,
-  },
-  standingsOverlayInner: {
-    backgroundColor: 'rgba(15, 12, 41, 0.95)',
-    borderRadius: 20,
-    padding: 16,
-    borderWidth: 1.5,
-    borderColor: COLORS.cardBorder,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.6,
-    shadowRadius: 24,
-    elevation: 20,
-    maxHeight: SCREEN_HEIGHT * 0.55,
-  },
-  standingsOverlayHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  standingsScroll: {
-    maxHeight: SCREEN_HEIGHT * 0.4,
-  },
-  moverBannerInline: {
-    color: COLORS.warning,
-    fontSize: 11,
-    fontWeight: '700',
+  loadingText: {
+    color: COLORS.textMuted,
+    fontSize: 16,
     fontFamily: FONTS.semiBold,
+    textAlign: 'center',
+    marginTop: 80,
+  },
+  frozenTint: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(14,116,144,0.05)',
+    zIndex: 1,
+    borderRadius: 0,
+  },
+  safeBottom: { height: 34 },
+
+  /* ── header ── */
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 10,
+    zIndex: 10,
+  },
+  progressText: {
+    fontSize: 15,
+    fontFamily: FONTS.extraBold,
+    color: COLORS.textSecondary,
+  },
+  progressCurrent: {
+    color: COLORS.purplePrimary,
   },
 
-  // ─── Flash Card Styles ────────────────────────────────────────────────────────
+  /* standings toggle */
+  standingsToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(127,119,221,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(127,119,221,0.25)',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  standingsToggleActive: {
+    backgroundColor: 'rgba(127,119,221,0.35)',
+    borderColor: 'rgba(127,119,221,0.5)',
+  },
+  standingsToggleIcon: { fontSize: 14 },
+  rankBadge: {
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: 8,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  rankBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontFamily: FONTS.extraBold,
+  },
+
+  /* timer badge */
+  timerBadge: {
+    backgroundColor: COLORS.accentBright,
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    minWidth: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  timerBadgeDanger: { backgroundColor: '#e53e3e' },
+  timerBadgeFrozen: { backgroundColor: '#0E7490' },
+  timerBadgeText: {
+    color: COLORS.bg,
+    fontSize: 16,
+    fontFamily: FONTS.black,
+  },
+  timerBadgeTextDanger: { color: '#fff' },
+  timerBadgeTextFrozen: { color: '#A5F3FC', fontSize: 12 },
+
+  /* timer progress bar */
+  timerBarTrack: {
+    height: 3,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 2,
+    overflow: 'hidden',
+    marginBottom: 16,
+  },
+  timerBarFill: {
+    height: '100%',
+    borderRadius: 2,
+    backgroundColor: COLORS.accentBright,
+  },
+  timerBarFillDanger: { backgroundColor: '#e53e3e' },
+  timerBarFillFrozen: { backgroundColor: '#0E7490' },
+
+  /* ── active powerup banners ── */
+  bannerRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  banner: {
+    flex: 1,
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    alignItems: 'center',
+  },
+  banner2x: {
+    backgroundColor: 'rgba(245,158,11,0.1)',
+    borderColor: 'rgba(245,158,11,0.3)',
+  },
+  bannerShield: {
+    backgroundColor: 'rgba(34,211,238,0.08)',
+    borderColor: 'rgba(34,211,238,0.25)',
+  },
+  bannerText2x: { color: '#FBBF24', fontSize: 12, fontFamily: FONTS.bold },
+  bannerTextShield: { color: '#67E8F9', fontSize: 12, fontFamily: FONTS.bold },
+
+  /* ── error ── */
+  errorBox: {
+    backgroundColor: 'rgba(239,68,68,0.12)',
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(239,68,68,0.35)',
+  },
+  errorText: {
+    color: '#FCA5A5',
+    fontSize: 13,
+    fontFamily: FONTS.medium,
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  retryBtn: {
+    backgroundColor: '#e53e3e',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 28,
+    alignItems: 'center',
+    alignSelf: 'center',
+  },
+  retryBtnText: { color: '#fff', fontSize: 14, fontFamily: FONTS.bold },
+
+  /* ── scroll area ── */
+  scrollArea: { flex: 1 },
+  scrollContent: { paddingBottom: 16 },
+
+  /* ── flash card ── */
   flashCard: {
     backgroundColor: COLORS.cardBg,
     borderRadius: 24,
     padding: 24,
     paddingTop: 28,
-    borderWidth: 1.5,
+    borderWidth: 1,
     borderColor: COLORS.cardBorder,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 14 },
-    shadowOpacity: 0.5,
-    shadowRadius: 24,
-    elevation: 16,
     position: 'relative',
     overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 32,
+    elevation: 16,
   },
-  cardTopHighlight: {
+  cardHighlight: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
     height: 3,
-    backgroundColor: 'rgba(127, 119, 221, 0.4)',
+    backgroundColor: 'rgba(255,255,255,0.4)',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
   },
-  cardIndexTab: {
+  qTab: {
     alignSelf: 'flex-start',
-    backgroundColor: 'rgba(127, 119, 221, 0.2)',
+    backgroundColor: COLORS.purplePrimary,
     borderRadius: 8,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     paddingVertical: 4,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(127, 119, 221, 0.3)',
+    marginBottom: 14,
   },
-  cardIndexText: {
-    color: COLORS.accent,
-    fontSize: 12,
+  qTabText: {
+    color: COLORS.accentBright,
+    fontSize: 11,
+    fontFamily: FONTS.extraBold,
+    letterSpacing: 1,
+  },
+  questionText: {
+    color: '#fff',
+    fontSize: 20,
     fontFamily: FONTS.bold,
-    fontWeight: '700',
+    lineHeight: 29,
   },
 
-  question: { color: '#fff', fontSize: 20, fontWeight: 'bold', marginBottom: 24, lineHeight: 28, fontFamily: FONTS.bold },
-  choice: {
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(127, 119, 221, 0.25)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 6,
-    elevation: 3,
-  },
-  choiceText: { color: '#fff', fontSize: 16, fontFamily: FONTS.medium },
-  choiceCorrect: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderColor: '#10B981',
-  },
-  choiceWrong: {
-    backgroundColor: 'rgba(239, 68, 68, 0.2)',
-    borderColor: '#EF4444',
-  },
-  boxRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 16, gap: 6 },
-  wordGroup: { flexDirection: 'row', gap: 4, marginRight: 12, marginBottom: 6 },
-  charBox: {
-    width: 32, height: 44, borderRadius: 8, borderWidth: 2, borderColor: COLORS.accent,
-    backgroundColor: '#1e1b4b', color: '#fff', fontSize: 18, fontWeight: '700',
-    textAlign: 'center', textAlignVertical: 'center', includeFontPadding: false, padding: 0,
-    shadowColor: 'rgba(127, 119, 221, 0.3)',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.4,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  submitBtn: {
-    backgroundColor: COLORS.accent,
-    borderRadius: 14,
-    padding: 16,
-    alignItems: 'center',
-    shadowColor: COLORS.accent,
-    shadowOffset: { width: 0, height: 5 },
-    shadowOpacity: 0.4,
-    shadowRadius: 10,
-    elevation: 6,
-  },
-  nextBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16, fontFamily: FONTS.bold },
-  errorContainer: {
-    backgroundColor: 'rgba(239, 68, 68, 0.15)',
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.4)',
-  },
-  errorText: { color: '#FCA5A5', fontSize: 14, marginBottom: 12, textAlign: 'center', fontFamily: FONTS.medium },
-  retryBtn: {
-    backgroundColor: '#e53e3e',
-    borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 24,
-    alignItems: 'center',
-    alignSelf: 'center',
-    shadowColor: '#e53e3e',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  retryBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 14, fontFamily: FONTS.bold },
-
-  // ─── Next Button (below card) ─────────────────────────────────────────────────
-  nextBtnFull: {
-    backgroundColor: COLORS.accent,
-    borderRadius: 16,
-    paddingVertical: 16,
-    alignItems: 'center',
-    shadowColor: COLORS.accent,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 12,
-    elevation: 8,
-  },
-
-  // ─── Standings (shared) ───────────────────────────────────────────────────────
-  standingsTitle: {
-    color: '#aaa',
-    fontSize: 12,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    fontFamily: FONTS.semiBold,
-  },
-  standingsRow: {
+  /* ── result strip ── */
+  resultStrip: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 6,
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    marginTop: 14,
   },
-  standingsRank: {
-    color: '#94A3B8',
-    width: 24,
-    fontSize: 14,
-    fontWeight: '700',
-    fontFamily: FONTS.bold,
+  resultStripCorrect: {
+    backgroundColor: 'rgba(16,185,129,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(16,185,129,0.35)',
   },
-  standingsName: {
-    color: '#fff',
-    fontSize: 14,
+  resultStripWrong: {
+    backgroundColor: 'rgba(239,68,68,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(239,68,68,0.35)',
+  },
+  resultStripLabel: {
     flex: 1,
-    fontFamily: FONTS.regular,
-  },
-  standingsYou: {
-    color: COLORS.accent,
-    fontWeight: '700',
-    fontFamily: FONTS.bold,
-  },
-  standingsScore: {
-    color: COLORS.accent,
     fontSize: 14,
-    fontWeight: '700',
     fontFamily: FONTS.bold,
+    color: '#34D399',
   },
-  standingsRowTop3: { backgroundColor: 'rgba(139, 92, 246, 0.12)', borderRadius: 8, paddingHorizontal: 8 },
-  streakBadge: { color: '#F59E0B', fontSize: 12, fontWeight: '700', marginLeft: 4 },
-  moveUp: { color: '#10B981', fontSize: 12, fontWeight: '700', marginRight: 6 },
-  moveDown: { color: '#EF4444', fontSize: 12, fontWeight: '700', marginRight: 6 },
-  moverBanner: { color: '#fff', fontSize: 14, fontWeight: '700', textAlign: 'center', marginBottom: 10, fontFamily: FONTS.bold },
+  resultStripWrong: {
+    backgroundColor: 'rgba(239,68,68,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(239,68,68,0.35)',
+  },
+  ptsGreen: { color: '#34D399' },
+  ptsRed: { color: '#F87171' },
+  resultStripPts: {
+    fontSize: 18,
+    fontFamily: FONTS.black,
+    marginLeft: 12,
+  },
 
-  // Powerup styles
+  /* ── MCQ choices ── */
+  choicesWrap: {
+    marginTop: 20,
+    gap: 12,
+  },
+  choice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1.5,
+    borderColor: 'rgba(127,119,221,0.2)',
+    borderRadius: 14,
+    paddingVertical: 16,
+    paddingHorizontal: 18,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  choiceCorrect: {
+    backgroundColor: 'rgba(16,185,129,0.15)',
+    borderColor: 'rgba(16,185,129,0.5)',
+  },
+  choiceWrong: {
+    backgroundColor: 'rgba(239,68,68,0.12)',
+    borderColor: 'rgba(239,68,68,0.45)',
+  },
+  choiceDimmed: { opacity: 0.35 },
+
+  choiceChip: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: 'rgba(124,58,237,0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  choiceChipCorrect: { backgroundColor: COLORS.success },
+  choiceChipWrong: { backgroundColor: COLORS.danger },
+  choiceChipText: {
+    fontSize: 14,
+    fontFamily: FONTS.extraBold,
+    color: '#DDD6FE',
+  },
+  choiceChipTextCorrect: { color: '#fff' },
+  choiceChipTextWrong: { color: '#fff' },
+
+  choiceText: {
+    flex: 1,
+    fontSize: 15,
+    fontFamily: FONTS.semiBold,
+    color: '#E2E8F0',
+  },
+  choiceTextCorrect: { color: '#34D399' },
+  choiceTextWrong: { color: '#F87171' },
+
+  /* ── identification ── */
+  idArea: {
+    marginTop: 24,
+    alignItems: 'center',
+    gap: 20,
+  },
+  hintBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(245,158,11,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(245,158,11,0.3)',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+  },
+  hintBannerText: { fontSize: 13, fontFamily: FONTS.bold, color: '#FBBF24' },
+  hintLetter: { fontFamily: FONTS.black },
+
+  idWords: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 16,
+  },
+  idWord: { flexDirection: 'row', gap: 5 },
+  charBox: {
+    width: 36,
+    height: 48,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: 'rgba(34,211,238,0.35)',
+    backgroundColor: COLORS.surface,
+    color: '#fff',
+    fontSize: 20,
+    fontFamily: FONTS.extraBold,
+    textAlign: 'center',
+    padding: 0,
+    includeFontPadding: false,
+  },
+  charBoxFilled: {
+    borderColor: COLORS.accentBright,
+    backgroundColor: 'rgba(34,211,238,0.08)',
+  },
+
+  submitBtn: {
+    backgroundColor: COLORS.purpleDark,
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 48,
+  },
+  submitBtnDisabled: { opacity: 0.4 },
+  submitBtnText: { color: '#fff', fontSize: 15, fontFamily: FONTS.extraBold },
+
+  /* ── next / finish ── */
+  nextWrap: { marginTop: 20 },
+  nextBtn: {
+    borderRadius: 16,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  nextBtnAccent: { backgroundColor: COLORS.accentBright },
+  nextBtnFinish: { backgroundColor: COLORS.purplePrimary },
+  nextBtnText: { fontSize: 16, fontFamily: FONTS.extraBold, letterSpacing: 0.5 },
+  nextBtnCountdown: { fontSize: 12, fontFamily: FONTS.medium, opacity: 0.7, marginLeft: 8 },
+  nextBtnTextAccent: { color: COLORS.bg },
+  nextBtnTextFinish: { color: '#fff' },
+
+  /* ── powerup bar ── */
   powerupBar: {
     flexDirection: 'row',
     justifyContent: 'center',
     gap: 10,
-    marginBottom: 20,
+    paddingVertical: 16,
   },
-  powerupBtn: {
+  puBtn: {
     alignItems: 'center',
     backgroundColor: COLORS.surface,
+    borderWidth: 1.5,
+    borderColor: 'rgba(127,119,221,0.2)',
     borderRadius: 14,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(139, 92, 246, 0.2)',
-    minWidth: 64,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 5,
-    elevation: 3,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    minWidth: 68,
+    position: 'relative',
   },
-  powerupBtnActive: {
-    backgroundColor: '#0E7490',
-    borderColor: '#67E8F9',
-    opacity: 1,
+  puBtnFreezeActive: {
+    backgroundColor: 'rgba(14,116,144,0.3)',
+    borderColor: '#0E7490',
   },
-  powerupIcon: {
-    fontSize: 20,
-    marginBottom: 2,
+  puBtnShieldActive: {
+    backgroundColor: 'rgba(14,116,144,0.2)',
+    borderColor: 'rgba(34,211,238,0.4)',
   },
-  powerupLabel: {
-    color: '#94A3B8',
+  puBtnUsed: { opacity: 0.5 },
+  puCountBadge: {
+    position: 'absolute',
+    top: -5,
+    right: -5,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: COLORS.purplePrimary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2,
+  },
+  puCountText: { color: '#fff', fontSize: 10, fontFamily: FONTS.extraBold },
+  puIcon: { fontSize: 20, marginBottom: 2 },
+  puLabel: {
     fontSize: 9,
-    fontWeight: '600',
+    fontFamily: FONTS.bold,
+    color: COLORS.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
     marginTop: 2,
-    fontFamily: FONTS.semiBold,
   },
-  powerupBannerRow: {
+  puLabelCyan: { color: '#A5F3FC' },
+  puLabelYellow: { color: '#FDE68A' },
+
+  /* ── powerup toast ── */
+  puToast: {
+    position: 'absolute',
+    bottom: 120,
+    left: 24,
+    right: 24,
     flexDirection: 'row',
-    gap: 8,
-    marginBottom: 12,
-  },
-  powerupBanner: {
-    flex: 1,
-    borderRadius: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderWidth: 1,
     alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.surfaceLight,
+    borderWidth: 1.5,
+    borderColor: 'rgba(124,58,237,0.5)',
+    borderRadius: 18,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    shadowColor: 'rgba(124,58,237,0.25)',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 1,
+    shadowRadius: 40,
+    elevation: 20,
+    zIndex: 60,
+  },
+  puToastIcon: { fontSize: 28 },
+  puToastTitle: { fontSize: 14, fontFamily: FONTS.extraBold, color: '#DDD6FE' },
+  puToastSub: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.textMuted, marginTop: 2 },
+
+  /* ── standings overlay ── */
+  standingsOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 100,
+  },
+  standingsBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(10,8,30,0.75)',
+  },
+  standingsDrawer: {
+    position: 'absolute',
+    top: 110,
+    left: 0,
+    right: 0,
+    backgroundColor: COLORS.bgSecondary,
+    borderBottomLeftRadius: 24,
+    borderBottomRightRadius: 24,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 28,
+    maxHeight: SCREEN_HEIGHT * 0.55,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
-    elevation: 2,
+    shadowOffset: { width: 0, height: 20 },
+    shadowOpacity: 0.5,
+    shadowRadius: 60,
+    elevation: 20,
   },
-  powerupBannerText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '700',
-    fontFamily: FONTS.bold,
-  },
-  floatOverlay: {
+  standingsDrawerHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
-    paddingVertical: 12,
-    borderRadius: 16,
-    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    marginBottom: 6,
+  },
+  standingsDrawerTitle: {
+    fontSize: 16,
+    fontFamily: FONTS.black,
+    letterSpacing: 2,
+    color: '#DDD6FE',
+  },
+  moverBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(16,185,129,0.12)',
     borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.3)',
-    shadowColor: 'rgba(16, 185, 129, 0.3)',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 8,
-    elevation: 5,
-  },
-  floatIcon: {
-    fontSize: 40,
-    marginBottom: 4,
-  },
-  floatLabel: {
-    color: '#10B981',
-    fontSize: 14,
-    fontWeight: '700',
-    fontFamily: FONTS.bold,
-  },
-  hintHint: {
-    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    borderColor: 'rgba(16,185,129,0.25)',
     borderRadius: 10,
-    paddingVertical: 6,
+    paddingVertical: 5,
     paddingHorizontal: 12,
-    marginBottom: 12,
+    marginBottom: 14,
+    alignSelf: 'flex-start',
+  },
+  moverBannerText: { fontSize: 11, fontFamily: FONTS.bold, color: '#34D399' },
+  standingsScroll: { maxHeight: SCREEN_HEIGHT * 0.38 },
+
+  /* standings rows */
+  srRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    marginBottom: 6,
+  },
+  srRowTop3: {
+    backgroundColor: 'rgba(124,58,237,0.12)',
     borderWidth: 1,
-    borderColor: 'rgba(245, 158, 11, 0.3)',
+    borderColor: 'rgba(124,58,237,0.2)',
   },
-  hintHintText: {
-    color: '#FDE68A',
-    fontSize: 14,
-    fontWeight: '600',
-    textAlign: 'center',
-    fontFamily: FONTS.semiBold,
+  srRowYou: {
+    borderWidth: 1,
+    borderColor: 'rgba(34,211,238,0.3)',
   },
+  srRank: { width: 32, fontSize: 18, textAlign: 'center', fontFamily: FONTS.bold, color: COLORS.textMuted },
+  srNameWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 4 },
+  srName: { fontSize: 14, fontFamily: FONTS.bold, color: '#E2E8F0' },
+  srNameYou: { color: COLORS.accent },
+  srYouTag: { color: COLORS.accent, fontFamily: FONTS.extraBold, fontSize: 12 },
+  srStreak: { fontSize: 12 },
+  srMoveUp: { fontSize: 11, fontFamily: FONTS.extraBold, color: '#34D399', width: 36, textAlign: 'center' },
+  srMoveDown: { fontSize: 11, fontFamily: FONTS.extraBold, color: '#F87171', width: 36, textAlign: 'center' },
+  srMoveSame: { fontSize: 11, fontFamily: FONTS.extraBold, color: '#64748B', width: 36, textAlign: 'center' },
+  srScore: { fontSize: 16, fontFamily: FONTS.black, color: '#fff', minWidth: 52, textAlign: 'right' },
 });

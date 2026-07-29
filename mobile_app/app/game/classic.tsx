@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Animated
@@ -45,15 +45,45 @@ const FONTS = {
   regular: 'Montserrat-Regular',
 };
 
+interface SavedQuiz {
+  id: number;
+  title: string;
+  quiz_type: string;
+  created_at: string;
+  questions: any[];
+}
+
 export default function ClassicGameSetupScreen() {
   const router = useRouter();
   const [joinCode, setJoinCode] = useState('');
-  const [questionCount, setQuestionCount] = useState('5');
   const [timePerQuestion, setTimePerQuestion] = useState('15');
-  const [questionType, setQuestionType] = useState<'mcq' | 'identification'>('mcq');
   const [loading, setLoading] = useState(false);
+  const [loadingQuizzes, setLoadingQuizzes] = useState(false);
   const [mode, setMode] = useState<'home' | 'create' | 'join'>('home');
+  const [quizzes, setQuizzes] = useState<SavedQuiz[]>([]);
+  const [selectedQuiz, setSelectedQuiz] = useState<SavedQuiz | null>(null);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [useFileUpload, setUseFileUpload] = useState(false);
   const [selectedFile, setSelectedFile] = useState<{ name: string; uri: string; mimeType: string } | null>(null);
+
+  useEffect(() => {
+    if (mode !== 'create') return;
+    setSelectedQuiz(null);
+    setUseFileUpload(false);
+    setSelectedFile(null);
+    const fetchQuizzes = async () => {
+      setLoadingQuizzes(true);
+      try {
+        const token = await getToken();
+        const res = await fetch(`${API_BASE_URL}/ai/quizzes/`, {
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        if (res.ok) setQuizzes(await res.json());
+      } catch { /* ignore */ }
+      setLoadingQuizzes(false);
+    };
+    fetchQuizzes();
+  }, [mode]);
 
   // Animation refs for physical card press effect
   const createCardScale = useRef(new Animated.Value(1)).current;
@@ -84,27 +114,39 @@ export default function ClassicGameSetupScreen() {
   };
 
   const handleCreate = async () => {
-    if (!selectedFile) {
-      Alert.alert('Error', 'Please upload a study material first');
+    if (!selectedQuiz && !selectedFile) {
+      Alert.alert('Error', 'Please select a quiz or upload study material');
       return;
     }
     setLoading(true);
     try {
       const token = await getToken();
-      const formData = new FormData();
-      formData.append('file', { uri: selectedFile.uri, name: selectedFile.name, type: selectedFile.mimeType } as any);
-      formData.append('questionCount', questionCount);
-      formData.append('timePerQuestion', timePerQuestion);
-      formData.append('questionType', questionType);
 
-      const response = await fetch(`${API_BASE_URL}/game/create/`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
-        body: formData,
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to create room');
-      router.push({ pathname: '/game/lobby', params: { roomCode: data.roomCode, isHost: 'true', topic: data.topic } });
+      if (selectedQuiz) {
+        const response = await fetch(`${API_BASE_URL}/game/create/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({
+            quizId: selectedQuiz.id,
+            timePerQuestion: parseInt(timePerQuestion) || 15,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Failed to create room');
+        router.push({ pathname: '/game/lobby', params: { roomCode: data.roomCode, isHost: 'true', topic: data.topic } });
+      } else {
+        const formData = new FormData();
+        formData.append('file', { uri: selectedFile!.uri, name: selectedFile!.name, type: selectedFile!.mimeType } as any);
+        formData.append('timePerQuestion', timePerQuestion);
+        const response = await fetch(`${API_BASE_URL}/game/create/`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: formData,
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Failed to create room');
+        router.push({ pathname: '/game/lobby', params: { roomCode: data.roomCode, isHost: 'true', topic: data.topic } });
+      }
     } catch (error: any) {
       Alert.alert('Error', error.message);
     } finally {
@@ -286,81 +328,134 @@ export default function ClassicGameSetupScreen() {
 
           {mode === 'create' ? (
             <>
-              {/* Upload Section */}
+              {/* Step 1: Select Quiz or Upload */}
               <View style={styles.section}>
                 <View style={styles.sectionHeader}>
                   <View style={styles.stepBadge}>
                     <Text style={styles.stepNumber}>1</Text>
                   </View>
-                  <Text style={styles.sectionTitle}>Upload Study Material</Text>
+                  <Text style={styles.sectionTitle}>
+                    {useFileUpload ? 'Upload Study Material' : 'Select a Quiz'}
+                  </Text>
                 </View>
 
-                <TouchableOpacity
-                  style={[
-                    styles.uploadBox,
-                    selectedFile && styles.uploadBoxSuccess
-                  ]}
-                  onPress={pickDocument}
-                  activeOpacity={0.7}
-                >
-                  {selectedFile ? (
-                    <>
-                      <LinearGradient
-                        colors={[COLORS.success, '#34D399']}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.uploadIconSuccess}
-                      >
-                        <Ionicons name="checkmark" size={22} color="white" />
-                      </LinearGradient>
-                      <Text style={styles.fileName}>{selectedFile.name}</Text>
-                      <Text style={styles.changeFileText}>Tap to change file</Text>
-                    </>
-                  ) : (
-                    <>
-                      <LinearGradient
-                        colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.uploadIcon}
-                      >
-                        <Ionicons name="cloud-upload" size={22} color="white" />
-                      </LinearGradient>
-                      <Text style={styles.uploadTitle}>Select File</Text>
-                      <Text style={styles.uploadSubtitle}>Supports .txt and .pdf files</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
+                {useFileUpload ? (
+                  <>
+                    <TouchableOpacity
+                      style={[styles.uploadBox, selectedFile && styles.uploadBoxSuccess]}
+                      onPress={pickDocument}
+                      activeOpacity={0.7}
+                    >
+                      {selectedFile ? (
+                        <>
+                          <LinearGradient colors={[COLORS.success, '#34D399']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.uploadIconSuccess}>
+                            <Ionicons name="checkmark" size={22} color="white" />
+                          </LinearGradient>
+                          <Text style={styles.fileName}>{selectedFile.name}</Text>
+                          <Text style={styles.changeFileText}>Tap to change file</Text>
+                        </>
+                      ) : (
+                        <>
+                          <LinearGradient colors={[COLORS.purplePrimary, COLORS.purpleVibrant]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.uploadIcon}>
+                            <Ionicons name="cloud-upload" size={22} color="white" />
+                          </LinearGradient>
+                          <Text style={styles.uploadTitle}>Select File</Text>
+                          <Text style={styles.uploadSubtitle}>Supports .txt and .pdf files</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => { setUseFileUpload(false); setSelectedFile(null); }} style={styles.switchLink}>
+                      <Ionicons name="book" size={14} color={COLORS.purpleLight} />
+                      <Text style={styles.switchLinkText}>Pick a saved quiz instead</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <>
+                    {/* Dropdown trigger */}
+                    <TouchableOpacity
+                      style={styles.dropdownTrigger}
+                      onPress={() => setShowDropdown(!showDropdown)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.dropdownTriggerLeft}>
+                        <Ionicons name="layers" size={18} color={selectedQuiz ? COLORS.purpleVibrant : COLORS.textMuted} />
+                        <Text style={[styles.dropdownTriggerText, !selectedQuiz && { color: COLORS.textMuted }]}>
+                          {selectedQuiz ? selectedQuiz.title : 'Select a quiz...'}
+                        </Text>
+                      </View>
+                      <Ionicons name={showDropdown ? 'chevron-up' : 'chevron-down'} size={18} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+
+                    {/* Question count badge when selected */}
+                    {selectedQuiz && (
+                      <View style={styles.selectedQuizInfo}>
+                        <View style={styles.badgePill}><Text style={styles.badgeText}>{selectedQuiz.questions?.length || 0} questions</Text></View>
+                        <View style={styles.badgePill}><Text style={styles.badgeText}>{selectedQuiz.quiz_type}</Text></View>
+                      </View>
+                    )}
+
+                    {/* Dropdown list */}
+                    {showDropdown && (
+                      <View style={styles.dropdownList}>
+                        {loadingQuizzes ? (
+                          <ActivityIndicator color={COLORS.purpleVibrant} style={{ padding: 20 }} />
+                        ) : quizzes.length === 0 ? (
+                          <Text style={styles.dropdownEmpty}>No quizzes yet. Generate one in Activities.</Text>
+                        ) : (
+                          quizzes.map(q => (
+                            <TouchableOpacity
+                              key={q.id}
+                              style={[styles.dropdownItem, selectedQuiz?.id === q.id && styles.dropdownItemActive]}
+                              onPress={() => { setSelectedQuiz(q); setShowDropdown(false); }}
+                              activeOpacity={0.7}
+                            >
+                              <View style={styles.dropdownItemContent}>
+                                <Text style={styles.dropdownItemTitle}>{q.title}</Text>
+                                <View style={styles.dropdownItemMeta}>
+                                  <Text style={styles.dropdownItemMetaText}>{q.questions?.length || 0} Qs</Text>
+                                  <Text style={styles.dropdownItemMetaDot}>·</Text>
+                                  <Text style={styles.dropdownItemMetaText}>{q.quiz_type}</Text>
+                                </View>
+                              </View>
+                              {selectedQuiz?.id === q.id && <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />}
+                            </TouchableOpacity>
+                          ))
+                        )}
+                      </View>
+                    )}
+
+                    <TouchableOpacity onPress={() => setUseFileUpload(true)} style={styles.switchLink}>
+                      <Ionicons name="cloud-upload" size={14} color={COLORS.purpleLight} />
+                      <Text style={styles.switchLinkText}>Upload material instead</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
               </View>
 
-              {/* Settings Section */}
+              {/* Step 2: Settings */}
               <View style={styles.section}>
                 <View style={styles.sectionHeader}>
                   <View style={styles.stepBadge}>
                     <Text style={styles.stepNumber}>2</Text>
                   </View>
-                  <Text style={styles.sectionTitle}>Quiz Settings</Text>
+                  <Text style={styles.sectionTitle}>Game Settings</Text>
                 </View>
 
                 <View style={styles.settingsCard}>
-                  <View style={styles.settingRow}>
-                    <View style={styles.settingIconBox}>
-                      <Ionicons name="list" size={16} color={COLORS.purpleVibrant} />
-                    </View>
-                    <View style={styles.settingContent}>
-                      <Text style={styles.settingLabel}>Number of Questions</Text>
-                      <TextInput
-                        style={styles.settingInput}
-                        value={questionCount}
-                        onChangeText={setQuestionCount}
-                        keyboardType="numeric"
-                        placeholder="5"
-                        placeholderTextColor={COLORS.textMuted}
-                      />
-                    </View>
-                  </View>
-
-                  <View style={styles.settingDivider} />
+                  {selectedQuiz && (
+                    <>
+                      <View style={styles.settingRow}>
+                        <View style={styles.settingIconBox}>
+                          <Ionicons name="list" size={16} color={COLORS.purpleVibrant} />
+                        </View>
+                        <View style={styles.settingContent}>
+                          <Text style={styles.settingLabel}>Questions</Text>
+                          <Text style={styles.settingValue}>{selectedQuiz.questions?.length || 0} ({selectedQuiz.quiz_type})</Text>
+                        </View>
+                      </View>
+                      <View style={styles.settingDivider} />
+                    </>
+                  )}
 
                   <View style={styles.settingRow}>
                     <View style={styles.settingIconBox}>
@@ -378,35 +473,6 @@ export default function ClassicGameSetupScreen() {
                       />
                     </View>
                   </View>
-
-                  <View style={styles.settingDivider} />
-
-                  <View style={styles.settingRow}>
-                    <View style={styles.settingIconBox}>
-                      <Ionicons name="help-circle" size={16} color={COLORS.purpleVibrant} />
-                    </View>
-                    <View style={styles.settingContent}>
-                      <Text style={styles.settingLabel}>Question Type</Text>
-                      <View style={styles.typeToggle}>
-                        <TouchableOpacity
-                          style={[styles.typeOption, questionType === 'mcq' && styles.typeOptionActive]}
-                          onPress={() => setQuestionType('mcq')}
-                        >
-                          <Text style={[styles.typeOptionText, questionType === 'mcq' && styles.typeOptionTextActive]}>
-                            Multiple Choice
-                          </Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[styles.typeOption, questionType === 'identification' && styles.typeOptionActive]}
-                          onPress={() => setQuestionType('identification')}
-                        >
-                          <Text style={[styles.typeOptionText, questionType === 'identification' && styles.typeOptionTextActive]}>
-                            Identification
-                          </Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  </View>
                 </View>
               </View>
 
@@ -414,14 +480,14 @@ export default function ClassicGameSetupScreen() {
               <TouchableOpacity
                 style={[
                   styles.primaryBtn,
-                  (!selectedFile || loading) && styles.primaryBtnDisabled
+                  ((!selectedQuiz && !selectedFile) || loading) && styles.primaryBtnDisabled
                 ]}
                 onPress={handleCreate}
-                disabled={loading || !selectedFile}
+                disabled={loading || (!selectedQuiz && !selectedFile)}
                 activeOpacity={0.8}
               >
                 <LinearGradient
-                  colors={(!selectedFile || loading)
+                  colors={((!selectedQuiz && !selectedFile) || loading)
                     ? [COLORS.surfaceLight, COLORS.surface]
                     : [COLORS.purplePrimary, COLORS.purpleVibrant]
                   }
@@ -923,11 +989,119 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.border,
     marginVertical: 12,
   },
-  typeToggle: { flexDirection: 'row', gap: 8, marginTop: 6 },
-  typeOption: { flex: 1, paddingVertical: 8, borderRadius: 8, alignItems: 'center', backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border },
-  typeOptionActive: { backgroundColor: COLORS.purplePrimary, borderColor: COLORS.purplePrimary },
-  typeOptionText: { color: COLORS.textMuted, fontSize: 12, fontWeight: '600' },
-  typeOptionTextActive: { color: '#fff' },
+  settingValue: {
+    fontSize: 16,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+  },
+
+  // Dropdown
+  dropdownTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  dropdownTriggerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  dropdownTriggerText: {
+    fontSize: 15,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textPrimary,
+    flex: 1,
+  },
+  dropdownList: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    overflow: 'hidden',
+  },
+  dropdownEmpty: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    textAlign: 'center',
+    padding: 20,
+    fontFamily: FONTS.regular,
+  },
+  dropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  dropdownItemActive: {
+    backgroundColor: 'rgba(139, 92, 246, 0.1)',
+  },
+  dropdownItemContent: {
+    flex: 1,
+  },
+  dropdownItemTitle: {
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textPrimary,
+    marginBottom: 2,
+  },
+  dropdownItemMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  dropdownItemMetaText: {
+    fontSize: 11,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+  },
+  dropdownItemMetaDot: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
+
+  // Selected quiz info badges
+  selectedQuizInfo: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 10,
+  },
+  badgePill: {
+    backgroundColor: 'rgba(139, 92, 246, 0.15)',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(139, 92, 246, 0.3)',
+  },
+  badgeText: {
+    fontSize: 11,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.purpleLight,
+  },
+
+  // Switch link between quiz picker and file upload
+  switchLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    marginTop: 4,
+  },
+  switchLinkText: {
+    fontSize: 13,
+    fontFamily: FONTS.medium,
+    color: COLORS.purpleLight,
+  },
 
   // Join Code Card
   joinCodeCard: {

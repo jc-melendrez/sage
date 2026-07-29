@@ -5,7 +5,6 @@ import json
 import requests
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from django.conf import settings
 from core.firebase import get_firestore
@@ -23,33 +22,66 @@ def get_display_name(user):
 
 class CreateGameView(APIView):
     permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        uploaded_file = request.FILES.get('file')
-        question_count = int(request.data.get('questionCount', 10))
+        quiz_id = request.data.get('quizId')
         time_per_question = int(request.data.get('timePerQuestion', 15))
-        question_type = request.data.get('questionType', 'mcq')
 
-        if not uploaded_file:
-            return Response({'error': 'No file uploaded'}, status=400)
+        if quiz_id:
+            from ai_assistant.models import Quiz
+            try:
+                quiz = Quiz.objects.get(id=quiz_id, user=request.user)
+            except Quiz.DoesNotExist:
+                return Response({'error': 'Quiz not found'}, status=404)
 
-        file_content = extract_text_from_file(uploaded_file)
-        if not file_content:
-            return Response({'error': 'Could not extract text from file'}, status=400)
+            topic = quiz.title
+            questions = []
+            for q in quiz.questions.all():
+                if q.options and len(q.options) > 0:
+                    letters = ['A', 'B', 'C', 'D']
+                    choices = [f"{letters[i]}. {opt}" for i, opt in enumerate(q.options)]
+                    correct_idx = -1
+                    for i, opt in enumerate(q.options):
+                        if opt.strip().lower() == q.correct_answer.strip().lower():
+                            correct_idx = i
+                            break
+                    correct_answer = choices[correct_idx] if correct_idx >= 0 else choices[0]
+                    questions.append({
+                        'type': 'mcq',
+                        'question': q.question_text,
+                        'choices': choices,
+                        'correctAnswer': correct_answer,
+                    })
+                else:
+                    questions.append({
+                        'type': 'identification',
+                        'question': q.question_text,
+                        'correctAnswer': q.correct_answer,
+                    })
 
-        # Generate Topic and Questions via AI
-        ai_data = self.process_content(file_content, question_count, question_type)
-        if not ai_data:
-            return Response({'error': 'AI failed to process content'}, status=500)
+            question_count = len(questions)
+        else:
+            uploaded_file = request.FILES.get('file')
+            question_count = int(request.data.get('questionCount', 10))
+            question_type = request.data.get('questionType', 'mcq')
 
-        topic = ai_data.get('topic', 'Study Quiz')
-        questions = ai_data.get('questions', [])
+            if not uploaded_file:
+                return Response({'error': 'No file uploaded or quizId provided'}, status=400)
+
+            file_content = extract_text_from_file(uploaded_file)
+            if not file_content:
+                return Response({'error': 'Could not extract text from file'}, status=400)
+
+            ai_data = self.process_content(file_content, question_count, question_type)
+            if not ai_data:
+                return Response({'error': 'AI failed to process content'}, status=500)
+
+            topic = ai_data.get('topic', 'Study Quiz')
+            questions = ai_data.get('questions', [])
 
         room_code = generate_room_code()
         db = get_firestore()
 
-        # Create the room
         db.collection('gameRooms').document(room_code).set({
             'status': 'waiting',
             'hostId': request.user.id,
@@ -60,7 +92,6 @@ class CreateGameView(APIView):
             'createdAt': fs.SERVER_TIMESTAMP,
         })
 
-        # Add host as first player
         db.collection('gameRooms').document(room_code)\
           .collection('players').document(str(request.user.id)).set({
             'displayName': get_display_name(request.user),
