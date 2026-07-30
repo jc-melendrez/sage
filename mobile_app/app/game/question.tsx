@@ -103,6 +103,13 @@ function StandingsRow({ player, index, isYou }: { player: any; index: number; is
 /* ═══════════════════════════════════════════════════════════════
    QuestionScreen
    ═══════════════════════════════════════════════════════════════ */
+const POWERUP_ITEMS = [
+  { key: 'freeze', icon: '❄️', label: 'Freeze', color: '#60A5FA' },
+  { key: 'hint', icon: '💡', label: 'Hint', color: '#FBBF24' },
+  { key: 'doublePoints', icon: '⚡', label: '2x Pts', color: '#A78BFA' },
+  { key: 'shield', icon: '🛡️', label: 'Shield', color: '#34D399' },
+];
+
 export default function QuestionScreen() {
   const router = useRouter();
   const { roomCode } = useLocalSearchParams<{ roomCode: string }>();
@@ -125,7 +132,10 @@ export default function QuestionScreen() {
   const [powerups, setPowerups] = useState({ freeze: 0, hint: 0, doublePoints: 0, shield: 0 });
   const [activePowerups, setActivePowerups] = useState({ hint: false, doublePoints: false, shield: false });
   const [hintedChoices, setHintedChoices] = useState<string[]>([]);
-  const [powerupEarned, setPowerupEarned] = useState<string | null>(null);
+  const [showRoulette, setShowRoulette] = useState(false);
+  const [rouletteTarget, setRouletteTarget] = useState<string | null>(null);
+  const [spinIndex, setSpinIndex] = useState(0);
+  const [roulettePhase, setRoulettePhase] = useState<'idle' | 'spinning' | 'revealed'>('idle');
   const [isFrozen, setIsFrozen] = useState(false);
   const [showStandings, setShowStandings] = useState(false);
   const standingsAnim = useRef(new Animated.Value(0)).current;
@@ -133,8 +143,6 @@ export default function QuestionScreen() {
   const startTimeRef = useRef<number>(Date.now());
   const standingsUnsubRef = useRef<(() => void) | null>(null);
   const previousStateRef = useRef<{ [id: string]: { rank: number; score: number } }>({});
-  const floatAnim = useRef(new Animated.Value(0)).current;
-  const floatScale = useRef(new Animated.Value(0)).current;
 
   const cardTranslateX = useRef(new Animated.Value(0)).current;
   const cardRotateY = useRef(new Animated.Value(0)).current;
@@ -144,6 +152,10 @@ export default function QuestionScreen() {
   const autoAdvanceRef = useRef<number | null>(null);
   const [autoCountdown, setAutoCountdown] = useState(0);
   const timerBarAnim = useRef(new Animated.Value(1)).current;
+  const spinTimerRef = useRef<any>(null);
+  const revealTimerRef = useRef<any>(null);
+  const spinDelayRef = useRef(60);
+  const cyclesRef = useRef(0);
 
   /* ── all useEffects below are UNCHANGED ── */
 
@@ -204,19 +216,39 @@ export default function QuestionScreen() {
   }, [userId]);
 
   useEffect(() => {
-    if (!powerupEarned) { floatAnim.setValue(0); floatScale.setValue(0); return; }
-    floatAnim.setValue(0);
-    floatScale.setValue(0);
-    Animated.parallel([
-      Animated.spring(floatAnim, { toValue: 1, friction: 5, tension: 80, useNativeDriver: true }),
-      Animated.sequence([
-        Animated.spring(floatScale, { toValue: 1.3, friction: 4, tension: 100, useNativeDriver: true }),
-        Animated.spring(floatScale, { toValue: 1, friction: 5, tension: 80, useNativeDriver: true }),
-      ]),
-    ]).start();
-    const t = setTimeout(() => setPowerupEarned(null), 2500);
-    return () => clearTimeout(t);
-  }, [powerupEarned]);
+    if (!showRoulette || !rouletteTarget) return;
+
+    setRoulettePhase('spinning');
+    spinDelayRef.current = 60;
+    cyclesRef.current = 0;
+
+    const tick = () => {
+      cyclesRef.current++;
+
+      if (cyclesRef.current >= 18) {
+        const targetIdx = POWERUP_ITEMS.findIndex(i => i.key === rouletteTarget);
+        setSpinIndex(targetIdx);
+        setRoulettePhase('revealed');
+        revealTimerRef.current = setTimeout(() => {
+          setShowRoulette(false);
+          setRouletteTarget(null);
+          setRoulettePhase('idle');
+        }, 2000);
+        return;
+      }
+
+      setSpinIndex(prev => (prev + 1) % POWERUP_ITEMS.length);
+      spinDelayRef.current = Math.min(spinDelayRef.current + 20, 400);
+      spinTimerRef.current = setTimeout(tick, spinDelayRef.current);
+    };
+
+    spinTimerRef.current = setTimeout(tick, 60);
+
+    return () => {
+      if (spinTimerRef.current) clearTimeout(spinTimerRef.current);
+      if (revealTimerRef.current) clearTimeout(revealTimerRef.current);
+    };
+  }, [showRoulette, rouletteTarget]);
 
   useEffect(() => {
     if (questions.length === 0) return;
@@ -369,7 +401,6 @@ export default function QuestionScreen() {
     setSelected(answer || '');
     setPendingAnswer(answer);
     setError(null);
-    setPowerupEarned(null);
     const timeTaken = (Date.now() - startTimeRef.current) / 1000;
     const actualIndex = questionOrder[currentIndex];
     try {
@@ -395,8 +426,8 @@ export default function QuestionScreen() {
       const data = await res.json();
       setResult({ correct: data.correct, correctAnswer: data.correctAnswer, points: data.pointsAwarded });
       if (data.powerupEarned) {
-        const icons: Record<string, string> = { freeze: '❄️', hint: '💡', doublePoints: '⚡', shield: '🛡️' };
-        setPowerupEarned(icons[data.powerupEarned] || data.powerupEarned);
+        setShowRoulette(true);
+        setRouletteTarget(data.powerupEarned);
       }
     } catch (e: any) {
       console.error(e);
@@ -454,7 +485,9 @@ export default function QuestionScreen() {
       standingsAnim.setValue(0);
       setActivePowerups({ hint: false, doublePoints: false, shield: false });
       setHintedChoices([]);
-      setPowerupEarned(null);
+      setShowRoulette(false);
+      setRouletteTarget(null);
+      setRoulettePhase('idle');
     });
   };
 
@@ -792,26 +825,26 @@ export default function QuestionScreen() {
         </View>
       )}
 
-      {/* ── POWERUP EARNED TOAST ── */}
-      {powerupEarned && (
-        <Animated.View
-          style={[
-            styles.puToast,
-            {
-              opacity: floatAnim,
-              transform: [
-                { translateY: floatAnim.interpolate({ inputRange: [0, 1], outputRange: [60, 0] }) },
-                { scale: floatScale },
-              ],
-            },
-          ]}
-        >
-          <Text style={styles.puToastIcon}>{powerupEarned}</Text>
-          <View>
-            <Text style={styles.puToastTitle}>Powerup earned!</Text>
-            <Text style={styles.puToastSub}>Added to your kit</Text>
+      {/* ── POWERUP ROULETTE OVERLAY ── */}
+      {showRoulette && (
+        <View style={styles.rouletteOverlay}>
+          <View style={[styles.rouletteCard, roulettePhase === 'revealed' && styles.rouletteCardRevealed]}>
+            <Text style={styles.rouletteLabel}>
+              {roulettePhase === 'revealed' ? 'YOU GOT' : 'POWER-UP'}
+            </Text>
+            <View style={styles.rouletteIconWrap}>
+              <Text style={[styles.rouletteIcon, roulettePhase === 'revealed' && { color: POWERUP_ITEMS[spinIndex].color }]}>
+                {POWERUP_ITEMS[spinIndex].icon}
+              </Text>
+            </View>
+            <Text style={[styles.rouletteItemName, { color: POWERUP_ITEMS[spinIndex].color }]}>
+              {POWERUP_ITEMS[spinIndex].label}
+            </Text>
+            <Text style={styles.rouletteHint}>
+              {roulettePhase === 'revealed' ? 'Added to your kit!' : '...'}
+            </Text>
           </View>
-        </Animated.View>
+        </View>
       )}
 
       {/* ── STANDINGS OVERLAY ── */}
@@ -1073,11 +1106,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(16,185,129,0.35)',
   },
-  resultStripWrong: {
-    backgroundColor: 'rgba(239,68,68,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(239,68,68,0.35)',
-  },
   resultStripLabel: {
     flex: 1,
     fontSize: 14,
@@ -1279,31 +1307,64 @@ const styles = StyleSheet.create({
   puLabelCyan: { color: '#A5F3FC' },
   puLabelYellow: { color: '#FDE68A' },
 
-  /* ── powerup toast ── */
-  puToast: {
-    position: 'absolute',
-    bottom: 120,
-    left: 24,
-    right: 24,
-    flexDirection: 'row',
+  /* ── powerup roulette overlay ── */
+  rouletteOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 12,
-    backgroundColor: COLORS.surfaceLight,
-    borderWidth: 1.5,
-    borderColor: 'rgba(124,58,237,0.5)',
-    borderRadius: 18,
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    shadowColor: 'rgba(124,58,237,0.25)',
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 1,
-    shadowRadius: 40,
-    elevation: 20,
-    zIndex: 60,
+    backgroundColor: 'rgba(10,8,30,0.82)',
+    zIndex: 200,
   },
-  puToastIcon: { fontSize: 28 },
-  puToastTitle: { fontSize: 14, fontFamily: FONTS.extraBold, color: '#DDD6FE' },
-  puToastSub: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.textMuted, marginTop: 2 },
+  rouletteCard: {
+    width: 220,
+    alignItems: 'center',
+    backgroundColor: COLORS.surface,
+    borderWidth: 2,
+    borderColor: 'rgba(139,92,246,0.4)',
+    borderRadius: 28,
+    paddingVertical: 32,
+    paddingHorizontal: 24,
+    shadowColor: 'rgba(124,58,237,0.3)',
+    shadowOffset: { width: 0, height: 16 },
+    shadowOpacity: 1,
+    shadowRadius: 48,
+    elevation: 30,
+  },
+  rouletteCardRevealed: {
+    borderColor: '#FBBF24',
+    shadowColor: 'rgba(251,191,36,0.4)',
+  },
+  rouletteLabel: {
+    fontSize: 13,
+    fontFamily: FONTS.extraBold,
+    color: COLORS.textMuted,
+    letterSpacing: 2,
+    marginBottom: 16,
+  },
+  rouletteIconWrap: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: COLORS.bgSecondary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(139,92,246,0.2)',
+  },
+  rouletteIcon: {
+    fontSize: 48,
+  },
+  rouletteItemName: {
+    fontSize: 18,
+    fontFamily: FONTS.bold,
+    marginBottom: 8,
+  },
+  rouletteHint: {
+    fontSize: 12,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+  },
 
   /* ── standings overlay ── */
   standingsOverlay: {
