@@ -15,6 +15,7 @@ import LessonGenerator from '@/components/LessonGenerator';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 
+
 //  Rich Purple Palette (Matching Dashboard)
 const COLORS = {
   bg: '#baaeda',
@@ -190,15 +191,12 @@ export default function ActivitiesScreen() {
     }
     setIsGeneratingQuiz(true);
     try {
-      setQuizGenerationStatus("Analyzing study material...");
+      setQuizGenerationStatus("Reading file...");
       setQuizGenerationProgress(0.1);
 
-      let extractedText = "";
-      if (quizFile.mimeType === 'text/plain') {
-        extractedText = await FileSystem.readAsStringAsync(quizFile.uri);
-      } else {
-        extractedText = `[Context from ${quizFile.name}]`;
-      }
+      const base64Data = await FileSystem.readAsStringAsync(quizFile.uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
 
       setQuizGenerationStatus("Generating questions...");
       setQuizGenerationProgress(0.4);
@@ -211,7 +209,7 @@ export default function ActivitiesScreen() {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          content: extractedText,
+          file: { name: quizFile.name, data: base64Data },
           difficulty: quizDifficulty,
           count: parseInt(quizCount),
           type: quizType,
@@ -231,7 +229,7 @@ export default function ActivitiesScreen() {
       setIsGenerateQuizModalOpen(false);
       setQuizFile(null);
       setQuizInstructions('');
-      loadInitialData();
+      await loadInitialData();
     } catch (err) {
       console.error("Generation Error Details:", err);
       Alert.alert("Generation Failed", err instanceof Error ? err.message : "Something went wrong.");

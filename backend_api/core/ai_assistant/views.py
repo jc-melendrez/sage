@@ -4,8 +4,12 @@ from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from .models import ChatSession, ChatMessage, Quiz, QuizQuestion
 from .serializers import QuizSerializer # Import the new serializer
+from users.utils.file_parser import extract_text_from_file
+import base64
+from io import BytesIO
 
 class SessionListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -134,16 +138,43 @@ class SessionHistoryView(APIView):
 
 class GenerateQuizView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
+        uploaded_file = request.FILES.get('file') or request.data.get('file')
         content = request.data.get('content')
-        difficulty = request.data.get('difficulty', 'Medium')
-        count = request.data.get('count', 10)
-        q_type = request.data.get('type', 'Multiple Choice')
-        instructions = request.data.get('instructions', '')
+
+        if not content and uploaded_file:
+            # Handle Django UploadedFile (multipart)
+            if hasattr(uploaded_file, 'read'):
+                content = extract_text_from_file(uploaded_file)
+            # Handle base64-encoded file from JSON body
+            elif isinstance(uploaded_file, dict) and uploaded_file.get('data'):
+                raw = base64.b64decode(uploaded_file['data'])
+                fname = (uploaded_file.get('name') or 'file.pdf').lower()
+                if fname.endswith('.pdf'):
+                    from pypdf import PdfReader
+                    reader = PdfReader(BytesIO(raw))
+                    pages = [page.extract_text() or '' for page in reader.pages]
+                    content = '\n'.join(pages)
+                elif fname.endswith('.docx'):
+                    import docx
+                    doc = docx.Document(BytesIO(raw))
+                    content = '\n'.join(p.text for p in doc.paragraphs)
+                else:
+                    content = raw.decode('utf-8')
 
         if not content:
+            print(f"[GenerateQuizView] No content received. "
+                  f"FILES keys={list(request.FILES.keys())}, "
+                  f"DATA keys={list(request.data.keys())}, "
+                  f"content_type={request.content_type}")
             return Response({"error": "No content provided to generate quiz."}, status=400)
+
+        difficulty = request.data.get('difficulty', 'Medium')
+        count = int(request.data.get('count', 10))
+        q_type = request.data.get('type', 'Multiple Choice')
+        instructions = request.data.get('instructions', '')
 
         GROQ_API_KEY = getattr(settings, 'GROQ_API_KEY', None)
         if not GROQ_API_KEY:
