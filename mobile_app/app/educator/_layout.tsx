@@ -4,6 +4,7 @@ export default function EducatorLayout() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="(tabs)" />
+      <Stack.Screen name="class/[id]" />
       <Stack.Screen name="student-progress" />
       <Stack.Screen name="study-groups" />
       <Stack.Screen name="analytics" />
