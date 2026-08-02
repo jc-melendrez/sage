@@ -28,8 +28,8 @@ const ACTIVITY = [
 ];
 
 const QUICK_ACTIONS: { id: string; label: string; icon: keyof typeof Ionicons.glyphMap; route: string }[] = [
-  { id: 'quiz', label: 'Create Quiz', icon: 'add-circle', route: '/educator/quiz-manager' },
-  { id: 'assign', label: 'Create Assignment', icon: 'document-text', route: '/educator/assignments' },
+  { id: 'quiz', label: 'Create Quiz', icon: 'add-circle', route: '/educator/content' },
+  { id: 'assign', label: 'Create Assignment', icon: 'document-text', route: '/educator/content' },
   { id: 'analytics', label: 'View Analytics', icon: 'stats-chart', route: '/educator/analytics' },
   { id: 'groups', label: 'Study Groups', icon: 'people', route: '/educator/study-groups' },
 ];

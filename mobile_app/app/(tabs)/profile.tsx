@@ -230,7 +230,7 @@ export default function ProfileScreen() {
         <View style={styles.section}>
           <View style={styles.listCard}>
             {/* 🆕 Dev-only entry point into educator screens — remove once real educator auth exists */}
-            <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/educator/dashboard')}>
+            <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/educator')}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="school-outline" size={22} color={COLORS.textSecondary} />
                 <Text style={styles.menuItemText}>Educator View (dev)</Text>
