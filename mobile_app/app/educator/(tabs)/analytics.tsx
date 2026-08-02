@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, StatCard, FilterChip, ProgressBar } from '@/components/educator/EducatorPrimitives';
@@ -20,14 +21,34 @@ const ENGAGEMENT_ROWS = [
 ];
 
 export default function AnalyticsScreen() {
+  const router = useRouter();
   const [filter, setFilter] = useState('Week');
   const maxScore = Math.max(...SCORE_TREND);
 
   return (
     <View style={styles.container}>
-      <EducatorHeader title="Analytics" subtitle="Period 3 · Algebra I" showBack rightIcon="download-outline" />
+      <EducatorHeader title="Analytics" subtitle="Period 3 · Algebra I" rightIcon="download-outline" />
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+        {/* AI Insights shortcut */}
+        <View style={styles.section}>
+          <SectionHeader title="AI Insights" actionLabel="Open" onAction={() => router.push('/educator/ai-insights' as any)} />
+          <TouchableOpacity
+            style={styles.linkCard}
+            activeOpacity={0.8}
+            onPress={() => router.push('/educator/ai-insights' as any)}
+          >
+            <View style={[styles.linkIconBg, { backgroundColor: tint(COLORS.accent) }]}>
+              <Ionicons name="sparkles" size={18} color={COLORS.accent} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.linkTitle}>Actionable AI recommendations</Text>
+              <Text style={styles.linkSub}>Trends, at-risk flags, and suggested interventions</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+          </TouchableOpacity>
+        </View>
+
         <View style={styles.filterRow}>
           {FILTERS.map((f) => (
             <FilterChip key={f} label={f} active={filter === f} onPress={() => setFilter(f)} />
@@ -117,6 +138,20 @@ const styles = StyleSheet.create({
   section: { marginBottom: 28 },
   filterRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 24 },
   statsRow: { flexDirection: 'row', gap: 10 },
+
+  linkCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  linkIconBg: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  linkTitle: { fontSize: 14, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textPrimary, marginBottom: 2 },
+  linkSub: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textSecondary },
 
   chartCard: { backgroundColor: COLORS.surface, borderRadius: RADIUS.lg, padding: 18, borderWidth: 1, borderColor: COLORS.border },
   chartRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', height: 120, marginBottom: 12 },

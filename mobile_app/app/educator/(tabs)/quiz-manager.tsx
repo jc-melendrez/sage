@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, Pill, FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
@@ -29,6 +30,7 @@ function statusColor(status: QuizStatus) {
 }
 
 export default function QuizManagerScreen() {
+  const router = useRouter();
   const [filter, setFilter] = useState<'all' | QuizStatus>('all');
   const [creating, setCreating] = useState(false);
   const [questionType, setQuestionType] = useState('mc');
@@ -44,12 +46,30 @@ export default function QuizManagerScreen() {
       <EducatorHeader
         title="Quiz & Content"
         subtitle={`${QUIZZES.length} quizzes · ${QUIZZES.filter((q) => q.status === 'assigned').length} live`}
-        showBack
         rightIcon={creating ? 'close' : 'add'}
         onRightPress={() => setCreating(!creating)}
       />
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+        {/* Assignments shortcut */}
+        <View style={styles.section}>
+          <SectionHeader title="Assignments" actionLabel="View all" onAction={() => router.push('/educator/assignments' as any)} />
+          <TouchableOpacity
+            style={styles.linkCard}
+            activeOpacity={0.8}
+            onPress={() => router.push('/educator/assignments' as any)}
+          >
+            <View style={[styles.linkIconBg, { backgroundColor: tint(COLORS.purplePrimary) }]}>
+              <Ionicons name="document-text-outline" size={18} color={COLORS.purplePrimary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.linkTitle}>Track submissions & due dates</Text>
+              <Text style={styles.linkSub}>Manage assignments across your classes</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+          </TouchableOpacity>
+        </View>
+
         {creating && (
           <View style={styles.section}>
             <SectionHeader title="New Quiz" />
@@ -210,6 +230,20 @@ const styles = StyleSheet.create({
   publishText: { color: 'white', fontSize: 14.5, fontFamily: FONTS.bold, fontWeight: '700' },
 
   filterRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 16 },
+
+  linkCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  linkIconBg: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  linkTitle: { fontSize: 14, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textPrimary, marginBottom: 2 },
+  linkSub: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textSecondary },
 
   quizCard: { backgroundColor: COLORS.surface, borderRadius: RADIUS.lg, padding: 16, borderWidth: 1, borderColor: COLORS.border },
   quizCardTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginBottom: 12 },

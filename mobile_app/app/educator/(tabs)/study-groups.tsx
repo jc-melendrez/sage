@@ -27,7 +27,7 @@ export default function StudyGroupsScreen() {
 
   return (
     <View style={styles.container}>
-      <EducatorHeader title="Study Groups" subtitle={`${GROUPS.length} active groups`} showBack rightIcon="add" />
+      <EducatorHeader title="Study Groups" subtitle={`${GROUPS.length} active groups`} rightIcon="add" />
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
         <View style={styles.section}>
