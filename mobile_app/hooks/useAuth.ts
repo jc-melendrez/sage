@@ -16,8 +16,8 @@ interface UseAuthReturn {
   user: AuthResponse['user'] | null;
   loading: boolean;
   error: string | null;
-  login: (credentials: LoginCredentials) => Promise<void>;
-  register: (credentials: RegisterCredentials) => Promise<void>;
+  login: (credentials: LoginCredentials) => Promise<AuthResponse>;
+  register: (credentials: RegisterCredentials) => Promise<AuthResponse>;
   logout: () => Promise<void>;
   clearError: () => void;
 }
@@ -29,13 +29,13 @@ export function useAuth(): UseAuthReturn {
   const [error, setError] = useState<string | null>(null);
 
   const handleLogin = useCallback(async (credentials: LoginCredentials) => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
-      
       const response = await login(credentials);
       setUser(response.user);
       setIsAuthenticatedState(true);
+      return response;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Login failed';
       setError(errorMessage);
@@ -46,13 +46,13 @@ export function useAuth(): UseAuthReturn {
   }, []);
 
   const handleRegister = useCallback(async (credentials: RegisterCredentials) => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
-      
       const response = await register(credentials);
       setUser(response.user);
       setIsAuthenticatedState(true);
+      return response;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Registration failed';
       setError(errorMessage);

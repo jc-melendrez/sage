@@ -1,5 +1,6 @@
 import { API_BASE_URL } from '../config/api';
 import * as SecureStore from 'expo-secure-store';
+import type { Href } from 'expo-router';
 import {
   signInWithEmail,
   signUpWithEmail,
@@ -19,6 +20,7 @@ export interface RegisterCredentials {
   last_name?: string;
   is_student?: boolean;
   is_educator?: boolean;
+  is_admin?: boolean;
 }
 
 export interface AuthResponse {
@@ -31,6 +33,9 @@ export interface AuthResponse {
     first_name?: string;
     last_name?: string;
     firebase_uid?: string;
+    is_student?: boolean;
+    is_educator?: boolean;
+    is_admin?: boolean;
   };
 }
 
@@ -116,6 +121,7 @@ export async function register(credentials: RegisterCredentials): Promise<AuthRe
       last_name: credentials.last_name || '',
       is_student: credentials.is_student ?? true,
       is_educator: credentials.is_educator ?? false,
+      is_admin: credentials.is_admin ?? false,
     }),
   });
 
@@ -185,4 +191,12 @@ export async function isAuthenticated(): Promise<boolean> {
   const payload = decodeJwtPayload(token);
   if (!payload || !payload.exp) return true;
   return payload.exp * 1000 > Date.now();
+}
+
+export function roleHomePath(
+  user?: { is_admin?: boolean; is_educator?: boolean } | null
+): Href {
+  if (user?.is_admin) return '/admin';
+  if (user?.is_educator) return '/educator';
+  return '/(tabs)';
 }

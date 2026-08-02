@@ -83,6 +83,7 @@ export default function ProfileScreen() {
   const nextLevelXP = userData?.next_level_xp || 1000;
   const progressPercent = Math.min((currentXP / nextLevelXP) * 100, 100);
   const earnedBadges = userData?.badges || [];
+  const roleLabel = userData?.is_admin ? 'Admin' : userData?.is_educator ? 'Educator' : 'Student';
 
   return (
     <View style={styles.container}>
@@ -108,7 +109,7 @@ export default function ProfileScreen() {
             <Text style={styles.userName}>{fullName}</Text>
             <Text style={styles.userEmail}>{userData?.email || 'No email provided'}</Text>
             <View style={styles.roleBadge}>
-              <Text style={styles.roleText}>Student</Text>
+              <Text style={styles.roleText}>{roleLabel}</Text>
             </View>
           </View>
         </View>
@@ -229,15 +230,16 @@ export default function ProfileScreen() {
         {/* Menu Items */}
         <View style={styles.section}>
           <View style={styles.listCard}>
-            {/* 🆕 Dev-only entry point into educator screens — remove once real educator auth exists */}
-            <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/educator/dashboard')}>
-              <View style={styles.menuItemLeft}>
-                <Ionicons name="school-outline" size={22} color={COLORS.textSecondary} />
-                <Text style={styles.menuItemText}>Educator View (dev)</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.menuItem, styles.borderTop]}>
+            {userData?.is_educator && (
+              <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/educator/dashboard')}>
+                <View style={styles.menuItemLeft}>
+                  <Ionicons name="school-outline" size={22} color={COLORS.textSecondary} />
+                  <Text style={styles.menuItemText}>Educator View</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={styles.menuItem}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />
                 <Text style={styles.menuItemText}>Notifications</Text>
@@ -251,32 +253,30 @@ export default function ProfileScreen() {
               </View>
               <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
             </TouchableOpacity>
-            {/* 🔐 Admin / Super Admin access
-                NOTE: currently visible to everyone since the backend doesn't yet expose
-                a role/is_admin flag to the app. Once `userData.is_admin` (or similar)
-                is returned by the API, wrap these two items in that check, e.g.
-                {userData?.is_admin && ( ...Admin Panel item... )}
-                {userData?.is_superadmin && ( ...Developer Panel item... )} */}
-            <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/admin')}>
-              <View style={styles.menuItemLeft}>
-                <Ionicons name="shield-checkmark-outline" size={22} color={COLORS.purpleVibrant} />
-                <Text style={styles.menuItemText}>Admin Panel</Text>
-              </View>
-              <View style={styles.menuItemRight}>
-                <Text style={styles.menuItemHint}>Dean / Program Chair</Text>
-                <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
-              </View>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/superadmin')}>
-              <View style={styles.menuItemLeft}>
-                <Ionicons name="terminal-outline" size={22} color={COLORS.purpleDeep} />
-                <Text style={styles.menuItemText}>Developer Panel</Text>
-              </View>
-              <View style={styles.menuItemRight}>
-                <Text style={styles.menuItemHint}>Super Admin</Text>
-                <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
-              </View>
-            </TouchableOpacity>
+            {userData?.is_admin && (
+              <>
+                <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/admin')}>
+                  <View style={styles.menuItemLeft}>
+                    <Ionicons name="shield-checkmark-outline" size={22} color={COLORS.purpleVibrant} />
+                    <Text style={styles.menuItemText}>Admin Panel</Text>
+                  </View>
+                  <View style={styles.menuItemRight}>
+                    <Text style={styles.menuItemHint}>Dean / Program Chair</Text>
+                    <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+                  </View>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/superadmin')}>
+                  <View style={styles.menuItemLeft}>
+                    <Ionicons name="terminal-outline" size={22} color={COLORS.purpleDeep} />
+                    <Text style={styles.menuItemText}>Developer Panel</Text>
+                  </View>
+                  <View style={styles.menuItemRight}>
+                    <Text style={styles.menuItemHint}>Super Admin</Text>
+                    <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+                  </View>
+                </TouchableOpacity>
+              </>
+            )}
             <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={handleLogout}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="log-out-outline" size={22} color={COLORS.danger} />
@@ -508,6 +508,13 @@ const styles = StyleSheet.create({
   menuItemText: {
     fontSize: 16,
     color: COLORS.textPrimary,
+    fontFamily: FONTS.medium,
+    fontWeight: '500',
+  },
+  menuItemRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  menuItemHint: {
+    fontSize: 12,
+    color: COLORS.textMuted,
     fontFamily: FONTS.medium,
     fontWeight: '500',
   },

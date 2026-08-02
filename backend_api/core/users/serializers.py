@@ -21,7 +21,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name', # 🌟 Unhidden here!
-            'is_student', 'is_educator', 'level', 'current_xp', 
+            'is_student', 'is_educator', 'is_admin', 'level', 'current_xp', 
             'next_level_xp', 'total_points', 'streak',
             'courses_completed', 'study_hours', 'quizzes_taken', 
             'group_activities_count', 'badges', 'date_joined'
@@ -66,7 +66,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         # 🌟 Added first_name and last_name here so the API accepts them
-        fields = ['username', 'email', 'password', 'first_name', 'last_name', 'is_student', 'is_educator']
+        fields = ['username', 'email', 'password', 'first_name', 'last_name', 'is_student', 'is_educator', 'is_admin']
         extra_kwargs = {'password': {'write_only': True}}
 
     def create(self, validated_data):
@@ -77,6 +77,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             first_name=validated_data.get('first_name', ''), # 🌟 Safely grab the first name
             last_name=validated_data.get('last_name', ''),   # 🌟 Safely grab the last name
             is_student=validated_data.get('is_student', False),
-            is_educator=validated_data.get('is_educator', False)
+            is_educator=validated_data.get('is_educator', False),
+            is_admin=validated_data.get('is_admin', False)
         )
         return user

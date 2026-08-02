@@ -5,7 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { isAuthenticated } from '@/services/authService';
+import { isAuthenticated, getCurrentUser, roleHomePath } from '@/services/authService';
 import { testFirebase } from "@/services/firebaseTest";
 import { startSyncManager } from '@/services/syncManager';
 import { initOfflineQueue } from '@/services/offlineQueue';
@@ -23,6 +23,15 @@ import {
 export const unstable_settings = {
   initialRouteName: '(tabs)',
 };
+
+async function fetchRoleHome() {
+  try {
+    const user = await getCurrentUser();
+    return roleHomePath(user);
+  } catch {
+    return '/(tabs)';
+  }
+}
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
@@ -57,7 +66,10 @@ export default function RootLayout() {
       if (!loggedIn && inAuthGroup) {
         router.replace('/login');
       } else if (loggedIn && segments[0] === 'login') {
-        router.replace('/(tabs)');
+        router.replace(await fetchRoleHome());
+      } else if (loggedIn && segments[0] === '(tabs)') {
+        const home = await fetchRoleHome();
+        if (home !== '/(tabs)') router.replace(home);
       }
 
       setIsReady(true);
