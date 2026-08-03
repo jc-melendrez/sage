@@ -68,7 +68,10 @@ class FirebaseLoginView(APIView):
             username = request.data.get('username', email.split('@')[0] if email else f"user_{firebase_uid[:8]}")
             first_name = request.data.get('first_name', '')
             last_name = request.data.get('last_name', '')
-            
+            is_student = _as_bool(request.data.get('is_student', False))
+            is_educator = _as_bool(request.data.get('is_educator', False))
+            is_admin = _as_bool(request.data.get('is_admin', False))
+
             # Ensure username is unique; if taken, append a random string from the UID
             if User.objects.filter(username=username).exists():
                 username = f"{username}_{firebase_uid[:6]}"
@@ -79,6 +82,9 @@ class FirebaseLoginView(APIView):
                 firebase_uid=firebase_uid,
                 first_name=first_name,
                 last_name=last_name,
+                is_student=is_student,
+                is_educator=is_educator,
+                is_admin=is_admin,
                 password=None # Password is managed by Firebase now
             )
             # Sync the new user to Firestore immediately
@@ -96,11 +102,22 @@ class FirebaseLoginView(APIView):
                 "email": user.email,
                 "first_name": user.first_name,
                 "last_name": user.last_name,
-                "firebase_uid": user.firebase_uid
+                "firebase_uid": user.firebase_uid,
+                "is_student": user.is_student,
+                "is_educator": user.is_educator,
+                "is_admin": user.is_admin
             }
         })
     
 # ---------- Helper: safe JSON parsing ----------
+def _as_bool(value, default=False):
+    """Coerce incoming role flags (bool, string, or int) to a real boolean."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(value)
+
 def safe_json_parse(text):
     """Try to parse JSON from text, with fallback to regex extraction."""
     try:

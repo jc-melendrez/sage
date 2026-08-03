@@ -6,12 +6,18 @@ import * as NavigationBar from 'expo-navigation-bar';
 import { HapticTab } from '@/components/haptic-tab';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
+// 🔥 Import Tabler icons
 import {
-  IconLayoutDashboard,
-  IconSchool,
-  IconNotebook,
-  IconUser,
+  IconHome,
+  IconUsers,
+  IconBooks,
+  IconMessages,
+  IconChartBar,
 } from '@tabler/icons-react-native';
+
+export const unstable_settings = {
+  initialRouteName: 'dashboard',
+};
 
 export default function EducatorTabLayout() {
   const colorScheme = useColorScheme();
@@ -56,33 +62,45 @@ export default function EducatorTabLayout() {
         },
       }}>
       <Tabs.Screen
-        name="index"
+        name="dashboard"
         options={{
-          title: 'Dashboard',
-          tabBarIcon: ({ color }) => <IconLayoutDashboard size={24} color={color} />,
+          title: 'Home',
+          tabBarIcon: ({ color }) => <IconHome size={24} color={color} />,
         }}
       />
       <Tabs.Screen
-        name="classes"
+        name="student-progress"
         options={{
-          title: 'Classes',
-          tabBarIcon: ({ color }) => <IconSchool size={24} color={color} />,
+          title: 'Students',
+          tabBarIcon: ({ color }) => <IconUsers size={24} color={color} />,
         }}
       />
       <Tabs.Screen
-        name="content"
+        name="quiz-manager"
         options={{
           title: 'Content',
-          tabBarIcon: ({ color }) => <IconNotebook size={24} color={color} />,
+          tabBarIcon: ({ color }) => <IconBooks size={24} color={color} />,
         }}
       />
       <Tabs.Screen
-        name="profile"
+        name="study-groups"
         options={{
-          title: 'Profile',
-          tabBarIcon: ({ color }) => <IconUser size={24} color={color} />,
+          title: 'Groups',
+          tabBarIcon: ({ color }) => <IconMessages size={24} color={color} />,
         }}
       />
+      <Tabs.Screen
+        name="analytics"
+        options={{
+          title: 'Analytics',
+          tabBarIcon: ({ color }) => <IconChartBar size={24} color={color} />,
+        }}
+      />
+      {/* Hidden sub-screens (reachable via push from within tabs) */}
+      <Tabs.Screen name="leaderboard" options={{ href: null }} />
+      <Tabs.Screen name="assignments" options={{ href: null }} />
+      <Tabs.Screen name="announcements" options={{ href: null }} />
+      <Tabs.Screen name="ai-insights" options={{ href: null }} />
     </Tabs>
   );
 }

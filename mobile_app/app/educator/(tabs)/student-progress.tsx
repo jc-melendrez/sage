@@ -1,6 +1,7 @@
 import React from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { StatCard, SectionHeader, ProgressBar, Pill, Avatar } from '@/components/educator/EducatorPrimitives';
@@ -42,12 +43,13 @@ function scoreColor(score: number) {
 }
 
 export default function StudentProgressScreen() {
+  const router = useRouter();
   const percent = Math.min((STUDENT.xp / STUDENT.nextLevelXp) * 100, 100);
   const initials = STUDENT.name.split(' ').map((n) => n[0]).join('').toUpperCase();
 
   return (
     <View style={styles.container}>
-      <EducatorHeader title="Student Progress" showBack rightIcon="chatbubble-ellipses-outline">
+      <EducatorHeader title="Student Progress" rightIcon="chatbubble-ellipses-outline">
         <View style={styles.studentHeaderRow}>
           <Avatar initials={initials} size={64} />
           <View style={{ flex: 1 }}>
@@ -65,6 +67,25 @@ export default function StudentProgressScreen() {
       </EducatorHeader>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+        {/* Leaderboard shortcut */}
+        <View style={styles.section}>
+          <SectionHeader title="Class Leaderboard" actionLabel="View all" onAction={() => router.push('/educator/leaderboard' as any)} />
+          <TouchableOpacity
+            style={styles.linkCard}
+            activeOpacity={0.8}
+            onPress={() => router.push('/educator/leaderboard' as any)}
+          >
+            <View style={[styles.linkIconBg, { backgroundColor: tint(COLORS.warning) }]}>
+              <Ionicons name="podium" size={18} color={COLORS.warning} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.linkTitle}>See who&apos;s on top</Text>
+              <Text style={styles.linkSub}>This week&apos;s class rankings</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+          </TouchableOpacity>
+        </View>
+
         <View style={styles.section}>
           <View style={styles.statsRow}>
             <StatCard icon="flame" value={STUDENT.streak} label="Streak" color={COLORS.warning} />
@@ -150,6 +171,20 @@ const styles = StyleSheet.create({
   xpText: { color: COLORS.purplePale, fontFamily: FONTS.medium, fontSize: 13 },
 
   statsRow: { flexDirection: 'row', gap: 10 },
+
+  linkCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  linkIconBg: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  linkTitle: { fontSize: 14, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textPrimary, marginBottom: 2 },
+  linkSub: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textSecondary },
 
   listCard: { backgroundColor: COLORS.surface, borderRadius: RADIUS.lg, paddingHorizontal: 16, borderWidth: 1, borderColor: COLORS.border },
   borderTop: { borderTopWidth: 1, borderTopColor: COLORS.border },
