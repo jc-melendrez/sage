@@ -263,3 +263,86 @@ class QuizListView(APIView):
         quizzes = Quiz.objects.filter(user=request.user).order_by('-created_at')
         serializer = QuizSerializer(quizzes, many=True)
         return Response(serializer.data)
+
+class QuizDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _get_owned_quiz(self, request, quiz_id):
+        return Quiz.objects.filter(id=quiz_id, user=request.user).first()
+
+    def get(self, request, quiz_id):
+        quiz = self._get_owned_quiz(request, quiz_id)
+        if not quiz:
+            return Response({"error": "Quiz not found."}, status=404)
+        return Response(QuizSerializer(quiz).data)
+
+    def patch(self, request, quiz_id):
+        quiz = self._get_owned_quiz(request, quiz_id)
+        if not quiz:
+            return Response({"error": "Quiz not found."}, status=404)
+
+        title = request.data.get('title')
+        if title is not None:
+            title = str(title).strip()
+            if not title:
+                return Response({"error": "Quiz title cannot be empty."}, status=400)
+            quiz.title = title
+            quiz.save()
+
+        questions = request.data.get('questions')
+        if questions is not None:
+            if not isinstance(questions, list):
+                return Response({"error": "questions must be a list."}, status=400)
+
+            existing = {q.id: q for q in quiz.questions.all()}
+            kept_ids = []
+
+            for item in questions:
+                if not isinstance(item, dict):
+                    return Response({"error": "Each question must be an object."}, status=400)
+
+                question_text = str(item.get('question_text', '')).strip()
+                correct_answer = str(item.get('correct_answer', '')).strip()
+                if not question_text or not correct_answer:
+                    return Response(
+                        {"error": "Each question needs question_text and correct_answer."},
+                        status=400,
+                    )
+
+                options = item.get('options')
+                if options is None:
+                    options = []
+                if not isinstance(options, list):
+                    return Response({"error": "options must be a list."}, status=400)
+                options = [str(o) for o in options]
+
+                qid = item.get('id')
+                if qid is not None and qid in existing:
+                    question = existing[qid]
+                    question.question_text = question_text
+                    question.options = options
+                    question.correct_answer = correct_answer
+                    question.explanation = str(item.get('explanation') or '')
+                    question.save()
+                    kept_ids.append(question.id)
+                else:
+                    question = QuizQuestion.objects.create(
+                        quiz=quiz,
+                        question_text=question_text,
+                        options=options,
+                        correct_answer=correct_answer,
+                        explanation=str(item.get('explanation') or ''),
+                    )
+                    kept_ids.append(question.id)
+
+            # Remove questions that were not kept in the payload
+            quiz.questions.exclude(id__in=kept_ids).delete()
+
+        return Response(QuizSerializer(quiz).data)
+
+    def delete(self, request, quiz_id):
+        quiz = self._get_owned_quiz(request, quiz_id)
+        if not quiz:
+            return Response({"error": "Quiz not found."}, status=404)
+        quiz.delete()
+        return Response(status=204)

@@ -2,7 +2,7 @@ import { Tabs } from 'expo-router';
 import React, { useEffect } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as NavigationBar from 'expo-navigation-bar';
-
+import { IconUser } from '@tabler/icons-react-native';
 import { HapticTab } from '@/components/haptic-tab';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
@@ -96,7 +96,18 @@ export default function EducatorTabLayout() {
           tabBarIcon: ({ color }) => <IconChartBar size={24} color={color} />,
         }}
       />
+      <Tabs.Screen
+        name="profile"
+        options={{
+          title: 'Profile',
+          tabBarIcon: ({ color }) => <IconUser size={24} color={color} />,
+        }}
+      />
       {/* Hidden sub-screens (reachable via push from within tabs) */}
+      <Tabs.Screen name="courses" options={{ href: null }} />
+      <Tabs.Screen name="student-detail" options={{ href: null }} />
+      <Tabs.Screen name="host-game" options={{ href: null }} />
+      <Tabs.Screen name="host-session" options={{ href: null }} />
       <Tabs.Screen name="leaderboard" options={{ href: null }} />
       <Tabs.Screen name="assignments" options={{ href: null }} />
       <Tabs.Screen name="announcements" options={{ href: null }} />

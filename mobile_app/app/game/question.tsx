@@ -6,11 +6,25 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  Animated,
+  // ✨ RENAMED to avoid conflict with react-native-reanimated
+  Animated as RNAnimated,
   Dimensions,
+  ActivityIndicator,
+  Platform,
 } from 'react-native';
+// ✨ NEW: Reanimated imports for timer shake/pulse
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withRepeat,
+  withTiming,
+  withSequence,
+  Easing,
+  interpolate,
+} from 'react-native-reanimated';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
+import * as Haptics from 'expo-haptics';
 import { getToken, getCurrentUser } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
 
@@ -56,13 +70,14 @@ const textOf = (c: string) => c;
    StandingsRow — restyled to match the HTML drawer
    ═══════════════════════════════════════════════════════════════ */
 function StandingsRow({ player, index, isYou }: { player: any; index: number; isYou: boolean }) {
-  const anim = useRef(new Animated.Value(0)).current;
-  const scoreAnim = useRef(new Animated.Value(player.prevScore)).current;
+  // ✨ UPDATED: RNAnimated
+  const anim = useRef(new RNAnimated.Value(0)).current;
+  const scoreAnim = useRef(new RNAnimated.Value(player.prevScore)).current;
   const [displayScore, setDisplayScore] = useState(player.prevScore);
 
   useEffect(() => {
-    Animated.timing(anim, { toValue: 1, duration: 280, delay: index * 90, useNativeDriver: true }).start();
-    Animated.timing(scoreAnim, { toValue: player.score, duration: 500, delay: index * 90 + 150, useNativeDriver: false }).start();
+    RNAnimated.timing(anim, { toValue: 1, duration: 280, delay: index * 90, useNativeDriver: true }).start();
+    RNAnimated.timing(scoreAnim, { toValue: player.score, duration: 500, delay: index * 90 + 150, useNativeDriver: false }).start();
     const id = scoreAnim.addListener(({ value }) => setDisplayScore(Math.round(value)));
     return () => scoreAnim.removeListener(id);
   }, []);
@@ -70,7 +85,7 @@ function StandingsRow({ player, index, isYou }: { player: any; index: number; is
   const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : null;
 
   return (
-    <Animated.View
+    <RNAnimated.View
       style={[
         styles.srRow,
         index < 3 && styles.srRowTop3,
@@ -82,7 +97,6 @@ function StandingsRow({ player, index, isYou }: { player: any; index: number; is
       ]}
     >
       <Text style={styles.srRank}>{medal || `${index + 1}`}</Text>
-
       <View style={styles.srNameWrap}>
         <Text style={[styles.srName, isYou && styles.srNameYou]}>
           {player.displayName}
@@ -90,13 +104,11 @@ function StandingsRow({ player, index, isYou }: { player: any; index: number; is
         </Text>
         {player.streak >= 3 && <Text style={styles.srStreak}>🔥{player.streak}</Text>}
       </View>
-
       {player.movement > 0 && <Text style={styles.srMoveUp}>▲{player.movement}</Text>}
       {player.movement < 0 && <Text style={styles.srMoveDown}>▼{Math.abs(player.movement)}</Text>}
       {player.movement === 0 && <Text style={styles.srMoveSame}>—</Text>}
-
       <Text style={styles.srScore}>{displayScore.toLocaleString()}</Text>
-    </Animated.View>
+    </RNAnimated.View>
   );
 }
 
@@ -138,36 +150,76 @@ export default function QuestionScreen() {
   const [roulettePhase, setRoulettePhase] = useState<'idle' | 'spinning' | 'revealed'>('idle');
   const [isFrozen, setIsFrozen] = useState(false);
   const [showStandings, setShowStandings] = useState(false);
-  const standingsAnim = useRef(new Animated.Value(0)).current;
+  const [roomStatus, setRoomStatus] = useState('waiting');
+
+  // ✨ UPDATED: RNAnimated refs
+  const standingsAnim = useRef(new RNAnimated.Value(0)).current;
   const timerRef = useRef<any>(null);
   const startTimeRef = useRef<number>(Date.now());
   const standingsUnsubRef = useRef<(() => void) | null>(null);
+  const roomUnsubRef = useRef<(() => void) | null>(null);
   const previousStateRef = useRef<{ [id: string]: { rank: number; score: number } }>({});
+  const pendingStandingsRef = useRef<any[] | null>(null);
+  const throttleTimerRef = useRef<any>(null);
+  const lastFlushAtRef = useRef<number>(0);
+  const bootedRef = useRef(false);
+  const navigatedRef = useRef(false);
 
-  const cardTranslateX = useRef(new Animated.Value(0)).current;
-  const cardRotateY = useRef(new Animated.Value(0)).current;
-  const cardOpacity = useRef(new Animated.Value(1)).current;
-  const resultFlipAnim = useRef(new Animated.Value(0)).current;
+  // ✨ UPDATED: RNAnimated refs for card/result/timerBar
+  const cardTranslateX = useRef(new RNAnimated.Value(0)).current;
+  const cardRotateY = useRef(new RNAnimated.Value(0)).current;
+  const cardOpacity = useRef(new RNAnimated.Value(1)).current;
+  const resultFlipAnim = useRef(new RNAnimated.Value(0)).current;
   const isAnimatingRef = useRef(false);
   const autoAdvanceRef = useRef<number | null>(null);
   const [autoCountdown, setAutoCountdown] = useState(0);
-  const timerBarAnim = useRef(new Animated.Value(1)).current;
+  const timerBarAnim = useRef(new RNAnimated.Value(1)).current;
   const spinTimerRef = useRef<any>(null);
   const revealTimerRef = useRef<any>(null);
   const spinDelayRef = useRef(60);
   const cyclesRef = useRef(0);
 
-  /* ── all useEffects below are UNCHANGED ── */
+  // ✨ NEW: Timer urgency animation (shake + pulse at ≤5s)
+  const urgencyAnim = useSharedValue(0);
+
+  const urgencyStyle = useAnimatedStyle(() => {
+    const shakeX = interpolate(
+      urgencyAnim.value,
+      [0, 0.25, 0.5, 0.75, 1],
+      [0, -3, 0, 3, 0]
+    );
+    const scale = interpolate(
+      urgencyAnim.value,
+      [0, 0.5, 1],
+      [1, 1.08, 1]
+    );
+    return {
+      transform: [{ translateX: shakeX }, { scale }],
+    };
+  });
+
+  /* ── all useEffects below ── */
+
+  // ✨ NEW: Trigger shake/pulse when timeLeft <= 5 and not frozen
+  useEffect(() => {
+    if (timeLeft <= 5 && !isFrozen && timeLeft > 0) {
+      urgencyAnim.value = withRepeat(
+        withSequence(
+          withTiming(1, { duration: 150, easing: Easing.linear }),
+          withTiming(0, { duration: 150, easing: Easing.linear })
+        ),
+        -1, // infinite
+        false
+      );
+    } else {
+      urgencyAnim.value = withTiming(0, { duration: 200 });
+    }
+  }, [timeLeft, isFrozen]);
 
   useEffect(() => {
     const init = async () => {
       const user = await getCurrentUser();
       setUserId(user?.id);
-      const room = await firestore().collection('gameRooms').doc(roomCode).get();
-      const data = room.data();
-      setQuestions(data?.questions || []);
-      setTimePerQuestion(data?.timePerQuestion || 15);
-      setTimeLeft(data?.timePerQuestion || 15);
       const player = await firestore().collection('gameRooms').doc(roomCode)
         .collection('players').doc(String(user?.id)).get();
       setQuestionOrder(player.data()?.questionOrder || []);
@@ -176,31 +228,73 @@ export default function QuestionScreen() {
     };
     init();
 
-    const unsub = firestore()
+    /* ── single room listener: boots the game + navigates when the host ends it ── */
+    const roomUnsub = firestore()
+      .collection('gameRooms').doc(roomCode)
+      .onSnapshot(snap => {
+        const data = snap.data();
+        if (!data) return;
+        if (!bootedRef.current) {
+          bootedRef.current = true;
+          setQuestions(data.questions || []);
+          setTimePerQuestion(data.timePerQuestion || 15);
+          setTimeLeft(data.timePerQuestion || 15);
+          setRoomStatus(data.status || 'waiting');
+        } else if (data.status === 'finished' && !navigatedRef.current) {
+          navigatedRef.current = true;
+          setRoomStatus('finished');
+          router.replace({ pathname: '/game/final', params: { roomCode } });
+        }
+      });
+    roomUnsubRef.current = roomUnsub;
+
+    /* ── standings listener: throttled to 500ms to limit re-renders ── */
+    const flushStandings = () => {
+      throttleTimerRef.current = null;
+      lastFlushAtRef.current = Date.now();
+      const withMovement = pendingStandingsRef.current;
+      if (!withMovement) return;
+      previousStateRef.current = Object.fromEntries(
+        withMovement.map((p, i) => [p.id, { rank: i, score: p.score }])
+      );
+      const top = withMovement.filter(p => p.movement >= 2).sort((a, b) => b.movement - a.movement)[0];
+      setBiggestMover(top ? { name: String(top.id) === String(userId) ? 'You' : top.displayName, jump: top.movement } : null);
+      setStandings(withMovement);
+    };
+
+    const standingsUnsub = firestore()
       .collection('gameRooms').doc(roomCode)
       .collection('players')
       .onSnapshot(snap => {
-        const sorted = snap.docs
+        pendingStandingsRef.current = snap.docs
           .map(d => ({
             id: d.id,
             displayName: d.data().displayName,
             score: d.data().score || 0,
             streak: d.data().streak || 0,
           }))
-          .sort((a, b) => b.score - a.score);
-        const withMovement = sorted.map((p, i) => {
-          const prev = previousStateRef.current[p.id];
-          return { ...p, movement: prev ? prev.rank - i : 0, prevScore: prev ? prev.score : p.score };
-        });
-        previousStateRef.current = Object.fromEntries(
-          withMovement.map((p, i) => [p.id, { rank: i, score: p.score }])
-        );
-        const top = withMovement.filter(p => p.movement >= 2).sort((a, b) => b.movement - a.movement)[0];
-        setBiggestMover(top ? { name: String(top.id) === String(userId) ? 'You' : top.displayName, jump: top.movement } : null);
-        setStandings(withMovement);
+          .sort((a, b) => b.score - a.score)
+          .map((p, i) => {
+            const prev = previousStateRef.current[p.id];
+            return { ...p, movement: prev ? prev.rank - i : 0, prevScore: prev ? prev.score : p.score };
+          });
+
+        const elapsed = Date.now() - lastFlushAtRef.current;
+        if (elapsed >= 500) {
+          if (throttleTimerRef.current) clearTimeout(throttleTimerRef.current);
+          flushStandings();
+        } else if (!throttleTimerRef.current) {
+          throttleTimerRef.current = setTimeout(flushStandings, 500 - elapsed);
+        }
       });
-    standingsUnsubRef.current = unsub;
-    return () => { unsub(); };
+    standingsUnsubRef.current = standingsUnsub;
+
+    return () => {
+      roomUnsub();
+      standingsUnsub();
+      if (throttleTimerRef.current) clearTimeout(throttleTimerRef.current);
+      throttleTimerRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -210,21 +304,29 @@ export default function QuestionScreen() {
       .collection('players').doc(String(userId))
       .onSnapshot(snap => {
         const p = snap.data();
-        if (p?.powerups) setPowerups(p.powerups);
+        const next = p?.powerups;
+        if (!next) return;
+        setPowerups(prev => {
+          if (
+            prev.freeze === next.freeze &&
+            prev.hint === next.hint &&
+            prev.doublePoints === next.doublePoints &&
+            prev.shield === next.shield
+          ) return prev;
+          return next;
+        });
       });
     return () => { unsub(); };
   }, [userId]);
 
   useEffect(() => {
     if (!showRoulette || !rouletteTarget) return;
-
     setRoulettePhase('spinning');
     spinDelayRef.current = 60;
     cyclesRef.current = 0;
 
     const tick = () => {
       cyclesRef.current++;
-
       if (cyclesRef.current >= 18) {
         const targetIdx = POWERUP_ITEMS.findIndex(i => i.key === rouletteTarget);
         setSpinIndex(targetIdx);
@@ -236,12 +338,10 @@ export default function QuestionScreen() {
         }, 2000);
         return;
       }
-
       setSpinIndex(prev => (prev + 1) % POWERUP_ITEMS.length);
       spinDelayRef.current = Math.min(spinDelayRef.current + 20, 400);
       spinTimerRef.current = setTimeout(tick, spinDelayRef.current);
     };
-
     spinTimerRef.current = setTimeout(tick, 60);
 
     return () => {
@@ -266,7 +366,8 @@ export default function QuestionScreen() {
 
   useEffect(() => {
     const target = isFrozen ? (timePerQuestion > 0 ? timeLeft / timePerQuestion : 0) : (timePerQuestion > 0 ? timeLeft / timePerQuestion : 0);
-    Animated.timing(timerBarAnim, {
+    // ✨ UPDATED: RNAnimated
+    RNAnimated.timing(timerBarAnim, {
       toValue: target,
       duration: 900,
       useNativeDriver: false,
@@ -287,17 +388,23 @@ export default function QuestionScreen() {
     cardTranslateX.setValue(SCREEN_WIDTH * 0.85);
     cardRotateY.setValue(12);
     cardOpacity.setValue(0);
-    Animated.parallel([
-      Animated.spring(cardTranslateX, { toValue: 0, friction: 8, tension: 60, useNativeDriver: true }),
-      Animated.timing(cardRotateY, { toValue: 0, duration: 350, useNativeDriver: true }),
-      Animated.timing(cardOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+    // ✨ UPDATED: RNAnimated
+    RNAnimated.parallel([
+      RNAnimated.spring(cardTranslateX, { toValue: 0, friction: 8, tension: 60, useNativeDriver: true }),
+      RNAnimated.timing(cardRotateY, { toValue: 0, duration: 350, useNativeDriver: true }),
+      RNAnimated.timing(cardOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
     ]).start(() => { isAnimatingRef.current = false; });
   }, [currentIndex]);
 
   useEffect(() => {
     if (result) {
+      if (Platform.OS !== 'web') {
+        if (result.correct) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        else Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      }
       resultFlipAnim.setValue(0);
-      Animated.timing(resultFlipAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+      // ✨ UPDATED: RNAnimated
+      RNAnimated.timing(resultFlipAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
     }
   }, [result]);
 
@@ -322,7 +429,6 @@ export default function QuestionScreen() {
   }, [result]);
 
   /* ── all handlers below are UNCHANGED ── */
-
   const joinWithSpaces = (chars: string[]) => {
     let result = '';
     let i = 0;
@@ -350,6 +456,7 @@ export default function QuestionScreen() {
 
   const handleFreeze = async () => {
     if (powerups.freeze <= 0 || selected || isFrozen) return;
+    if (Platform.OS !== 'web') Haptics.selectionAsync();
     clearInterval(timerRef.current);
     setIsFrozen(true);
     setPowerups(p => ({ ...p, freeze: p.freeze - 1 }));
@@ -361,6 +468,7 @@ export default function QuestionScreen() {
 
   const handleHint = async () => {
     if (powerups.hint <= 0 || selected || activePowerups.hint) return;
+    if (Platform.OS !== 'web') Haptics.selectionAsync();
     setPowerups(p => ({ ...p, hint: p.hint - 1 }));
     setActivePowerups(p => ({ ...p, hint: true }));
     const q = questions[questionOrder[currentIndex]];
@@ -377,6 +485,7 @@ export default function QuestionScreen() {
 
   const handleDoublePoints = async () => {
     if (powerups.doublePoints <= 0 || selected || activePowerups.doublePoints) return;
+    if (Platform.OS !== 'web') Haptics.selectionAsync();
     setPowerups(p => ({ ...p, doublePoints: p.doublePoints - 1 }));
     setActivePowerups(p => ({ ...p, doublePoints: true }));
     const user = await getCurrentUser();
@@ -387,6 +496,7 @@ export default function QuestionScreen() {
 
   const handleShield = async () => {
     if (powerups.shield <= 0 || selected || activePowerups.shield) return;
+    if (Platform.OS !== 'web') Haptics.selectionAsync();
     setPowerups(p => ({ ...p, shield: p.shield - 1 }));
     setActivePowerups(p => ({ ...p, shield: true }));
     const user = await getCurrentUser();
@@ -436,7 +546,6 @@ export default function QuestionScreen() {
         : e.message || 'Network error. Check your connection.';
       setError(msg);
       setSelected(null);
-      setPendingAnswer(null);
       startTimeRef.current = Date.now();
       setTimeLeft(timePerQuestion);
       timerRef.current = setInterval(() => {
@@ -448,12 +557,17 @@ export default function QuestionScreen() {
     }
   };
 
-  const handleRetry = () => { setError(null); handleAnswer(pendingAnswer); };
+  const handleRetry = () => {
+    if (!pendingAnswer) return;
+    setError(null);
+    handleAnswer(pendingAnswer);
+  };
 
   const toggleStandings = () => {
     const toValue = showStandings ? 0 : 1;
     setShowStandings(!showStandings);
-    Animated.spring(standingsAnim, { toValue, friction: 8, tension: 60, useNativeDriver: true }).start();
+    // ✨ UPDATED: RNAnimated
+    RNAnimated.spring(standingsAnim, { toValue, friction: 8, tension: 60, useNativeDriver: true }).start();
   };
 
   const handleNext = async () => {
@@ -464,14 +578,16 @@ export default function QuestionScreen() {
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ roomCode }),
       });
+      navigatedRef.current = true;
       router.replace({ pathname: '/game/final', params: { roomCode } });
       return;
     }
     isAnimatingRef.current = true;
-    Animated.parallel([
-      Animated.timing(cardTranslateX, { toValue: -SCREEN_WIDTH * 0.9, duration: 300, useNativeDriver: true }),
-      Animated.timing(cardRotateY, { toValue: -14, duration: 300, useNativeDriver: true }),
-      Animated.timing(cardOpacity, { toValue: 0, duration: 250, useNativeDriver: true }),
+    // ✨ UPDATED: RNAnimated
+    RNAnimated.parallel([
+      RNAnimated.timing(cardTranslateX, { toValue: -SCREEN_WIDTH * 0.9, duration: 300, useNativeDriver: true }),
+      RNAnimated.timing(cardRotateY, { toValue: -14, duration: 300, useNativeDriver: true }),
+      RNAnimated.timing(cardOpacity, { toValue: 0, duration: 250, useNativeDriver: true }),
     ]).start(() => {
       cardTranslateX.setValue(SCREEN_WIDTH * 0.85);
       cardRotateY.setValue(12);
@@ -480,6 +596,7 @@ export default function QuestionScreen() {
       setSelected(null);
       setResult(null);
       setTypedAnswer('');
+      setPendingAnswer(null);
       setIsFrozen(false);
       setShowStandings(false);
       standingsAnim.setValue(0);
@@ -514,7 +631,6 @@ export default function QuestionScreen() {
      ═══════════════════════════════════════════════════════════ */
   return (
     <View style={styles.container}>
-
       {/* ── frozen screen tint ── */}
       {isFrozen && <View style={styles.frozenTint} />}
 
@@ -539,10 +655,12 @@ export default function QuestionScreen() {
           )}
         </TouchableOpacity>
 
-        <View style={[
+        {/* ✨ NEW: Wrapped timer badge in Reanimated Animated.View with urgencyStyle */}
+        <Animated.View style={[
           styles.timerBadge,
           isFrozen && styles.timerBadgeFrozen,
           isDanger && styles.timerBadgeDanger,
+          urgencyStyle,
         ]}>
           <Text style={[
             styles.timerBadgeText,
@@ -551,12 +669,13 @@ export default function QuestionScreen() {
           ]}>
             {isFrozen ? '❄️ FROZEN' : `${timeLeft}s`}
           </Text>
-        </View>
+        </Animated.View>
       </View>
 
       {/* ── TIMER PROGRESS BAR (smooth animated) ── */}
       <View style={styles.timerBarTrack}>
-        <Animated.View style={[
+        {/* ✨ UPDATED: RNAnimated */}
+        <RNAnimated.View style={[
           styles.timerBarFill,
           isDanger && styles.timerBarFillDanger,
           isFrozen && styles.timerBarFillFrozen,
@@ -598,7 +717,8 @@ export default function QuestionScreen() {
         scrollEnabled={!showStandings}
       >
         {/* ── FLASH CARD (animated) ── */}
-        <Animated.View
+        {/* ✨ UPDATED: RNAnimated */}
+        <RNAnimated.View
           style={[
             styles.flashCard,
             {
@@ -612,17 +732,24 @@ export default function QuestionScreen() {
           ]}
         >
           <View style={styles.cardHighlight} />
-
           <View style={styles.qTab}>
             <Text style={styles.qTabText}>Q{currentIndex + 1}</Text>
           </View>
-
           <Text style={styles.questionText}>{question.question}</Text>
-        </Animated.View>
+        </RNAnimated.View>
+
+        {/* ── PROCESSING (optimistic — shown while answer is in flight) ── */}
+        {selected && !result && !error && (
+          <View style={styles.processingStrip}>
+            <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
+            <Text style={styles.processingText}>Checking answer...</Text>
+          </View>
+        )}
 
         {/* ── RESULT STRIP ── */}
         {result && (
-          <Animated.View
+          /* ✨ UPDATED: RNAnimated */
+          <RNAnimated.View
             style={[
               styles.resultStrip,
               result.correct ? styles.resultStripCorrect : styles.resultStripWrong,
@@ -638,7 +765,7 @@ export default function QuestionScreen() {
             <Text style={[styles.resultStripPts, result.correct ? styles.ptsGreen : styles.ptsRed]}>
               +{result.points}
             </Text>
-          </Animated.View>
+          </RNAnimated.View>
         )}
 
         {/* ── MCQ CHOICES ── */}
@@ -648,6 +775,7 @@ export default function QuestionScreen() {
               const isCorrect = result && choice === result.correctAnswer;
               const isWrongPick = result && choice === selected && !result.correct;
               const isDimmed = result && !isCorrect && choice !== selected;
+              const isPending = selected === choice && !result && !error;
               return (
                 <TouchableOpacity
                   key={choice}
@@ -656,8 +784,12 @@ export default function QuestionScreen() {
                     isCorrect && styles.choiceCorrect,
                     isWrongPick && styles.choiceWrong,
                     isDimmed && styles.choiceDimmed,
+                    isPending && styles.choicePending,
                   ]}
-                  onPress={() => handleAnswer(choice)}
+                  onPress={() => {
+                    if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    handleAnswer(choice);
+                  }}
                   disabled={!!selected}
                   activeOpacity={0.7}
                 >
@@ -665,11 +797,13 @@ export default function QuestionScreen() {
                     styles.choiceChip,
                     isCorrect && styles.choiceChipCorrect,
                     isWrongPick && styles.choiceChipWrong,
+                    isPending && styles.choiceChipPending,
                   ]}>
                     <Text style={[
                       styles.choiceChipText,
                       isCorrect && styles.choiceChipTextCorrect,
                       isWrongPick && styles.choiceChipTextWrong,
+                      isPending && styles.choiceChipTextPending,
                     ]}>
                       {isCorrect ? '✓' : isWrongPick ? '✗' : letterOf(choice)}
                     </Text>
@@ -678,6 +812,7 @@ export default function QuestionScreen() {
                     styles.choiceText,
                     isCorrect && styles.choiceTextCorrect,
                     isWrongPick && styles.choiceTextWrong,
+                    isPending && styles.choiceTextPending,
                   ]}>
                     {textOf(choice)}
                   </Text>
@@ -697,7 +832,6 @@ export default function QuestionScreen() {
                 </Text>
               </View>
             )}
-
             <View style={styles.idWords}>
               {(() => {
                 let idx = 0;
@@ -724,11 +858,13 @@ export default function QuestionScreen() {
                 });
               })()}
             </View>
-
             {!result && (
               <TouchableOpacity
                 style={[styles.submitBtn, !boxChars.every(c => c) && styles.submitBtnDisabled]}
-                onPress={() => handleAnswer(joinWithSpaces(boxChars))}
+                onPress={() => {
+                  if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  handleAnswer(joinWithSpaces(boxChars));
+                }}
                 disabled={!!selected || !boxChars.every(c => c)}
                 activeOpacity={0.8}
               >
@@ -740,7 +876,8 @@ export default function QuestionScreen() {
 
         {/* ── NEXT / FINISH (auto-advance countdown, tappable to skip) ── */}
         {result && (
-          <Animated.View
+          /* ✨ UPDATED: RNAnimated */
+          <RNAnimated.View
             style={[
               styles.nextWrap,
               {
@@ -767,7 +904,7 @@ export default function QuestionScreen() {
                 <Text style={styles.nextBtnCountdown}>{autoCountdown}s</Text>
               )}
             </TouchableOpacity>
-          </Animated.View>
+          </RNAnimated.View>
         )}
       </ScrollView>
 
@@ -851,7 +988,8 @@ export default function QuestionScreen() {
       {showStandings && (
         <View style={styles.standingsOverlay}>
           <TouchableOpacity style={styles.standingsBackdrop} activeOpacity={1} onPress={toggleStandings} />
-          <Animated.View
+          {/* ✨ UPDATED: RNAnimated */}
+          <RNAnimated.View
             style={[
               styles.standingsDrawer,
               {
@@ -873,7 +1011,7 @@ export default function QuestionScreen() {
                 <StandingsRow key={p.id} player={p} index={i} isYou={String(p.id) === String(userId)} />
               ))}
             </ScrollView>
-          </Animated.View>
+          </RNAnimated.View>
         </View>
       )}
 
@@ -1092,6 +1230,26 @@ const styles = StyleSheet.create({
     lineHeight: 29,
   },
 
+  /* ── processing strip ── */
+  processingStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    marginTop: 14,
+    backgroundColor: 'rgba(124,58,237,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(139,92,246,0.3)',
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+  },
+  processingText: {
+    fontSize: 14,
+    fontFamily: FONTS.bold,
+    color: '#C4B5FD',
+  },
+
   /* ── result strip ── */
   resultStrip: {
     flexDirection: 'row',
@@ -1154,8 +1312,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(239,68,68,0.12)',
     borderColor: 'rgba(239,68,68,0.45)',
   },
+  choicePending: {
+    backgroundColor: 'rgba(139,92,246,0.16)',
+    borderColor: 'rgba(167,139,250,0.6)',
+  },
   choiceDimmed: { opacity: 0.35 },
-
   choiceChip: {
     width: 34,
     height: 34,
@@ -1166,6 +1327,7 @@ const styles = StyleSheet.create({
   },
   choiceChipCorrect: { backgroundColor: COLORS.success },
   choiceChipWrong: { backgroundColor: COLORS.danger },
+  choiceChipPending: { backgroundColor: COLORS.purpleVibrant },
   choiceChipText: {
     fontSize: 14,
     fontFamily: FONTS.extraBold,
@@ -1173,7 +1335,7 @@ const styles = StyleSheet.create({
   },
   choiceChipTextCorrect: { color: '#fff' },
   choiceChipTextWrong: { color: '#fff' },
-
+  choiceChipTextPending: { color: '#fff' },
   choiceText: {
     flex: 1,
     fontSize: 15,
@@ -1182,6 +1344,7 @@ const styles = StyleSheet.create({
   },
   choiceTextCorrect: { color: '#34D399' },
   choiceTextWrong: { color: '#F87171' },
+  choiceTextPending: { color: '#DDD6FE' },
 
   /* ── identification ── */
   idArea: {
@@ -1202,7 +1365,6 @@ const styles = StyleSheet.create({
   },
   hintBannerText: { fontSize: 13, fontFamily: FONTS.bold, color: '#FBBF24' },
   hintLetter: { fontFamily: FONTS.black },
-
   idWords: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1228,7 +1390,6 @@ const styles = StyleSheet.create({
     borderColor: COLORS.accentBright,
     backgroundColor: 'rgba(34,211,238,0.08)',
   },
-
   submitBtn: {
     backgroundColor: COLORS.purpleDark,
     borderRadius: 14,

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Badge, Recommendation, Session, Activity
+from .models import Badge, Recommendation, Session, Activity, Course
 # --- Your Related Serializers (Unchanged, these are great!) ---
 from django.contrib.auth import get_user_model
 
@@ -81,3 +81,33 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             is_admin=validated_data.get('is_admin', False)
         )
         return user
+
+# --- Course Serializers (each course has its own roster of students) ---
+
+class CourseSerializer(serializers.ModelSerializer):
+    educator = serializers.SerializerMethodField()
+    student_count = serializers.SerializerMethodField()
+    study_group_id = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Course
+        fields = [
+            'id', 'name', 'description', 'join_code', 'educator',
+            'students', 'student_count', 'study_group_id', 'created_at',
+        ]
+        read_only_fields = ['join_code', 'students', 'created_at']
+
+    def get_educator(self, obj):
+        display_name = f"{obj.educator.first_name} {obj.educator.last_name}".strip()
+        return {
+            'id': obj.educator.id,
+            'username': obj.educator.username,
+            'display_name': display_name or obj.educator.username,
+        }
+
+    def get_student_count(self, obj):
+        return obj.students.count()
+
+
+class CourseRosterSerializer(CourseSerializer):
+    students = UserSerializer(many=True, read_only=True)

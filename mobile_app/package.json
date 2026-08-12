@@ -24,7 +24,7 @@
     "expo": "~55.0.26",
     "expo-clipboard": "~55.0.13",
     "expo-constants": "~55.0.16",
-    "expo-dev-client": "^57.0.9",
+    "expo-dev-client": "~55.0.37",
     "expo-document-picker": "~55.0.13",
     "expo-file-system": "~55.0.22",
     "expo-font": "~55.0.8",
@@ -34,6 +34,7 @@
     "expo-linking": "~55.0.15",
     "expo-navigation-bar": "~55.0.14",
     "expo-router": "~55.0.16",
+    "expo-screen-orientation": "~55.0.18",
     "expo-secure-store": "~55.0.14",
     "expo-splash-screen": "~55.0.21",
     "expo-sqlite": "~55.0.17",
@@ -57,6 +58,9 @@
     "eslint": "^9.25.0",
     "eslint-config-expo": "~55.0.0",
     "typescript": "~5.9.2"
+  },
+  "overrides": {
+    "react-native": "0.83.6"
   },
   "private": true
 }

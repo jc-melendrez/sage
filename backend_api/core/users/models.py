@@ -117,3 +117,25 @@ class GroupMessage(models.Model):
 
     def __str__(self):
         return f"{self.sender.username}: {self.text[:30]}"
+
+
+# --- 🌟 COURSES: each course has its OWN set of students ---
+
+class Course(models.Model):
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    join_code = models.CharField(max_length=10, unique=True, default=generate_join_code)
+
+    # The educator who owns this course
+    educator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='courses')
+
+    # The students enrolled in THIS course (per-course roster)
+    students = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='enrolled_courses', blank=True)
+
+    # Optional link to a study group for chat/collaboration
+    study_group = models.OneToOneField(StudyGroup, on_delete=models.SET_NULL, null=True, blank=True, related_name='course')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.join_code})"

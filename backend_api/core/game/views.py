@@ -238,6 +238,7 @@ class StartGameView(APIView):
 
 
 class AnswerQuestionView(APIView):
+    
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -269,82 +270,120 @@ class AnswerQuestionView(APIView):
 
             # Score: faster answers = more points
             points = 0
-            powerup_earned = None
             if is_correct:
                 time_per_q = room.get('timePerQuestion', 15)
                 points = int(1000 * (1 - (time_taken / time_per_q) * 0.5))
                 points = max(points, 500)
 
+            print(f"[ANSWER] user={request.user.id} q={question_index} answer='{answer}' correct='{correct_answer}' type={q_type} is_correct={is_correct} points={points}")
+            
             # Parse powerup usage flags
             use_hint = request.data.get('useHint', 'false') == 'true'
             use_double = request.data.get('useDoublePoints', 'false') == 'true'
             use_shield = request.data.get('useShield', 'false') == 'true'
 
-            # Update player in Firestore
+            # Update player in Firestore — idempotent: a retried submission for the
+            # same question returns the cached result without double-scoring.
             player_ref = room_ref.collection('players').document(str(request.user.id))
-            player_data = player_ref.get().to_dict() or {}
 
-            if is_correct:
-                current_streak = player_data.get('streak', 0)
-                new_streak = current_streak + 1
+            @fs.transactional
+            def answer_in_transaction(transaction, player_ref):
+                snapshot = player_ref.get(transaction=transaction)
+                data = snapshot.to_dict() or {}
+                answered = data.get('answeredQuestions', [])
 
-                # Apply 2x points powerup (frontend already decremented count)
-                if use_double:
-                    points *= 2
+                # Duplicate submission — return the previously stored result unchanged
+                if question_index in answered:
+                    cached = data.get('lastAnswerResult', {})
+                    return {
+                        'correct': cached.get('correct', is_correct),
+                        'correctAnswer': cached.get('correctAnswer', correct_answer),
+                        'pointsAwarded': cached.get('pointsAwarded', 0),
+                        'powerupEarned': None,
+                        'scored': False,
+                    }
 
-                updates = {
-                    'score': fs.Increment(points),
-                    'answeredCount': fs.Increment(1),
-                    'streak': fs.Increment(1),
-                }
-
-                # Random powerup reward (30% base + 5% per streak, capped at 45%)
-                # Max 1 of each type — if already owned, give consolation 50 pts
+                updates = {}
+                points = 0
                 powerup_earned = None
-                current_powerups = player_data.get('powerups', {})
-                trigger_chance = min(0.30 + (new_streak * 0.05), 0.45)
-                if rng.random() < trigger_chance:
-                    roll = rng.random()
-                    if roll < 0.40:
-                        ptype = 'freeze'
-                    elif roll < 0.70:
-                        ptype = 'hint'
-                    elif roll < 0.90:
-                        ptype = 'doublePoints'
-                    else:
-                        ptype = 'shield'
 
-                    if current_powerups.get(ptype, 0) == 0:
-                        updates[f'powerups.{ptype}'] = fs.Increment(1)
-                        powerup_earned = ptype
-                    else:
-                        # Already have one — consolation bonus
-                        updates['score'] = fs.Increment(50)
-                        points += 50
+                if is_correct:
+                    current_streak = data.get('streak', 0)
+                    new_streak = current_streak + 1
 
-                player_ref.update(updates)
-            else:
-                updates = {
-                    'answeredCount': fs.Increment(1),
+                    # Apply 2x points powerup (frontend already decremented count)
+                    if use_double:
+                        points *= 2
+
+                    updates = {
+                        'score': fs.Increment(points),
+                        'answeredCount': fs.Increment(1),
+                        'streak': fs.Increment(1),
+                    }
+
+                    # Powerup reward — guaranteed at streak milestones (3, 5, 10),
+                    # probabilistic otherwise. Max 1 of each type — if already
+                    # owned, give consolation 50 pts.
+                    current_powerups = data.get('powerups', {})
+                    trigger_chance = min(0.30 + (new_streak * 0.05), 0.45)
+                    if new_streak in (3, 5, 10) or rng.random() < trigger_chance:
+                        roll = rng.random()
+                        if roll < 0.40:
+                            ptype = 'freeze'
+                        elif roll < 0.70:
+                            ptype = 'hint'
+                        elif roll < 0.90:
+                            ptype = 'doublePoints'
+                        else:
+                            ptype = 'shield'
+
+                        if current_powerups.get(ptype, 0) == 0:
+                            updates[f'powerups.{ptype}'] = fs.Increment(1)
+                            powerup_earned = ptype
+                        else:
+                            # Already have one — consolation bonus
+                            updates['score'] = fs.Increment(50)
+                            points += 50
+                else:
+                    updates = {
+                        'answeredCount': fs.Increment(1),
+                    }
+
+                    # Apply shield powerup — protect streak (frontend already decremented count)
+                    if use_shield:
+                        pass  # streak stays unchanged
+                    else:
+                        updates['streak'] = 0
+
+                updates['answeredQuestions'] = fs.ArrayUnion([question_index])
+                updates['lastAnswerResult'] = {
+                    'correct': is_correct,
+                    'correctAnswer': correct_answer,
+                    'pointsAwarded': points,
                 }
 
-                # Apply shield powerup — protect streak (frontend already decremented count)
-                if use_shield:
-                    pass  # streak stays unchanged
-                else:
-                    updates['streak'] = 0
+                transaction.update(player_ref, updates)
 
-                player_ref.update(updates)
+                return {
+                    'correct': is_correct,
+                    'correctAnswer': correct_answer,
+                    'pointsAwarded': points,
+                    'powerupEarned': powerup_earned,
+                    'scored': True,
+                }
 
-            # Award XP in Django
-            if is_correct:
+            transaction = db.transaction()
+            result = answer_in_transaction(transaction, player_ref)
+
+            # Award XP in Django only on the first (scoring) submission
+            if result['scored'] and result['correct']:
                 request.user.add_xp(10)
 
             return Response({
-                'correct': is_correct,
-                'correctAnswer': correct_answer,
-                'pointsAwarded': points,
-                'powerupEarned': powerup_earned,
+                'correct': result['correct'],
+                'correctAnswer': result['correctAnswer'],
+                'pointsAwarded': result['pointsAwarded'],
+                'powerupEarned': result['powerupEarned'],
             })
         except ValueError as e:
             return Response({'error': f'Invalid request data: {e}'}, status=400)
@@ -373,9 +412,22 @@ class FinishGameView(APIView):
             player_ref = room_ref.collection('players').document(str(request.user.id))
             player_ref.update({'isFinished': True})
 
-            # Check if all players are finished
+            room_data = room_ref.get().to_dict() or {}
+            host_id = str(room_data.get('hostId'))
+
+            if str(request.user.id) == host_id:
+                # Host can end the session at any time
+                room_ref.update({
+                    'status': 'finished',
+                    'finishedAt': fs.SERVER_TIMESTAMP,
+                })
+                return Response({'message': 'Marked as finished', 'allFinished': True})
+
+            # Check if all non-host players are finished
             players = room_ref.collection('players').stream()
-            all_finished = all(p.to_dict().get('isFinished', False) for p in players)
+            all_finished = all(
+                p.id == host_id or p.to_dict().get('isFinished', False) for p in players
+            )
 
             if all_finished:
                 room_ref.update({

@@ -405,6 +405,13 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
               <TouchableOpacity
                 style={styles.headerIconBtn}
                 activeOpacity={0.7}
+                onPress={() => router.push('/courses')}
+              >
+                <Ionicons name="book" size={22} color={COLORS.textSecondary} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.headerIconBtn}
+                activeOpacity={0.7}
                 onPress={() => console.log('Notifications pressed')}
               >
                 <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />

@@ -1,20 +1,13 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import React, { useRef } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Animated } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { StatCard, SectionHeader, EmptyState } from '@/components/educator/EducatorPrimitives';
-import { StudentRow, StudentSummary } from '@/components/educator/StudentRow';
-
-// --- Mock data (wire up to your API layer, same shape as services/*) ---
-const ROSTER: StudentSummary[] = [
-  { id: '1', name: 'Amara Chen', level: 12, xp: 840, nextLevelXp: 1000, streak: 14, status: 'onTrack', lastActive: 'today' },
-  { id: '2', name: 'Diego Ramos', level: 9, xp: 220, nextLevelXp: 800, streak: 0, status: 'atRisk', lastActive: '6 days ago' },
-  { id: '3', name: 'Priya Nair', level: 15, xp: 960, nextLevelXp: 1200, streak: 22, status: 'onTrack', lastActive: 'today' },
-  { id: '4', name: 'Owen Blake', level: 7, xp: 310, nextLevelXp: 700, streak: 1, status: 'needsAttention', lastActive: '2 days ago' },
-  { id: '5', name: 'Sofia Reyes', level: 11, xp: 705, nextLevelXp: 900, streak: 9, status: 'onTrack', lastActive: 'today' },
-];
+import { StudentRow } from '@/components/educator/StudentRow';
+import { ROSTER, CLASS_LABEL } from '@/constants/educatorMockData';
 
 const ANNOUNCEMENTS = [
   { id: 'a1', title: 'Quiz on Fractions moved to Friday', time: '2h ago' },
@@ -28,15 +21,23 @@ const ACTIVITY = [
 ];
 
 const QUICK_ACTIONS: { id: string; label: string; icon: keyof typeof Ionicons.glyphMap; route: string }[] = [
+  { id: 'courses', label: 'My Courses', icon: 'book', route: '/educator/courses' },
   { id: 'quiz', label: 'Create Quiz', icon: 'add-circle', route: '/educator/quiz-manager' },
   { id: 'assign', label: 'Create Assignment', icon: 'document-text', route: '/educator/assignments' },
   { id: 'analytics', label: 'View Analytics', icon: 'stats-chart', route: '/educator/analytics' },
-  { id: 'groups', label: 'Study Groups', icon: 'people', route: '/educator/study-groups' },
 ];
 
 export default function ClassDashboardScreen() {
   const router = useRouter();
-  const [classLabel] = useState('Period 3 · Algebra I');
+  const classLabel = CLASS_LABEL;
+
+  const hostCardScale = useRef(new Animated.Value(1)).current;
+  const animatePressIn = () => {
+    Animated.spring(hostCardScale, { toValue: 0.96, friction: 8, tension: 120, useNativeDriver: true }).start();
+  };
+  const animatePressOut = () => {
+    Animated.spring(hostCardScale, { toValue: 1, friction: 6, tension: 100, useNativeDriver: true }).start();
+  };
 
   const activeToday = ROSTER.filter((s) => s.lastActive === 'today').length;
   const atRisk = ROSTER.filter((s) => s.status === 'atRisk' || s.status === 'needsAttention');
@@ -69,6 +70,39 @@ export default function ClassDashboardScreen() {
           </View>
         </View>
 
+        {/* Host live game */}
+        <View style={styles.section}>
+          <Animated.View style={{ transform: [{ scale: hostCardScale }] }}>
+            <TouchableOpacity
+              style={styles.hostCard}
+              activeOpacity={0.85}
+              onPress={() => router.push('/educator/host-game' as any)}
+              onPressIn={animatePressIn}
+              onPressOut={animatePressOut}
+            >
+            <LinearGradient
+              colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.hostCardGradient}
+            >
+              <View style={styles.hostCardLeft}>
+                <View style={styles.hostIconBox}>
+                  <Ionicons name="game-controller" size={24} color="white" />
+                </View>
+              </View>
+              <View style={styles.hostCardBody}>
+                <Text style={styles.hostCardTitle}>Host Live Game</Text>
+                <Text style={styles.hostCardSub}>Start a live quiz battle and watch students compete in real time</Text>
+              </View>
+              <View style={styles.hostCardArrow}>
+                <Ionicons name="arrow-forward" size={18} color="white" />
+              </View>
+            </LinearGradient>
+          </TouchableOpacity>
+          </Animated.View>
+        </View>
+
         {/* Quick actions */}
         <View style={styles.section}>
           <SectionHeader title="Quick Actions" />
@@ -95,7 +129,7 @@ export default function ClassDashboardScreen() {
             <SectionHeader title="Needs Attention" actionLabel="View all" onAction={() => {}} />
             <View style={styles.listCard}>
               {atRisk.map((s) => (
-                <StudentRow key={s.id} student={s} onPress={() => router.push('/educator/student-progress' as any)} />
+                <StudentRow key={s.id} student={s} onPress={() => router.push({ pathname: '/educator/student-detail', params: { id: s.id } })} />
               ))}
             </View>
           </View>
@@ -106,7 +140,7 @@ export default function ClassDashboardScreen() {
           <SectionHeader title="Student Roster" actionLabel="See all" onAction={() => {}} />
           <View style={styles.listCard}>
             {ROSTER.map((s) => (
-              <StudentRow key={s.id} student={s} onPress={() => router.push('/educator/student-progress' as any)} />
+              <StudentRow key={s.id} student={s} onPress={() => router.push({ pathname: '/educator/student-detail', params: { id: s.id } })} />
             ))}
           </View>
         </View>
@@ -171,6 +205,36 @@ const styles = StyleSheet.create({
   glassPillText: { color: 'white', fontSize: 12, fontFamily: FONTS.semiBold, fontWeight: '600' },
 
   statsRow: { flexDirection: 'row', gap: 10 },
+
+  hostCard: { borderRadius: RADIUS.lg, overflow: 'hidden' },
+  hostCardGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    padding: 18,
+  },
+  hostCardLeft: {},
+  hostIconBox: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.25)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  hostCardBody: { flex: 1 },
+  hostCardTitle: { color: 'white', fontSize: 16, fontFamily: FONTS.bold, fontWeight: '700', marginBottom: 3 },
+  hostCardSub: { color: 'rgba(255,255,255,0.85)', fontSize: 12, fontFamily: FONTS.regular, lineHeight: 17 },
+  hostCardArrow: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
 
   actionsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   actionCard: {
