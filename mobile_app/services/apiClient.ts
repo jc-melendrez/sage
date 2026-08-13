@@ -6,11 +6,11 @@ export async function apiCall<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const doFetch = async (tok: string | null) => {
-    const headers: HeadersInit = {
+    const headers = {
       'Content-Type': 'application/json',
-      ...options.headers,
-    };
-    if (tok) headers['Authorization'] = `Bearer ${tok}`;
+      ...(options.headers ?? {}),
+      ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+    } as HeadersInit;
     return fetch(`${API_BASE_URL}${endpoint}`, { ...options, headers });
   };
 
@@ -28,7 +28,7 @@ export async function apiCall<T>(
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.message || `API error: ${response.status}`);
+    throw new Error(error.message || error.error || error.detail || `API error: ${response.status}`);
   }
 
   return await response.json();

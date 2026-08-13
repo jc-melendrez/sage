@@ -23,10 +23,10 @@ const COLORS = {
   success: '#10B981',
   warning: '#F59E0B',
   danger: '#EF4444',
-  textPrimary: '#3a107a', // ✅ Updated to match Dashboard
-  textSecondary: '#CBD5E1', // ✅ Updated to match Dashboard
-  textMuted: '#94A3B8', // ✅ Updated to match Dashboard
-  border: 'rgba(44, 29, 0, 0.15)', // ✅ Updated to match Dashboard
+  textPrimary: '#3a107a',
+  textSecondary: '#CBD5E1',
+  textMuted: '#94A3B8',
+  border: 'rgba(44, 29, 0, 0.15)',
 };
 
 const FONTS = {
@@ -83,13 +83,12 @@ export default function ProfileScreen() {
   const nextLevelXP = userData?.next_level_xp || 1000;
   const progressPercent = Math.min((currentXP / nextLevelXP) * 100, 100);
   const earnedBadges = userData?.badges || [];
+  const roleLabel = userData?.is_admin ? 'Admin' : userData?.is_educator ? 'Educator' : 'Student';
 
   return (
     <View style={styles.container}>
-      {/* ✅ Status bar configured for light-on-dark header */}
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
 
-      {/* 🌟 PREMIUM GRADIENT HEADER with safe top padding */}
       <LinearGradient
         colors={[COLORS.purpleDeep, COLORS.purpleDark]}
         start={{ x: 0, y: 0 }}
@@ -110,12 +109,11 @@ export default function ProfileScreen() {
             <Text style={styles.userName}>{fullName}</Text>
             <Text style={styles.userEmail}>{userData?.email || 'No email provided'}</Text>
             <View style={styles.roleBadge}>
-              <Text style={styles.roleText}>Student</Text>
+              <Text style={styles.roleText}>{roleLabel}</Text>
             </View>
           </View>
         </View>
 
-        {/* 🌟 GLASSMORPHIC LEVEL PROGRESS */}
         <View style={styles.glassCard}>
           <View style={styles.glassCardHeader}>
             <View style={styles.levelBadge}>
@@ -137,7 +135,6 @@ export default function ProfileScreen() {
       </LinearGradient>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
-        {/* Overview Stats */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Overview</Text>
           <View style={styles.overviewGrid}>
@@ -165,7 +162,6 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        {/* Statistics List */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Statistics</Text>
           <View style={styles.listCard}>
@@ -199,7 +195,6 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        {/* Badges Grid */}
         <View style={styles.section}>
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>Badges</Text>
@@ -235,6 +230,15 @@ export default function ProfileScreen() {
         {/* Menu Items */}
         <View style={styles.section}>
           <View style={styles.listCard}>
+            {userData?.is_educator && (
+              <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/educator/dashboard')}>
+                <View style={styles.menuItemLeft}>
+                  <Ionicons name="school-outline" size={22} color={COLORS.textSecondary} />
+                  <Text style={styles.menuItemText}>Educator View</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            )}
             <TouchableOpacity style={styles.menuItem}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />
@@ -249,6 +253,30 @@ export default function ProfileScreen() {
               </View>
               <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
             </TouchableOpacity>
+            {userData?.is_admin && (
+              <>
+                <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/admin')}>
+                  <View style={styles.menuItemLeft}>
+                    <Ionicons name="shield-checkmark-outline" size={22} color={COLORS.purpleVibrant} />
+                    <Text style={styles.menuItemText}>Admin Panel</Text>
+                  </View>
+                  <View style={styles.menuItemRight}>
+                    <Text style={styles.menuItemHint}>Dean / Program Chair</Text>
+                    <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+                  </View>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/superadmin')}>
+                  <View style={styles.menuItemLeft}>
+                    <Ionicons name="terminal-outline" size={22} color={COLORS.purpleDeep} />
+                    <Text style={styles.menuItemText}>Developer Panel</Text>
+                  </View>
+                  <View style={styles.menuItemRight}>
+                    <Text style={styles.menuItemHint}>Super Admin</Text>
+                    <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+                  </View>
+                </TouchableOpacity>
+              </>
+            )}
             <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={handleLogout}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="log-out-outline" size={22} color={COLORS.danger} />
@@ -259,7 +287,6 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        {/* Footer */}
         <View style={styles.footer}>
           <Ionicons name="calendar-outline" size={16} color={COLORS.textMuted} />
           <Text style={styles.footerText}>Member since {userData?.date_joined ? new Date(userData.date_joined).getFullYear() : '2026'}</Text>
@@ -271,8 +298,6 @@ export default function ProfileScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
-
-  // ✅ Header with platform-aware top padding to avoid status bar overlap
   header: {
     paddingTop: Platform.OS === 'ios' ? 60 : 40,
     paddingBottom: 28,
@@ -295,19 +320,19 @@ const styles = StyleSheet.create({
   },
   avatarText: { fontSize: 26, fontFamily: FONTS.black, color: 'white' },
   userInfo: { flex: 1 },
-  userName: { 
-    fontSize: 26, 
-    fontFamily: FONTS.bold, 
-    fontWeight: '700', // ✅ Added fontWeight
-    color: 'white', 
-    marginBottom: 4, 
-    letterSpacing: -0.5 
+  userName: {
+    fontSize: 26,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: 'white',
+    marginBottom: 4,
+    letterSpacing: -0.5
   },
-  userEmail: { 
-    fontSize: 14, 
-    fontFamily: FONTS.medium, 
-    color: COLORS.purplePale, 
-    marginBottom: 8 
+  userEmail: {
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.purplePale,
+    marginBottom: 8
   },
   roleBadge: {
     alignSelf: 'flex-start',
@@ -318,13 +343,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.2)',
   },
-  roleText: { 
-    color: 'white', 
-    fontSize: 12, 
+  roleText: {
+    color: 'white',
+    fontSize: 12,
     fontFamily: FONTS.semiBold,
-    fontWeight: '600', // ✅ Added fontWeight
+    fontWeight: '600',
   },
-
   glassCard: {
     backgroundColor: 'rgba(255,255,255,0.1)',
     borderRadius: 20,
@@ -334,45 +358,43 @@ const styles = StyleSheet.create({
   },
   glassCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
   levelBadge: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  levelText: { 
-    color: 'white', 
-    fontFamily: FONTS.bold, 
-    fontWeight: '700', // ✅ Added fontWeight
-    fontSize: 16 
+  levelText: {
+    color: 'white',
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    fontSize: 16
   },
-  xpText: { 
-    color: COLORS.purplePale, 
-    fontSize: 14, 
+  xpText: {
+    color: COLORS.purplePale,
+    fontSize: 14,
     fontFamily: FONTS.medium,
-    fontWeight: '500', // ✅ Added fontWeight
+    fontWeight: '500',
   },
   progressBarBg: { height: 8, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 4, overflow: 'hidden', marginBottom: 8 },
   progressBarFill: { height: '100%', borderRadius: 4 },
-  xpRemainingText: { 
-    color: 'rgba(255,255,255,0.7)', 
-    fontSize: 12, 
+  xpRemainingText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
     fontFamily: FONTS.regular,
-    fontWeight: '400', // ✅ Added fontWeight
+    fontWeight: '400',
   },
-
   content: { flex: 1, paddingHorizontal: 24, paddingTop: 24 },
   section: { marginBottom: 28 },
   sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  sectionTitle: { 
-    fontSize: 18, 
-    fontFamily: FONTS.extraBold, // ✅ Changed from bold to extraBold
-    fontWeight: '900', // ✅ Added fontWeight like Dashboard
-    letterSpacing: 1, // ✅ Added letterSpacing like Dashboard
-    color: COLORS.textPrimary, 
-    marginBottom: 16 
+  sectionTitle: {
+    fontSize: 18,
+    fontFamily: FONTS.extraBold,
+    fontWeight: '900',
+    letterSpacing: 1,
+    color: COLORS.textPrimary,
+    marginBottom: 16
   },
-  viewAllText: { 
-    color: COLORS.purpleDeep, 
-    fontSize: 14, 
-    fontFamily: FONTS.extraBold, // ✅ Changed to extraBold
-    fontWeight: '500', // ✅ Added fontWeight like Dashboard
+  viewAllText: {
+    color: COLORS.purpleDeep,
+    fontSize: 14,
+    fontFamily: FONTS.extraBold,
+    fontWeight: '500',
   },
-
   overviewGrid: { flexDirection: 'row', gap: 12 },
   overviewCard: {
     flex: 1,
@@ -392,23 +414,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
-  overviewValue: { 
-    fontSize: 24, 
-    fontFamily: FONTS.black, 
-    fontWeight: '900', // ✅ Added fontWeight
-    color: COLORS.textPrimary, 
-    marginBottom: 4, 
-    letterSpacing: -0.5 
+  overviewValue: {
+    fontSize: 24,
+    fontFamily: FONTS.black,
+    fontWeight: '900',
+    color: COLORS.textPrimary,
+    marginBottom: 4,
+    letterSpacing: -0.5
   },
-  overviewLabel: { 
-    fontSize: 11, 
-    color: COLORS.textSecondary, 
-    fontFamily: FONTS.semiBold, 
-    fontWeight: '600', // ✅ Added fontWeight
-    textTransform: 'uppercase', 
-    letterSpacing: 0.5 
+  overviewLabel: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5
   },
-
   listCard: {
     backgroundColor: COLORS.surface,
     borderRadius: 20,
@@ -420,19 +441,18 @@ const styles = StyleSheet.create({
   borderTop: { borderTopWidth: 1, borderTopColor: COLORS.border },
   listItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 14 },
   listIconBg: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
-  listItemText: { 
-    fontSize: 15, 
-    color: COLORS.textPrimary, 
+  listItemText: {
+    fontSize: 15,
+    color: COLORS.textPrimary,
     fontFamily: FONTS.medium,
-    fontWeight: '500', // ✅ Added fontWeight
+    fontWeight: '500',
   },
-  listItemValue: { 
-    fontSize: 18, 
-    fontFamily: FONTS.bold, 
-    fontWeight: '700', // ✅ Added fontWeight
-    color: COLORS.textPrimary 
+  listItemValue: {
+    fontSize: 18,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: COLORS.textPrimary
   },
-
   badgesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   badgeCard: {
     width: '31%',
@@ -453,13 +473,13 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   badgeEmoji: { fontSize: 28 },
-  badgeName: { 
-    fontSize: 12, 
-    color: COLORS.textSecondary, 
+  badgeName: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
     fontFamily: FONTS.semiBold,
-    fontWeight: '600', // ✅ Added fontWeight
-    marginBottom: 8, 
-    textAlign: 'center' 
+    fontWeight: '600',
+    marginBottom: 8,
+    textAlign: 'center'
   },
   earnedPill: {
     flexDirection: 'row',
@@ -470,34 +490,39 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     borderRadius: 12,
   },
-  earnedText: { 
-    fontSize: 10, 
-    color: COLORS.success, 
+  earnedText: {
+    fontSize: 10,
+    color: COLORS.success,
     fontFamily: FONTS.semiBold,
-    fontWeight: '600', // ✅ Added fontWeight
+    fontWeight: '600',
   },
   emptyBadges: { padding: 24, alignItems: 'center', width: '100%', backgroundColor: COLORS.surface, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border },
-  emptyBadgesText: { 
-    color: COLORS.textSecondary, 
+  emptyBadgesText: {
+    color: COLORS.textSecondary,
     fontFamily: FONTS.medium,
-    fontWeight: '500', // ✅ Added fontWeight
-    textAlign: 'center' 
+    fontWeight: '500',
+    textAlign: 'center'
   },
-
   menuItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 18 },
   menuItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  menuItemText: { 
-    fontSize: 16, 
-    color: COLORS.textPrimary, 
+  menuItemText: {
+    fontSize: 16,
+    color: COLORS.textPrimary,
     fontFamily: FONTS.medium,
-    fontWeight: '500', // ✅ Added fontWeight
+    fontWeight: '500',
   },
-
-  footer: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 8, paddingBottom: 20 },
-  footerText: { 
-    color: COLORS.textMuted, 
-    fontSize: 14, 
+  menuItemRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  menuItemHint: {
+    fontSize: 12,
+    color: COLORS.textMuted,
     fontFamily: FONTS.medium,
-    fontWeight: '500', // ✅ Added fontWeight
+    fontWeight: '500',
+  },
+  footer: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 8, paddingBottom: 20 },
+  footerText: {
+    color: COLORS.textMuted,
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    fontWeight: '500',
   },
 });

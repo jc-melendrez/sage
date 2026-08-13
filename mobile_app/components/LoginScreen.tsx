@@ -8,6 +8,15 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../hooks/useAuth';
+import { roleHomePath } from '../services/authService';
+
+type AccountType = 'student' | 'educator' | 'admin';
+
+const ROLE_OPTIONS: { type: AccountType; label: string; icon: string }[] = [
+  { type: 'student', label: 'Student', icon: 'school-outline' },
+  { type: 'educator', label: 'Educator', icon: 'book-outline' },
+  { type: 'admin', label: 'Admin', icon: 'shield-checkmark-outline' },
+];
 
 const COLORS = {
   bg: '#baaeda',
@@ -52,6 +61,7 @@ export default function LoginScreen() {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [username, setUsername] = useState('');
+  const [accountType, setAccountType] = useState<AccountType>('student');
 
   const handleLogin = async () => {
     if (!email || !password) {
@@ -60,8 +70,8 @@ export default function LoginScreen() {
     }
     try {
       clearError();
-      await login({ username: email, password: password });
-      router.replace('/');
+      const response = await login({ username: email, password: password });
+      router.replace(roleHomePath(response.user));
     } catch (err) {
       Alert.alert('Login Failed', error || 'Please check your credentials');
     }
@@ -74,15 +84,17 @@ export default function LoginScreen() {
     }
     try {
       clearError();
-      await register({
+      const response = await register({
         username,
         email,
         password,
         first_name: firstName,
         last_name: lastName,
-        is_student: true,
+        is_student: accountType === 'student',
+        is_educator: accountType === 'educator',
+        is_admin: accountType === 'admin',
       });
-      router.replace('/');
+      router.replace(roleHomePath(response.user));
     } catch (err) {
       Alert.alert('Sign Up Failed', error || 'Please try again');
     }
@@ -226,6 +238,34 @@ export default function LoginScreen() {
                   <TouchableOpacity style={styles.forgotPassword}>
                     <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
                   </TouchableOpacity>
+                )}
+
+                {isSignUp && (
+                  <View style={styles.rolePicker}>
+                    <Text style={styles.rolePickerLabel}>I am a...</Text>
+                    <View style={styles.roleOptions}>
+                      {ROLE_OPTIONS.map((role) => {
+                        const active = accountType === role.type;
+                        return (
+                          <TouchableOpacity
+                            key={role.type}
+                            style={[styles.roleOption, active && styles.roleOptionActive]}
+                            onPress={() => setAccountType(role.type)}
+                            disabled={loading}
+                          >
+                            <Ionicons
+                              name={role.icon as any}
+                              size={14}
+                              color={active ? 'white' : COLORS.purpleDeep}
+                            />
+                            <Text style={[styles.roleOptionText, active && styles.roleOptionTextActive]}>
+                              {role.label}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
                 )}
 
                 <TouchableOpacity 
@@ -414,6 +454,47 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.medium,
     color: COLORS.purplePrimary,
     fontWeight: '600',
+  },
+
+  // Account type picker (Sign Up only)
+  rolePicker: {
+    marginBottom: 10,
+  },
+  rolePickerLabel: {
+    fontSize: 11,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: '#6B7280',
+    marginBottom: 6,
+  },
+  roleOptions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  roleOption: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#F9FAFB',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    paddingVertical: 9,
+  },
+  roleOptionActive: {
+    backgroundColor: COLORS.purplePrimary,
+    borderColor: COLORS.purplePrimary,
+  },
+  roleOptionText: {
+    fontSize: 12,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.purpleDeep,
+  },
+  roleOptionTextActive: {
+    color: 'white',
   },
 
   // Submit

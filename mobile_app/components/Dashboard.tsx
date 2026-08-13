@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,11 +6,19 @@ import {
   ScrollView,
   ActivityIndicator,
   TouchableOpacity,
-  Animated,
   Platform,
   StatusBar,
   Dimensions,
 } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedScrollHandler,
+  useAnimatedStyle,
+  interpolate,
+  withTiming,
+  withSpring,
+  type SharedValue,
+} from 'react-native-reanimated';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -90,6 +98,21 @@ interface Activity {
   activity_type: string;
 }
 
+function DotIndicator({ index, scrollX }: { index: number; scrollX: SharedValue<number> }) {
+  const animatedStyle = useAnimatedStyle(() => {
+    const inputRange = [
+      (index - 1) * CAROUSEL_PAGE_WIDTH,
+      index * CAROUSEL_PAGE_WIDTH,
+      (index + 1) * CAROUSEL_PAGE_WIDTH,
+    ];
+    const width = interpolate(scrollX.value, inputRange, [7, 18, 7], 'clamp');
+    const opacity = interpolate(scrollX.value, inputRange, [0.4, 1, 0.4], 'clamp');
+    return { width, opacity };
+  });
+
+  return <Animated.View style={[styles.dot, animatedStyle, { backgroundColor: 'white' }]} />;
+}
+
 export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => void }) {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
@@ -104,7 +127,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
   const [showLessonGenerator, setShowLessonGenerator] = useState(false);
 
   const [isFabOpen, setIsFabOpen] = useState(false);
-  const fabAnim = useRef(new Animated.Value(0)).current;
+  const fabAnim = useSharedValue(0);
 
   // Carousel state
   const [currentPage, setCurrentPage] = useState(0);
@@ -113,7 +136,13 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
   const autoSlideTimerRef = useRef<NodeJS.Timeout | null>(null);
   
   // Animation value for smooth dot transition
-  const scrollX = useRef(new Animated.Value(0)).current;
+  const scrollX = useSharedValue(0);
+
+  const onScroll = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      scrollX.value = event.contentOffset.x;
+    },
+  });
 
   const streakCount = user?.streak || 0;
 
@@ -272,49 +301,40 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
 
   const toggleFab = () => {
     if (isFabOpen) {
-      Animated.timing(fabAnim, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: true,
-      }).start(() => setIsFabOpen(false));
+      fabAnim.value = withTiming(0, { duration: 200 }, () => {
+        setIsFabOpen(false);
+      });
     } else {
       setIsFabOpen(true);
-      requestAnimationFrame(() => {
-        Animated.spring(fabAnim, {
-          toValue: 1,
-          friction: 5,
-          tension: 60,
-          useNativeDriver: true,
-        }).start();
-      });
+      fabAnim.value = withSpring(1, { damping: 15, stiffness: 150 });
     }
   };
 
-  const spin = fabAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '180deg'],
-  });
-  const item1Anim = {
-    opacity: fabAnim,
+  const spinStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: interpolate(fabAnim.value, [0, 1], [0, 180]) + 'deg' }],
+  }));
+
+  const item1Style = useAnimatedStyle(() => ({
+    opacity: fabAnim.value,
     transform: [
-      { translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [45, 0] }) },
-      { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) },
+      { translateY: interpolate(fabAnim.value, [0, 1], [45, 0]) },
+      { scale: interpolate(fabAnim.value, [0, 1], [0.8, 1]) },
     ],
-  };
-  const item2Anim = {
-    opacity: fabAnim,
+  }));
+  const item2Style = useAnimatedStyle(() => ({
+    opacity: fabAnim.value,
     transform: [
-      { translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) },
-      { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) },
+      { translateY: interpolate(fabAnim.value, [0, 1], [30, 0]) },
+      { scale: interpolate(fabAnim.value, [0, 1], [0.8, 1]) },
     ],
-  };
-  const item3Anim = {
-    opacity: fabAnim,
+  }));
+  const item3Style = useAnimatedStyle(() => ({
+    opacity: fabAnim.value,
     transform: [
-      { translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) },
-      { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) },
+      { translateY: interpolate(fabAnim.value, [0, 1], [15, 0]) },
+      { scale: interpolate(fabAnim.value, [0, 1], [0.8, 1]) },
     ],
-  };
+  }));
 
   const handleLessonGenerated = (generatedLesson: any) => {
     setLesson(generatedLesson);
@@ -367,6 +387,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
         style={styles.container}
         contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
+        removeClippedSubviews={true}
       >
         {/* HEADER */}
         <LinearGradient
@@ -381,6 +402,13 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
               <View style={styles.logoDot} />
             </View>
             <View style={styles.headerIcons}>
+              <TouchableOpacity
+                style={styles.headerIconBtn}
+                activeOpacity={0.7}
+                onPress={() => router.push('/courses')}
+              >
+                <Ionicons name="book" size={22} color={COLORS.textSecondary} />
+              </TouchableOpacity>
               <TouchableOpacity
                 style={styles.headerIconBtn}
                 activeOpacity={0.7}
@@ -403,17 +431,13 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
             <Animated.ScrollView
               ref={scrollViewRef}
               horizontal
-              // pagingEnabled is removed to allow custom deceleration
               showsHorizontalScrollIndicator={false}
               onMomentumScrollEnd={handleMomentumScrollEnd}
-              onScroll={Animated.event(
-                [{ nativeEvent: { contentOffset: { x: scrollX } } }],
-                { useNativeDriver: false } // False because we are modifying state in JS
-              )}
+              onScroll={onScroll}
               scrollEventThrottle={16}
-              decelerationRate="normal" // Makes the scroll feel heavier/smoother
-              snapToInterval={CAROUSEL_PAGE_WIDTH} // Helps align pages
+              snapToInterval={CAROUSEL_PAGE_WIDTH}
               snapToOffsets={featurePages.map((_, i) => i * CAROUSEL_PAGE_WIDTH)}
+              removeClippedSubviews={true}
               style={styles.carouselScroll}
               contentContainerStyle={{ paddingHorizontal: 0 }}
             >
@@ -464,35 +488,11 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
             {/* Animated Dot Indicator */}
             <View style={styles.dotContainer}>
               {featurePages.map((_, idx) => {
-                const inputRange = [
-                  (idx - 1) * CAROUSEL_PAGE_WIDTH,
-                  idx * CAROUSEL_PAGE_WIDTH,
-                  (idx + 1) * CAROUSEL_PAGE_WIDTH,
-                ];
-                
-                const dotWidth = scrollX.interpolate({
-                  inputRange,
-                  outputRange: [7, 18, 7],
-                  extrapolate: 'clamp',
-                });
-                
-                const opacity = scrollX.interpolate({
-                  inputRange,
-                  outputRange: [0.4, 1, 0.4],
-                  extrapolate: 'clamp',
-                });
-
                 return (
-                  <Animated.View
+                  <DotIndicator
                     key={idx}
-                    style={[
-                      styles.dot,
-                      {
-                        width: dotWidth,
-                        opacity: opacity,
-                        backgroundColor: 'white',
-                      },
-                    ]}
+                    index={idx}
+                    scrollX={scrollX}
                   />
                 );
               })}
@@ -553,6 +553,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
               horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.scrollContent}
+              removeClippedSubviews={true}
             >
               {sessions.slice(0, 4).map((session) => (
                 <TouchableOpacity key={session.id} style={styles.sessionCard} activeOpacity={0.7}>
@@ -618,6 +619,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
               horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.scrollContent}
+              removeClippedSubviews={true}
             >
               {recommendations.slice(0, 4).map((rec, index) => {
                 const gradients = [
@@ -727,7 +729,8 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.badgeScroll}
+              contentContainerStyle={styles.scrollContent}
+              removeClippedSubviews={true}
             >
               {badges.slice(0, 6).map((badge) => (
                 <View key={badge.id} style={styles.badgeItem}>
@@ -752,7 +755,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       {/* FAB Menu */}
       {isFabOpen && (
         <View style={styles.fabMenu}>
-          <Animated.View style={[styles.fabMenuItemWrapper, item1Anim]}>
+          <Animated.View style={[styles.fabMenuItemWrapper, item1Style]}>
             <TouchableOpacity
               style={styles.fabMenuItem}
               onPress={() => {
@@ -766,7 +769,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
               </View>
             </TouchableOpacity>
           </Animated.View>
-          <Animated.View style={[styles.fabMenuItemWrapper, item2Anim]}>
+          <Animated.View style={[styles.fabMenuItemWrapper, item2Style]}>
             <TouchableOpacity style={styles.fabMenuItem} activeOpacity={0.8}>
               <Text style={styles.fabMenuText}>Create Group</Text>
               <View style={styles.fabMenuIconBox}>
@@ -774,7 +777,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
               </View>
             </TouchableOpacity>
           </Animated.View>
-          <Animated.View style={[styles.fabMenuItemWrapper, item3Anim]}>
+          <Animated.View style={[styles.fabMenuItemWrapper, item3Style]}>
             <TouchableOpacity style={styles.fabMenuItem} activeOpacity={0.8}>
               <Text style={styles.fabMenuText}>Study Plan</Text>
               <View style={styles.fabMenuIconBox}>
@@ -797,7 +800,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
         style={styles.fabMain}
       >
         <TouchableOpacity onPress={toggleFab} activeOpacity={0.85}>
-          <Animated.View style={{ transform: [{ rotate: spin }] }}>
+          <Animated.View style={spinStyle}>
             <Ionicons name={isFabOpen ? 'remove' : 'add'} size={32} color="white" />
           </Animated.View>
         </TouchableOpacity>

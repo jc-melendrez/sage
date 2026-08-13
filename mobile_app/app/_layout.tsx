@@ -5,14 +5,33 @@ import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { isAuthenticated } from '@/services/authService';
+import { isAuthenticated, getCurrentUser, roleHomePath } from '@/services/authService';
 import { testFirebase } from "@/services/firebaseTest";
 import { startSyncManager } from '@/services/syncManager';
 import { initOfflineQueue } from '@/services/offlineQueue';
 
+import {
+  useFonts,
+  Montserrat_400Regular,
+  Montserrat_500Medium,
+  Montserrat_600SemiBold,
+  Montserrat_700Bold,
+  Montserrat_800ExtraBold,
+  Montserrat_900Black,
+} from '@expo-google-fonts/montserrat';
+
 export const unstable_settings = {
   initialRouteName: '(tabs)',
 };
+
+async function fetchRoleHome() {
+  try {
+    const user = await getCurrentUser();
+    return roleHomePath(user);
+  } catch {
+    return '/(tabs)';
+  }
+}
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
@@ -21,12 +40,18 @@ export default function RootLayout() {
   const navigationState = useRootNavigationState();
 
   const [isReady, setIsReady] = useState(false);
+
+  const [fontsLoaded] = useFonts({
+    'Montserrat-Regular': Montserrat_400Regular,
+    'Montserrat-Medium': Montserrat_500Medium,
+    'Montserrat-SemiBold': Montserrat_600SemiBold,
+    'Montserrat-Bold': Montserrat_700Bold,
+    'Montserrat-ExtraBold': Montserrat_800ExtraBold,
+    'Montserrat-Black': Montserrat_900Black,
+  });
+
   useEffect(() => {
     initOfflineQueue();
-    const stop = startSyncManager();
-    return () => stop();
-  }, []);
-  useEffect(() => {
     const stop = startSyncManager();
     return () => stop();
   }, []);
@@ -41,7 +66,10 @@ export default function RootLayout() {
       if (!loggedIn && inAuthGroup) {
         router.replace('/login');
       } else if (loggedIn && segments[0] === 'login') {
-        router.replace('/(tabs)');
+        router.replace(await fetchRoleHome());
+      } else if (loggedIn && segments[0] === '(tabs)') {
+        const home = await fetchRoleHome();
+        if (home !== '/(tabs)') router.replace(home);
       }
 
       setIsReady(true);
@@ -50,7 +78,7 @@ export default function RootLayout() {
     verifyAuth();
   }, [segments, navigationState?.key]);
 
-  if (!isReady) return null;
+  if (!isReady || !fontsLoaded) return null;
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
@@ -59,6 +87,9 @@ export default function RootLayout() {
         <Stack.Screen name="login" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
         <Stack.Screen name="game" options={{ headerShown: false }} />
+        <Stack.Screen name="admin" options={{ headerShown: false }} />
+        <Stack.Screen name="superadmin" options={{ headerShown: false }} />
+        <Stack.Screen name="educator" options={{ headerShown: false }} />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>

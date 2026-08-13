@@ -8,14 +8,15 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
 from .serializers import (
     UserSerializer, UserRegistrationSerializer,
     BadgeSerializer, RecommendationSerializer,
-    SessionSerializer, ActivitySerializer
+    SessionSerializer, ActivitySerializer,
+    CourseSerializer, CourseRosterSerializer,
 )
 from .utils.file_parser import extract_text_from_file
 from rest_framework.decorators import api_view, permission_classes, parser_classes
@@ -68,7 +69,10 @@ class FirebaseLoginView(APIView):
             username = request.data.get('username', email.split('@')[0] if email else f"user_{firebase_uid[:8]}")
             first_name = request.data.get('first_name', '')
             last_name = request.data.get('last_name', '')
-            
+            is_student = _as_bool(request.data.get('is_student', False))
+            is_educator = _as_bool(request.data.get('is_educator', False))
+            is_admin = _as_bool(request.data.get('is_admin', False))
+
             # Ensure username is unique; if taken, append a random string from the UID
             if User.objects.filter(username=username).exists():
                 username = f"{username}_{firebase_uid[:6]}"
@@ -79,6 +83,9 @@ class FirebaseLoginView(APIView):
                 firebase_uid=firebase_uid,
                 first_name=first_name,
                 last_name=last_name,
+                is_student=is_student,
+                is_educator=is_educator,
+                is_admin=is_admin,
                 password=None # Password is managed by Firebase now
             )
             # Sync the new user to Firestore immediately
@@ -96,11 +103,22 @@ class FirebaseLoginView(APIView):
                 "email": user.email,
                 "first_name": user.first_name,
                 "last_name": user.last_name,
-                "firebase_uid": user.firebase_uid
+                "firebase_uid": user.firebase_uid,
+                "is_student": user.is_student,
+                "is_educator": user.is_educator,
+                "is_admin": user.is_admin
             }
         })
     
 # ---------- Helper: safe JSON parsing ----------
+def _as_bool(value, default=False):
+    """Coerce incoming role flags (bool, string, or int) to a real boolean."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(value)
+
 def safe_json_parse(text):
     """Try to parse JSON from text, with fallback to regex extraction."""
     try:
@@ -231,6 +249,133 @@ class GroupChatView(APIView):
             return Response({"error": "Message text is required"}, status=400)
         msg_id = send_message(group_id, request.user.firebase_uid, text)
         return Response({"id": msg_id, "text": text})
+
+
+# ---------- COURSES: each course has its own set of students ----------
+
+class CreateCourseView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.is_educator:
+            return Response({"error": "Only educators can create courses"}, status=403)
+
+        name = request.data.get('name')
+        if not name:
+            return Response({"error": "Course name is required"}, status=400)
+
+        description = request.data.get('description', '')
+        study_group_id = request.data.get('study_group_id')
+
+        study_group = None
+        if study_group_id:
+            try:
+                study_group = StudyGroup.objects.get(id=study_group_id, created_by=request.user)
+            except StudyGroup.DoesNotExist:
+                return Response({"error": "Study group not found"}, status=404)
+
+        course = Course.objects.create(
+            name=name,
+            description=description,
+            educator=request.user,
+            study_group=study_group,
+        )
+        return Response(CourseSerializer(course).data, status=201)
+
+class MyCoursesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        courses = Course.objects.filter(educator=request.user).order_by('-created_at')
+        return Response(CourseRosterSerializer(courses, many=True).data)
+
+class EnrolledCoursesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        courses = Course.objects.filter(students=request.user).order_by('-created_at')
+        return Response(CourseSerializer(courses, many=True).data)
+
+class JoinCourseView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        join_code = request.data.get('join_code')
+        if not join_code:
+            return Response({"error": "Join code is required"}, status=400)
+
+        try:
+            course = Course.objects.get(join_code=join_code.strip().upper())
+        except Course.DoesNotExist:
+            return Response({"error": "Invalid join code. Course not found."}, status=404)
+
+        if request.user != course.educator and not course.students.filter(id=request.user.id).exists():
+            course.students.add(request.user)
+
+        return Response(CourseRosterSerializer(course).data)
+
+class CourseDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, course_id):
+        try:
+            course = Course.objects.get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({"error": "Course not found"}, status=404)
+
+        if request.user != course.educator and not course.students.filter(id=request.user.id).exists():
+            return Response({"error": "You are not a member of this course"}, status=403)
+
+        return Response(CourseRosterSerializer(course).data)
+
+class AddStudentToCourseView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, course_id):
+        try:
+            course = Course.objects.get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({"error": "Course not found"}, status=404)
+
+        if request.user != course.educator:
+            return Response({"error": "Only the course educator can modify the roster"}, status=403)
+
+        user_id = request.data.get('user_id')
+        if not user_id:
+            return Response({"error": "user_id is required"}, status=400)
+
+        try:
+            student = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({"error": "Student not found"}, status=404)
+
+        if not student.is_student:
+            return Response({"error": "User is not a student"}, status=400)
+
+        if not course.students.filter(id=student.id).exists():
+            course.students.add(student)
+
+        return Response(CourseRosterSerializer(course).data)
+
+class RemoveStudentFromCourseView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, course_id):
+        try:
+            course = Course.objects.get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({"error": "Course not found"}, status=404)
+
+        if request.user != course.educator:
+            return Response({"error": "Only the course educator can modify the roster"}, status=403)
+
+        user_id = request.data.get('user_id')
+        if not user_id:
+            return Response({"error": "user_id is required"}, status=400)
+
+        course.students.remove(user_id)
+
+        return Response(CourseRosterSerializer(course).data)
 
     
 

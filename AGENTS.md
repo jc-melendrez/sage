@@ -49,6 +49,7 @@ python manage.py test            # runs Django tests
   - `/api/users/me/` (current user profile, requires JWT)
   - `/api/users/<id>/`, `<id>/activities/`, `<id>/badges/`, `<id>/sessions/`, `<id>/recommendations/`
   - `/api/users/groups/create/`, `/api/users/groups/join/`, `/api/users/groups/mine/`, `/api/users/groups/<id>/chat/`
+  - `/api/users/courses/create/`, `/api/users/courses/mine/`, `/api/users/courses/enrolled/`, `/api/users/courses/join/`, `/api/users/courses/<id>/`, `/api/users/courses/<id>/add-student/`, `/api/users/courses/<id>/remove-student/` (per-course rosters, educator-owned; students enroll via join code or are added by the educator)
   - `/api/users/lessons/generate/` (Groq AI)
   - `/api/users/test-xp/` (add XP debug), `/api/users/test-model-config/`
   - `/api/ai/ask/`, `/api/ai/sessions/`, `/api/ai/sessions/<id>/history/`
