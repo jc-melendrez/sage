@@ -31,10 +31,10 @@ dir = "mobile_app"
 run = "npm install"
 
 [tasks.backend_run]
-description = "Run Django dev server on :8000"
+description = "Run Django dev server on 0.0.0.0:8000"
 dir = "backend_api/core"
-run = ".venv/bin/python manage.py runserver"
-run_windows = ".venv\\Scripts\\python manage.py runserver"
+run = ".venv/bin/python manage.py runserver 0.0.0.0:8000"
+run_windows = ".venv\\Scripts\\python manage.py runserver 0.0.0.0:8000"
 
 [tasks.backend_test]
 description = "Run Django tests"
