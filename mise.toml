@@ -5,12 +5,8 @@
 
 [env]
 # --- Backend (Django) ---
-# Django debug mode. settings.py defaults to False; flip True for local dev.
 DEBUG = "True"
-# Optional Groq model override for AI lesson/quiz generation
-# (backend_api/core/users/views.py). Server default: llama-3.3-70b-versatile.
 GROQ_MODEL_NAME = "llama-3.3-70b-versatile"
-# Firestore project ID (core/core/settings.py; code default: sage-a47b8).
 FIREBASE_PROJECT_ID = "sage-a47b8"
 
 # NOTE: Secrets are intentionally NOT in this file. DJANGO_SECRET_KEY,
@@ -19,9 +15,6 @@ FIREBASE_PROJECT_ID = "sage-a47b8"
 # credentials in mise.toml.
 
 # --- Mobile (Expo) ---
-# Optional override for the backend base URL (mobile_app/config/api.ts).
-# Leave unset to auto-derive from the Metro dev-server host (recommended in
-# dev); set explicitly for web or when using a LAN/tunnel URL.
 EXPO_PUBLIC_API_URL = "http://localhost:8000/api"
 
 # --- Tasks ---
@@ -33,7 +26,6 @@ depends = ["setup.backend", "setup.mobile"]
 [tasks.setup.backend]
 description = "Create venv, install backend deps, migrate DB, seed sample data"
 dir = "backend_api/core"
-# POSIX (sh/bash/zsh on macOS/Linux). Windows uses run_windows below.
 run = """
 python -m venv .venv
 source .venv/bin/activate
@@ -41,8 +33,6 @@ pip install -r requirements.txt
 python manage.py migrate
 python manage.py seed_data
 """
-# Windows: mise's default inline shell is cmd (not bash), and Windows venvs
-# create Scripts\ instead of bin/, so activation and commands differ.
 run_windows = """
 python -m venv .venv
 call .venv\\Scripts\\activate
