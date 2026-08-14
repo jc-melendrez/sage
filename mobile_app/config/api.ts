@@ -24,6 +24,9 @@ export const API_CONFIG = {
 };
 
 // Select which config to use.
-// In dev, prefer the Metro-derived URL (auto-adapts to IP changes);
-// fall back to LOCAL for release builds or when hostUri is unavailable.
-export const API_BASE_URL = deriveDevHost() ?? API_CONFIG.LOCAL;
+// Priority:
+// 1. EXPO_PUBLIC_API_URL env var (forces a specific backend, e.g. Render in dev)
+// 2. Metro-derived URL in dev (auto-adapts to IP changes)
+// 3. DEPLOYED for release builds or when hostUri is unavailable.
+export const API_BASE_URL =
+  process.env.EXPO_PUBLIC_API_URL ?? (deriveDevHost() ?? API_CONFIG.DEPLOYED);

@@ -12,7 +12,6 @@ export default function Login() {
         style={styles.skipBtn}
         onPress={() => router.replace('/educator/dashboard')}
       >
-        <Text style={styles.skipText}>Preview Educator Interface →</Text>
       </TouchableOpacity>
     </View>
   );

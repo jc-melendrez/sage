@@ -42,6 +42,21 @@ export interface AuthResponse {
 const TOKEN_KEY = 'auth_token';
 const REFRESH_TOKEN_KEY = 'refresh_token';
 
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 60000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw new Error('Request timed out. If using Render\u2019s free tier, the server may be waking up \u2014 try again in a minute.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function refreshAccessToken(): Promise<string | null> {
   const refresh = await getRefreshToken();
   if (!refresh) return null;
@@ -84,7 +99,7 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
   const idToken = await signInWithEmail(credentials.username, credentials.password);
 
   // 2. Exchange Firebase ID token for Django JWT
-  const response = await fetch(`${API_BASE_URL}/users/firebase-login/`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/users/firebase-login/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id_token: idToken }),
@@ -111,7 +126,7 @@ export async function register(credentials: RegisterCredentials): Promise<AuthRe
   const idToken = await signUpWithEmail(credentials.email, credentials.password);
 
   // 2. Sync to Django and get JWT
-  const response = await fetch(`${API_BASE_URL}/users/firebase-login/`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/users/firebase-login/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

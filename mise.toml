@@ -30,7 +30,7 @@ EXPO_PUBLIC_API_URL = "http://localhost:8000/api"
 description = "Full initial setup from a fresh clone (backend venv + deps + DB + seed, then npm install)"
 depends = ["setup:backend", "setup:mobile"]
 
-[tasks.setup:backend]
+["tasks.setup:backend"]
 description = "Create venv, install backend deps, migrate DB, seed sample data"
 dir = "backend_api/core"
 # POSIX (sh/bash/zsh on macOS/Linux). Windows uses run_windows below.
@@ -51,77 +51,77 @@ python manage.py migrate
 python manage.py seed_data
 """
 
-[tasks.setup:mobile]
+["tasks.setup:mobile"]
 description = "Install mobile app npm dependencies"
 dir = "mobile_app"
 run = "npm install"
 
-[tasks.backend:run]
+["tasks.backend:run"]
 description = "Run the Django dev server on :8000"
 dir = "backend_api/core"
 run = "python manage.py runserver"
 
-[tasks.backend:test]
+["tasks.backend:test"]
 description = "Run Django tests"
 dir = "backend_api/core"
 run = "python manage.py test"
 
-[tasks.backend:migrate]
+["tasks.backend:migrate"]
 description = "Apply database migrations"
 dir = "backend_api/core"
 run = "python manage.py migrate"
 
-[tasks.backend:makemigrations]
+["tasks.backend:makemigrations"]
 description = "Create migrations from model changes"
 dir = "backend_api/core"
 run = "python manage.py makemigrations"
 
-[tasks.backend:seed]
+["tasks.backend:seed"]
 description = "Seed the database with sample data"
 dir = "backend_api/core"
 run = "python manage.py seed_data"
 
-[tasks.backend:shell]
+["tasks.backend:shell"]
 description = "Open the Django shell"
 dir = "backend_api/core"
 run = "python manage.py shell"
 
-[tasks.backend:superuser]
+["tasks.backend:superuser"]
 description = "Create a Django superuser"
 dir = "backend_api/core"
 run = "python manage.py createsuperuser"
 
-[tasks.backend:testapi]
+["tasks.backend:testapi"]
 description = "Run the manual API smoke test (needs a running server)"
 dir = "backend_api/core"
 run = "python test_api.py"
 
-[tasks.mobile:start]
+["tasks.mobile:start"]
 description = "Start the Expo dev server"
 dir = "mobile_app"
 run = "npm start"
 
-[tasks.mobile:web]
+["tasks.mobile:web"]
 description = "Start Expo for web"
 dir = "mobile_app"
 run = "npm run web"
 
-[tasks.mobile:android]
+["tasks.mobile:android"]
 description = "Build and run on Android (patches Gradle to 8.13 first)"
 dir = "mobile_app"
 run = "npm run android"
 
-[tasks.mobile:ios]
+["tasks.mobile:ios"]
 description = "Build and run on iOS"
 dir = "mobile_app"
 run = "npm run ios"
 
-[tasks.mobile:lint]
+["tasks.mobile:lint"]
 description = "Lint the mobile app (expo lint)"
 dir = "mobile_app"
 run = "npm run lint"
 
-[tasks.firestore:deploy]
+["tasks.firestore:deploy"]
 description = "Deploy Firestore rules/indexes to the Firebase project"
 dir = "backend_api/firebase-config"
 run = "firebase deploy --only firestore"
