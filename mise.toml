@@ -21,9 +21,17 @@ depends = ["setup_backend", "setup_mobile"]
 description = "Create venv, install deps, migrate, seed"
 dir = "backend_api/core"
 run = """
-python -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/python manage.py migrate && .venv/bin/python manage.py seed_data
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python manage.py migrate
+.venv/bin/python manage.py seed_data
 """
-run_windows = "python -m venv .venv & .venv\\Scripts\\pip install -r requirements.txt & .venv\\Scripts\\python manage.py migrate & .venv\\Scripts\\python manage.py seed_data"
+run_windows = """
+python -m venv .venv
+.venv\\Scripts\\pip install -r requirements.txt
+.venv\\Scripts\\python manage.py migrate
+.venv\\Scripts\\python manage.py seed_data
+"""
 
 [tasks.setup_mobile]
 description = "Install mobile npm dependencies"
