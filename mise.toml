@@ -1,0 +1,127 @@
+# mise configuration for SAGE Learning
+# Root-level config: applies to both mobile_app/ (Expo/Node) and
+# backend_api/core (Django). Runtime versions come from .tool-versions.
+# All tasks are opt-in — run explicitly with `mise run <task>`.
+
+[env]
+# --- Backend (Django) ---
+# Django debug mode. settings.py defaults to False; flip True for local dev.
+DEBUG = "True"
+# Optional Groq model override for AI lesson/quiz generation
+# (backend_api/core/users/views.py). Server default: llama-3.3-70b-versatile.
+GROQ_MODEL_NAME = "llama-3.3-70b-versatile"
+# Firestore project ID (core/core/settings.py; code default: sage-a47b8).
+FIREBASE_PROJECT_ID = "sage-a47b8"
+
+# NOTE: Secrets are intentionally NOT in this file. DJANGO_SECRET_KEY,
+# GROQ_API_KEY, DEEPSEEK_API_KEY, and FIREBASE_SERVICE_ACCOUNT are loaded by
+# core/core/settings.py from the committed root .env. Never put real
+# credentials in mise.toml.
+
+# --- Mobile (Expo) ---
+# Optional override for the backend base URL (mobile_app/config/api.ts).
+# Leave unset to auto-derive from the Metro dev-server host (recommended in
+# dev); set explicitly for web or when using a LAN/tunnel URL.
+EXPO_PUBLIC_API_URL = "http://localhost:8000/api"
+
+# --- Tasks ---
+
+[tasks.setup]
+description = "Full initial setup from a fresh clone (backend venv + deps + DB + seed, then npm install)"
+depends = ["setup:backend", "setup:mobile"]
+
+[tasks.setup:backend]
+description = "Create venv, install backend deps, migrate DB, seed sample data"
+dir = "backend_api/core"
+# POSIX (sh/bash/zsh on macOS/Linux). Windows uses run_windows below.
+run = """
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python manage.py migrate
+python manage.py seed_data
+"""
+# Windows: mise's default inline shell is cmd (not bash), and Windows venvs
+# create Scripts\ instead of bin/, so activation and commands differ.
+run_windows = """
+python -m venv .venv
+call .venv\\Scripts\\activate
+pip install -r requirements.txt
+python manage.py migrate
+python manage.py seed_data
+"""
+
+[tasks.setup:mobile]
+description = "Install mobile app npm dependencies"
+dir = "mobile_app"
+run = "npm install"
+
+[tasks.backend:run]
+description = "Run the Django dev server on :8000"
+dir = "backend_api/core"
+run = "python manage.py runserver"
+
+[tasks.backend:test]
+description = "Run Django tests"
+dir = "backend_api/core"
+run = "python manage.py test"
+
+[tasks.backend:migrate]
+description = "Apply database migrations"
+dir = "backend_api/core"
+run = "python manage.py migrate"
+
+[tasks.backend:makemigrations]
+description = "Create migrations from model changes"
+dir = "backend_api/core"
+run = "python manage.py makemigrations"
+
+[tasks.backend:seed]
+description = "Seed the database with sample data"
+dir = "backend_api/core"
+run = "python manage.py seed_data"
+
+[tasks.backend:shell]
+description = "Open the Django shell"
+dir = "backend_api/core"
+run = "python manage.py shell"
+
+[tasks.backend:superuser]
+description = "Create a Django superuser"
+dir = "backend_api/core"
+run = "python manage.py createsuperuser"
+
+[tasks.backend:testapi]
+description = "Run the manual API smoke test (needs a running server)"
+dir = "backend_api/core"
+run = "python test_api.py"
+
+[tasks.mobile:start]
+description = "Start the Expo dev server"
+dir = "mobile_app"
+run = "npm start"
+
+[tasks.mobile:web]
+description = "Start Expo for web"
+dir = "mobile_app"
+run = "npm run web"
+
+[tasks.mobile:android]
+description = "Build and run on Android (patches Gradle to 8.13 first)"
+dir = "mobile_app"
+run = "npm run android"
+
+[tasks.mobile:ios]
+description = "Build and run on iOS"
+dir = "mobile_app"
+run = "npm run ios"
+
+[tasks.mobile:lint]
+description = "Lint the mobile app (expo lint)"
+dir = "mobile_app"
+run = "npm run lint"
+
+[tasks.firestore:deploy]
+description = "Deploy Firestore rules/indexes to the Firebase project"
+dir = "backend_api/firebase-config"
+run = "firebase deploy --only firestore"
