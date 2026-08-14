@@ -29,4 +29,4 @@ export const API_CONFIG = {
 // 2. Metro-derived URL in dev (auto-adapts to IP changes)
 // 3. DEPLOYED for release builds or when hostUri is unavailable.
 export const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL ?? (deriveDevHost() ?? API_CONFIG.DEPLOYED);
+  process.env.EXPO_PUBLIC_API_URL ?? (deriveDevHost() ?? API_CONFIG.LOCAL);
