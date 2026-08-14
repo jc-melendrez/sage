@@ -1,30 +1,23 @@
 # mise configuration for SAGE Learning
-# Root-level config: applies to both mobile_app/ (Expo/Node) and
-# backend_api/core (Django). Runtime versions come from .tool-versions.
-# All tasks are opt-in — run explicitly with `mise run <task>`.
+# All tasks use flat underscore naming for mise 2026.8.5 compatibility.
+# Run explicitly with `mise run <task>`.
 
 [env]
-# --- Backend (Django) ---
 DEBUG = "True"
 GROQ_MODEL_NAME = "llama-3.3-70b-versatile"
 FIREBASE_PROJECT_ID = "sage-a47b8"
-
-# NOTE: Secrets are intentionally NOT in this file. DJANGO_SECRET_KEY,
-# GROQ_API_KEY, DEEPSEEK_API_KEY, and FIREBASE_SERVICE_ACCOUNT are loaded by
-# core/core/settings.py from the committed root .env. Never put real
-# credentials in mise.toml.
-
-# --- Mobile (Expo) ---
 EXPO_PUBLIC_API_URL = "http://localhost:8000/api"
 
-# --- Tasks ---
+# NOTE: Secrets (DJANGO_SECRET_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY,
+# FIREBASE_SERVICE_ACCOUNT) are loaded from committed root .env.
+# Never put real credentials here.
 
 [tasks.setup]
-description = "Full initial setup from a fresh clone (backend venv + deps + DB + seed, then npm install)"
-depends = ["setup.backend", "setup.mobile"]
+description = "Full initial setup from fresh clone"
+depends = ["setup_backend", "setup_mobile"]
 
-[tasks.setup.backend]
-description = "Create venv, install backend deps, migrate DB, seed sample data"
+[tasks.setup_backend]
+description = "Create venv, install deps, migrate, seed"
 dir = "backend_api/core"
 run = """
 python -m venv .venv
@@ -41,77 +34,77 @@ python manage.py migrate
 python manage.py seed_data
 """
 
-[tasks.setup.mobile]
-description = "Install mobile app npm dependencies"
+[tasks.setup_mobile]
+description = "Install mobile npm dependencies"
 dir = "mobile_app"
 run = "npm install"
 
-[tasks.backend.run]
-description = "Run the Django dev server on :8000"
+[tasks.backend_run]
+description = "Run Django dev server on :8000"
 dir = "backend_api/core"
 run = "python manage.py runserver"
 
-[tasks.backend.test]
+[tasks.backend_test]
 description = "Run Django tests"
 dir = "backend_api/core"
 run = "python manage.py test"
 
-[tasks.backend.migrate]
+[tasks.backend_migrate]
 description = "Apply database migrations"
 dir = "backend_api/core"
 run = "python manage.py migrate"
 
-[tasks.backend.makemigrations]
+[tasks.backend_makemigrations]
 description = "Create migrations from model changes"
 dir = "backend_api/core"
 run = "python manage.py makemigrations"
 
-[tasks.backend.seed]
-description = "Seed the database with sample data"
+[tasks.backend_seed]
+description = "Seed database with sample data"
 dir = "backend_api/core"
 run = "python manage.py seed_data"
 
-[tasks.backend.shell]
-description = "Open the Django shell"
+[tasks.backend_shell]
+description = "Open Django shell"
 dir = "backend_api/core"
 run = "python manage.py shell"
 
-[tasks.backend.superuser]
-description = "Create a Django superuser"
+[tasks.backend_superuser]
+description = "Create Django superuser"
 dir = "backend_api/core"
 run = "python manage.py createsuperuser"
 
-[tasks.backend.testapi]
-description = "Run the manual API smoke test (needs a running server)"
+[tasks.backend_testapi]
+description = "Run manual API smoke test"
 dir = "backend_api/core"
 run = "python test_api.py"
 
-[tasks.mobile.start]
-description = "Start the Expo dev server"
+[tasks.mobile_start]
+description = "Start Expo dev server"
 dir = "mobile_app"
 run = "npm start"
 
-[tasks.mobile.web]
+[tasks.mobile_web]
 description = "Start Expo for web"
 dir = "mobile_app"
 run = "npm run web"
 
-[tasks.mobile.android]
-description = "Build and run on Android (patches Gradle to 8.13 first)"
+[tasks.mobile_android]
+description = "Build and run on Android"
 dir = "mobile_app"
 run = "npm run android"
 
-[tasks.mobile.ios]
+[tasks.mobile_ios]
 description = "Build and run on iOS"
 dir = "mobile_app"
 run = "npm run ios"
 
-[tasks.mobile.lint]
-description = "Lint the mobile app (expo lint)"
+[tasks.mobile_lint]
+description = "Lint mobile app"
 dir = "mobile_app"
 run = "npm run lint"
 
-[tasks.firestore.deploy]
-description = "Deploy Firestore rules/indexes to the Firebase project"
+[tasks.firestore_deploy]
+description = "Deploy Firestore rules/indexes"
 dir = "backend_api/firebase-config"
 run = "firebase deploy --only firestore"
