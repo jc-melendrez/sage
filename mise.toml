@@ -20,19 +20,9 @@ depends = ["setup_backend", "setup_mobile"]
 description = "Create venv, install deps, migrate, seed"
 dir = "backend_api/core"
 run = """
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python manage.py migrate
-python manage.py seed_data
+python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && python manage.py migrate && python manage.py seed_data
 """
-run_windows = """
-python -m venv .venv
-call .venv\\Scripts\\activate
-pip install -r requirements.txt
-python manage.py migrate
-python manage.py seed_data
-"""
+run_windows = "python -m venv .venv & call .venv\\Scripts\\activate & pip install -r requirements.txt & python manage.py migrate & python manage.py seed_data"
 
 [tasks.setup_mobile]
 description = "Install mobile npm dependencies"
@@ -43,97 +33,65 @@ run = "npm install"
 description = "Run Django dev server on :8000"
 dir = "backend_api/core"
 run = """
-source .venv/bin/activate
-python manage.py runserver
+source .venv/bin/activate && python manage.py runserver
 """
-run_windows = """
-call .venv\\Scripts\\activate
-python manage.py runserver
-"""
+run_windows = "call .venv\\Scripts\\activate & python manage.py runserver"
 
 [tasks.backend_test]
 description = "Run Django tests"
 dir = "backend_api/core"
 run = """
-source .venv/bin/activate
-python manage.py test
+source .venv/bin/activate && python manage.py test
 """
-run_windows = """
-call .venv\\Scripts\\activate
-python manage.py test
-"""
+run_windows = "call .venv\\Scripts\\activate & python manage.py test"
 
 [tasks.backend_migrate]
 description = "Apply database migrations"
 dir = "backend_api/core"
 run = """
-source .venv/bin/activate
-python manage.py migrate
+source .venv/bin/activate && python manage.py migrate
 """
-run_windows = """
-call .venv\\Scripts\\activate
-python manage.py migrate
-"""
+run_windows = "call .venv\\Scripts\\activate & python manage.py migrate"
 
 [tasks.backend_makemigrations]
 description = "Create migrations from model changes"
 dir = "backend_api/core"
 run = """
-source .venv/bin/activate
-python manage.py makemigrations
+source .venv/bin/activate && python manage.py makemigrations
 """
-run_windows = """
-call .venv\\Scripts\\activate
-python manage.py makemigrations
-"""
+run_windows = "call .venv\\Scripts\\activate & python manage.py makemigrations"
 
 [tasks.backend_seed]
 description = "Seed database with sample data"
 dir = "backend_api/core"
 run = """
-source .venv/bin/activate
-python manage.py seed_data
+source .venv/bin/activate && python manage.py seed_data
 """
-run_windows = """
-call .venv\\Scripts\\activate
-python manage.py seed_data
-"""
+run_windows = "call .venv\\Scripts\\activate & python manage.py seed_data"
 
 [tasks.backend_shell]
 description = "Open Django shell"
 dir = "backend_api/core"
 run = """
-source .venv/bin/activate
-python manage.py shell
+source .venv/bin/activate && python manage.py shell
 """
-run_windows = """
-call .venv\\Scripts\\activate
-python manage.py shell
-"""
+run_windows = "call .venv\\Scripts\\activate & python manage.py shell"
 
 [tasks.backend_superuser]
 description = "Create Django superuser"
 dir = "backend_api/core"
 run = """
-source .venv/bin/activate
-python manage.py createsuperuser
+source .venv/bin/activate && python manage.py createsuperuser
 """
-run_windows = """
-call .venv\\Scripts\\activate
-python manage.py createsuperuser
-"""
+run_windows = "call .venv\\Scripts\\activate & python manage.py createsuperuser"
 
 [tasks.backend_testapi]
 description = "Run manual API smoke test"
 dir = "backend_api/core"
 run = """
-source .venv/bin/activate
-python test_api.py
+source .venv/bin/activate && python test_api.py
 """
-run_windows = """
-call .venv\\Scripts\\activate
-python test_api.py
-"""
+run_windows = "call .venv\\Scripts\\activate & python test_api.py"
 
 [tasks.mobile_start]
 description = "Start Expo dev server"
