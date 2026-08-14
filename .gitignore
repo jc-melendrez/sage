@@ -51,6 +51,10 @@ serviceAccountKey.json
 
 
 
+google-services.json
+debug.keystore
+repomix-output.xml
+
 #BackEnd
 
 .env
