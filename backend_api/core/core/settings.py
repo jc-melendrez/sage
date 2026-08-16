@@ -133,7 +133,7 @@ AUTH_PASSWORD_VALIDATORS = [
 # Tell Django REST Framework to use JWTs for authentication
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'users.authentication.TokenVersionAuthentication',
     ),
 }
 
@@ -143,6 +143,9 @@ SIMPLE_JWT = {
     
     # Make the refresh token last for 30 days
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
+
+    # Embed role / school / token_version in our JWTs
+    'TOKEN_OBTAIN_SERIALIZER': 'users.authentication.SAGETokenObtainPairSerializer',
 }
 
 

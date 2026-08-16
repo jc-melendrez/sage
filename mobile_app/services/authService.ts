@@ -33,6 +33,8 @@ export interface AuthResponse {
     first_name?: string;
     last_name?: string;
     firebase_uid?: string;
+    role?: 'superadmin' | 'admin' | 'educator' | 'student';
+    school_id?: number | null;
     is_student?: boolean;
     is_educator?: boolean;
     is_admin?: boolean;
@@ -194,9 +196,10 @@ export async function isAuthenticated(): Promise<boolean> {
 }
 
 export function roleHomePath(
-  user?: { is_admin?: boolean; is_educator?: boolean } | null
+  user?: { role?: string; is_admin?: boolean; is_educator?: boolean } | null
 ): Href {
-  if (user?.is_admin) return '/admin';
-  if (user?.is_educator) return '/educator';
+  if (user?.role === 'superadmin') return '/superadmin';
+  if (user?.role === 'admin' || user?.is_admin) return '/admin';
+  if (user?.role === 'educator' || user?.is_educator) return '/educator';
   return '/(tabs)';
 }
