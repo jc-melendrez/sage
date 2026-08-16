@@ -10,6 +10,8 @@ from django.conf import settings
 from core.firebase import get_firestore
 from firebase_admin import firestore as fs
 from users.utils.file_parser import extract_text_from_file
+from users.gamification import award_xp, record_game_finish
+from users.models import User
 
 
 def generate_room_code():
@@ -336,9 +338,9 @@ class AnswerQuestionView(APIView):
 
                 player_ref.update(updates)
 
-            # Award XP in Django
+            # Award XP in Django (goes through the gamification service)
             if is_correct:
-                request.user.add_xp(10)
+                award_xp(request.user, 10, source='game_answer')
 
             return Response({
                 'correct': is_correct,
@@ -366,27 +368,81 @@ class FinishGameView(APIView):
 
             db = get_firestore()
             room_ref = db.collection('gameRooms').document(room_code)
+            room_doc = room_ref.get()
 
-            if not room_ref.get().exists:
+            if not room_doc.exists:
                 return Response({'error': 'Game room not found'}, status=404)
 
+            room_data = room_doc.to_dict()
             player_ref = room_ref.collection('players').document(str(request.user.id))
+
             player_ref.update({'isFinished': True})
 
             # Check if all players are finished
             players = room_ref.collection('players').stream()
             all_finished = all(p.to_dict().get('isFinished', False) for p in players)
 
-            if all_finished:
+            # Only award placement XP on the transition to finished (once per room)
+            already_finished = room_data.get('status') == 'finished'
+            if all_finished and not already_finished:
                 room_ref.update({
                     'status': 'finished',
                     'finishedAt': fs.SERVER_TIMESTAMP,
                 })
+                self._award_placement_xp(room_ref, room_code)
+
+            # Re-read standings to compute the caller's rank
+            standings = self._get_standings(room_ref)
+            rank = 0
+            for i, entry in enumerate(standings):
+                if entry['user_id'] == request.user.id:
+                    rank = i + 1
+                    break
 
             return Response({
                 'message': 'Marked as finished',
                 'allFinished': all_finished,
+                'rank': rank,
             })
         except Exception as e:
             print(f'[FinishGame Error] {e}')
             return Response({'error': 'Failed to finish game'}, status=500)
+
+    def _get_standings(self, room_ref):
+        """Sorted (rank-ordered) players by score, descending."""
+        players = room_ref.collection('players').stream()
+        entries = []
+        for p in players:
+            data = p.to_dict() or {}
+            entries.append({
+                'user_id': int(p.id),
+                'display_name': data.get('displayName', 'Player'),
+                'score': data.get('score', 0),
+            })
+        entries.sort(key=lambda e: e['score'], reverse=True)
+        return entries
+
+    def _award_placement_xp(self, room_ref, room_code):
+        """Award XP to every participant based on final placement."""
+        standings = self._get_standings(room_ref)
+
+        # Standard competition ranking (ties share the same rank)
+        ranks = []
+        prev_score = None
+        prev_rank = 0
+        for i, entry in enumerate(standings):
+            if entry['score'] != prev_score:
+                rank = i + 1
+                prev_rank = rank
+                prev_score = entry['score']
+            else:
+                rank = prev_rank
+            ranks.append(rank)
+
+        for entry, rank in zip(standings, ranks):
+            user = User.objects.filter(id=entry['user_id']).first()
+            if user:
+                try:
+                    record_game_finish(user, rank)
+                except Exception as e:
+                    print(f'[FinishGame XP Award Error] user {entry["user_id"]}: {e}')

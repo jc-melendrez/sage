@@ -22,6 +22,7 @@ class User(AbstractUser):
     current_xp = models.IntegerField(default=0)
     total_points = models.IntegerField(default=0)
     streak = models.IntegerField(default=0)
+    last_active = models.DateField(null=True, blank=True)
     
     # --- Statistics Section ---
     courses_completed = models.IntegerField(default=0)
@@ -117,3 +118,21 @@ class GroupMessage(models.Model):
 
     def __str__(self):
         return f"{self.sender.username}: {self.text[:30]}"
+
+
+# --- Lesson Progress (persisted course progression) ---
+
+class LessonProgress(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='lesson_progress')
+    course_id = models.CharField(max_length=255)
+    level_id = models.IntegerField(default=1)
+    score = models.IntegerField(default=0)
+    total = models.IntegerField(default=0)
+    passed = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('user', 'course_id', 'level_id')
+
+    def __str__(self):
+        return f"{self.user.username} - {self.course_id} L{self.level_id} ({'pass' if self.passed else 'fail'})"

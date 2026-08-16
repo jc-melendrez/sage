@@ -2,12 +2,43 @@ import { useEffect, useState } from 'react';
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, Animated } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
+import { getCurrentUser } from '@/services/authService';
+
+const PLACEMENT_XP: Record<number, number> = { 1: 100, 2: 60, 3: 40 };
+
+function placementXpFor(rank: number) {
+  return PLACEMENT_XP[rank] ?? 25;
+}
 
 export default function FinalScreen() {
   const router = useRouter();
   const { roomCode } = useLocalSearchParams<{ roomCode: string }>();
   const [players, setPlayers] = useState<any[]>([]);
+  const [myRank, setMyRank] = useState<number | null>(null);
   const podiumAnim = useState(new Animated.Value(0))[0];
+
+  useEffect(() => {
+    let mounted = true;
+    getCurrentUser()
+      .then(user => {
+        if (!user?.id || !mounted) return;
+        firestore()
+          .collection('gameRooms').doc(roomCode)
+          .collection('players')
+          .get()
+          .then(snap => {
+            if (!mounted) return;
+            const sorted = snap.docs
+              .map(d => ({ id: d.id, ...d.data() }))
+              .sort((a: any, b: any) => b.score - a.score);
+            const rank = sorted.findIndex(p => String(p.id) === String(user.id)) + 1;
+            if (rank > 0) setMyRank(rank);
+          })
+          .catch(() => {});
+      })
+      .catch(() => {});
+    return () => { mounted = false; };
+  }, []);
 
   useEffect(() => {
     const unsub = firestore()
@@ -33,6 +64,13 @@ export default function FinalScreen() {
     <View style={styles.container}>
       <Text style={styles.title}>Game Over!</Text>
       <Text style={styles.subtitle}>Final Leaderboard</Text>
+      {myRank !== null && (
+        <View style={styles.youBanner}>
+          <Text style={styles.youBannerText}>
+            You finished <Text style={styles.youBannerRank}>#{myRank}</Text> · +{placementXpFor(myRank)} XP
+          </Text>
+        </View>
+      )}
       {players.length >= 3 && (
         <Animated.View
           style={[
@@ -88,6 +126,17 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f0c29', padding: 24, paddingTop: 60 },
   title: { fontSize: 32, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 4 },
   subtitle: { color: '#aaa', textAlign: 'center', marginBottom: 24 },
+  youBanner: {
+    backgroundColor: '#2d2a6e',
+    borderWidth: 1,
+    borderColor: '#7F77DD',
+    borderRadius: 12,
+    padding: 12,
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  youBannerText: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  youBannerRank: { color: '#7F77DD', fontWeight: 'bold' },
   row: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e1b4b', borderRadius: 12, padding: 14, marginBottom: 8 },
   first: { backgroundColor: '#2d2a6e', borderWidth: 1, borderColor: '#7F77DD' },
   medal: { fontSize: 20, marginRight: 12 },

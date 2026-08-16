@@ -8,10 +8,16 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, LessonProgress
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
+from .gamification import (
+    record_quiz_completion,
+    record_lesson_completion,
+    record_daily_checkin,
+    award_xp,
+)
 from .serializers import (
     UserSerializer, UserRegistrationSerializer,
     BadgeSerializer, RecommendationSerializer,
@@ -142,6 +148,105 @@ class CurrentUserProfileView(APIView):
         user = request.user
         serializer = UserProfileSerializer(user)
         return Response(serializer.data)
+
+
+# ---------- Gamification Endpoints ----------
+
+class CheckInView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        return Response(record_daily_checkin(request.user))
+
+
+class CompleteQuizView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            score = int(request.data.get('score', 0))
+            total = int(request.data.get('total', 0))
+        except (TypeError, ValueError):
+            return Response({'error': 'score and total must be integers'}, status=400)
+        if total < 0 or score < 0 or score > total:
+            return Response({'error': 'Invalid score/total'}, status=400)
+        return Response(record_quiz_completion(request.user, score, total))
+
+
+class CompleteLessonView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        course_id = request.data.get('course_id')
+        level_id = request.data.get('level_id')
+        if not course_id:
+            return Response({'error': 'course_id is required'}, status=400)
+        try:
+            level_id = int(level_id or 1)
+            score = int(request.data.get('score', 0))
+            total = int(request.data.get('total', 0))
+        except (TypeError, ValueError):
+            return Response({'error': 'level_id, score and total must be integers'}, status=400)
+        if total < 0 or score < 0 or score > total:
+            return Response({'error': 'Invalid score/total'}, status=400)
+        passed = request.data.get('passed')
+        if passed is not None:
+            passed = _as_bool(passed)
+        return Response(record_lesson_completion(
+            request.user, str(course_id), level_id, score, total, passed
+        ))
+
+
+class MyProgressView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        progress = LessonProgress.objects.filter(user=request.user).order_by('course_id', 'level_id')
+        return Response({
+            'lesson_progress': [
+                {
+                    'course_id': p.course_id,
+                    'level_id': p.level_id,
+                    'score': p.score,
+                    'total': p.total,
+                    'passed': p.passed,
+                    'updated_at': p.updated_at,
+                }
+                for p in progress
+            ],
+        })
+
+
+class LeaderboardView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        top = User.objects.exclude(is_superuser=True).order_by('-total_points', 'id')[:20]
+
+        entries = []
+        for index, user in enumerate(top):
+            entries.append({
+                'rank': index + 1,
+                'id': user.id,
+                'username': user.username,
+                'display_name': f"{user.first_name} {user.last_name}".strip() or user.username,
+                'level': user.level,
+                'total_points': user.total_points,
+                'streak': user.streak,
+                'is_you': user.id == request.user.id,
+            })
+
+        # Compute the caller's rank among all users (not just top 20)
+        your_rank = (
+            User.objects.exclude(is_superuser=True)
+            .filter(total_points__gt=request.user.total_points).count() + 1
+        )
+
+        return Response({
+            'entries': entries,
+            'your_rank': your_rank,
+            'your_points': request.user.total_points,
+        })
 
 class RegisterUserView(APIView):
     permission_classes = [AllowAny]

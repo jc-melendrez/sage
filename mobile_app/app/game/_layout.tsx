@@ -7,7 +7,6 @@ export default function GameLayout() {
       <Stack.Screen name="classic" />
       <Stack.Screen name="lobby" />
       <Stack.Screen name="question" />
-      <Stack.Screen name="leaderboard" />
       <Stack.Screen name="final" />
     </Stack>
   );

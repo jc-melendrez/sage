@@ -9,6 +9,7 @@ import * as Clipboard from 'expo-clipboard';
 import firestore from '@react-native-firebase/firestore';
 import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser } from '@/services/authService';
+import { completeQuiz, completeLesson, getMyProgress } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
 import LessonDisplay from '../../components/LessonDisplay';
 import LessonGenerator from '@/components/LessonGenerator';
@@ -111,7 +112,7 @@ export default function ActivitiesScreen() {
 
   // --- NEW: Courses state ---
   const [courses, setCourses] = useState<Course[]>([]);
-  const [levelProgress, setLevelProgress] = useState<{ [levelId: number]: number }>({});
+  const [levelProgress, setLevelProgress] = useState<{ [key: string]: number }>({});
   const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
   const [isCourseModalOpen, setIsCourseModalOpen] = useState(false);
 
@@ -254,6 +255,8 @@ export default function ActivitiesScreen() {
 
       if (groupRes.ok) setGroups(await groupRes.json());
       if (quizRes.ok) setQuizzes(await quizRes.json());
+
+      loadPersistedProgress();
     } catch (error) {
       console.error(error);
     } finally {
@@ -401,17 +404,33 @@ export default function ActivitiesScreen() {
     }
   };
 
-  const getLevelScore = (levelId: number): number => levelProgress[levelId] ?? 0;
+  const levelKey = (courseId: string, levelId: number) => `${courseId}::${levelId}`;
+
+  const getLevelScore = (course: Course, levelId: number): number =>
+    levelProgress[levelKey(course.course_title, levelId)] ?? 0;
 
   const isLevelUnlocked = (course: Course, levelIndex: number): boolean => {
     if (levelIndex === 0) return true;
     const prevLevel = course.levels[levelIndex - 1];
-    const prevScore = getLevelScore(prevLevel.level_id);
+    const prevScore = getLevelScore(course, prevLevel.level_id);
     return prevScore >= prevLevel.passing_score;
   };
 
-  const updateLevelProgress = (levelId: number, score: number) => {
-    setLevelProgress(prev => ({ ...prev, [levelId]: score }));
+  const updateLevelProgress = (course: Course, levelId: number, score: number) => {
+    setLevelProgress(prev => ({ ...prev, [levelKey(course.course_title, levelId)]: score }));
+  };
+
+  const loadPersistedProgress = async () => {
+    try {
+      const data = await getMyProgress();
+      const map: { [key: string]: number } = {};
+      data.lesson_progress.forEach(p => {
+        map[levelKey(p.course_id, p.level_id)] = p.score;
+      });
+      setLevelProgress(map);
+    } catch (error) {
+      console.error('Failed to load persisted course progress:', error);
+    }
   };
 
   const handleCourseGenerated = (course: Course) => {
@@ -445,7 +464,7 @@ export default function ActivitiesScreen() {
   const renderLevels = (course: Course) => {
     return course.levels.map((level, index) => {
       const unlocked = isLevelUnlocked(course, index);
-      const score = getLevelScore(level.level_id);
+      const score = getLevelScore(course, level.level_id);
       const passed = score >= level.passing_score;
 
       return (
@@ -902,18 +921,49 @@ export default function ActivitiesScreen() {
         <TakeQuiz
           quizTitle={quizToTake?.title || 'Quiz'}
           questions={quizToTake?.questions || []}
-          onFinish={(score) => {
-            if (quizToTake && quizToTake.levelId !== -1) {
-              const levelId = quizToTake.levelId;
-              const passingScore = quizToTake.passingScore;
-              updateLevelProgress(levelId, score);
-              if (score >= passingScore) {
-                Alert.alert(' Passed!', `You scored ${score}% and unlocked the next level.`);
-              } else {
-                Alert.alert('Keep trying!', `You scored ${score}%. Need ${passingScore}% to unlock the next level.`);
+          onFinish={async (score) => {
+            const total = quizToTake?.questions.length ?? 0;
+            const percent = total > 0 ? Math.round((score / total) * 100) : 0;
+
+            try {
+              const quizResult = await completeQuiz(score, total);
+              let message = `You scored ${percent}%`;
+              if (quizResult.xp > 0) message += ` · +${quizResult.xp} XP`;
+              if (quizResult.badges.length > 0) {
+                message += `\n${quizResult.badges.map(b => `${b.icon} ${b.name}`).join('\n')}`;
               }
-            } else {
-              Alert.alert('Quiz Finished', `Your score: ${score}%`);
+              Alert.alert('Quiz Finished', message);
+
+              if (quizToTake && quizToTake.levelId !== -1 && selectedCourse) {
+                const levelId = quizToTake.levelId;
+                const passingScore = quizToTake.passingScore;
+                const passed = percent >= passingScore;
+
+                updateLevelProgress(selectedCourse, levelId, percent);
+
+                try {
+                  await completeLesson(
+                    selectedCourse.course_title,
+                    levelId,
+                    percent,
+                    100,
+                    passed,
+                  );
+                  if (passed) {
+                    Alert.alert('Level Passed! ✅', `You scored ${percent}% and unlocked the next level.`);
+                  } else {
+                    Alert.alert('Keep trying!', `You scored ${percent}%. Need ${passingScore}% to unlock the next level.`);
+                  }
+                } catch (error) {
+                  console.error('Failed to persist lesson progress:', error);
+                }
+              }
+            } catch (error) {
+              console.error('Failed to record quiz completion:', error);
+              // Fall back to local-only progress update so unlocks still work offline.
+              if (quizToTake && quizToTake.levelId !== -1 && selectedCourse) {
+                updateLevelProgress(selectedCourse, quizToTake.levelId, percent);
+              }
             }
             setIsQuizModalOpen(false);
             setQuizToTake(null);

@@ -10,6 +10,13 @@ urlpatterns = [
     
     path('me/', views.CurrentUserProfileView.as_view(), name='current_user_profile'),
 
+    # --- Gamification Routes ---
+    path('me/check-in/', views.CheckInView.as_view(), name='daily_check_in'),
+    path('me/complete-quiz/', views.CompleteQuizView.as_view(), name='complete_quiz'),
+    path('me/complete-lesson/', views.CompleteLessonView.as_view(), name='complete_lesson'),
+    path('me/progress/', views.MyProgressView.as_view(), name='my_progress'),
+    path('leaderboard/', views.LeaderboardView.as_view(), name='leaderboard'),
+
     # --- User Data Routes ---
     path('<int:user_id>/', views.user_detail, name='user_detail'),
     path('<int:user_id>/recommendations/', views.user_recommendations, name='user_recommendations'),
