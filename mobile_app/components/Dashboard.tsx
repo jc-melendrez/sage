@@ -9,6 +9,7 @@ import {
   Platform,
   StatusBar,
   Dimensions,
+  Alert,
 } from 'react-native';
 import Animated, {
   useSharedValue,
@@ -26,6 +27,7 @@ import { API_BASE_URL } from '@/config/api';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
 import { getCurrentUser, getToken, logout } from '@/services/authService';
+import { dailyCheckIn } from '@/services/gamificationService';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -156,6 +158,14 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       route: null,
     },
     {
+      id: 'leaderboard',
+      icon: 'podium',
+      title: 'Leaderboard',
+      description: 'See where you stand among the top students.',
+      color: '#FBBF24',
+      route: '/leaderboard',
+    },
+    {
       id: 'quiz',
       icon: 'game-controller',
       title: 'Play a Quiz',
@@ -237,6 +247,22 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
   // --- Data fetching ---
   useEffect(() => {
     fetchUserData();
+  }, []);
+
+  // Daily check-in (once per session)
+  const checkInRanRef = useRef(false);
+  useEffect(() => {
+    if (checkInRanRef.current) return;
+    checkInRanRef.current = true;
+    dailyCheckIn()
+      .then((result) => {
+        if (result.checked_in) {
+          const streakText = result.streak > 1 ? `${result.streak} day streak!` : 'Your streak begins today!';
+          Alert.alert('Daily Check-In 🔥', `+${result.xp} XP · ${streakText}`);
+          fetchUserData();
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const fetchUserData = async () => {
@@ -372,7 +398,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
     return <LessonDisplay lesson={lesson} onClose={handleLessonDisplayClose} />;
   }
 
-  const totalPoints = user?.total_points || badges.length * 100 || 0;
+  const totalPoints = user?.total_points ?? 0;
   const level = user?.level || 1;
 
   return (

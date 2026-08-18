@@ -65,7 +65,6 @@ export default function EducatorProfileScreen() {
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
 
-      {/* Header */}
       <LinearGradient
         colors={[COLORS.purpleDeep, COLORS.purpleDark]}
         start={{ x: 0, y: 0 }}
@@ -152,6 +151,33 @@ export default function EducatorProfileScreen() {
           </View>
         </View>
 
+        {/* Admin / Super Admin access */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Administration</Text>
+          <View style={styles.listCard}>
+            <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/admin')}>
+              <View style={styles.menuItemLeft}>
+                <View style={styles.menuIconBox}><Ionicons name="shield-checkmark-outline" size={20} color={COLORS.purpleVibrant} /></View>
+                <Text style={styles.menuItemText}>Admin Panel</Text>
+              </View>
+              <View style={styles.menuItemRight}>
+                <Text style={styles.menuItemHint}>Dean / Program Chair</Text>
+                <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/superadmin')}>
+              <View style={styles.menuItemLeft}>
+                <View style={styles.menuIconBox}><Ionicons name="terminal-outline" size={20} color={COLORS.purpleDeep} /></View>
+                <Text style={styles.menuItemText}>Developer Panel</Text>
+              </View>
+              <View style={styles.menuItemRight}>
+                <Text style={styles.menuItemHint}>Super Admin</Text>
+                <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+              </View>
+            </TouchableOpacity>
+          </View>
+        </View>
+
         {/* Logout Button */}
         <View style={styles.section}>
           <TouchableOpacity style={styles.logoutButton} onPress={handleLogout} activeOpacity={0.8}>
@@ -204,6 +230,8 @@ const styles = StyleSheet.create({
   menuIconBox: { width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(139,92,246,0.12)', justifyContent: 'center', alignItems: 'center' },
   menuItemText: { fontSize: 15, fontFamily: FONTS.medium, color: COLORS.textPrimary },
   menuItemValue: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.textMuted, maxWidth: '50%', textAlign: 'right' },
+  menuItemRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  menuItemHint: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted },
   logoutButton: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
     backgroundColor: 'rgba(239,68,68,0.08)', borderRadius: RADIUS.lg,

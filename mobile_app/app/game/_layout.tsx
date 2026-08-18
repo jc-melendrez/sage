@@ -5,9 +5,9 @@ export default function GameLayout() {
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="index" />
       <Stack.Screen name="classic" />
+      <Stack.Screen name="flashcards" />
       <Stack.Screen name="lobby" />
       <Stack.Screen name="question" />
-      <Stack.Screen name="leaderboard" />
       <Stack.Screen name="final" />
     </Stack>
   );

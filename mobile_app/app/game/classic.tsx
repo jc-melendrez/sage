@@ -3,7 +3,7 @@ import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Animated
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
 import * as DocumentPicker from 'expo-document-picker';
@@ -56,11 +56,15 @@ interface SavedQuiz {
 
 export default function ClassicGameSetupScreen() {
   const router = useRouter();
+  const { mode: paramMode, teamMode: paramTeamMode } = useLocalSearchParams<{ mode?: string; teamMode?: string }>();
+  const groupMode = paramMode === 'create' && paramTeamMode === 'true';
   const [joinCode, setJoinCode] = useState('');
   const [timePerQuestion, setTimePerQuestion] = useState('15');
+  const [teamMode, setTeamMode] = useState(paramTeamMode === 'true');
+  const [teamCount, setTeamCount] = useState(2);
   const [loading, setLoading] = useState(false);
   const [loadingQuizzes, setLoadingQuizzes] = useState(false);
-  const [mode, setMode] = useState<'home' | 'create' | 'join'>('home');
+  const [mode, setMode] = useState<'home' | 'create' | 'join'>(paramMode === 'create' ? 'create' : 'home');
   const [quizzes, setQuizzes] = useState<SavedQuiz[]>([]);
   const [selectedQuiz, setSelectedQuiz] = useState<SavedQuiz | null>(null);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -187,15 +191,19 @@ export default function ClassicGameSetupScreen() {
           body: JSON.stringify({
             quizId: selectedQuiz.id,
             timePerQuestion: parseInt(timePerQuestion) || 15,
+            teamMode,
+            teamCount: teamMode ? teamCount : undefined,
           }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'Failed to create room');
-        router.push({ pathname: '/game/lobby', params: { roomCode: data.roomCode, isHost: 'true', topic: data.topic } });
+        router.push({ pathname: '/game/lobby', params: { roomCode: data.roomCode, isHost: 'true', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
       } else {
         const formData = new FormData();
         formData.append('file', { uri: selectedFile!.uri, name: selectedFile!.name, type: selectedFile!.mimeType } as any);
         formData.append('timePerQuestion', timePerQuestion);
+        formData.append('teamMode', String(teamMode));
+        formData.append('teamCount', String(teamCount));
         const response = await fetch(`${API_BASE_URL}/game/create/`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}` },
@@ -203,7 +211,7 @@ export default function ClassicGameSetupScreen() {
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'Failed to create room');
-        router.push({ pathname: '/game/lobby', params: { roomCode: data.roomCode, isHost: 'true', topic: data.topic } });
+        router.push({ pathname: '/game/lobby', params: { roomCode: data.roomCode, isHost: 'true', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
       }
     } catch (error: any) {
       Alert.alert('Error', error.message);
@@ -230,7 +238,7 @@ export default function ClassicGameSetupScreen() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Failed to join room');
-      router.push({ pathname: '/game/lobby', params: { roomCode: joinCode.toUpperCase(), isHost: 'false', topic: data.topic } });
+      router.push({ pathname: '/game/lobby', params: { roomCode: joinCode.toUpperCase(), isHost: 'false', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
     } catch (error: any) {
       Alert.alert('Error', error.message);
     } finally {
@@ -280,7 +288,7 @@ export default function ClassicGameSetupScreen() {
             <View style={styles.heroCard}>
               <View style={styles.cardEdge} />
               <View style={styles.heroTopRow}>
-                <View style={styles.heroTab}><Text style={styles.heroTabText}>CLASSIC</Text></View>
+                <View style={styles.heroTab}><Text style={styles.heroTabText}>{groupMode ? 'GROUP' : 'CLASSIC'}</Text></View>
                 <View style={styles.livePill}>
                   <Animated.View
                     style={[styles.liveDot, {
@@ -423,12 +431,12 @@ export default function ClassicGameSetupScreen() {
           <Animated.View style={{ opacity: formAnim, transform: [{ translateY: formAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }] }}>
             {/* ── form header ── */}
             <View style={styles.formHeader}>
-              <TouchableOpacity style={styles.backCircle} onPress={() => setMode('home')} activeOpacity={0.7}>
+              <TouchableOpacity style={styles.backCircle} onPress={() => (groupMode ? router.back() : setMode('home'))} activeOpacity={0.7}>
                 <Ionicons name="arrow-back" size={18} color={COLORS.purpleLight} />
               </TouchableOpacity>
               <View style={styles.formTitleCol}>
-                <Text style={styles.formKicker}>{mode === 'create' ? 'HOST' : 'JOIN'}</Text>
-                <Text style={styles.formTitle}>{mode === 'create' ? 'Create Room' : 'Join Room'}</Text>
+                <Text style={styles.formKicker}>{mode === 'create' ? (groupMode ? 'GROUP' : 'HOST') : 'JOIN'}</Text>
+                <Text style={styles.formTitle}>{mode === 'create' ? (groupMode ? 'Create Group Room' : 'Create Room') : 'Join Room'}</Text>
               </View>
             </View>
 
@@ -592,6 +600,57 @@ export default function ClassicGameSetupScreen() {
                         />
                       </View>
                     </View>
+
+                    <View style={styles.divider} />
+
+                    <View style={styles.settingRow}>
+                      <View style={styles.settingChip}>
+                        <Ionicons name="people" size={16} color={COLORS.success} />
+                      </View>
+                      <View style={styles.settingBody}>
+                        <Text style={styles.settingLabel}>Team Mode</Text>
+                        <Text style={styles.settingHint}>Split players into teams that compete for the same score</Text>
+                      </View>
+                      {groupMode ? (
+                        <View style={[styles.toggle, styles.toggleOn]}>
+                          <View style={[styles.toggleKnob, styles.toggleKnobOn]} />
+                        </View>
+                      ) : (
+                        <TouchableOpacity
+                          style={[styles.toggle, teamMode && styles.toggleOn]}
+                          onPress={() => setTeamMode(!teamMode)}
+                          activeOpacity={0.8}
+                        >
+                          <View style={[styles.toggleKnob, teamMode && styles.toggleKnobOn]} />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+
+                    {teamMode && (
+                      <>
+                        <View style={styles.divider} />
+                        <View style={styles.settingRow}>
+                          <View style={styles.settingChip}>
+                            <Ionicons name="git-network" size={16} color={COLORS.warning} />
+                          </View>
+                          <View style={styles.settingBody}>
+                            <Text style={styles.settingLabel}>Number of Teams</Text>
+                            <View style={styles.teamCountRow}>
+                              {[2, 3, 4].map(n => (
+                                <TouchableOpacity
+                                  key={n}
+                                  style={[styles.teamCountChip, teamCount === n && styles.teamCountChipActive]}
+                                  onPress={() => setTeamCount(n)}
+                                  activeOpacity={0.7}
+                                >
+                                  <Text style={[styles.teamCountChipText, teamCount === n && styles.teamCountChipTextActive]}>{n}</Text>
+                                </TouchableOpacity>
+                              ))}
+                            </View>
+                          </View>
+                        </View>
+                      </>
+                    )}
                   </View>
                 </View>
 
@@ -986,7 +1045,31 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: 'rgba(34,211,238,0.25)',
     paddingHorizontal: 14, paddingVertical: 10,
   },
+  settingHint: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted },
   divider: { height: 1, backgroundColor: 'rgba(127,119,221,0.12)', marginVertical: 14 },
+
+  toggle: {
+    width: 48, height: 28, borderRadius: 14,
+    backgroundColor: COLORS.surfaceLight, borderWidth: 1, borderColor: 'rgba(127,119,221,0.25)',
+    padding: 2, justifyContent: 'center',
+  },
+  toggleOn: { backgroundColor: 'rgba(16,185,129,0.25)', borderColor: 'rgba(16,185,129,0.5)' },
+  toggleKnob: {
+    width: 22, height: 22, borderRadius: 11, backgroundColor: COLORS.textMuted,
+  },
+  toggleKnobOn: {
+    backgroundColor: COLORS.success,
+    alignSelf: 'flex-end',
+  },
+  teamCountRow: { flexDirection: 'row', gap: 8, marginTop: 2 },
+  teamCountChip: {
+    flex: 1, borderRadius: 12, paddingVertical: 10,
+    backgroundColor: COLORS.bg, borderWidth: 1.5, borderColor: 'rgba(127,119,221,0.25)',
+    alignItems: 'center',
+  },
+  teamCountChipActive: { borderColor: COLORS.warning, backgroundColor: 'rgba(245,158,11,0.12)' },
+  teamCountChipText: { fontSize: 14, fontFamily: FONTS.bold, color: COLORS.textMuted },
+  teamCountChipTextActive: { color: '#FBBF24' },
 
   /* ── join code card ── */
   codeCard: {

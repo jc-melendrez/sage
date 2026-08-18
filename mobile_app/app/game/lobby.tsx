@@ -22,6 +22,7 @@ const COLORS = {
   purpleLight: '#A78BFA',
   accent: '#22D3EE',
   success: '#10B981',
+  warning: '#F59E0B',
   textPrimary: '#FFFFFF',
   textSecondary: '#CBD5E1',
   textMuted: '#94A3B8',
@@ -41,6 +42,9 @@ export default function LobbyScreen() {
   const router = useRouter();
   const { roomCode, isHost, topic } = useLocalSearchParams<{ roomCode: string; isHost: string; topic: string }>();
   const [players, setPlayers] = useState<any[]>([]);
+  const [teams, setTeams] = useState<any[]>([]);
+  const [roomStatus, setRoomStatus] = useState('waiting');
+  const [teamMode, setTeamMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [hostId, setHostId] = useState<number | string | null>(null);
@@ -64,13 +68,32 @@ export default function LobbyScreen() {
       .collection('gameRooms')
       .doc(roomCode)
       .onSnapshot(snap => {
-        if (snap?.data()?.status === 'active') {
+        const d = snap?.data();
+        setRoomStatus(d?.status ?? 'waiting');
+        setTeamMode(!!d?.teamMode);
+        if (d?.status === 'active') {
           router.replace({ pathname: '/game/question', params: { roomCode, isHost } });
         }
       });
 
     return () => { unsub(); roomUnsub(); };
   }, [roomCode]);
+
+  /* ── teams subscription (team mode only) ── */
+  useEffect(() => {
+    if (!teamMode) {
+      setTeams([]);
+      return;
+    }
+    const unsub = firestore()
+      .collection('gameRooms')
+      .doc(roomCode)
+      .collection('teams')
+      .onSnapshot(snap => {
+        setTeams(snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []);
+      });
+    return () => unsub();
+  }, [teamMode, roomCode]);
 
   /* ── additive UI-only: read hostId once (existing listeners stay untouched) ── */
   useEffect(() => {
@@ -131,6 +154,50 @@ export default function LobbyScreen() {
   const ghostSeats = Math.max(0, 4 - playerCount);
   const codeChars = (roomCode || '').split('');
 
+  /* ── team assignment ── */
+  const myPlayer = players.find(p => String(p.id) === String(currentUserId));
+  const myTeamId = myPlayer?.teamId ?? null;
+  const sortedTeams = [...teams].sort((a, b) => (parseInt(a.id, 10) || 0) - (parseInt(b.id, 10) || 0));
+  const allAssigned = !teamMode || (players.length > 0 && players.every(p => p.teamId));
+
+  const handlePickTeam = (teamId: string) => {
+    if (roomStatus === 'active' || !currentUserId) return;
+    const target = sortedTeams.find(t => t.id === teamId);
+    const current = sortedTeams.find(t => t.id === myTeamId);
+    if (!target || target.id === myTeamId) return;
+    Alert.alert(
+      'Join Team',
+      current ? `Switch from ${current.name} to ${target.name}?` : `Join ${target.name}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Confirm', onPress: () => doAssign(teamId) },
+      ],
+    );
+  };
+
+  const doAssign = async (teamId: string) => {
+    try {
+      const db = firestore();
+      const uid = String(currentUserId);
+      const roomRef = db.collection('gameRooms').doc(roomCode);
+      const batch = db.batch();
+      batch.update(roomRef.collection('teams').doc(teamId), {
+        memberIds: firestore.FieldValue.arrayUnion(uid),
+        memberCount: firestore.FieldValue.increment(1),
+      });
+      if (myTeamId) {
+        batch.update(roomRef.collection('teams').doc(myTeamId), {
+          memberIds: firestore.FieldValue.arrayRemove(uid),
+          memberCount: firestore.FieldValue.increment(-1),
+        });
+      }
+      batch.update(roomRef.collection('players').doc(uid), { teamId });
+      await batch.commit();
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to join team');
+    }
+  };
+
   return (
     <LinearGradient
       colors={[COLORS.bg, COLORS.bgSecondary]}
@@ -190,6 +257,74 @@ export default function LobbyScreen() {
           <Text style={styles.codeHint}>Send this code to friends so they can join the battle</Text>
         </Animated.View>
 
+        {/* ── teams (team mode) ── */}
+        {teamMode && (
+          <Animated.View
+            style={{
+              opacity: rosterAnim,
+              transform: [{ translateY: rosterAnim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] }) }],
+            }}
+          >
+            <View style={styles.rosterHead}>
+              <Text style={styles.rosterKicker}>TEAMS</Text>
+              {allAssigned ? (
+                <View style={styles.waitingTag}>
+                  <View style={[styles.waitingDot, { backgroundColor: COLORS.success }]} />
+                  <Text style={styles.waitingTagText}>All players assigned</Text>
+                </View>
+              ) : (
+                <View style={styles.waitingTag}>
+                  <View style={styles.waitingDot} />
+                  <Text style={styles.waitingTagText}>Tap a team to join</Text>
+                </View>
+              )}
+            </View>
+
+            {sortedTeams.map(team => {
+              const members = players.filter(p => String(p.teamId) === team.id);
+              const isMyTeam = team.id === myTeamId;
+              const maxSize = team.maxTeamSize ?? 20;
+              const full = members.length >= maxSize;
+              return (
+                <TouchableOpacity
+                  key={team.id}
+                  style={[
+                    styles.teamCard,
+                    { borderColor: isMyTeam ? team.color : team.color + '55' },
+                    isMyTeam && { backgroundColor: team.color + '14' },
+                    roomStatus === 'active' && { opacity: 0.55 },
+                  ]}
+                  onPress={() => handlePickTeam(team.id)}
+                  activeOpacity={0.75}
+                  disabled={roomStatus === 'active' || full || isMyTeam}
+                >
+                  <View style={[styles.teamDot, { backgroundColor: team.color }]} />
+                  <View style={styles.teamInfo}>
+                    <View style={styles.playerNameRow}>
+                      <Text style={styles.teamName} numberOfLines={1}>{team.name}</Text>
+                      {isMyTeam && <View style={styles.youPill}><Text style={styles.youPillText}>YOU</Text></View>}
+                    </View>
+                    <Text style={styles.playerSub} numberOfLines={1}>
+                      {members.length > 0 ? members.map(m => m.displayName).join(', ') : 'No players yet'}
+                    </Text>
+                  </View>
+                  <View style={styles.teamScoreCol}>
+                    <Text style={styles.teamScore}>{members.length}/{maxSize}</Text>
+                    <Text style={styles.teamScoreLabel}>JOINED</Text>
+                  </View>
+                  {roomStatus !== 'active' && (
+                    <View style={[styles.joinChip, isMyTeam && styles.joinChipYou, full && !isMyTeam && styles.joinChipFull]}>
+                      <Text style={[styles.joinChipText, isMyTeam && styles.joinChipTextYou]}>
+                        {isMyTeam ? 'Joined' : full ? 'Full' : 'Join'}
+                      </Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </Animated.View>
+        )}
+
         {/* ── roster ── */}
         <Animated.View
           style={{
@@ -212,6 +347,7 @@ export default function LobbyScreen() {
           {players.map((item) => {
             const isYou = String(item.id) === String(currentUserId);
             const isHostRow = hostId != null && String(item.id) === String(hostId);
+            const teamInfo = teamMode ? teams.find(t => t.id === item.teamId) : null;
             const initial = (item.displayName || '?').charAt(0).toUpperCase();
             return (
               <View key={item.id} style={[styles.playerCard, isYou && styles.playerCardYou]}>
@@ -224,10 +360,23 @@ export default function LobbyScreen() {
                     <Text style={styles.playerName} numberOfLines={1}>{item.displayName}</Text>
                     {isYou && <View style={styles.youPill}><Text style={styles.youPillText}>YOU</Text></View>}
                   </View>
-                  <Text style={styles.playerSub}>{isHostRow ? 'Host' : 'Player'} · Ready</Text>
+                  <View style={styles.playerSubRow}>
+                    <Text style={styles.playerSub}>
+                      {isHostRow ? 'Host' : 'Player'} · Ready
+                    </Text>
+                    {teamInfo && <View style={[styles.playerTeamDot, { backgroundColor: teamInfo.color }]} />}
+                    {teamInfo && (
+                      <Text style={styles.playerSub}>
+                        {` · ${teamInfo.name}`}
+                      </Text>
+                    )}
+                    {teamMode && !teamInfo && (
+                      <Text style={[styles.playerSub, { color: COLORS.warning }]}> · Pick a team</Text>
+                    )}
+                  </View>
                 </View>
                 {isHostRow && <Text style={styles.crown}>👑</Text>}
-                <View style={styles.readyDot} />
+                <View style={[styles.readyDot, teamMode && !item.teamId && { backgroundColor: COLORS.warning }]} />
               </View>
             );
           })}
@@ -260,12 +409,17 @@ export default function LobbyScreen() {
           <TouchableOpacity
             style={styles.startWrap}
             onPress={handleStart}
-            disabled={loading}
+            disabled={loading || (teamMode && !allAssigned)}
             activeOpacity={0.85}
           >
             {loading ? (
               <View style={styles.startInnerDisabled}>
                 <ActivityIndicator color="#fff" />
+              </View>
+            ) : (teamMode && !allAssigned) ? (
+              <View style={styles.startInnerDisabled}>
+                <Ionicons name="people" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
+                <Text style={styles.startTextDisabled}>Waiting for all players to pick a team</Text>
               </View>
             ) : (
               <LinearGradient
@@ -288,7 +442,9 @@ export default function LobbyScreen() {
                 transform: [{ scale: livePulse.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1.2] }) }],
               }]}
             />
-            <Text style={styles.waitBarText}>Waiting for host to start...</Text>
+            <Text style={styles.waitBarText}>
+              {teamMode && !allAssigned ? 'Pick a team so the host can start...' : 'Waiting for host to start...'}
+            </Text>
           </View>
         )}
       </Animated.View>
@@ -350,6 +506,30 @@ const styles = StyleSheet.create({
   },
   codeChipText: { fontSize: 26, fontFamily: FONTS.black, color: COLORS.textPrimary },
   codeHint: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, textAlign: 'center', lineHeight: 17 },
+
+  /* ── team cards ── */
+  teamCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: COLORS.cardBg, borderRadius: 18, padding: 14,
+    borderWidth: 1.5, marginBottom: 10, position: 'relative', overflow: 'hidden',
+  },
+  teamDot: { width: 14, height: 14, borderRadius: 7 },
+  teamInfo: { flex: 1 },
+  teamName: { fontSize: 16, fontFamily: FONTS.bold, color: COLORS.textPrimary, flexShrink: 1 },
+  teamScoreCol: { alignItems: 'center' },
+  teamScore: { fontSize: 15, fontFamily: FONTS.extraBold, color: COLORS.textPrimary },
+  teamScoreLabel: { fontSize: 9, fontFamily: FONTS.extraBold, letterSpacing: 1, color: COLORS.textMuted, marginTop: 2 },
+  joinChip: {
+    backgroundColor: 'rgba(34,211,238,0.12)', borderRadius: 8,
+    borderWidth: 1, borderColor: 'rgba(34,211,238,0.35)',
+    paddingHorizontal: 10, paddingVertical: 5,
+  },
+  joinChipYou: { backgroundColor: 'rgba(16,185,129,0.15)', borderColor: 'rgba(16,185,129,0.4)' },
+  joinChipFull: { backgroundColor: 'rgba(148,163,184,0.1)', borderColor: 'rgba(148,163,184,0.25)' },
+  joinChipText: { fontSize: 11, fontFamily: FONTS.bold, color: COLORS.accent },
+  joinChipTextYou: { color: '#34D399' },
+  playerSubRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  playerTeamDot: { width: 8, height: 8, borderRadius: 4 },
 
   /* ── roster ── */
   rosterHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
@@ -419,6 +599,7 @@ const styles = StyleSheet.create({
   startInner: { paddingVertical: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center' },
   startInnerDisabled: { paddingVertical: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', backgroundColor: COLORS.surfaceLight },
   startText: { color: COLORS.bg, fontSize: 16, fontFamily: FONTS.extraBold, letterSpacing: 0.3 },
+  startTextDisabled: { color: COLORS.textMuted, fontSize: 14, fontFamily: FONTS.extraBold, letterSpacing: 0.2, textAlign: 'center' },
   startCount: { color: 'rgba(15,12,41,0.7)', fontSize: 14, fontFamily: FONTS.bold },
 
   waitBar: {

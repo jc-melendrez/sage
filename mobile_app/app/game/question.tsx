@@ -151,6 +151,9 @@ export default function QuestionScreen() {
   const [isFrozen, setIsFrozen] = useState(false);
   const [showStandings, setShowStandings] = useState(false);
   const [roomStatus, setRoomStatus] = useState('waiting');
+  const [teamMode, setTeamMode] = useState(false);
+  const [teams, setTeams] = useState<any[]>([]);
+  const [myTeamId, setMyTeamId] = useState<string | null>(null);
 
   // ✨ UPDATED: RNAnimated refs
   const standingsAnim = useRef(new RNAnimated.Value(0)).current;
@@ -223,6 +226,7 @@ export default function QuestionScreen() {
       const player = await firestore().collection('gameRooms').doc(roomCode)
         .collection('players').doc(String(user?.id)).get();
       setQuestionOrder(player.data()?.questionOrder || []);
+      setMyTeamId(player.data()?.teamId ?? null);
       const pPowerups = player.data()?.powerups;
       if (pPowerups) setPowerups(pPowerups);
     };
@@ -240,6 +244,7 @@ export default function QuestionScreen() {
           setTimePerQuestion(data.timePerQuestion || 15);
           setTimeLeft(data.timePerQuestion || 15);
           setRoomStatus(data.status || 'waiting');
+          setTeamMode(!!data.teamMode);
         } else if (data.status === 'finished' && !navigatedRef.current) {
           navigatedRef.current = true;
           setRoomStatus('finished');
@@ -318,6 +323,21 @@ export default function QuestionScreen() {
       });
     return () => { unsub(); };
   }, [userId]);
+
+  /* ── teams subscription (team mode only) ── */
+  useEffect(() => {
+    if (!teamMode) {
+      setTeams([]);
+      return;
+    }
+    const unsub = firestore()
+      .collection('gameRooms').doc(roomCode)
+      .collection('teams')
+      .onSnapshot(snap => {
+        setTeams(snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []);
+      });
+    return () => { unsub(); };
+  }, [teamMode, roomCode]);
 
   useEffect(() => {
     if (!showRoulette || !rouletteTarget) return;
@@ -622,6 +642,8 @@ export default function QuestionScreen() {
   const playerRank = standings.findIndex(p => String(p.id) === String(userId)) + 1;
   const isDanger = !isFrozen && timeLeft <= 5;
   const hasPowerups = powerups.freeze > 0 || powerups.hint > 0 || powerups.doublePoints > 0 || powerups.shield > 0;
+  const myTeam = teamMode ? teams.find(t => t.id === myTeamId) ?? null : null;
+  const sortedTeams = [...teams].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   const visibleChoices = question.type === 'mcq'
     ? question.choices.filter((c: string) => !hintedChoices.includes(c))
     : [];
@@ -636,11 +658,20 @@ export default function QuestionScreen() {
 
       {/* ── HEADER ROW ── */}
       <View style={styles.header}>
-        <Text style={styles.progressText}>
-          <Text style={styles.progressCurrent}>{currentIndex + 1}</Text>
-          {' / '}
-          {questionOrder.length}
-        </Text>
+        <View style={styles.headerLeft}>
+          <Text style={styles.progressText}>
+            <Text style={styles.progressCurrent}>{currentIndex + 1}</Text>
+            {' / '}
+            {questionOrder.length}
+          </Text>
+          {myTeam && (
+            <View style={[styles.teamPill, { borderColor: myTeam.color + '66', backgroundColor: myTeam.color + '14' }]}>
+              <View style={[styles.teamPillDot, { backgroundColor: myTeam.color }]} />
+              <Text style={styles.teamPillName} numberOfLines={1}>{myTeam.name}</Text>
+              <Text style={[styles.teamPillScore, { color: myTeam.color }]}>{(myTeam.score ?? 0).toLocaleString()}</Text>
+            </View>
+          )}
+        </View>
 
         <TouchableOpacity
           style={[styles.standingsToggle, showStandings && styles.standingsToggleActive]}
@@ -1007,6 +1038,27 @@ export default function QuestionScreen() {
               </View>
             )}
             <ScrollView showsVerticalScrollIndicator={false} style={styles.standingsScroll}>
+              {teamMode && (
+                <View style={styles.standingsTeamsBlock}>
+                  <Text style={styles.standingsBlockLabel}>TEAMS</Text>
+                  {sortedTeams.map((t, i) => {
+                    const isMyTeam = t.id === myTeamId;
+                    return (
+                      <View key={t.id} style={[styles.srRow, i < 3 && styles.srRowTop3, isMyTeam && styles.srRowYou]}>
+                        <Text style={styles.srRank}>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}`}</Text>
+                        <View style={styles.srNameWrap}>
+                          <Text style={[styles.srName, isMyTeam && styles.srNameYou]} numberOfLines={1}>
+                            {t.name}
+                            {isMyTeam && <Text style={styles.srYouTag}> (You)</Text>}
+                          </Text>
+                        </View>
+                        <View style={[styles.teamStandDot, { backgroundColor: t.color }]} />
+                        <Text style={styles.srScore}>{(t.score ?? 0).toLocaleString()}</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
               {standings.map((p, i) => (
                 <StandingsRow key={p.id} player={p} index={i} isYou={String(p.id) === String(userId)} />
               ))}
@@ -1054,6 +1106,26 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
     zIndex: 10,
   },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+    paddingRight: 8,
+  },
+  teamPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    maxWidth: 150,
+  },
+  teamPillDot: { width: 8, height: 8, borderRadius: 4 },
+  teamPillName: { fontSize: 12, fontFamily: FONTS.bold, color: COLORS.textPrimary, flexShrink: 1 },
+  teamPillScore: { fontSize: 12, fontFamily: FONTS.black },
   progressText: {
     fontSize: 15,
     fontFamily: FONTS.extraBold,
@@ -1583,6 +1655,16 @@ const styles = StyleSheet.create({
   },
   moverBannerText: { fontSize: 11, fontFamily: FONTS.bold, color: '#34D399' },
   standingsScroll: { maxHeight: SCREEN_HEIGHT * 0.38 },
+  standingsTeamsBlock: { marginBottom: 10 },
+  standingsBlockLabel: {
+    fontSize: 10,
+    fontFamily: FONTS.extraBold,
+    letterSpacing: 2,
+    color: COLORS.textMuted,
+    marginBottom: 6,
+    marginTop: 4,
+  },
+  teamStandDot: { width: 10, height: 10, borderRadius: 5 },
 
   /* standings rows */
   srRow: {

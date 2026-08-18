@@ -10,14 +10,37 @@ from django.conf import settings
 from core.firebase import get_firestore
 from firebase_admin import firestore as fs
 from users.utils.file_parser import extract_text_from_file
+from users.gamification import award_xp, record_game_finish
+from users.models import User
 
 
 def generate_room_code():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
+MAX_PLAYERS = 20
+TEAM_COLORS = ['#22D3EE', '#10B981', '#F59E0B', '#A78BFA']
+
+
 def get_display_name(user):
     return f"{user.first_name} {user.last_name}".strip() or user.username
+
+
+def snapshot_team_results(room_ref, room_data):
+    """Additive: persist final team standings to room.teamResults (team mode only)."""
+    if not room_data.get('teamMode', False):
+        return
+    teams = room_ref.collection('teams').stream()
+    results = [{
+        'teamId': t.id,
+        'name': d.get('name', f'Team {t.id}'),
+        'color': d.get('color'),
+        'score': d.get('score', 0),
+        'correctCount': d.get('correctCount', 0),
+        'answeredCount': d.get('answeredCount', 0),
+    } for t in teams for d in [t.to_dict() or {}]]
+    results.sort(key=lambda r: r['score'], reverse=True)
+    room_ref.update({'teamResults': results})
 
 
 class CreateGameView(APIView):
@@ -26,6 +49,11 @@ class CreateGameView(APIView):
     def post(self, request):
         quiz_id = request.data.get('quizId')
         time_per_question = int(request.data.get('timePerQuestion', 15))
+        team_mode = str(request.data.get('teamMode', 'false')).lower() == 'true'
+        team_count = int(request.data.get('teamCount', 2))
+
+        if team_mode and team_count not in (2, 3, 4):
+            return Response({'error': 'teamCount must be between 2 and 4'}, status=400)
 
         if quiz_id:
             from ai_assistant.models import Quiz
@@ -79,10 +107,13 @@ class CreateGameView(APIView):
             topic = ai_data.get('topic', 'Study Quiz')
             questions = ai_data.get('questions', [])
 
+        if team_mode and question_count < team_count:
+            return Response({'error': 'Not enough questions for that many teams'}, status=400)
+
         room_code = generate_room_code()
         db = get_firestore()
 
-        db.collection('gameRooms').document(room_code).set({
+        room_data = {
             'status': 'waiting',
             'hostId': request.user.id,
             'topic': topic,
@@ -90,10 +121,27 @@ class CreateGameView(APIView):
             'timePerQuestion': time_per_question,
             'questions': questions,
             'createdAt': fs.SERVER_TIMESTAMP,
-        })
+        }
+        if team_mode:
+            room_data['teamMode'] = True
+            room_data['teamCount'] = team_count
+            room_data['maxTeamSize'] = -(-MAX_PLAYERS // team_count)
+        db.collection('gameRooms').document(room_code).set(room_data)
 
-        db.collection('gameRooms').document(room_code)\
-          .collection('players').document(str(request.user.id)).set({
+        if team_mode:
+            for i in range(team_count):
+                db.collection('gameRooms').document(room_code)\
+                  .collection('teams').document(str(i + 1)).set({
+                    'name': f'Team {i + 1}',
+                    'color': TEAM_COLORS[i % len(TEAM_COLORS)],
+                    'score': 0,
+                    'correctCount': 0,
+                    'answeredCount': 0,
+                    'memberIds': [],
+                    'memberCount': 0,
+                })
+
+        player_data = {
             'displayName': get_display_name(request.user),
             'score': 0,
             'answeredCount': 0,
@@ -101,13 +149,26 @@ class CreateGameView(APIView):
             'isReady': True,
             'isFinished': False,
             'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
-        })
+        }
+        if team_mode:
+            player_data['teamId'] = None
 
-        return Response({
+        db.collection('gameRooms').document(room_code)\
+          .collection('players').document(str(request.user.id)).set(player_data)
+
+        response_data = {
             'roomCode': room_code,
             'topic': topic,
             'message': 'Room created successfully!'
-        })
+        }
+        if team_mode:
+            response_data['teamMode'] = True
+            response_data['teams'] = [
+                {'id': str(i + 1), 'name': f'Team {i + 1}', 'color': TEAM_COLORS[i % len(TEAM_COLORS)]}
+                for i in range(team_count)
+            ]
+
+        return Response(response_data)
 
     def process_content(self, content, count, question_type='mcq'):
         if question_type == 'identification':
@@ -182,8 +243,10 @@ class JoinGameView(APIView):
         if room_data['status'] != 'waiting':
             return Response({'error': 'Game already started'}, status=400)
 
+        is_team_mode = bool(room_data.get('teamMode', False))
+
         # Add player to room
-        room_ref.collection('players').document(str(request.user.id)).set({
+        player_data = {
             'displayName': get_display_name(request.user),
             'score': 0,
             'answeredCount': 0,
@@ -191,13 +254,34 @@ class JoinGameView(APIView):
             'isReady': True,
             'isFinished': False,
             'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
-        })
+        }
+        if is_team_mode:
+            player_data['teamId'] = None
+        room_ref.collection('players').document(str(request.user.id)).set(player_data)
 
-        return Response({
+        response = {
             'roomCode': room_code,
             'topic': room_data['topic'],
             'message': f'Joined room {room_code}!'
-        })
+        }
+        if is_team_mode:
+            response['teamMode'] = True
+            response['teams'] = [
+                {
+                    'id': t.id,
+                    'name': d.get('name', f'Team {t.id}'),
+                    'color': d.get('color'),
+                    'score': d.get('score', 0),
+                    'correctCount': d.get('correctCount', 0),
+                    'answeredCount': d.get('answeredCount', 0),
+                    'memberIds': d.get('memberIds', []),
+                    'memberCount': d.get('memberCount', 0),
+                }
+                for t in room_ref.collection('teams').stream()
+                for d in [t.to_dict() or {}]
+            ]
+
+        return Response(response)
 
 
 class StartGameView(APIView):
@@ -220,9 +304,15 @@ class StartGameView(APIView):
         if room_data['status'] != 'waiting':
             return Response({'error': 'Game already started'}, status=400)
 
+        players = list(room_ref.collection('players').stream())
+
+        if room_data.get('teamMode', False):
+            for player in players:
+                if not (player.to_dict() or {}).get('teamId'):
+                    return Response({'error': 'All players must join a team before starting'}, status=400)
+
         # Assign shuffled question order to each player
         count = len(room_data.get('questions', []))
-        players = room_ref.collection('players').stream()
         for player in players:
             order = list(range(count))
             random.shuffle(order)
@@ -276,8 +366,15 @@ class AnswerQuestionView(APIView):
 
             player_ref = room_ref.collection('players').document(str(request.user.id))
 
+            team_ref = None
+            if room.get('teamMode', False):
+                player_data = player_ref.get().to_dict() or {}
+                team_id = player_data.get('teamId')
+                if team_id:
+                    team_ref = room_ref.collection('teams').document(str(team_id))
+
             @fs.transactional
-            def answer_in_transaction(transaction, player_ref):
+            def answer_in_transaction(transaction, player_ref, team_ref):
                 snapshot = player_ref.get(transaction=transaction)
                 data = snapshot.to_dict() or {}
                 answered = data.get('answeredQuestions', [])
@@ -339,8 +436,6 @@ class AnswerQuestionView(APIView):
                             updates['score'] = fs.Increment(50)
                             earned_points += 50
 
-                    transaction.update(player_ref, updates)
-
                 else:
                     # Wrong Answer Logic
                     updates = {
@@ -349,18 +444,8 @@ class AnswerQuestionView(APIView):
                     # Shield protects streak
                     if not use_shield:
                         updates['streak'] = 0
-                    
-                    transaction.update(player_ref, updates)
 
-                # 3. SAVE RESULT FOR IDEMPOTENCY
-                # We update again to save the result cache (or merge into previous update)
-                # Note: In a real high-scale app, we'd merge this into the single update above.
-                # For Firestore simplicity here, we do a second update or merge logic.
-                # To keep it atomic and simple, let's merge into the first update logic 
-                # (Refactored below to single update for safety)
-                
-                # Actually, let's refine the update to include the cache in one go
-                # Re-calculating updates to include lastAnswerResult
+                # Merge result cache into a single atomic player update
                 final_updates = updates if is_correct else {'answeredCount': fs.Increment(1)}
                 if not is_correct and not use_shield:
                      final_updates['streak'] = 0
@@ -371,7 +456,22 @@ class AnswerQuestionView(APIView):
                     'correctAnswer': correct_answer,
                     'pointsAwarded': earned_points,
                 }
-                
+
+                # 3. TEAM SCORE — inside the SAME transaction as the player update.
+                #    Explicit transaction.get() first, then fs.Increment only (never
+                #    read team score to compute a new value client-side). The
+                #    idempotency check above (answeredQuestions) keeps this from
+                #    double-counting on retries.
+                if team_ref is not None:
+                    transaction.get(team_ref)
+                    team_updates = {'answeredCount': fs.Increment(1)}
+                    if is_correct:
+                        score_increment = updates.get('score')
+                        if isinstance(score_increment, fs.Increment):
+                            team_updates['score'] = fs.Increment(score_increment.value)
+                        team_updates['correctCount'] = fs.Increment(1)
+                    transaction.update(team_ref, team_updates)
+
                 # Perform the single atomic update
                 transaction.update(player_ref, final_updates)
 
@@ -384,11 +484,11 @@ class AnswerQuestionView(APIView):
                 }
 
             # Execute Transaction
-            result = answer_in_transaction(db.transaction(), player_ref)
+            result = answer_in_transaction(db.transaction(), player_ref, team_ref)
 
-            # Award XP in Django (only if scored)
+            # Award XP in Django (goes through the gamification service)
             if result['scored'] and result['correct']:
-                request.user.add_xp(10)
+                award_xp(request.user, 10, source='game_answer')
 
             return Response({
                 'correct': result['correct'],
@@ -416,11 +516,14 @@ class FinishGameView(APIView):
 
             db = get_firestore()
             room_ref = db.collection('gameRooms').document(room_code)
+            room_doc = room_ref.get()
 
-            if not room_ref.get().exists:
+            if not room_doc.exists:
                 return Response({'error': 'Game room not found'}, status=404)
 
+            room_data = room_doc.to_dict()
             player_ref = room_ref.collection('players').document(str(request.user.id))
+
             player_ref.update({'isFinished': True})
 
             room_data = room_ref.get().to_dict() or {}
@@ -432,6 +535,7 @@ class FinishGameView(APIView):
                     'status': 'finished',
                     'finishedAt': fs.SERVER_TIMESTAMP,
                 })
+                snapshot_team_results(room_ref, room_data)
                 return Response({'message': 'Marked as finished', 'allFinished': True})
 
             # Check if all non-host players are finished
@@ -440,16 +544,68 @@ class FinishGameView(APIView):
                 p.id == host_id or p.to_dict().get('isFinished', False) for p in players
             )
 
-            if all_finished:
+            # Only award placement XP on the transition to finished (once per room)
+            already_finished = room_data.get('status') == 'finished'
+            if all_finished and not already_finished:
                 room_ref.update({
                     'status': 'finished',
                     'finishedAt': fs.SERVER_TIMESTAMP,
                 })
+                self._award_placement_xp(room_ref, room_code)
+                snapshot_team_results(room_ref, room_data)
+
+            # Re-read standings to compute the caller's rank
+            standings = self._get_standings(room_ref)
+            rank = 0
+            for i, entry in enumerate(standings):
+                if entry['user_id'] == request.user.id:
+                    rank = i + 1
+                    break
 
             return Response({
                 'message': 'Marked as finished',
                 'allFinished': all_finished,
+                'rank': rank,
             })
         except Exception as e:
             print(f'[FinishGame Error] {e}')
             return Response({'error': 'Failed to finish game'}, status=500)
+
+    def _get_standings(self, room_ref):
+        """Sorted (rank-ordered) players by score, descending."""
+        players = room_ref.collection('players').stream()
+        entries = []
+        for p in players:
+            data = p.to_dict() or {}
+            entries.append({
+                'user_id': int(p.id),
+                'display_name': data.get('displayName', 'Player'),
+                'score': data.get('score', 0),
+            })
+        entries.sort(key=lambda e: e['score'], reverse=True)
+        return entries
+
+    def _award_placement_xp(self, room_ref, room_code):
+        """Award XP to every participant based on final placement."""
+        standings = self._get_standings(room_ref)
+
+        # Standard competition ranking (ties share the same rank)
+        ranks = []
+        prev_score = None
+        prev_rank = 0
+        for i, entry in enumerate(standings):
+            if entry['score'] != prev_score:
+                rank = i + 1
+                prev_rank = rank
+                prev_score = entry['score']
+            else:
+                rank = prev_rank
+            ranks.append(rank)
+
+        for entry, rank in zip(standings, ranks):
+            user = User.objects.filter(id=entry['user_id']).first()
+            if user:
+                try:
+                    record_game_finish(user, rank)
+                except Exception as e:
+                    print(f'[FinishGame XP Award Error] user {entry["user_id"]}: {e}')

@@ -10,7 +10,7 @@ export default function Login() {
       {/* TEMP: preview button, remove before shipping */}
       <TouchableOpacity
         style={styles.skipBtn}
-        onPress={() => router.replace('/educator/dashboard')}
+        onPress={() => router.replace('/educator')}
       >
       </TouchableOpacity>
     </View>

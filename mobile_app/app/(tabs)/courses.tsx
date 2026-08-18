@@ -13,6 +13,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   StatusBar,
+  Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -20,13 +21,38 @@ import { useFocusEffect } from 'expo-router';
 import { colors } from '@/constants/theme';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
 
+const { width } = Dimensions.get('window');
+
+// 🎨 NEW PALETTE: Cosmic / Tech Academy
+const THEME = {
+  bgDark: '#0f172a',      // Slate 900
+  bgCard: '#1e293b',      // Slate 800
+  primary: '#6366f1',     // Indigo 500
+  accent: '#22d3ee',      // Cyan 400
+  success: '#10b981',     // Emerald 500
+  locked: '#475569',      // Slate 600
+  textMain: '#f8fafc',    // Slate 50
+  textMuted: '#94a3b8',   // Slate 400
+  glass: 'rgba(30, 41, 59, 0.7)',
+  border: 'rgba(148, 163, 184, 0.1)',
+};
+
 function formatDate(iso: string): string {
   try {
-    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   } catch {
     return '';
   }
 }
+
+// --- Mock Data for the Visual Path (Fallback if no real courses) ---
+const MOCK_PATH = [
+  { id: 'mock-1', title: 'Introduction to AI', status: 'completed', type: 'video' },
+  { id: 'mock-2', title: 'Neural Networks Basics', status: 'completed', type: 'quiz' },
+  { id: 'mock-3', title: 'Deep Learning', status: 'active', type: 'lesson' },
+  { id: 'mock-4', title: 'Computer Vision', status: 'locked', type: 'project' },
+  { id: 'mock-5', title: 'Natural Language Processing', status: 'locked', type: 'boss' },
+];
 
 export default function StudentCoursesScreen() {
   const [courses, setCourses] = useState<CourseSummary[]>([]);
@@ -35,18 +61,38 @@ export default function StudentCoursesScreen() {
   const [joinVisible, setJoinVisible] = useState(false);
   const [joining, setJoining] = useState(false);
   const [code, setCode] = useState('');
+  
+  // For the demo, we pretend the first course is the one we are visualizing
+  const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
 
   const loadCourses = useCallback(async () => {
     try {
+      setLoading(true); // Ensure loading is true while fetching
+      console.log("🚀 Fetching enrolled courses...");
+      
+      // 1. Restore the API call
       const data = await getEnrolledCourses();
-      setCourses(data);
-    } catch (err) {
+      
+      console.log("✅ API Response:", data); // <--- DEBUG LOG
+      
+      // 2. Set the courses state
+      // Ensure data is an array, if API returns something else, default to []
+      const safeData = Array.isArray(data) ? data : [];
+      setCourses(safeData);
+
+      // 3. Auto-select the first course for the visual path demo
+      if (safeData.length > 0 && !selectedCourseId) {
+        setSelectedCourseId(String(safeData[0].id));
+      }
+    } catch (err: any) {
+      console.error("❌ Error loading courses:", err);
       Alert.alert('Failed to load courses', err instanceof Error ? err.message : 'Something went wrong.');
+      setCourses([]); // Ensure empty on error
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [selectedCourseId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -72,114 +118,207 @@ export default function StudentCoursesScreen() {
       setCode('');
       await loadCourses();
       Alert.alert('Joined!', 'You are now enrolled in this course.');
-    } catch (err) {
+    } catch (err: any) {
       Alert.alert('Could not join', err instanceof Error ? err.message : 'Something went wrong.');
     } finally {
       setJoining(false);
     }
   };
 
+  // --- Render Helpers ---
+
+  const renderNodeIcon = (type: string) => {
+    switch (type) {
+      case 'video': return 'play-circle';
+      case 'quiz': return 'help-circle';
+      case 'project': return 'construct';
+      case 'boss': return 'flash';
+      default: return 'book';
+    }
+  };
+
+  // Convert real courses to path nodes, or use mock if empty
+  const getPathData = () => {
+    if (courses.length > 0) {
+      // Map real courses to the visual path format
+      // Since real courses don't have "status" or "type" yet, we fake it for the UI
+      return courses.map((course, index) => ({
+        id: String(course.id),
+        title: course.name,
+        // Logic: First one active, others locked (just for visual demo)
+        status: index === 0 ? 'active' : 'locked', 
+        type: index % 2 === 0 ? 'lesson' : 'quiz', // Alternate icons
+      }));
+    }
+    return MOCK_PATH;
+  };
+
+  const renderPath = () => {
+    const pathData = getPathData();
+
+    return (
+      <View style={styles.pathContainer}>
+        {pathData.map((item: any, index: number) => {
+          const isCompleted = item.status === 'completed';
+          const isActive = item.status === 'active';
+          const isLocked = item.status === 'locked';
+          
+          // Alternating layout for the "Constellation" feel
+          const isLeft = index % 2 === 0;
+
+          return (
+            <View key={item.id} style={styles.nodeRow}>
+              {/* Connector Line (Vertical) */}
+              {index > 0 && (
+                <View style={[
+                  styles.connectorLine,
+                  { left: isLeft ? '25%' : '75%', backgroundColor: isCompleted || isActive ? THEME.accent : THEME.locked }
+                ]} />
+              )}
+
+              <View style={[
+                styles.nodeWrapper,
+                { alignSelf: isLeft ? 'flex-start' : 'flex-end' }
+              ]}>
+                <TouchableOpacity 
+                  activeOpacity={0.8}
+                  disabled={isLocked}
+                  onPress={() => {
+                    if (isActive) Alert.alert("Starting Course", item.title);
+                    if (isCompleted) Alert.alert("Reviewing Course", item.title);
+                    if (isLocked) Alert.alert("Locked", "Complete previous courses to unlock.");
+                  }}
+                >
+                  {/* Glow Effect for Active */}
+                  {isActive && <View style={styles.nodeGlow} />}
+
+                  <LinearGradient
+                    colors={
+                      isLocked 
+                        ? [THEME.bgCard, THEME.bgCard] 
+                        : isCompleted 
+                          ? [THEME.accent, '#0891b2'] // Cyan gradient
+                          : [THEME.primary, '#4f46e5'] // Indigo gradient
+                    }
+                    style={[
+                      styles.nodeHexagon,
+                      isLocked && styles.nodeLocked,
+                      isActive && styles.nodeActive
+                    ]}
+                  >
+                    <Ionicons 
+                      name={isLocked ? 'lock-closed' : renderNodeIcon(item.type)} 
+                      size={28} 
+                      color={isLocked ? THEME.textMuted : '#fff'} 
+                    />
+                  </LinearGradient>
+
+                  <Text style={[
+                    styles.nodeLabel,
+                    isLocked && { color: THEME.textMuted }
+                  ]} numberOfLines={2}>
+                    {item.title}
+                  </Text>
+                  
+                  {isCompleted && (
+                    <View style={styles.checkBadge}>
+                      <Ionicons name="checkmark" size={12} color="#fff" />
+                    </View>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          );
+        })}
+      </View>
+    );
+  };
+
+  if (loading) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', backgroundColor: THEME.bgDark }]}>
+        <ActivityIndicator size="large" color={THEME.accent} />
+      </View>
+    );
+  }
+
+  // Main View with Path
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={colors.purple[900]} translucent={false} />
-      <LinearGradient
-        colors={[colors.purple[900], colors.purple[700]]}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.header}
-      >
+      <StatusBar barStyle="light-content" backgroundColor={THEME.bgDark} translucent={false} />
+      
+      {/* Header */}
+      <LinearGradient colors={[THEME.bgDark, '#1e1b4b']} style={styles.header}>
         <View style={styles.headerTop}>
-          <Text style={styles.headerTitle}>My Courses</Text>
-          <TouchableOpacity style={styles.headerBtn} activeOpacity={0.8} onPress={() => setJoinVisible(true)}>
-            <Ionicons name="enter-outline" size={18} color="white" />
-            <Text style={styles.headerBtnText}>Join</Text>
-          </TouchableOpacity>
+            <View>
+                <Text style={styles.headerSub}>Current Course</Text>
+                <Text style={styles.headerTitle}>{courses[0]?.name || 'Learning Path'}</Text>
+            </View>
+            <TouchableOpacity style={styles.menuBtn} onPress={() => setJoinVisible(true)}>
+                <Ionicons name="add" size={24} color={THEME.accent} />
+            </TouchableOpacity>
         </View>
-        <Text style={styles.headerSub}>{courses.length} enrolled course{courses.length === 1 ? '' : 's'}</Text>
+        
+        {/* Progress Bar */}
+        <View style={styles.progressContainer}>
+            <View style={styles.progressBarBg}>
+                <LinearGradient 
+                    colors={[THEME.accent, THEME.primary]} 
+                    style={[styles.progressBarFill, { width: `${courses.length > 0 ? Math.min(100, (1 / courses.length) * 100) : 0}%` }]} 
+                    start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+                />
+            </View>
+            <Text style={styles.progressText}>{courses.length > 0 ? `${courses.length} Enrolled` : 'No courses yet'}</Text>
+        </View>
       </LinearGradient>
 
-      <ScrollView
-        style={styles.content}
+      <ScrollView 
+        style={styles.content} 
+        contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 40 }}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
       >
-        {loading ? (
-          <View style={styles.loadingBox}>
-            <ActivityIndicator size="large" color={colors.primary} />
-          </View>
-        ) : courses.length > 0 ? (
-          <View style={styles.list}>
-            {courses.map((course) => (
-              <View key={course.id} style={styles.card}>
-                <View style={styles.cardIconBg}>
-                  <Ionicons name="school" size={20} color={colors.primary} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.cardTitle}>{course.name}</Text>
-                  <Text style={styles.cardMeta}>
-                    {course.educator.display_name} · joined {formatDate(course.created_at)}
-                  </Text>
-                </View>
-              </View>
-            ))}
-          </View>
-        ) : (
-          <View style={styles.emptyCard}>
-            <View style={styles.emptyIconBox}>
-              <Ionicons name="school-outline" size={36} color={colors.purple[400]} />
+        {courses.length === 0 && (
+          <View style={styles.previewBanner}>
+            <View style={styles.previewBannerIcon}>
+              <Ionicons name="planet-outline" size={22} color={THEME.accent} />
             </View>
-            <Text style={styles.emptyTitle}>No courses yet</Text>
-            <Text style={styles.emptyText}>
-              Ask your educator for a join code, then tap the Join button above to enroll.
-            </Text>
-            <TouchableOpacity style={styles.emptyBtn} activeOpacity={0.85} onPress={() => setJoinVisible(true)}>
-              <Ionicons name="enter-outline" size={16} color="white" />
-              <Text style={styles.emptyBtnText}>Join with code</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.previewBannerTitle}>No enrolled courses yet</Text>
+              <Text style={styles.previewBannerText}>
+                Showing a preview path. Join a class with a code to unlock your real learning path.
+              </Text>
+            </View>
+            <TouchableOpacity style={styles.previewJoinBtn} onPress={() => setJoinVisible(true)}>
+              <Text style={styles.previewJoinText}>Join</Text>
             </TouchableOpacity>
           </View>
         )}
+        {renderPath()}
       </ScrollView>
 
+      {/* Floating Action Button for Joining more */}
+      <TouchableOpacity style={styles.fab} onPress={() => setJoinVisible(true)}>
+        <Ionicons name="add" size={24} color={THEME.bgDark} />
+      </TouchableOpacity>
+
+      {/* Join Modal */}
       <Modal animationType="slide" transparent visible={joinVisible} onRequestClose={() => setJoinVisible(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Join a course</Text>
-              <TouchableOpacity onPress={() => setJoinVisible(false)} activeOpacity={0.7}>
-                <Ionicons name="close" size={24} color={colors.text} />
-              </TouchableOpacity>
+            <View style={styles.modalContent}>
+                <Text style={styles.modalTitle}>Join Class</Text>
+                <TextInput
+                    style={styles.codeInput}
+                    placeholder="ENTER CODE"
+                    placeholderTextColor={THEME.textMuted}
+                    value={code}
+                    onChangeText={(t) => setCode(t.toUpperCase())}
+                    autoCapitalize="characters"
+                    autoFocus
+                />
+                <TouchableOpacity style={styles.modalBtn} onPress={handleJoin} disabled={joining}>
+                    {joining ? <ActivityIndicator color="#fff" /> : <Text style={styles.modalBtnText}>Launch</Text>}
+                </TouchableOpacity>
             </View>
-
-            <Text style={styles.label}>Join code</Text>
-            <TextInput
-              style={styles.codeInput}
-              placeholder="e.g. A7X9PQ"
-              placeholderTextColor={colors.textMuted}
-              value={code}
-              onChangeText={(t) => setCode(t.toUpperCase())}
-              autoCapitalize="characters"
-              autoCorrect={false}
-              autoFocus
-              maxLength={10}
-            />
-
-            <TouchableOpacity
-              style={[styles.joinBtn, joining && { opacity: 0.7 }]}
-              activeOpacity={0.85}
-              onPress={handleJoin}
-              disabled={joining}
-            >
-              {joining ? (
-                <ActivityIndicator color="white" />
-              ) : (
-                <>
-                  <Ionicons name="enter" size={18} color="white" />
-                  <Text style={styles.joinBtnText}>Join Course</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
         </KeyboardAvoidingView>
       </Modal>
     </View>
@@ -187,73 +326,280 @@ export default function StudentCoursesScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.background },
+  container: { flex: 1, backgroundColor: THEME.bgDark },
+  
+  // Header
   header: {
     paddingTop: Platform.OS === 'ios' ? 60 : 40,
-    paddingBottom: 24,
+    paddingBottom: 30,
     paddingHorizontal: 24,
-    borderBottomLeftRadius: 32,
-    borderBottomRightRadius: 32,
+    borderBottomLeftRadius: 30,
+    borderBottomRightRadius: 30,
   },
-  headerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
-  headerTitle: { color: 'white', fontSize: 26, fontFamily: 'Montserrat-Bold', fontWeight: '700', letterSpacing: -0.5 },
-  headerBtn: {
+  headerTop: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 5,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 9999,
+    marginBottom: 20,
   },
-  headerBtnText: { color: 'white', fontSize: 13, fontFamily: 'Montserrat-SemiBold', fontWeight: '600' },
-  headerSub: { color: colors.purple[300], fontSize: 14, fontFamily: 'Montserrat-Medium' },
-
-  content: { flex: 1, paddingHorizontal: 24, paddingTop: 20 },
-  loadingBox: { paddingVertical: 60, alignItems: 'center' },
-  list: { gap: 12 },
-
-  card: {
+  headerSub: {
+    color: THEME.accent,
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  headerTitle: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '800',
+    letterSpacing: -0.5,
+  },
+  menuBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  progressContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    backgroundColor: colors.surface,
+  },
+  progressBarBg: {
+    flex: 1,
+    height: 8,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  progressText: {
+    color: THEME.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+
+  // Path / Nodes
+  content: {
+    flex: 1,
+    paddingTop: 40,
+  },
+  pathContainer: {
+    paddingHorizontal: 20,
+    position: 'relative',
+  },
+  nodeRow: {
+    minHeight: 140,
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  connectorLine: {
+    position: 'absolute',
+    top: -40,
+    bottom: 40,
+    width: 2,
+    borderStyle: 'dashed',
+    opacity: 0.5,
+    zIndex: 0,
+  },
+  nodeWrapper: {
+    width: '50%',
+    alignItems: 'center',
+    zIndex: 1,
+  },
+  nodeHexagon: {
+    width: 80,
+    height: 80,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  nodeActive: {
+    width: 90,
+    height: 90,
+    borderRadius: 28,
+    shadowColor: THEME.primary,
+    shadowOpacity: 0.6,
+    shadowRadius: 15,
+  },
+  nodeLocked: {
+    opacity: 0.6,
+    borderWidth: 1,
+    borderColor: THEME.locked,
+  },
+  nodeGlow: {
+    position: 'absolute',
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    backgroundColor: THEME.primary,
+    opacity: 0.2,
+    zIndex: -1,
+  },
+  nodeLabel: {
+    marginTop: 12,
+    color: THEME.textMain,
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
+    paddingHorizontal: 10,
+  },
+  checkBadge: {
+    position: 'absolute',
+    bottom: -5,
+    right: -5,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: THEME.success,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: THEME.bgDark,
+  },
+
+  // Empty State
+  emptyState: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 40,
+  },
+
+  // Preview Banner (shown when no enrolled courses)
+  previewBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.bgCard,
     borderRadius: 16,
     padding: 16,
+    marginHorizontal: 20,
+    marginBottom: 20,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: THEME.border,
+    gap: 12,
   },
-  cardIconBg: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.purple[50], justifyContent: 'center', alignItems: 'center' },
-  cardTitle: { fontSize: 15, fontFamily: 'Montserrat-Bold', fontWeight: '700', color: colors.text, marginBottom: 2 },
-  cardMeta: { fontSize: 12, fontFamily: 'Montserrat-Regular', color: colors.textMuted },
-
-  emptyCard: { backgroundColor: colors.surface, borderRadius: 24, padding: 32, alignItems: 'center', borderWidth: 1.5, borderColor: colors.border, borderStyle: 'dashed' },
-  emptyIconBox: { width: 72, height: 72, borderRadius: 36, backgroundColor: colors.purple[50], justifyContent: 'center', alignItems: 'center', marginBottom: 14 },
-  emptyTitle: { color: colors.purple[700], fontSize: 15, fontFamily: 'Montserrat-Bold', fontWeight: '700', marginBottom: 6 },
-  emptyText: { color: colors.purple[400], fontSize: 13, fontFamily: 'Montserrat-Regular', textAlign: 'center', lineHeight: 19, marginBottom: 16 },
-  emptyBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.primary, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 9999 },
-  emptyBtnText: { color: 'white', fontSize: 13, fontFamily: 'Montserrat-Bold', fontWeight: '700' },
-
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: colors.background, borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 24, paddingBottom: Platform.OS === 'ios' ? 40 : 24 },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  modalTitle: { fontSize: 20, fontFamily: 'Montserrat-Bold', fontWeight: '700', color: colors.text },
-  label: { fontSize: 13, fontFamily: 'Montserrat-SemiBold', fontWeight: '600', color: colors.textMuted, marginBottom: 8 },
-  codeInput: {
-    backgroundColor: colors.surface,
+  previewBannerIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(34, 211, 238, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  previewBannerTitle: {
+    color: THEME.textMain,
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  previewBannerText: {
+    color: THEME.textMuted,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  previewJoinBtn: {
+    backgroundColor: THEME.primary,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
     borderRadius: 12,
-    padding: 14,
-    fontSize: 24,
-    fontFamily: 'Montserrat-Black',
-    fontWeight: '900',
-    letterSpacing: 6,
-    textAlign: 'center',
-    color: colors.purple[700],
-    borderWidth: 1,
-    borderColor: colors.border,
   },
-  joinBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: colors.primary, paddingVertical: 16, borderRadius: 12, marginTop: 24 },
-  joinBtnText: { color: 'white', fontFamily: 'Montserrat-Bold', fontWeight: '700', fontSize: 15 },
+  previewJoinText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  joinBtnHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    gap: 8,
+  },
+  joinBtnText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+
+  // FAB
+  fab: {
+    position: 'absolute',
+    bottom: 30,
+    right: 20,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: THEME.accent,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: THEME.accent,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+
+  // Modal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: THEME.bgCard,
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    padding: 30,
+    paddingBottom: 50,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  modalTitle: {
+    color: '#fff',
+    fontSize: 24,
+    fontWeight: '700',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  codeInput: {
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    borderRadius: 16,
+    padding: 20,
+    fontSize: 24,
+    fontWeight: '800',
+    color: THEME.accent,
+    textAlign: 'center',
+    letterSpacing: 4,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    marginBottom: 20,
+  },
+  modalBtn: {
+    backgroundColor: THEME.primary,
+    padding: 18,
+    borderRadius: 16,
+    alignItems: 'center',
+  },
+  modalBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
 });

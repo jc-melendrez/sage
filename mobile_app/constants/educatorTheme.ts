@@ -8,9 +8,9 @@
  */
 
 export const COLORS = {
-  bg: '#baaeda',
-  bgSecondary: '#dad6e7',
-  surface: '#cdc2dd',
+  bg: '#E4EAF6',
+  bgSecondary: '#DBE1F0',
+  surface: '#EFF3FA',
   surfaceLight: '#5A4F6C',
   purpleDeep: '#4C1D95',
   purpleDark: '#6D28D9',
@@ -24,9 +24,9 @@ export const COLORS = {
   warning: '#F59E0B',
   danger: '#EF4444',
   textPrimary: '#3a107a',
-  textSecondary: '#CBD5E1',
-  textMuted: '#94A3B8',
-  border: 'rgba(44, 29, 0, 0.15)',
+  textSecondary: '#5B5780',
+  textMuted: '#6B6F85',
+  border: 'rgba(76, 29, 149, 0.16)',
 };
 
 export const FONTS = {

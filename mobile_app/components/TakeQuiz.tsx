@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, Alert, Dimensions, Modal } from 'react-native';
+import React, { useState } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, Modal } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 
@@ -28,7 +28,7 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
   if (!questions || questions.length === 0) return null;
 
   const currentQuestion = questions[currentQuestionIndex] || questions[0];
-  const progress = useMemo(() => ((currentQuestionIndex + 1) / questions.length) * 100, [currentQuestionIndex, questions.length]);
+  const progress = ((currentQuestionIndex + 1) / questions.length) * 100;
 
   const getOptionLabel = (index: number) => {
     const labels = ['A', 'B', 'C', 'D', 'E', 'F'];
@@ -215,7 +215,7 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
                 {score !== null && score / questions.length >= 0.7 ? 'Great Job!' : 'Keep Practicing!'}
               </Text>
               <Text style={styles.resultsSubtitle}>
-                You've completed the "{quizTitle}" quiz.
+                You&apos;ve completed the &quot;{quizTitle}&quot; quiz.
               </Text>
             </View>
 

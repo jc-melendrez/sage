@@ -7,7 +7,6 @@
 DEBUG = "True"
 GROQ_MODEL_NAME = "llama-3.3-70b-versatile"
 FIREBASE_PROJECT_ID = "sage-a47b8"
-EXPO_PUBLIC_API_URL = "http://localhost:8000/api"
 
 # NOTE: Secrets (DJANGO_SECRET_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY,
 # FIREBASE_SERVICE_ACCOUNT) are loaded from committed root .env.
@@ -81,7 +80,7 @@ run_windows = ".venv\\Scripts\\python test_api.py"
 [tasks.mobile_start]
 description = "Start Expo dev server"
 dir = "mobile_app"
-run = "npm start"
+run = "npx expo start -c"
 
 [tasks.mobile_web]
 description = "Start Expo for web"

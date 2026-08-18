@@ -18,6 +18,8 @@ def create_user_profile(firebase_uid: str, data: dict):
         'email': data.get('email', ''),
         'first_name': data.get('first_name', ''),
         'last_name': data.get('last_name', ''),
+        'role': data.get('role', 'student'),
+        'schoolId': data.get('schoolId'),
         'is_student': data.get('is_student', True),
         'is_educator': data.get('is_educator', False),
         'is_admin': data.get('is_admin', False),

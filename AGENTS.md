@@ -43,7 +43,13 @@ python manage.py test            # runs Django tests
 ### Backend key facts
 
 - **Django apps**: `users`, `ai_assistant`, `game`
-- **Custom user model**: `users.User` (extends `AbstractUser`) — has XP, level, streak, role flags (`is_student`/`is_educator`/`is_admin`)
+- **Custom user model**: `users.User` (extends `AbstractUser`) — single `role` field (`superadmin`/`admin`/`educator`/`student`) + `school` FK tenant + `token_version` (JWT revocation). Legacy flags (`is_student`/`is_educator`/`is_admin`) are derived from `role` in `save()`. Custom `SageUserManager` sets `role='superadmin'` for `createsuperuser`
+- **Roles & tenancy**: superadmin = global scope, admin = school-scoped (`school_id` comes from JWT, never the URL). Permissions in `users/permissions.py` (`IsSuperadmin`, `IsSchoolAdmin`, `IsSameSchool`); role changes audited in `RoleChangeLog` + bump `token_version` to kill outstanding JWTs (stale token → 401)
+- **Creating superusers / admins**:
+  - `python manage.py createsuperuser` → role `superadmin` (via `SageUserManager`)
+  - Superadmin interface: `POST /api/users/superadmin/users/` with `role` + `school`; for `role='superadmin'` it also auto-provisions a **Firebase Auth account** (email+password) so the user can sign in on the app immediately (offline/duplicate → warning, still creates the Django user)
+  - School admins: `POST /api/users/superadmin/schools/<id>/admins/` or the Admin's `.../role/` endpoint
+- **Mobile login is Firebase-only**: the app calls `signInWithEmailAndPassword` then exchanges the ID token at `/api/users/firebase-login/` (matches Django user by `firebase_uid`, falling back to email). A backend-created user without a Firebase account can be linked by creating a Firebase Auth user with the same email (or by being created via the superadmin interface, which provisions it automatically)
 - **API endpoints**:
   - `/api/users/register/`, `/api/users/login/` (JWT), `/api/users/token/refresh/`
   - `/api/users/me/` (current user profile, requires JWT)

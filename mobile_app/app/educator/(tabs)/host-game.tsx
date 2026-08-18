@@ -64,6 +64,8 @@ export default function HostGameScreen() {
   const [useFileUpload, setUseFileUpload] = useState(false);
   const [selectedFile, setSelectedFile] = useState<{ name: string; uri: string; mimeType: string } | null>(null);
   const [timePerQuestion, setTimePerQuestion] = useState('15');
+  const [teamMode, setTeamMode] = useState(false);
+  const [teamCount, setTeamCount] = useState(2);
   const [loading, setLoading] = useState(false);
   const [segWidth, setSegWidth] = useState(0);
 
@@ -145,6 +147,8 @@ export default function HostGameScreen() {
           body: JSON.stringify({
             quizId: selectedQuiz.id,
             timePerQuestion: parseInt(timePerQuestion) || 15,
+            teamMode,
+            teamCount: teamMode ? teamCount : undefined,
           }),
         });
         data = await response.json();
@@ -153,6 +157,8 @@ export default function HostGameScreen() {
         const formData = new FormData();
         formData.append('file', { uri: selectedFile!.uri, name: selectedFile!.name, type: selectedFile!.mimeType } as any);
         formData.append('timePerQuestion', timePerQuestion);
+        formData.append('teamMode', String(teamMode));
+        formData.append('teamCount', String(teamCount));
         const response = await fetch(`${API_BASE_URL}/game/create/`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}` },
@@ -378,6 +384,51 @@ export default function HostGameScreen() {
                     />
                   </View>
                 </View>
+
+                <View style={styles.divider} />
+
+                <View style={styles.settingRow}>
+                  <View style={styles.settingChip}>
+                    <Ionicons name="people" size={16} color={COLORS.success} />
+                  </View>
+                  <View style={styles.settingBody}>
+                    <Text style={styles.settingLabel}>Team Mode</Text>
+                    <Text style={styles.settingHint}>Split players into teams that compete for the same score</Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.toggle, teamMode && styles.toggleOn]}
+                    onPress={() => setTeamMode(!teamMode)}
+                    activeOpacity={0.8}
+                  >
+                    <View style={[styles.toggleKnob, teamMode && styles.toggleKnobOn]} />
+                  </TouchableOpacity>
+                </View>
+
+                {teamMode && (
+                  <>
+                    <View style={styles.divider} />
+                    <View style={styles.settingRow}>
+                      <View style={styles.settingChip}>
+                        <Ionicons name="git-network" size={16} color={COLORS.warning} />
+                      </View>
+                      <View style={styles.settingBody}>
+                        <Text style={styles.settingLabel}>Number of Teams</Text>
+                        <View style={styles.teamCountRow}>
+                          {[2, 3, 4].map(n => (
+                            <TouchableOpacity
+                              key={n}
+                              style={[styles.teamCountChip, teamCount === n && styles.teamCountChipActive]}
+                              onPress={() => setTeamCount(n)}
+                              activeOpacity={0.7}
+                            >
+                              <Text style={[styles.teamCountChipText, teamCount === n && styles.teamCountChipTextActive]}>{n}</Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      </View>
+                    </View>
+                  </>
+                )}
               </View>
             </View>
             </Animated.View>
@@ -677,7 +728,31 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
   },
+  settingHint: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted },
   divider: { height: 1, backgroundColor: 'rgba(127,119,221,0.12)', marginVertical: 14 },
+
+  toggle: {
+    width: 48, height: 28, borderRadius: 14,
+    backgroundColor: COLORS.surfaceLight, borderWidth: 1, borderColor: 'rgba(127,119,221,0.25)',
+    padding: 2, justifyContent: 'center',
+  },
+  toggleOn: { backgroundColor: 'rgba(16,185,129,0.25)', borderColor: 'rgba(16,185,129,0.5)' },
+  toggleKnob: {
+    width: 22, height: 22, borderRadius: 11, backgroundColor: COLORS.textMuted,
+  },
+  toggleKnobOn: {
+    backgroundColor: COLORS.success,
+    alignSelf: 'flex-end',
+  },
+  teamCountRow: { flexDirection: 'row', gap: 8, marginTop: 2 },
+  teamCountChip: {
+    flex: 1, borderRadius: 12, paddingVertical: 10,
+    backgroundColor: COLORS.bg, borderWidth: 1.5, borderColor: 'rgba(127,119,221,0.25)',
+    alignItems: 'center',
+  },
+  teamCountChipActive: { borderColor: COLORS.warning, backgroundColor: 'rgba(245,158,11,0.12)' },
+  teamCountChipText: { fontSize: 14, fontFamily: FONTS.bold, color: COLORS.textMuted },
+  teamCountChipTextActive: { color: '#FBBF24' },
 
   /* ── CTA ── */
   ctaWrap: {
