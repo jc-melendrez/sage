@@ -30,9 +30,10 @@ const FONTS = {
   medium: 'Montserrat-Medium',
 };
 
-function getNodeStatus(node: LearningNode): 'completed' | 'current' | 'locked' {
+function getNodeStatus(node: LearningNode, index: number, allNodes: LearningNode[]): 'completed' | 'current' | 'locked' {
   if (node.progress?.passed) return 'completed';
-  if (node.progress && !node.progress.passed) return 'current';
+  const allPriorCompleted = allNodes.slice(0, index).every(n => n.progress?.passed);
+  if (allPriorCompleted) return 'current';
   return 'locked';
 }
 
@@ -152,7 +153,7 @@ export default function CourseDetailScreen() {
 
                 <View style={styles.nodeRow}>
                   {topic.nodes.map((node, i) => {
-                    const status = getNodeStatus(node);
+                    const status = getNodeStatus(node, i, topic.nodes);
                     const cfg = NODE_TYPE_CONFIG[node.node_type];
                     return (
                       <View key={node.id} style={styles.nodeDotWrap}>

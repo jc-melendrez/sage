@@ -28,9 +28,10 @@ const FONTS = {
   medium: 'Montserrat-Medium',
 };
 
-function getNodeStatus(node: LearningNode): 'completed' | 'current' | 'locked' {
+function getNodeStatus(node: LearningNode, index: number, allNodes: LearningNode[]): 'completed' | 'current' | 'locked' {
   if (node.progress?.passed) return 'completed';
-  if (node.progress && !node.progress.passed) return 'current';
+  const allPriorCompleted = allNodes.slice(0, index).every(n => n.progress?.passed);
+  if (allPriorCompleted) return 'current';
   return 'locked';
 }
 
@@ -62,13 +63,13 @@ export default function TopicPathScreen() {
     }
   };
 
-  const handleNodePress = (node: LearningNode) => {
-    const status = getNodeStatus(node);
+  const handleNodePress = (node: LearningNode, index: number) => {
+    const status = getNodeStatus(node, index, nodes);
     if (status === 'locked') return;
     router.push(`/course/node/${node.id}` as any);
   };
 
-  const completedCount = nodes.filter(n => getNodeStatus(n) === 'completed').length;
+  const completedCount = nodes.filter((n, i) => getNodeStatus(n, i, nodes) === 'completed').length;
 
   if (loading) {
     return (
@@ -107,7 +108,7 @@ export default function TopicPathScreen() {
 
         {/* Vertical path */}
         {nodes.map((node, index) => {
-          const status = getNodeStatus(node);
+          const status = getNodeStatus(node, index, nodes);
           const cfg = NODE_TYPE_CONFIG[node.node_type];
           const isFirst = index === 0;
           const isLast = index === nodes.length - 1;
@@ -129,7 +130,7 @@ export default function TopicPathScreen() {
                   status === 'locked' && styles.nodeWrapLocked,
                 ]}
                 disabled={status === 'locked'}
-                onPress={() => handleNodePress(node)}
+                onPress={() => handleNodePress(node, index)}
                 activeOpacity={0.8}
               >
                 {status === 'current' && <View style={[styles.glow, { backgroundColor: cfg.color }]} />}
