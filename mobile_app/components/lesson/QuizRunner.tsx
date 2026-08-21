@@ -74,6 +74,16 @@ export default function QuizRunner({ questions, passingScore = 70, onFinish }: Q
 
   const correctSoFar = results.filter(r => r.correct).length;
 
+  if (questions.length === 0) {
+    return (
+      <View style={styles.container}>
+        <Text style={{ fontSize: 15, fontFamily: FONTS.medium, color: COLORS.textMuted, textAlign: 'center', marginTop: 60 }}>
+          No questions available for this activity.
+        </Text>
+      </View>
+    );
+  }
+
   return (
     <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
       {/* Progress */}

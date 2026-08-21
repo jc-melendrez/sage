@@ -87,14 +87,33 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS('Database seeding completed!'))
 
-        # --- Seed Courses with Topics + Learning Nodes ---
-        course, course_created = Course.objects.get_or_create(
-            name='Python Fundamentals',
-            educator=user,
-            defaults={'description': 'A hands-on course covering Python basics through intermediate topics.'},
+        # --- Create educator user ---
+        educator, edu_created = User.objects.get_or_create(
+            username='educator',
+            defaults={
+                'email': 'educator@example.com',
+                'first_name': 'Ms',
+                'last_name': 'Teacher',
+                'role': 'educator',
+            }
         )
-        if course_created:
-            self.stdout.write(self.style.SUCCESS(f'Created course: {course.name} (join code: {course.join_code})'))
+        if edu_created:
+            educator.set_password('testpass123')
+            educator.save()
+            self.stdout.write(self.style.SUCCESS(f'Created educator: {educator.username}'))
+
+        # --- Seed Courses with Topics + Learning Nodes ---
+        Course.objects.filter(name='Python Fundamentals').delete()
+        course = Course.objects.create(
+            name='Python Fundamentals',
+            educator=educator,
+            description='A hands-on course covering Python basics through intermediate topics.',
+        )
+        self.stdout.write(self.style.SUCCESS(f'Created course: {course.name} (join code: {course.join_code})'))
+
+        # Enroll the student
+        course.students.add(user)
+        self.stdout.write(self.style.SUCCESS(f'Enrolled {user.username} in {course.name}'))
 
         topics_data = [
             {

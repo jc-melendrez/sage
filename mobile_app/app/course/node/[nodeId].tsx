@@ -56,10 +56,11 @@ export default function NodePlayerScreen() {
 
       if (isLearnContent(data.content_json) && data.content_json.blocks?.length > 0) {
         setPhase('lesson');
-      } else if (isPracticeContent(data.content_json)) {
+      } else if (isPracticeContent(data.content_json) && data.content_json.questions?.length > 0) {
         setPhase('quiz');
       } else {
-        setPhase('lesson');
+        setError('This activity has no content yet.');
+        setPhase('error');
       }
     } catch (e: any) {
       setError(e?.message || 'Failed to load activity');
@@ -79,8 +80,9 @@ export default function NodePlayerScreen() {
       setCurrentBlockIndex(prev => prev + 1);
     } else {
       // All blocks done — compute learn score and submit
-      const total = interactionsTotal || 1;
-      const score = Math.round((interactionsCorrect / total) * 100) || 100;
+      const score = interactionsTotal > 0
+        ? Math.round((interactionsCorrect / interactionsTotal) * 100)
+        : 100;
       submitScore(score);
     }
   }, [node, currentBlockIndex, interactionsCorrect, interactionsTotal]);

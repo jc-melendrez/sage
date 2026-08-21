@@ -56,7 +56,7 @@ export default function ResultsSummary({
         colors={passed ? ['#10B981', '#059669'] : ['#6D28D9', '#4C1D95']}
         style={styles.hero}
       >
-        <ProgressRing progress={score / 100} size={100} strokeWidth={8} fillColor="white" />
+        <ProgressRing progress={score} size={100} strokeWidth={8} fillColor="white" />
         <View style={styles.heroRingOverlay}>
           <Text style={styles.heroScore}>{score}%</Text>
         </View>

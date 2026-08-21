@@ -127,7 +127,7 @@ export default function CourseDetailScreen() {
                     ) : null}
                   </View>
                   <ProgressRing
-                    progress={pct}
+                    progress={pct * 100}
                     size={52}
                     strokeWidth={5}
                     fillColor={pct >= 1 ? COLORS.success : COLORS.purpleVibrant}

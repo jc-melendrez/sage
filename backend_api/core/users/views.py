@@ -613,7 +613,11 @@ class CompleteNodeView(APIView):
         if not course.students.filter(id=request.user.id).exists():
             return Response({'error': 'Not enrolled in this course'}, status=status.HTTP_403_FORBIDDEN)
 
-        score = int(request.data.get('score', 0))
+        try:
+            score = int(request.data.get('score', 0))
+        except (ValueError, TypeError):
+            return Response({'error': 'Invalid score'}, status=status.HTTP_400_BAD_REQUEST)
+
         passed = score >= node.required_score
 
         progress, created = NodeProgress.objects.get_or_create(
@@ -621,17 +625,19 @@ class CompleteNodeView(APIView):
             defaults={'score': score, 'passed': passed, 'attempts': 1}
         )
         if not created:
+            was_already_passed = progress.passed
             progress.score = score
             progress.passed = passed
             progress.attempts += 1
             progress.save()
+        else:
+            was_already_passed = False
 
         xp_result = None
-        if passed:
+        if passed and not was_already_passed:
             from django.utils import timezone
-            if not progress.completed_at:
-                progress.completed_at = timezone.now()
-                progress.save(update_fields=['completed_at'])
+            progress.completed_at = timezone.now()
+            progress.save(update_fields=['completed_at'])
             xp_result = award_xp(request.user, node.xp_reward, source='learning_node')
 
         return Response({
