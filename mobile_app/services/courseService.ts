@@ -1,4 +1,5 @@
 import { apiCall } from './apiClient';
+import { CoursePathTopic, LearningNode, NodeCompleteResponse } from '@/types/learning';
 
 export interface CourseStudent {
   id: number;
@@ -77,5 +78,22 @@ export async function removeStudentFromCourse(courseId: number, userId: number):
   return apiCall<CourseRoster>(`/users/courses/${courseId}/remove-student/`, {
     method: 'POST',
     body: JSON.stringify({ user_id: userId }),
+  });
+}
+
+// --- Learning Path ---
+
+export async function getCoursePath(courseId: number): Promise<CoursePathTopic[]> {
+  return apiCall<CoursePathTopic[]>(`/users/courses/${courseId}/path/`);
+}
+
+export async function getNode(nodeId: number): Promise<LearningNode> {
+  return apiCall<LearningNode>(`/users/nodes/${nodeId}/`);
+}
+
+export async function completeNode(nodeId: number, score: number): Promise<NodeCompleteResponse> {
+  return apiCall<NodeCompleteResponse>(`/users/nodes/${nodeId}/complete/`, {
+    method: 'POST',
+    body: JSON.stringify({ score }),
   });
 }

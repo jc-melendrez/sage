@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { colors } from '@/constants/theme';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
 
@@ -55,6 +55,7 @@ const MOCK_PATH = [
 ];
 
 export default function StudentCoursesScreen() {
+  const router = useRouter();
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -184,9 +185,11 @@ export default function StudentCoursesScreen() {
                   activeOpacity={0.8}
                   disabled={isLocked}
                   onPress={() => {
-                    if (isActive) Alert.alert("Starting Course", item.title);
-                    if (isCompleted) Alert.alert("Reviewing Course", item.title);
-                    if (isLocked) Alert.alert("Locked", "Complete previous courses to unlock.");
+                    if (isActive || isCompleted) {
+                      router.push(`/course/${item.id}` as any);
+                    } else if (isLocked) {
+                      Alert.alert("Locked", "Complete previous courses to unlock.");
+                    }
                   }}
                 >
                   {/* Glow Effect for Active */}
