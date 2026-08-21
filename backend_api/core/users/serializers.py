@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Badge, Recommendation, Session, Activity, Course, School, User, RoleChangeLog
+from .models import Badge, Recommendation, Session, Activity, Course, School, User, RoleChangeLog, Topic, LearningNode, NodeProgress
 # --- Your Related Serializers (Unchanged, these are great!) ---
 from django.contrib.auth import get_user_model
 
@@ -250,3 +250,56 @@ class RoleChangeLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = RoleChangeLog
         fields = ['id', 'changed_by', 'changed_by_username', 'target_user', 'target_username', 'from_role', 'to_role', 'created_at']
+
+
+# --- Learning Path Serializers ---
+
+class TopicSerializer(serializers.ModelSerializer):
+    node_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Topic
+        fields = ['id', 'course', 'title', 'description', 'order', 'node_count', 'created_at']
+        read_only_fields = ['created_at']
+
+    def get_node_count(self, obj):
+        return obj.nodes.count()
+
+
+class LearningNodeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LearningNode
+        fields = ['id', 'topic', 'node_type', 'title', 'description', 'content_json', 'order', 'xp_reward', 'required_score', 'estimated_minutes', 'created_at']
+        read_only_fields = ['created_at']
+
+
+class NodeProgressSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NodeProgress
+        fields = ['id', 'user', 'node', 'score', 'passed', 'completed_at', 'attempts', 'updated_at']
+        read_only_fields = ['completed_at', 'updated_at']
+
+
+class CoursePathTopicSerializer(serializers.ModelSerializer):
+    """Topic with nested nodes and user progress — used in the course path endpoint."""
+    nodes = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Topic
+        fields = ['id', 'title', 'description', 'order', 'nodes']
+
+    def get_nodes(self, obj):
+        request = self.context.get('request')
+        user = request.user if request else None
+        nodes = obj.nodes.all()
+        result = []
+        for node in nodes:
+            node_data = LearningNodeSerializer(node).data
+            if user:
+                try:
+                    progress = NodeProgress.objects.get(user=user, node=node)
+                    node_data['progress'] = NodeProgressSerializer(progress).data
+                except NodeProgress.DoesNotExist:
+                    node_data['progress'] = None
+            result.append(node_data)
+        return result

@@ -228,3 +228,63 @@ class RoleChangeLog(models.Model):
 
     def __str__(self):
         return f"{self.changed_by.username} {self.from_role}->{self.to_role} for {self.target_user.username}"
+
+
+# --- LEARNING PATH: Topics, Nodes, and Progress ---
+
+class Topic(models.Model):
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='topics')
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default='')
+    order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['order']
+
+    def __str__(self):
+        return f"{self.course.name} > {self.title}"
+
+
+class LearningNode(models.Model):
+    NODE_TYPES = [
+        ('learn', 'Learn'),
+        ('practice', 'Practice'),
+        ('challenge', 'Challenge'),
+        ('group_activity', 'Group Activity'),
+        ('review', 'Review'),
+        ('mastery', 'Mastery'),
+    ]
+
+    topic = models.ForeignKey(Topic, on_delete=models.CASCADE, related_name='nodes')
+    node_type = models.CharField(max_length=20, choices=NODE_TYPES)
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default='')
+    content_json = models.JSONField(default=dict)
+    order = models.IntegerField(default=0)
+    xp_reward = models.IntegerField(default=25)
+    required_score = models.IntegerField(default=70)
+    estimated_minutes = models.IntegerField(default=5)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['order']
+
+    def __str__(self):
+        return f"{self.topic.title} > {self.title} ({self.node_type})"
+
+
+class NodeProgress(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='node_progress')
+    node = models.ForeignKey(LearningNode, on_delete=models.CASCADE)
+    score = models.IntegerField(default=0)
+    passed = models.BooleanField(default=False)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.IntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('user', 'node')
+
+    def __str__(self):
+        return f"{self.user.username} - {self.node.title} ({'pass' if self.passed else 'fail'})"

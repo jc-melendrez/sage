@@ -6,26 +6,27 @@ class Command(BaseCommand):
     help = 'Seed the database with sample data'
 
     def handle(self, *args, **options):
-        # Create sample user
         user, created = User.objects.get_or_create(
             id=1,
             defaults={
-                'name': 'Jomar Melendrez',
+                'username': 'jomar',
                 'email': 'jomar@example.com',
-                'streak_count': 7,
-                'total_achievements': 5,
+                'first_name': 'Jomar',
+                'last_name': 'Melendrez',
+                'role': 'student',
             }
         )
-        
+
         if created:
-            self.stdout.write(self.style.SUCCESS(f'Created user: {user.name}'))
-        
-        # Create sample badges
+            user.set_password('testpass123')
+            user.save()
+            self.stdout.write(self.style.SUCCESS(f'Created user: {user.username}'))
+
         badge_data = [
             {'icon': '🏅', 'name': 'First Steps'},
             {'icon': '🏆', 'name': 'Top Performer'},
         ]
-        
+
         for badge_info in badge_data:
             badge, created = Badge.objects.get_or_create(
                 user=user,
@@ -34,13 +35,12 @@ class Command(BaseCommand):
             )
             if created:
                 self.stdout.write(self.style.SUCCESS(f'Created badge: {badge.name}'))
-        
-        # Create sample recommendations
+
         rec_data = [
             {'title': 'Join Study Group Alpha', 'description': 'A new study group is forming for your core classes'},
             {'title': 'Review Algebra Concepts', 'description': 'Based on your recent activity, strengthening algebra fundamentals would help'},
         ]
-        
+
         for rec_info in rec_data:
             rec, created = Recommendation.objects.get_or_create(
                 user=user,
@@ -49,13 +49,12 @@ class Command(BaseCommand):
             )
             if created:
                 self.stdout.write(self.style.SUCCESS(f'Created recommendation: {rec.title}'))
-        
-        # Create sample sessions
+
         session_data = [
             {'title': 'Math Study Session', 'description': 'Collaborative problem-solving session', 'participants': 4},
             {'title': 'Physics Group Work', 'description': 'Working on Lab Report 3', 'participants': 3},
         ]
-        
+
         for session_info in session_data:
             session, created = Session.objects.get_or_create(
                 user=user,
@@ -67,14 +66,13 @@ class Command(BaseCommand):
             )
             if created:
                 self.stdout.write(self.style.SUCCESS(f'Created session: {session.title}'))
-        
-        # Create sample activities
+
         activity_data = [
             {'title': 'Completed Quiz 5', 'description': 'Scored 95% on calculus quiz', 'activity_type': 'quiz'},
             {'title': 'Participated in Session', 'description': 'Active member in Study Group Alpha', 'activity_type': 'participation'},
             {'title': 'Homework Submitted', 'description': 'Submitted Linear Algebra homework', 'activity_type': 'homework'},
         ]
-        
+
         for activity_info in activity_data:
             activity, created = Activity.objects.get_or_create(
                 user=user,
@@ -86,5 +84,5 @@ class Command(BaseCommand):
             )
             if created:
                 self.stdout.write(self.style.SUCCESS(f'Created activity: {activity.title}'))
-        
+
         self.stdout.write(self.style.SUCCESS('Database seeding completed!'))

@@ -37,6 +37,15 @@ urlpatterns = [
     path('courses/<int:course_id>/add-student/', views.AddStudentToCourseView.as_view(), name='course_add_student'),
     path('courses/<int:course_id>/remove-student/', views.RemoveStudentFromCourseView.as_view(), name='course_remove_student'),
 
+    # --- Learning Path ---
+    path('courses/<int:course_id>/topics/', views.CourseTopicsView.as_view(), name='course_topics'),
+    path('courses/<int:course_id>/path/', views.CoursePathView.as_view(), name='course_path'),
+    path('courses/<int:course_id>/topics/create/', views.TopicCreateView.as_view(), name='topic_create'),
+    path('topics/<int:topic_id>/nodes/create/', views.NodeCreateView.as_view(), name='node_create'),
+    path('topics/<int:topic_id>/mistakes/', views.TopicMistakesView.as_view(), name='topic_mistakes'),
+    path('nodes/<int:node_id>/', views.NodeDetailView.as_view(), name='node_detail'),
+    path('nodes/<int:node_id>/complete/', views.CompleteNodeView.as_view(), name='node_complete'),
+
     path('test-xp/', views.AddXpTestView.as_view(), name='add_xp_test'),
     path('test-model-config/', views.TestModelConfigView.as_view(), name='test_model_config'),
     path('lessons/generate/', views.generate_lesson, name='generate_lesson'),

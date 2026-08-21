@@ -9,7 +9,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, School, RoleChangeLog
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, School, RoleChangeLog, Topic, LearningNode, NodeProgress
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
@@ -27,6 +27,7 @@ from .serializers import (
     SchoolSerializer, SchoolCreateSerializer, SchoolAdminCreateSerializer,
     AdminUserCreateSerializer, AdminUserUpdateSerializer, AdminRoleUpdateSerializer,
     SuperadminUserUpdateSerializer, SuperadminCreateUserSerializer, RoleChangeLogSerializer,
+    TopicSerializer, LearningNodeSerializer, NodeProgressSerializer, CoursePathTopicSerializer,
 )
 from .permissions import IsSuperadmin, IsSchoolAdmin, IsSameSchool
 from .utils.file_parser import extract_text_from_file
@@ -42,26 +43,7 @@ from core.firestore_service import (
 )
 
 
-class UserMeView(APIView):
-    permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        firebase_uid = request.user.firebase_uid  # Still resolved via JWT
-        profile = get_user_profile(firebase_uid)
-        if not profile:
-            return Response({'error': 'User not found'}, status=404)
-        
-        # Attach badges (sub-collection)
-        profile['badges'] = get_badges(firebase_uid)
-        profile['id'] = firebase_uid  # Use UID as the ID
-        # Ensure role/school always reflect the DB source of truth.
-        profile['role'] = request.user.role
-        profile['schoolId'] = request.user.school_id
-        profile['is_student'] = request.user.is_student
-        profile['is_educator'] = request.user.is_educator
-        profile['is_admin'] = request.user.is_admin
-        return Response(profile)
-    
 class FirebaseLoginView(APIView):
     permission_classes = [AllowAny]
 
@@ -556,7 +538,180 @@ class RemoveStudentFromCourseView(APIView):
 
         return Response(CourseRosterSerializer(course).data)
 
-    
+
+# --- Learning Path Views ---
+
+class CourseTopicsView(APIView):
+    """List topics for a course."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, course_id):
+        try:
+            course = Course.objects.get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not (request.user == course.educator or course.students.filter(id=request.user.id).exists()):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+
+        topics = course.topics.all()
+        return Response(TopicSerializer(topics, many=True).data)
+
+
+class CoursePathView(APIView):
+    """Full learning path for a course: topics → nodes → user progress."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, course_id):
+        try:
+            course = Course.objects.get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not (request.user == course.educator or course.students.filter(id=request.user.id).exists()):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+
+        topics = course.topics.all()
+        return Response(CoursePathTopicSerializer(topics, many=True, context={'request': request}).data)
+
+
+class NodeDetailView(APIView):
+    """Get a single node with content and user progress."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, node_id):
+        try:
+            node = LearningNode.objects.select_related('topic__course').get(id=node_id)
+        except LearningNode.DoesNotExist:
+            return Response({'error': 'Node not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        course = node.topic.course
+        if not (request.user == course.educator or course.students.filter(id=request.user.id).exists()):
+            return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+
+        data = LearningNodeSerializer(node).data
+        try:
+            progress = NodeProgress.objects.get(user=request.user, node=node)
+            data['progress'] = NodeProgressSerializer(progress).data
+        except NodeProgress.DoesNotExist:
+            data['progress'] = None
+
+        return Response(data)
+
+
+class CompleteNodeView(APIView):
+    """Mark a node as complete, award XP, return gamification results."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, node_id):
+        try:
+            node = LearningNode.objects.select_related('topic__course').get(id=node_id)
+        except LearningNode.DoesNotExist:
+            return Response({'error': 'Node not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        course = node.topic.course
+        if not course.students.filter(id=request.user.id).exists():
+            return Response({'error': 'Not enrolled in this course'}, status=status.HTTP_403_FORBIDDEN)
+
+        score = int(request.data.get('score', 0))
+        passed = score >= node.required_score
+
+        progress, created = NodeProgress.objects.get_or_create(
+            user=request.user, node=node,
+            defaults={'score': score, 'passed': passed, 'attempts': 1}
+        )
+        if not created:
+            progress.score = score
+            progress.passed = passed
+            progress.attempts += 1
+            progress.save()
+
+        xp_result = None
+        if passed:
+            from django.utils import timezone
+            if not progress.completed_at:
+                progress.completed_at = timezone.now()
+                progress.save(update_fields=['completed_at'])
+            xp_result = award_xp(request.user, node.xp_reward, source='learning_node')
+
+        return Response({
+            'score': score,
+            'passed': passed,
+            'attempts': progress.attempts,
+            'xp': xp_result,
+        })
+
+
+class TopicCreateView(APIView):
+    """Create a topic within a course (educator only)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, course_id):
+        try:
+            course = Course.objects.get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user != course.educator:
+            return Response({'error': 'Only the educator can add topics'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = TopicSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save(course=course)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class NodeCreateView(APIView):
+    """Create a node within a topic (educator only)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, topic_id):
+        try:
+            topic = Topic.objects.select_related('course').get(id=topic_id)
+        except Topic.DoesNotExist:
+            return Response({'error': 'Topic not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user != topic.course.educator:
+            return Response({'error': 'Only the educator can add nodes'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = LearningNodeSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save(topic=topic)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class TopicMistakesView(APIView):
+    """Return mistakes from practice/mastery nodes in a topic (for Review nodes)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, topic_id):
+        try:
+            topic = Topic.objects.get(id=topic_id)
+        except Topic.DoesNotExist:
+            return Response({'error': 'Topic not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        nodes = topic.nodes.filter(node_type__in=['practice', 'challenge', 'mastery'])
+        mistakes = []
+        for node in nodes:
+            cp = NodeProgress.objects.filter(user=request.user, node=node, passed=False).first()
+            if cp and cp.score < 100:
+                content = node.content_json
+                for q in content.get('questions', []):
+                    mistakes.append({
+                        'node_id': node.id,
+                        'node_title': node.title,
+                        'question': q.get('question', ''),
+                        'options': q.get('options', []),
+                        'correct_answer': q.get('correct_answer', ''),
+                        'explanation': q.get('explanation', ''),
+                    })
+
+        return Response(mistakes)
+
 
 class AddXpTestView(APIView):
     permission_classes = [IsAuthenticated]

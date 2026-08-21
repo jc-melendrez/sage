@@ -12,7 +12,6 @@ import { useRouter } from 'expo-router';
 import { getToken, getCurrentUser } from '@/services/authService';
 import { completeQuiz, completeLesson, getMyProgress } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
-import LessonDisplay from '../../components/LessonDisplay';
 import LessonGenerator from '@/components/LessonGenerator';
 import CourseCard from '@/components/courses/CourseCard';
 import CourseDetailModal from '@/components/courses/CourseDetailModal';
@@ -142,8 +141,6 @@ export default function ActivitiesScreen() {
 
   // --- Generate Lesson Modal ---
   const [isGenerateLessonModalOpen, setIsGenerateLessonModalOpen] = useState(false);
-  const [isLessonDisplayModalOpen, setIsLessonDisplayModalOpen] = useState(false);
-  const [lessonToDisplay, setLessonToDisplay] = useState<any>(null);
 
   // --- Quiz Generator State ---
   const [isGenerateQuizModalOpen, setIsGenerateQuizModalOpen] = useState(false);
@@ -450,13 +447,18 @@ export default function ActivitiesScreen() {
   };
 
   const takeQuizForLevel = (level: Level) => {
-    const quizQuestions = level.quiz.map((q, idx) => ({
-      id: idx + 1,
-      question: q.question,
-      type: 'Multiple Choice',
-      options: q.options,
-      correct_answer: q.correct_answer,
-    }));
+    const quizQuestions = level.quiz.map((q, idx) => {
+      const correctAnswer = typeof q.correct_answer === 'number'
+        ? q.options[q.correct_answer]
+        : q.correct_answer;
+      return {
+        id: idx + 1,
+        question: q.question,
+        type: 'Multiple Choice' as const,
+        options: q.options,
+        correct_answer: correctAnswer,
+      };
+    });
     setQuizToTake({
       title: `${level.difficulty} Quiz`,
       questions: quizQuestions,
@@ -919,16 +921,6 @@ export default function ActivitiesScreen() {
             levelProgress={levelProgress}
             onTakeQuiz={takeQuizForLevel}
             onClose={() => setIsCourseModalOpen(false)}
-          />
-        )}
-      </Modal>
-
-      {/* LEGACY LESSON DISPLAY MODAL */}
-      <Modal visible={isLessonDisplayModalOpen} animationType="slide">
-        {lessonToDisplay && (
-          <LessonDisplay
-            lesson={lessonToDisplay}
-            onClose={() => setIsLessonDisplayModalOpen(false)}
           />
         )}
       </Modal>
