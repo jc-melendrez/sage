@@ -23,6 +23,7 @@ export default function SuperAdminCreateUser() {
   const [role, setRole] = useState<Role>('superadmin');
   const [schoolId, setSchoolId] = useState<number | null>(null);
   const [schools, setSchools] = useState<School[]>([]);
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const loadSchools = useCallback(async () => {
@@ -106,7 +107,12 @@ export default function SuperAdminCreateUser() {
           <Text style={styles.sectionLabel}>ACCOUNT</Text>
           <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#64748B" value={username} onChangeText={setUsername} autoCapitalize="none" />
           <TextInput style={styles.input} placeholder="Email" placeholderTextColor="#64748B" value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" />
-          <TextInput style={styles.input} placeholder="Password (min 8 chars)" placeholderTextColor="#64748B" value={password} onChangeText={setPassword} secureTextEntry />
+          <View style={styles.passwordRow}>
+            <TextInput style={[styles.input, { flex: 1, marginBottom: 0 }]} placeholder="Password (min 8 chars)" placeholderTextColor="#64748B" value={password} onChangeText={setPassword} secureTextEntry={!showPassword} />
+            <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(!showPassword)}>
+              <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={18} color="#94A3B8" />
+            </TouchableOpacity>
+          </View>
           <TextInput style={styles.input} placeholder="First name" placeholderTextColor="#64748B" value={firstName} onChangeText={setFirstName} />
           <TextInput style={styles.input} placeholder="Last name" placeholderTextColor="#64748B" value={lastName} onChangeText={setLastName} />
 
@@ -215,4 +221,6 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   submitBtnText: { color: '#0B1020', fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700' },
+  passwordRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  eyeBtn: { width: 40, height: 40, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#151B2E', borderWidth: 1, borderColor: 'rgba(34,211,238,0.15)' },
 });

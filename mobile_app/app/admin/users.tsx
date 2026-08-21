@@ -226,6 +226,7 @@ function AddUserModal({
   const [lastName, setLastName] = useState('');
   const [role, setRole] = useState<'student' | 'educator'>('student');
   const [submitting, setSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   const submit = async () => {
     if (!username || !email) {
@@ -260,7 +261,12 @@ function AddUserModal({
           <Text style={styles.modalTitle}>Add User</Text>
           <TextInput style={styles.input} placeholder="Username" placeholderTextColor={COLORS.textMuted} value={username} onChangeText={setUsername} autoCapitalize="none" />
           <TextInput style={styles.input} placeholder="Email" placeholderTextColor={COLORS.textMuted} value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
-          <TextInput style={styles.input} placeholder="Password (optional)" placeholderTextColor={COLORS.textMuted} value={password} onChangeText={setPassword} secureTextEntry />
+          <View style={styles.passwordWrap}>
+            <TextInput style={[styles.input, { flex: 1 }]} placeholder="Password (optional)" placeholderTextColor={COLORS.textMuted} value={password} onChangeText={setPassword} secureTextEntry={!showPassword} />
+            <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword((v) => !v)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          </View>
           <TextInput style={styles.input} placeholder="First name" placeholderTextColor={COLORS.textMuted} value={firstName} onChangeText={setFirstName} />
           <TextInput style={styles.input} placeholder="Last name" placeholderTextColor={COLORS.textMuted} value={lastName} onChangeText={setLastName} />
           <View style={styles.tabs}>
@@ -325,6 +331,16 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: FONTS.medium,
     color: COLORS.textPrimary,
+  },
+  passwordWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.bg,
+    borderRadius: 12,
+  },
+  eyeBtn: {
+    position: 'absolute',
+    right: 12,
   },
   modalActions: { flexDirection: 'row', gap: 10, marginTop: 6 },
   modalBtn: { flex: 1, alignItems: 'center', paddingVertical: 12, borderRadius: 12 },

@@ -169,6 +169,7 @@ function CreateAdminModal({ school, onClose, onCreated }: { school: School; onCl
   const [password, setPassword] = useState('');
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const submit = async () => {
@@ -201,7 +202,12 @@ function CreateAdminModal({ school, onClose, onCreated }: { school: School; onCl
           <Text style={styles.modalSubtitle}>{school.name}</Text>
           <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#64748B" value={username} onChangeText={setUsername} autoCapitalize="none" />
           <TextInput style={styles.input} placeholder="Email" placeholderTextColor="#64748B" value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" />
-          <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#64748B" value={password} onChangeText={setPassword} secureTextEntry />
+          <View style={styles.passwordRow}>
+            <TextInput style={[styles.input, { flex: 1, marginBottom: 0 }]} placeholder="Password" placeholderTextColor="#64748B" value={password} onChangeText={setPassword} secureTextEntry={!showPassword} />
+            <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(!showPassword)}>
+              <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={18} color="#94A3B8" />
+            </TouchableOpacity>
+          </View>
           <TextInput style={styles.input} placeholder="First name" placeholderTextColor="#64748B" value={firstName} onChangeText={setFirstName} />
           <TextInput style={styles.input} placeholder="Last name" placeholderTextColor="#64748B" value={lastName} onChangeText={setLastName} />
           <TouchableOpacity style={styles.submitBtn} onPress={submit} disabled={submitting}>
@@ -261,4 +267,6 @@ const styles = StyleSheet.create({
     borderRadius: 14,
   },
   submitBtnText: { color: '#0B1020', fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700' },
+  passwordRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 },
+  eyeBtn: { width: 40, height: 40, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0B1020', borderWidth: 1, borderColor: 'rgba(34,211,238,0.15)' },
 });

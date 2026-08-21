@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AdminHeader from '@/components/admin/AdminHeader';
 import StatCard from '@/components/admin/StatCard';
 import { COLORS, FONTS } from '@/constants/adminTheme';
 import { superadminService, PlatformAnalytics } from '@/services/adminService';
+import { useAuth } from '@/hooks/useAuth';
 
 const QUICK_LINKS: {
   icon: keyof typeof Ionicons.glyphMap;
@@ -47,9 +48,24 @@ const QUICK_LINKS: {
 
 export default function SuperAdminDashboard() {
   const router = useRouter();
+  const { logout } = useAuth();
   const [analytics, setAnalytics] = useState<PlatformAnalytics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const handleLogout = async () => {
+    Alert.alert('Log Out', 'Are you sure you want to log out?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Log Out',
+        style: 'destructive',
+        onPress: async () => {
+          await logout();
+          router.replace('/login');
+        },
+      },
+    ]);
+  };
 
   const loadAnalytics = useCallback(async () => {
     try {
@@ -117,6 +133,11 @@ export default function SuperAdminDashboard() {
             </TouchableOpacity>
           ))}
         </View>
+
+        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout} activeOpacity={0.8}>
+          <Ionicons name="log-out-outline" size={18} color={COLORS.danger} />
+          <Text style={styles.logoutText}>Log Out</Text>
+        </TouchableOpacity>
       </ScrollView>
     </View>
   );
@@ -159,4 +180,17 @@ const styles = StyleSheet.create({
   errorText: { fontSize: 13, fontFamily: FONTS.medium, color: '#94A3B8', textAlign: 'center' },
   retryBtn: { backgroundColor: COLORS.superAdminGlow, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 10 },
   retryText: { color: '#0B1020', fontFamily: FONTS.semiBold, fontSize: 12 },
+  logoutBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(239,68,68,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(239,68,68,0.3)',
+    paddingVertical: 14,
+    borderRadius: 14,
+    marginTop: 28,
+  },
+  logoutText: { color: COLORS.danger, fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700' },
 });

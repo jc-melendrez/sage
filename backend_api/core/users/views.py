@@ -681,6 +681,13 @@ class SuperadminSchoolAdminCreateView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         admin = serializer.save()
+        password = request.data.get('password')
+        if not admin.firebase_uid and admin.email and password:
+            uid = create_firebase_user(admin.email, password)
+            if uid:
+                admin.firebase_uid = uid
+                admin.save(update_fields=['firebase_uid'])
+        sync_user_to_firestore(admin)
         RoleChangeLog.objects.create(
             changed_by=request.user,
             target_user=admin,
@@ -790,6 +797,12 @@ class AdminUserListView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         user = serializer.save()
+        password = request.data.get('password')
+        if not user.firebase_uid and user.email and password:
+            uid = create_firebase_user(user.email, password)
+            if uid:
+                user.firebase_uid = uid
+                user.save(update_fields=['firebase_uid'])
         sync_user_to_firestore(user)
         return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
 
