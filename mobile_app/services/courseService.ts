@@ -1,5 +1,5 @@
 import { apiCall } from './apiClient';
-import { CoursePathTopic, LearningNode, NodeCompleteResponse } from '@/types/learning';
+import { CoursePathTopic, LearningNode, NodeCompleteResponse, NodeType, ContentJson, Topic } from '@/types/learning';
 
 export interface CourseStudent {
   id: number;
@@ -95,5 +95,28 @@ export async function completeNode(nodeId: number, score: number): Promise<NodeC
   return apiCall<NodeCompleteResponse>(`/users/nodes/${nodeId}/complete/`, {
     method: 'POST',
     body: JSON.stringify({ score }),
+  });
+}
+
+export async function createTopic(courseId: number, data: { title: string; description?: string; order: number }): Promise<Topic> {
+  return apiCall<Topic>(`/users/courses/${courseId}/topics/create/`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function createNode(topicId: number, data: {
+  node_type: NodeType;
+  title: string;
+  description?: string;
+  content_json: ContentJson;
+  order: number;
+  xp_reward?: number;
+  required_score?: number;
+  estimated_minutes?: number;
+}): Promise<LearningNode> {
+  return apiCall<LearningNode>(`/users/topics/${topicId}/nodes/create/`, {
+    method: 'POST',
+    body: JSON.stringify(data),
   });
 }

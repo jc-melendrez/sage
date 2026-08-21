@@ -14,7 +14,7 @@ import {
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, EmptyState } from '@/components/educator/EducatorPrimitives';
@@ -29,6 +29,7 @@ function formatDate(iso: string): string {
 }
 
 export default function EducatorCoursesScreen() {
+  const router = useRouter();
   const [courses, setCourses] = useState<CourseRoster[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -106,7 +107,15 @@ export default function EducatorCoursesScreen() {
           ) : courses.length > 0 ? (
             <View style={{ gap: 14 }}>
               {courses.map((course) => (
-                <View key={course.id} style={styles.courseCard}>
+                <TouchableOpacity
+                  key={course.id}
+                  style={styles.courseCard}
+                  activeOpacity={0.7}
+                  onPress={() => router.push({
+                    pathname: '/educator/(tabs)/course-detail',
+                    params: { courseId: course.id, courseName: course.name },
+                  })}
+                >
                   <View style={styles.courseHeader}>
                     <View style={styles.courseIconBg}>
                       <Ionicons name="book" size={20} color={COLORS.purpleVibrant} />
@@ -131,14 +140,15 @@ export default function EducatorCoursesScreen() {
                     <TouchableOpacity
                       style={styles.codeChip}
                       activeOpacity={0.8}
-                      onPress={() => {
+                      onPress={(e) => {
+                        e.stopPropagation?.();
                         setCreatedCode(course.join_code);
                       }}
                     >
                       <Text style={styles.codeChipText}>{course.join_code}</Text>
                     </TouchableOpacity>
                   </View>
-                </View>
+                </TouchableOpacity>
               ))}
             </View>
           ) : (
