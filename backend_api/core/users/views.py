@@ -1244,3 +1244,147 @@ Each level must have:
             {"error": "Internal server error"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+class GenerateTopicView(APIView):
+    """Generate a full topic with nodes from a file using Groq AI."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, course_id):
+        try:
+            course = Course.objects.get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user != course.educator:
+            return Response({'error': 'Only the course educator can generate content'}, status=status.HTTP_403_FORBIDDEN)
+
+        uploaded_file = request.FILES.get('file')
+        if not uploaded_file:
+            return Response({'error': 'File is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            extracted_text = extract_text_from_file(uploaded_file)
+        except Exception as e:
+            print(f"[GenerateTopicView] File extract error: {e}")
+            return Response({'error': 'Failed to process uploaded file'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not extracted_text.strip():
+            return Response({'error': 'Could not extract text from file'}, status=status.HTTP_400_BAD_REQUEST)
+
+        clean_text = ' '.join(extracted_text.split())
+        instructions = request.data.get('instructions', '')
+        difficulty = request.data.get('difficulty', 'beginner')
+        node_count = request.data.get('node_count', '4')
+
+        try:
+            node_count = int(node_count)
+            node_count = max(2, min(6, node_count))
+        except (ValueError, TypeError):
+            node_count = 4
+
+        api_key = os.getenv('GROQ_API_KEY')
+        if not api_key:
+            return Response({'error': 'Groq API key not configured'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        prompt = f"""You are an expert curriculum designer. Given the uploaded study material, create a structured learning topic with {node_count} nodes.
+
+**Requirements:**
+- Create a topic with a clear title and description.
+- Generate {node_count} learning nodes of different types:
+  - 1-2 "learn" nodes with lesson content (concept, example, interaction, summary blocks)
+  - 1-2 "practice" nodes with quiz questions
+  - 1 "mastery" node with harder quiz questions
+
+Difficulty level: {difficulty}
+{f"Additional instructions: {instructions}" if instructions else ""}
+
+For "learn" nodes, content_json must have a "blocks" array with objects of these types:
+
+Concept block:
+{{"type": "concept", "title": "Section title", "content": "Clear explanation of the concept (2-4 sentences)"}}
+
+Example block:
+{{"type": "example", "title": "Example title", "content": "A concrete example with code or walkthrough", "prompt": "Try it yourself prompt (optional)"}}
+
+Interaction block:
+{{"type": "interaction", "question": "A quick check question", "options": ["Option A", "Option B", "Option C", "Option D"], "correct_index": 0, "feedback_correct": "Correct! explanation", "feedback_incorrect": "Not quite. explanation"}}
+
+Summary block:
+{{"type": "summary", "points": ["Key takeaway 1", "Key takeaway 2", "Key takeaway 3"]}}
+
+For "practice" and "mastery" nodes, content_json must have a "questions" array:
+{{"questions": [{{"question": "Question text?", "options": ["A", "B", "C", "D"], "correct_answer": "A", "explanation": "Why this is correct"}}]}}
+
+**Output MUST be pure JSON** with this exact schema:
+{{
+  "title": "Topic Title",
+  "description": "Brief topic description",
+  "nodes": [
+    {{
+      "node_type": "learn",
+      "title": "Node title",
+      "description": "Brief node description",
+      "content_json": {{ ... }},
+      "xp_reward": 25,
+      "required_score": 70,
+      "estimated_minutes": 8
+    }}
+  ]
+}}
+
+**Study Material:**
+{clean_text[:12000]}"""
+
+        model_name = os.getenv('GROQ_MODEL_NAME', 'llama-3.3-70b-versatile')
+
+        payload = {
+            'model': model_name,
+            'messages': [
+                {'role': 'system', 'content': 'You are an expert educator. Return ONLY valid JSON. No markdown. No explanations.'},
+                {'role': 'user', 'content': prompt},
+            ],
+            'temperature': 0.7,
+            'max_tokens': 4000,
+            'response_format': {'type': 'json_object'},
+        }
+
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        }
+
+        try:
+            response = requests.post(
+                'https://api.groq.com/openai/v1/chat/completions',
+                headers=headers,
+                json=payload,
+                timeout=60,
+            )
+
+            if response.status_code != 200:
+                print(f"[GenerateTopicView] Groq error: {response.text}")
+                return Response({'error': 'AI generation failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            data = response.json()
+            raw_content = data['choices'][0]['message']['content']
+            topic_data = safe_json_parse(raw_content)
+
+            if not topic_data or 'title' not in topic_data or 'nodes' not in topic_data:
+                return Response({'error': 'AI returned invalid structure'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            for i, node in enumerate(topic_data['nodes']):
+                node.setdefault('node_type', 'learn')
+                node.setdefault('title', f'Node {i + 1}')
+                node.setdefault('description', '')
+                node.setdefault('content_json', {})
+                node.setdefault('xp_reward', 25)
+                node.setdefault('required_score', 70)
+                node.setdefault('estimated_minutes', 5)
+
+            return Response(topic_data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            print(f"[GenerateTopicView] Error: {e}")
+            return Response({'error': 'AI generation failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
