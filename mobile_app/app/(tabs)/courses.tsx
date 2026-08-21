@@ -45,15 +45,6 @@ function formatDate(iso: string): string {
   }
 }
 
-// --- Mock Data for the Visual Path (Fallback if no real courses) ---
-const MOCK_PATH = [
-  { id: 'mock-1', title: 'Introduction to AI', status: 'completed', type: 'video' },
-  { id: 'mock-2', title: 'Neural Networks Basics', status: 'completed', type: 'quiz' },
-  { id: 'mock-3', title: 'Deep Learning', status: 'active', type: 'lesson' },
-  { id: 'mock-4', title: 'Computer Vision', status: 'locked', type: 'project' },
-  { id: 'mock-5', title: 'Natural Language Processing', status: 'locked', type: 'boss' },
-];
-
 export default function StudentCoursesScreen() {
   const router = useRouter();
   const [courses, setCourses] = useState<CourseSummary[]>([]);
@@ -62,9 +53,6 @@ export default function StudentCoursesScreen() {
   const [joinVisible, setJoinVisible] = useState(false);
   const [joining, setJoining] = useState(false);
   const [code, setCode] = useState('');
-  
-  // For the demo, we pretend the first course is the one we are visualizing
-  const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
 
   const loadCourses = useCallback(async () => {
     try {
@@ -80,11 +68,6 @@ export default function StudentCoursesScreen() {
       // Ensure data is an array, if API returns something else, default to []
       const safeData = Array.isArray(data) ? data : [];
       setCourses(safeData);
-
-      // 3. Auto-select the first course for the visual path demo
-      if (safeData.length > 0 && !selectedCourseId) {
-        setSelectedCourseId(String(safeData[0].id));
-      }
     } catch (err: any) {
       console.error("❌ Error loading courses:", err);
       Alert.alert('Failed to load courses', err instanceof Error ? err.message : 'Something went wrong.');
@@ -93,7 +76,7 @@ export default function StudentCoursesScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [selectedCourseId]);
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -128,111 +111,40 @@ export default function StudentCoursesScreen() {
 
   // --- Render Helpers ---
 
-  const renderNodeIcon = (type: string) => {
-    switch (type) {
-      case 'video': return 'play-circle';
-      case 'quiz': return 'help-circle';
-      case 'project': return 'construct';
-      case 'boss': return 'flash';
-      default: return 'book';
-    }
-  };
-
-  // Convert real courses to path nodes, or use mock if empty
-  const getPathData = () => {
-    if (courses.length > 0) {
-      // Map real courses to the visual path format
-      // Since real courses don't have "status" or "type" yet, we fake it for the UI
-      return courses.map((course, index) => ({
-        id: String(course.id),
-        title: course.name,
-        // Logic: First one active, others locked (just for visual demo)
-        status: index === 0 ? 'active' : 'locked', 
-        type: index % 2 === 0 ? 'lesson' : 'quiz', // Alternate icons
-      }));
-    }
-    return MOCK_PATH;
-  };
-
-  const renderPath = () => {
-    const pathData = getPathData();
+  const renderCourses = () => {
+    if (courses.length === 0) return null;
 
     return (
-      <View style={styles.pathContainer}>
-        {pathData.map((item: any, index: number) => {
-          const isCompleted = item.status === 'completed';
-          const isActive = item.status === 'active';
-          const isLocked = item.status === 'locked';
-          
-          // Alternating layout for the "Constellation" feel
-          const isLeft = index % 2 === 0;
-
-          return (
-            <View key={item.id} style={styles.nodeRow}>
-              {/* Connector Line (Vertical) */}
-              {index > 0 && (
-                <View style={[
-                  styles.connectorLine,
-                  { left: isLeft ? '25%' : '75%', backgroundColor: isCompleted || isActive ? THEME.accent : THEME.locked }
-                ]} />
-              )}
-
-              <View style={[
-                styles.nodeWrapper,
-                { alignSelf: isLeft ? 'flex-start' : 'flex-end' }
-              ]}>
-                <TouchableOpacity 
-                  activeOpacity={0.8}
-                  disabled={isLocked}
-                  onPress={() => {
-                    if (isActive || isCompleted) {
-                      router.push(`/course/${item.id}` as any);
-                    } else if (isLocked) {
-                      Alert.alert("Locked", "Complete previous courses to unlock.");
-                    }
-                  }}
-                >
-                  {/* Glow Effect for Active */}
-                  {isActive && <View style={styles.nodeGlow} />}
-
-                  <LinearGradient
-                    colors={
-                      isLocked 
-                        ? [THEME.bgCard, THEME.bgCard] 
-                        : isCompleted 
-                          ? [THEME.accent, '#0891b2'] // Cyan gradient
-                          : [THEME.primary, '#4f46e5'] // Indigo gradient
-                    }
-                    style={[
-                      styles.nodeHexagon,
-                      isLocked && styles.nodeLocked,
-                      isActive && styles.nodeActive
-                    ]}
-                  >
-                    <Ionicons 
-                      name={isLocked ? 'lock-closed' : renderNodeIcon(item.type)} 
-                      size={28} 
-                      color={isLocked ? THEME.textMuted : '#fff'} 
-                    />
-                  </LinearGradient>
-
-                  <Text style={[
-                    styles.nodeLabel,
-                    isLocked && { color: THEME.textMuted }
-                  ]} numberOfLines={2}>
-                    {item.title}
-                  </Text>
-                  
-                  {isCompleted && (
-                    <View style={styles.checkBadge}>
-                      <Ionicons name="checkmark" size={12} color="#fff" />
-                    </View>
-                  )}
-                </TouchableOpacity>
+      <View style={styles.courseList}>
+        {courses.map((course) => (
+          <TouchableOpacity
+            key={course.id}
+            style={styles.courseCard}
+            activeOpacity={0.8}
+            onPress={() => router.push(`/course/${course.id}` as any)}
+          >
+            <LinearGradient
+              colors={[THEME.primary, '#4f46e5']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.courseCardGradient}
+            >
+              <View style={styles.courseCardHeader}>
+                <Ionicons name="book" size={20} color="white" />
+                <Text style={styles.courseCardName} numberOfLines={2}>{course.name}</Text>
               </View>
-            </View>
-          );
-        })}
+              {course.description && (
+                <Text style={styles.courseCardDesc} numberOfLines={2}>{course.description}</Text>
+              )}
+              <View style={styles.courseCardFooter}>
+                <Ionicons name="people-outline" size={14} color="rgba(255,255,255,0.7)" />
+                <Text style={styles.courseCardMeta}>{course.student_count} students</Text>
+                <View style={{ flex: 1 }} />
+                <Ionicons name="arrow-forward-circle" size={28} color="rgba(255,255,255,0.8)" />
+              </View>
+            </LinearGradient>
+          </TouchableOpacity>
+        ))}
       </View>
     );
   };
@@ -296,7 +208,7 @@ export default function StudentCoursesScreen() {
             </TouchableOpacity>
           </View>
         )}
-        {renderPath()}
+        {renderCourses()}
       </ScrollView>
 
       {/* Floating Action Button for Joining more */}
@@ -604,5 +516,49 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '700',
+  },
+
+  // Course cards
+  courseList: {
+    paddingHorizontal: 20,
+    gap: 14,
+  },
+  courseCard: {
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  courseCardGradient: {
+    padding: 20,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  courseCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 8,
+  },
+  courseCardName: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+    flex: 1,
+  },
+  courseCardDesc: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+  courseCardFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  courseCardMeta: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    fontWeight: '600',
   },
 });
