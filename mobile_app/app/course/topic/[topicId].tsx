@@ -1,24 +1,25 @@
-import { useEffect, useState, useCallback } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { useState, useCallback, useEffect } from 'react';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Dimensions, Modal, Pressable } from 'react-native';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getCoursePath } from '@/services/courseService';
-import { CoursePathTopic, LearningNode, NODE_TYPE_CONFIG, NodeType } from '@/types/learning';
+import { LearningNode, NODE_TYPE_CONFIG } from '@/types/learning';
 
 const COLORS = {
   bg: '#baaeda',
-  surface: '#cdc2dd',
+  surface: '#FFFFFF', // Cards should be white for contrast
   purpleDeep: '#4C1D95',
   purpleDark: '#6D28D9',
   purpleVibrant: '#8B5CF6',
   accent: '#22D3EE',
   success: '#10B981',
   warning: '#F59E0B',
-  textPrimary: '#3a107a',
-  textSecondary: '#CBD5E1',
+  textPrimary: '#1F2937',
+  textSecondary: '#6B7280',
   textMuted: '#94A3B8',
-  border: 'rgba(44, 29, 0, 0.15)',
+  border: 'rgba(0, 0, 0, 0.1)',
+  shadow: 'rgba(76, 29, 149, 0.2)',
 };
 
 const FONTS = {
@@ -26,6 +27,23 @@ const FONTS = {
   bold: 'Montserrat-Bold',
   semiBold: 'Montserrat-SemiBold',
   medium: 'Montserrat-Medium',
+};
+
+// --- Geometry ---
+const SCREEN_W = Dimensions.get('window').width;
+const PATH_W = Math.min(SCREEN_W - 20, 400);
+const NODE_SIZE = 70; // Slightly bigger for touch targets
+const ROW_H = 110; // Vertical spacing between nodes
+const AMP = PATH_W / 2 - 60; // Horizontal swing amplitude
+
+// Calculate X position based on index (Sine wave pattern)
+const getNodeX = (index: number) => {
+  return PATH_W / 2 + Math.sin(index * 0.8) * AMP;
+};
+
+// Calculate Y position
+const getNodeY = (index: number) => {
+  return index * ROW_H + 80; // Start lower to clear header
 };
 
 function getNodeStatus(node: LearningNode, index: number, allNodes: LearningNode[]): 'completed' | 'current' | 'locked' {
@@ -41,6 +59,9 @@ export default function TopicPathScreen() {
   const [nodes, setNodes] = useState<LearningNode[]>([]);
   const [topicTitle, setTopicTitle] = useState(title || 'Topic');
   const [loading, setLoading] = useState(true);
+  
+  // State for the popup card
+  const [selectedNodeIndex, setSelectedNodeIndex] = useState<number | null>(null);
 
   useFocusEffect(
     useCallback(() => {
@@ -58,18 +79,36 @@ export default function TopicPathScreen() {
         setTopicTitle(topic.title);
       }
     } catch {
+      // Handle error silently or with toast
     } finally {
       setLoading(false);
     }
   };
 
-  const handleNodePress = (node: LearningNode, index: number) => {
+  const handleNodePress = (index: number) => {
+    const node = nodes[index];
     const status = getNodeStatus(node, index, nodes);
-    if (status === 'locked') return;
-    router.push(`/course/node/${node.id}` as any);
+    
+    if (status === 'locked') return; // Do nothing or shake animation
+    
+    // Toggle selection: if tapping same node, close it. If new node, open it.
+    if (selectedNodeIndex === index) {
+      setSelectedNodeIndex(null);
+    } else {
+      setSelectedNodeIndex(index);
+    }
   };
 
-  const completedCount = nodes.filter((n, i) => getNodeStatus(n, i, nodes) === 'completed').length;
+  const handleStartActivity = (nodeId: number) => {
+    setSelectedNodeIndex(null); // Close popup
+    router.push(`/course/node/${nodeId}` as any);
+  };
+
+  const statuses = nodes.map((n, i) => getNodeStatus(n, i, nodes));
+  const completedCount = statuses.filter(s => s === 'completed').length;
+  
+  // Calculate total height for the scroll view
+  const contentHeight = nodes.length > 0 ? getNodeY(nodes.length) + 100 : 400;
 
   if (loading) {
     return (
@@ -79,8 +118,12 @@ export default function TopicPathScreen() {
     );
   }
 
+  const selectedNode = selectedNodeIndex !== null ? nodes[selectedNodeIndex] : null;
+  const selectedStatus = selectedNodeIndex !== null ? statuses[selectedNodeIndex] : null;
+
   return (
     <View style={styles.container}>
+      {/* Header */}
       <LinearGradient colors={[COLORS.purpleDeep, COLORS.purpleDark]} style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
           <Ionicons name="chevron-back" size={24} color="white" />
@@ -92,129 +135,155 @@ export default function TopicPathScreen() {
         <View style={{ width: 32 }} />
       </LinearGradient>
 
-      <ScrollView
-        contentContainerStyle={styles.pathContainer}
+      <ScrollView 
+        contentContainerStyle={[styles.scrollContent, { height: contentHeight }]} 
         showsVerticalScrollIndicator={false}
-        contentInsetAdjustmentBehavior="automatic"
+        // Close popup when scrolling
+        onScrollBeginDrag={() => setSelectedNodeIndex(null)}
       >
-        {/* Empty state */}
         {nodes.length === 0 && (
           <View style={styles.emptyState}>
             <Ionicons name="construct-outline" size={48} color={COLORS.textMuted} />
             <Text style={styles.emptyTitle}>No activities yet</Text>
-            <Text style={styles.emptySub}>Activities will appear here soon.</Text>
           </View>
         )}
 
-        {/* Vertical path */}
-        {nodes.map((node, index) => {
-          const status = getNodeStatus(node, index, nodes);
+        {/* The Path Nodes */}
+        {nodes.map((node, i) => {
+          const status = statuses[i];
           const cfg = NODE_TYPE_CONFIG[node.node_type];
-          const isFirst = index === 0;
-          const isLast = index === nodes.length - 1;
+          const x = getNodeX(i);
+          const y = getNodeY(i);
+          const isSelected = selectedNodeIndex === i;
 
           return (
-            <View key={node.id} style={styles.nodeRow}>
-              {/* Connector above */}
-              {!isFirst && (
+            <View key={node.id}>
+              {/* Glow for current node */}
+              {status === 'current' && (
                 <View style={[
-                  styles.connector,
-                  { backgroundColor: status === 'completed' ? COLORS.success : 'rgba(124,58,237,0.15)' },
+                  styles.glow, 
+                  { left: x - (NODE_SIZE + 20)/2, top: y - (NODE_SIZE + 20)/2, backgroundColor: cfg.color }
                 ]} />
               )}
 
-              {/* The node */}
+              {/* The Circle Button */}
               <TouchableOpacity
                 style={[
-                  styles.nodeWrap,
-                  status === 'locked' && styles.nodeWrapLocked,
+                  styles.nodeBtn,
+                  { left: x - NODE_SIZE/2, top: y - NODE_SIZE/2 },
+                  status === 'locked' && styles.nodeLocked,
+                  isSelected && styles.nodeSelected
                 ]}
                 disabled={status === 'locked'}
-                onPress={() => handleNodePress(node, index)}
+                onPress={() => handleNodePress(i)}
                 activeOpacity={0.8}
               >
-                {status === 'current' && <View style={[styles.glow, { backgroundColor: cfg.color }]} />}
-
                 <LinearGradient
                   colors={
-                    status === 'completed'
-                      ? ['#10B981', '#059669']
-                      : status === 'current'
-                      ? [cfg.color, cfg.color + 'CC']
-                      : ['#CBD5E1', '#94A3B8']
+                    status === 'completed' ? ['#10B981', '#059669'] :
+                    status === 'current' ? [cfg.color, cfg.color + 'CC'] :
+                    ['#CBD5E1', '#94A3B8']
                   }
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 1 }}
                   style={styles.nodeCircle}
                 >
-                  <Ionicons
+                   <Ionicons
                     name={
-                      status === 'completed' ? 'checkmark' as const
-                      : (cfg.icon as any)
+                      status === 'completed' ? 'checkmark' :
+                      status === 'locked' ? 'lock-closed' :
+                      (cfg.icon as any)
                     }
-                    size={status === 'completed' ? 22 : 24}
+                    size={status === 'current' ? 32 : 28}
                     color="white"
                   />
                 </LinearGradient>
-
-                {/* Label card */}
-                <View style={styles.labelCard}>
-                  <View style={styles.labelTop}>
-                    <View style={[styles.typeBadge, { backgroundColor: cfg.color + '20' }]}>
-                      <Ionicons name={cfg.icon as any} size={11} color={cfg.color} />
-                      <Text style={[styles.typeText, { color: cfg.color }]}>{cfg.label}</Text>
-                    </View>
-                    {node.estimated_minutes > 0 && (
-                      <Text style={styles.timeText}>{node.estimated_minutes}m</Text>
-                    )}
-                  </View>
-                  <Text style={[
-                    styles.nodeTitle,
-                    status === 'locked' && { color: COLORS.textMuted },
-                  ]} numberOfLines={2}>
-                    {node.title}
-                  </Text>
-                  {status === 'locked' && (
-                    <View style={styles.lockRow}>
-                      <Ionicons name="lock-closed" size={10} color={COLORS.textMuted} />
-                      <Text style={styles.lockText}>Complete previous activities</Text>
-                    </View>
-                  )}
-                  {node.progress?.score !== undefined && node.progress.score > 0 && (
-                    <View style={[styles.scorePill, node.progress.passed ? styles.scorePillPass : styles.scorePillFail]}>
-                      <Text style={[styles.scoreText, node.progress.passed ? { color: COLORS.success } : { color: COLORS.warning }]}>
-                        {node.progress.score}%
-                      </Text>
-                    </View>
-                  )}
-                </View>
+                
+                {/* Selection Ring */}
+                {isSelected && (
+                  <View style={[styles.selectionRing, { borderColor: cfg.color }]} />
+                )}
               </TouchableOpacity>
-
-              {/* Connector below (last item gets a trophy) */}
-              {isLast && (
-                <View style={styles.connector} />
-              )}
-              {isLast && (
-                <View style={styles.trophyWrap}>
-                  <LinearGradient colors={['#EAB308', '#CA8A04']} style={styles.trophyCircle}>
-                    <Ionicons name="trophy" size={22} color="white" />
-                  </LinearGradient>
-                  <Text style={styles.trophyLabel}>Topic Complete!</Text>
-                </View>
-              )}
             </View>
           );
         })}
+
+        {/* Trophy at the end */}
+        {nodes.length > 0 && (
+           <View style={[styles.trophyWrap, { left: PATH_W/2 - 40, top: getNodeY(nodes.length) }]}>
+             <LinearGradient colors={['#F59E0B', '#D97706']} style={styles.trophyCircle}>
+               <Ionicons name="trophy" size={32} color="white" />
+             </LinearGradient>
+           </View>
+        )}
       </ScrollView>
+
+      {/* --- POPUP CARD MODAL --- */}
+      {/* We use a Modal-like overlay that sits on top, but positioned absolutely relative to the screen */}
+      {selectedNode && (
+        <Pressable style={styles.overlay} onPress={() => setSelectedNodeIndex(null)}>
+           <View 
+             style={[
+               styles.popupCard, 
+               { 
+                 // Position the card near the node, but keep it on screen
+                 top: Math.min(Math.max(getNodeY(selectedNodeIndex!) - 160, 100), contentHeight - 200),
+                 left: Math.min(Math.max(getNodeX(selectedNodeIndex!) - 140, 20), PATH_W - 300),
+                 borderColor: NODE_TYPE_CONFIG[selectedNode.node_type].color
+               }
+             ]}
+           >
+             {/* Stop propagation so clicking card doesn't close it */}
+             <Pressable onPress={(e) => e.stopPropagation()}>
+                <View style={styles.popupHeader}>
+                  <View style={[styles.typeBadge, { backgroundColor: NODE_TYPE_CONFIG[selectedNode.node_type].color + '20' }]}>
+                    <Text style={[styles.typeText, { color: NODE_TYPE_CONFIG[selectedNode.node_type].color }]}>
+                      {NODE_TYPE_CONFIG[selectedNode.node_type].label}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setSelectedNodeIndex(null)}>
+                    <Ionicons name="close" size={20} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                </View>
+                
+                <Text style={styles.popupTitle}>{selectedNode.title}</Text>
+                <Text style={styles.popupDesc} numberOfLines={3}>
+                  {selectedNode.description || "Tap start to begin this activity."}
+                </Text>
+
+                <View style={styles.popupMeta}>
+                   <View style={styles.metaItem}>
+                     <Ionicons name="time-outline" size={14} color={COLORS.textSecondary} />
+                     <Text style={styles.metaText}>{selectedNode.estimated_minutes} min</Text>
+                   </View>
+                   <View style={styles.metaItem}>
+                     <Ionicons name="star-outline" size={14} color={COLORS.warning} />
+                     <Text style={styles.metaText}>{selectedNode.xp_reward} XP</Text>
+                   </View>
+                </View>
+
+                <TouchableOpacity 
+                  style={[styles.startBtn, { backgroundColor: NODE_TYPE_CONFIG[selectedNode.node_type].color }]}
+                  onPress={() => handleStartActivity(selectedNode.id)}
+                >
+                  <Text style={styles.startBtnText}>
+                    {selectedStatus === 'completed' ? 'Review' : 'Start'}
+                  </Text>
+                  <Ionicons name="arrow-forward" size={18} color="white" />
+                </TouchableOpacity>
+             </Pressable>
+           </View>
+        </Pressable>
+      )}
     </View>
   );
 }
 
-const NODE_SIZE = 64;
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   center: { flex: 1, backgroundColor: COLORS.bg, justifyContent: 'center', alignItems: 'center' },
+  
+  // Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -224,38 +293,45 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     borderBottomLeftRadius: 24,
     borderBottomRightRadius: 24,
+    zIndex: 10,
   },
   backBtn: { padding: 6, width: 36, alignItems: 'center' },
   headerCenter: { alignItems: 'center', flex: 1 },
   headerTitle: { color: 'white', fontSize: 17, fontFamily: FONTS.extraBold, fontWeight: '800' },
   headerSub: { color: 'rgba(255,255,255,0.7)', fontSize: 12, fontFamily: FONTS.medium, marginTop: 2 },
-  pathContainer: {
-    paddingHorizontal: 20,
-    paddingTop: 32,
+  
+  // Scroll & Path
+  scrollContent: {
+    paddingTop: 20,
     paddingBottom: 60,
-    alignItems: 'center',
+    // alignItems: 'center', // Removed because we use absolute positioning for X
   },
   emptyState: { alignItems: 'center', paddingVertical: 80, gap: 10 },
   emptyTitle: { fontSize: 17, fontFamily: FONTS.bold, color: COLORS.textPrimary },
-  emptySub: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textMuted, textAlign: 'center' },
-  nodeRow: { alignItems: 'center', width: '100%', maxWidth: 360 },
-  connector: { width: 3, height: 32, borderRadius: 1.5 },
-  nodeWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    paddingVertical: 8,
-    width: '100%',
-  },
-  nodeWrapLocked: { opacity: 0.45 },
+  
+  // Nodes
   glow: {
     position: 'absolute',
-    left: -4,
-    top: 6,
-    width: NODE_SIZE + 8,
-    height: NODE_SIZE + 8,
-    borderRadius: (NODE_SIZE + 8) / 2,
-    opacity: 0.18,
+    width: NODE_SIZE + 20,
+    height: NODE_SIZE + 20,
+    borderRadius: (NODE_SIZE + 20) / 2,
+    opacity: 0.3,
+    zIndex: 0,
+  },
+  nodeBtn: {
+    position: 'absolute',
+    zIndex: 2,
+    // Shadow for depth
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  nodeLocked: { opacity: 0.5 },
+  nodeSelected: {
+    transform: [{ scale: 1.1 }],
+    zIndex: 10,
   },
   nodeCircle: {
     width: NODE_SIZE,
@@ -263,32 +339,113 @@ const styles = StyleSheet.create({
     borderRadius: NODE_SIZE / 2,
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#4C1D95',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    elevation: 5,
+    borderWidth: 4,
+    borderColor: 'rgba(255,255,255,0.3)', // Inner ring effect
   },
-  labelCard: {
-    flex: 1,
+  selectionRing: {
+    position: 'absolute',
+    top: -8, left: -8, right: -8, bottom: -8,
+    borderRadius: (NODE_SIZE + 16) / 2,
+    borderWidth: 3,
+    borderStyle: 'dashed',
+    opacity: 0.8,
+  },
+
+  // Trophy
+  trophyWrap: {
+    position: 'absolute',
+    width: 80,
+    alignItems: 'center',
+  },
+  trophyCircle: { 
+    width: 64, height: 64, borderRadius: 32, 
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: '#F59E0B', shadowOffset: {width:0, height:4}, shadowOpacity: 0.4, shadowRadius: 8, elevation: 5
+  },
+
+  // Popup Overlay
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'transparent', // Transparent overlay to catch taps
+    zIndex: 100,
+  },
+  
+  // Popup Card
+  popupCard: {
+    position: 'absolute',
+    width: 280,
     backgroundColor: COLORS.surface,
-    borderRadius: 14,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: COLORS.border,
+    borderRadius: 20,
+    padding: 20,
+    borderWidth: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    elevation: 10,
   },
-  labelTop: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
-  typeBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 8 },
-  typeText: { fontSize: 10, fontFamily: FONTS.semiBold, fontWeight: '700' },
-  timeText: { fontSize: 10, fontFamily: FONTS.medium, color: COLORS.textMuted, marginLeft: 'auto' },
-  nodeTitle: { fontSize: 13, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary, lineHeight: 18 },
-  lockRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 },
-  lockText: { fontSize: 10, fontFamily: FONTS.medium, color: COLORS.textMuted },
-  scorePill: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, marginTop: 6 },
-  scorePillPass: { backgroundColor: 'rgba(16,185,129,0.12)' },
-  scorePillFail: { backgroundColor: 'rgba(245,158,11,0.12)' },
-  scoreText: { fontSize: 11, fontFamily: FONTS.bold },
-  trophyWrap: { alignItems: 'center', marginTop: 4, gap: 6 },
-  trophyCircle: { width: 48, height: 48, borderRadius: 24, justifyContent: 'center', alignItems: 'center' },
-  trophyLabel: { fontSize: 13, fontFamily: FONTS.extraBold, color: '#CA8A04' },
+  popupHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  typeBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  typeText: {
+    fontSize: 11,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  popupTitle: {
+    fontSize: 18,
+    fontFamily: FONTS.bold,
+    color: COLORS.textPrimary,
+    marginBottom: 8,
+    lineHeight: 24,
+  },
+  popupDesc: {
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textSecondary,
+    marginBottom: 16,
+    lineHeight: 20,
+  },
+  popupMeta: {
+    flexDirection: 'row',
+    gap: 16,
+    marginBottom: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  metaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  metaText: {
+    fontSize: 13,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textSecondary,
+  },
+  startBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 14,
+    gap: 8,
+  },
+  startBtnText: {
+    color: 'white',
+    fontSize: 16,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+  },
 });
