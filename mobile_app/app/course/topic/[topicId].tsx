@@ -1,5 +1,5 @@
-import { useState, useCallback, useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Dimensions, Modal, Pressable } from 'react-native';
+import { useState, useCallback } from 'react';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Dimensions, Pressable } from 'react-native';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -31,10 +31,17 @@ const FONTS = {
 
 // --- Geometry ---
 const SCREEN_W = Dimensions.get('window').width;
+const SCREEN_H = Dimensions.get('window').height;
+const HEADER_H = 90;
 const PATH_W = Math.min(SCREEN_W - 20, 400);
 const NODE_SIZE = 70; // Slightly bigger for touch targets
 const ROW_H = 110; // Vertical spacing between nodes
 const AMP = PATH_W / 2 - 60; // Horizontal swing amplitude
+
+// Popup bubble
+const POPUP_W = 280;
+const POPUP_H_EST = 285;
+const TAIL = 14;
 
 // Calculate X position based on index (Sine wave pattern)
 const getNodeX = (index: number) => {
@@ -62,6 +69,7 @@ export default function TopicPathScreen() {
   
   // State for the popup card
   const [selectedNodeIndex, setSelectedNodeIndex] = useState<number | null>(null);
+  const [scrollY, setScrollY] = useState(0);
 
   useFocusEffect(
     useCallback(() => {
@@ -86,17 +94,9 @@ export default function TopicPathScreen() {
   };
 
   const handleNodePress = (index: number) => {
-    const node = nodes[index];
-    const status = getNodeStatus(node, index, nodes);
-    
-    if (status === 'locked') return; // Do nothing or shake animation
-    
     // Toggle selection: if tapping same node, close it. If new node, open it.
-    if (selectedNodeIndex === index) {
-      setSelectedNodeIndex(null);
-    } else {
-      setSelectedNodeIndex(index);
-    }
+    // Locked nodes also open a bubble (explaining how to unlock).
+    setSelectedNodeIndex(prev => (prev === index ? null : index));
   };
 
   const handleStartActivity = (nodeId: number) => {
@@ -119,7 +119,6 @@ export default function TopicPathScreen() {
   }
 
   const selectedNode = selectedNodeIndex !== null ? nodes[selectedNodeIndex] : null;
-  const selectedStatus = selectedNodeIndex !== null ? statuses[selectedNodeIndex] : null;
 
   return (
     <View style={styles.container}>
@@ -135,9 +134,11 @@ export default function TopicPathScreen() {
         <View style={{ width: 32 }} />
       </LinearGradient>
 
-      <ScrollView 
-        contentContainerStyle={[styles.scrollContent, { height: contentHeight }]} 
+      <ScrollView
+        contentContainerStyle={[styles.scrollContent, { height: contentHeight }]}
         showsVerticalScrollIndicator={false}
+        onScroll={(e) => setScrollY(e.nativeEvent.contentOffset.y)}
+        scrollEventThrottle={16}
         // Close popup when scrolling
         onScrollBeginDrag={() => setSelectedNodeIndex(null)}
       >
@@ -174,7 +175,6 @@ export default function TopicPathScreen() {
                   status === 'locked' && styles.nodeLocked,
                   isSelected && styles.nodeSelected
                 ]}
-                disabled={status === 'locked'}
                 onPress={() => handleNodePress(i)}
                 activeOpacity={0.8}
               >
@@ -189,16 +189,24 @@ export default function TopicPathScreen() {
                   style={styles.nodeCircle}
                 >
                    <Ionicons
-                    name={
-                      status === 'completed' ? 'checkmark' :
-                      status === 'locked' ? 'lock-closed' :
-                      (cfg.icon as any)
-                    }
-                    size={status === 'current' ? 32 : 28}
+                    name={cfg.icon as any}
+                    size={status === 'current' ? 32 : 26}
                     color="white"
                   />
                 </LinearGradient>
-                
+
+                {/* Status badges (type icon stays inside the circle) */}
+                {status === 'completed' && (
+                  <View style={styles.badgeCheck}>
+                    <Ionicons name="checkmark" size={13} color="white" />
+                  </View>
+                )}
+                {status === 'locked' && (
+                  <View style={styles.badgeLock}>
+                    <Ionicons name="lock-closed" size={10} color="white" />
+                  </View>
+                )}
+
                 {/* Selection Ring */}
                 {isSelected && (
                   <View style={[styles.selectionRing, { borderColor: cfg.color }]} />
@@ -218,34 +226,67 @@ export default function TopicPathScreen() {
         )}
       </ScrollView>
 
-      {/* --- POPUP CARD MODAL --- */}
-      {/* We use a Modal-like overlay that sits on top, but positioned absolutely relative to the screen */}
-      {selectedNode && (
-        <Pressable style={styles.overlay} onPress={() => setSelectedNodeIndex(null)}>
-           <View 
-             style={[
-               styles.popupCard, 
-               { 
-                 // Position the card near the node, but keep it on screen
-                 top: Math.min(Math.max(getNodeY(selectedNodeIndex!) - 160, 100), contentHeight - 200),
-                 left: Math.min(Math.max(getNodeX(selectedNodeIndex!) - 140, 20), PATH_W - 300),
-                 borderColor: NODE_TYPE_CONFIG[selectedNode.node_type].color
-               }
-             ]}
-           >
-             {/* Stop propagation so clicking card doesn't close it */}
-             <Pressable onPress={(e) => e.stopPropagation()}>
+      {/* --- SPEECH BUBBLE POPUP --- */}
+      {selectedNode && selectedNodeIndex !== null && (() => {
+        const i = selectedNodeIndex;
+        const cfg = NODE_TYPE_CONFIG[selectedNode.node_type];
+        const st = statuses[i];
+
+        // Position relative to the node's on-screen location (scroll aware)
+        const nodeScreenY = getNodeY(i) - scrollY;
+        const belowTop = nodeScreenY + NODE_SIZE / 2 + TAIL / 2 + 6;
+        const fitsBelow = belowTop + POPUP_H_EST < SCREEN_H - HEADER_H;
+        const above = !fitsBelow;
+        const popupTop = above
+          ? Math.max(nodeScreenY - NODE_SIZE / 2 - TAIL / 2 - 6 - POPUP_H_EST, HEADER_H + 8)
+          : Math.min(belowTop, SCREEN_H - HEADER_H - POPUP_H_EST);
+        const popupLeft = Math.min(Math.max(getNodeX(i) - POPUP_W / 2, 20), PATH_W - POPUP_W - 20);
+
+        // Tail points at the circle's x, clamped inside the card bounds
+        const tailLeft = Math.min(Math.max(getNodeX(i) - popupLeft - TAIL / 2, 16), POPUP_W - 16 - TAIL);
+
+        const startLabel =
+          st === 'completed' ? 'Review'
+          : selectedNode.progress && !selectedNode.progress.passed ? 'Retry'
+          : 'Start';
+
+        return (
+          <Pressable style={styles.overlay} onPress={() => setSelectedNodeIndex(null)}>
+            <View
+              style={[
+                styles.popupCard,
+                {
+                  top: popupTop,
+                  left: popupLeft,
+                  borderColor: cfg.color,
+                  opacity: st === 'locked' ? 0.92 : 1,
+                },
+              ]}
+            >
+              {/* Comic bubble tail pointing at the circle */}
+              <View
+                style={[
+                  styles.popupTail,
+                  above
+                    ? { bottom: -(TAIL / 2), borderBottomWidth: 2, borderRightWidth: 2 }
+                    : { top: -(TAIL / 2), borderTopWidth: 2, borderLeftWidth: 2 },
+                  { borderColor: cfg.color },
+                  { left: tailLeft },
+                ]}
+              />
+
+              {/* Stop propagation so clicking card doesn't close it */}
+              <Pressable onPress={(e) => e.stopPropagation()}>
                 <View style={styles.popupHeader}>
-                  <View style={[styles.typeBadge, { backgroundColor: NODE_TYPE_CONFIG[selectedNode.node_type].color + '20' }]}>
-                    <Text style={[styles.typeText, { color: NODE_TYPE_CONFIG[selectedNode.node_type].color }]}>
-                      {NODE_TYPE_CONFIG[selectedNode.node_type].label}
-                    </Text>
+                  <View style={[styles.typeBadge, { backgroundColor: cfg.color + '20' }]}>
+                    <Ionicons name={cfg.icon as any} size={12} color={cfg.color} />
+                    <Text style={[styles.typeText, { color: cfg.color }]}>{cfg.label}</Text>
                   </View>
-                  <TouchableOpacity onPress={() => setSelectedNodeIndex(null)}>
+                  <TouchableOpacity onPress={() => setSelectedNodeIndex(null)} hitSlop={8}>
                     <Ionicons name="close" size={20} color={COLORS.textMuted} />
                   </TouchableOpacity>
                 </View>
-                
+
                 <Text style={styles.popupTitle}>{selectedNode.title}</Text>
                 <Text style={styles.popupDesc} numberOfLines={3}>
                   {selectedNode.description || "Tap start to begin this activity."}
@@ -260,21 +301,34 @@ export default function TopicPathScreen() {
                      <Ionicons name="star-outline" size={14} color={COLORS.warning} />
                      <Text style={styles.metaText}>{selectedNode.xp_reward} XP</Text>
                    </View>
+                   {selectedNode.progress?.score !== undefined && selectedNode.progress.score > 0 && (
+                     <View style={[styles.scorePill, selectedNode.progress.passed ? styles.scorePillPass : styles.scorePillFail]}>
+                       <Text style={[styles.scorePillText, { color: selectedNode.progress.passed ? COLORS.success : COLORS.warning }]}>
+                         {selectedNode.progress.score}%
+                       </Text>
+                     </View>
+                   )}
                 </View>
 
-                <TouchableOpacity 
-                  style={[styles.startBtn, { backgroundColor: NODE_TYPE_CONFIG[selectedNode.node_type].color }]}
-                  onPress={() => handleStartActivity(selectedNode.id)}
-                >
-                  <Text style={styles.startBtnText}>
-                    {selectedStatus === 'completed' ? 'Review' : 'Start'}
-                  </Text>
-                  <Ionicons name="arrow-forward" size={18} color="white" />
-                </TouchableOpacity>
+                {st === 'locked' ? (
+                  <View style={styles.lockNotice}>
+                    <Ionicons name="lock-closed" size={15} color={COLORS.textMuted} />
+                    <Text style={styles.lockNoticeText}>Complete previous activities to unlock</Text>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={[styles.startBtn, { backgroundColor: cfg.color }]}
+                    onPress={() => handleStartActivity(selectedNode.id)}
+                  >
+                    <Text style={styles.startBtnText}>{startLabel}</Text>
+                    <Ionicons name="arrow-forward" size={18} color="white" />
+                  </TouchableOpacity>
+                )}
              </Pressable>
-           </View>
-        </Pressable>
-      )}
+            </View>
+          </Pressable>
+        );
+      })()}
     </View>
   );
 }
@@ -329,6 +383,34 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   nodeLocked: { opacity: 0.5 },
+  badgeCheck: {
+    position: 'absolute',
+    bottom: -3,
+    right: -3,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: COLORS.success,
+    borderWidth: 2,
+    borderColor: COLORS.bg,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 5,
+  },
+  badgeLock: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#64748B',
+    borderWidth: 2,
+    borderColor: COLORS.bg,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 5,
+  },
   nodeSelected: {
     transform: [{ scale: 1.1 }],
     zIndex: 10,
@@ -373,7 +455,7 @@ const styles = StyleSheet.create({
   // Popup Card
   popupCard: {
     position: 'absolute',
-    width: 280,
+    width: POPUP_W,
     backgroundColor: COLORS.surface,
     borderRadius: 20,
     padding: 20,
@@ -382,6 +464,14 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 10 },
     shadowOpacity: 0.25,
     shadowRadius: 20,
+    elevation: 10,
+  },
+  popupTail: {
+    position: 'absolute',
+    width: TAIL,
+    height: TAIL,
+    backgroundColor: COLORS.surface,
+    transform: [{ rotate: '45deg' }],
     elevation: 10,
   },
   popupHeader: {
@@ -433,6 +523,33 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: FONTS.semiBold,
     color: COLORS.textSecondary,
+  },
+  scorePill: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginLeft: 'auto',
+  },
+  scorePillPass: { backgroundColor: 'rgba(16,185,129,0.12)' },
+  scorePillFail: { backgroundColor: 'rgba(245,158,11,0.12)' },
+  scorePillText: {
+    fontSize: 12,
+    fontFamily: FONTS.bold,
+  },
+  lockNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 14,
+    backgroundColor: 'rgba(148,163,184,0.15)',
+  },
+  lockNoticeText: {
+    fontSize: 13,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textMuted,
+    flexShrink: 1,
   },
   startBtn: {
     flexDirection: 'row',

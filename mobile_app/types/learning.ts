@@ -135,9 +135,9 @@ export function isPracticeContent(json: ContentJson): json is PracticeContent {
 
 export const NODE_TYPE_CONFIG: Record<NodeType, { icon: string; label: string; color: string }> = {
   learn: { icon: 'book', label: 'Learn', color: '#7C3AED' },
-  practice: { icon: 'brain', label: 'Practice', color: '#3B82F6' },
-  challenge: { icon: 'zap', label: 'Challenge', color: '#F59E0B' },
+  practice: { icon: 'pencil', label: 'Practice', color: '#3B82F6' },
+  challenge: { icon: 'flash', label: 'Challenge', color: '#F59E0B' },
   group_activity: { icon: 'people', label: 'Group Activity', color: '#22D3EE' },
   review: { icon: 'refresh', label: 'Review', color: '#10B981' },
-  mastery: { icon: 'trophy', label: 'Mastery', color: '#EAB308' },
+  mastery: { icon: 'ribbon', label: 'Mastery', color: '#EAB308' },
 };
