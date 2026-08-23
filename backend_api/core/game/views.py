@@ -205,7 +205,7 @@ class CreateGameView(APIView):
                     'Content-Type': 'application/json',
                 },
                 json={
-                    'model': 'llama-3.3-70b-versatile',
+                    'model': 'openai/gpt-oss-120b',
                     'messages': [{
                         'role': 'user',
                         'content': f'''Based on the following content, 1) Provide a concise quiz title/topic (max 5 words). 2) {type_instruction}

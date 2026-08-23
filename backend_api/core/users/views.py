@@ -739,7 +739,7 @@ class TestModelConfigView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        model_name = os.getenv('GROQ_MODEL_NAME', 'llama-3.3-70b-versatile')
+        model_name = os.getenv('GROQ_MODEL_NAME', 'openai/gpt-oss-120b')
         api_key = os.getenv('GROQ_API_KEY', 'not_set')
         return Response({
             "model_name": model_name,
@@ -1162,7 +1162,7 @@ Each level must have:
 {clean_text[:12000]}
 """
 
-        model_name = os.getenv('GROQ_MODEL_NAME', 'llama-3.3-70b-versatile')
+        model_name = os.getenv('GROQ_MODEL_NAME', 'openai/gpt-oss-120b')
 
         payload = {
             "model": model_name,
@@ -1253,6 +1253,14 @@ class GenerateTopicView(APIView):
 
     def post(self, request, course_id):
         try:
+            return self._handle(request, course_id)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def _handle(self, request, course_id):
+        try:
             course = Course.objects.get(id=course_id)
         except Course.DoesNotExist:
             return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -1337,7 +1345,7 @@ For "practice" and "mastery" nodes, content_json must have a "questions" array:
 **Study Material:**
 {clean_text[:12000]}"""
 
-        model_name = os.getenv('GROQ_MODEL_NAME', 'llama-3.3-70b-versatile')
+        model_name = os.getenv('GROQ_MODEL_NAME', 'openai/gpt-oss-120b')
 
         payload = {
             'model': model_name,

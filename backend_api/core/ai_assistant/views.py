@@ -73,7 +73,7 @@ class AskSAGEView(APIView):
         # Groq uses the exact same payload format as DeepSeek and OpenAI
         payload = {
             # 🌟 Using Llama 3.3 70B for high-quality reasoning and educational support
-            "model": "llama-3.3-70b-versatile", 
+            "model": "openai/gpt-oss-120b", 
             "messages": [
                 {
                     "role": "system", 
@@ -210,7 +210,7 @@ class GenerateQuizView(APIView):
         }
 
         payload = {
-            "model": "llama-3.3-70b-versatile",
+            "model": "openai/gpt-oss-120b",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}

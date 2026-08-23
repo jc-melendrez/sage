@@ -260,7 +260,7 @@ class TopicSerializer(serializers.ModelSerializer):
     class Meta:
         model = Topic
         fields = ['id', 'course', 'title', 'description', 'order', 'node_count', 'created_at']
-        read_only_fields = ['created_at']
+        read_only_fields = ['created_at', 'course']
 
     def get_node_count(self, obj):
         return obj.nodes.count()
@@ -270,7 +270,7 @@ class LearningNodeSerializer(serializers.ModelSerializer):
     class Meta:
         model = LearningNode
         fields = ['id', 'topic', 'node_type', 'title', 'description', 'content_json', 'order', 'xp_reward', 'required_score', 'estimated_minutes', 'created_at']
-        read_only_fields = ['created_at']
+        read_only_fields = ['created_at', 'topic']
 
 
 class NodeProgressSerializer(serializers.ModelSerializer):
