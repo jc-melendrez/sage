@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, type ComponentRef } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Dimensions, Pressable } from 'react-native';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -69,7 +69,9 @@ export default function TopicPathScreen() {
   
   // State for the popup card
   const [selectedNodeIndex, setSelectedNodeIndex] = useState<number | null>(null);
-  const [scrollY, setScrollY] = useState(0);
+  // Real on-screen center of each circle (measured), so the bubble anchors exactly
+  const [nodeCenters, setNodeCenters] = useState<Record<number, { cx: number; cy: number }>>({});
+  const nodeRefs = useRef<Record<number, ComponentRef<typeof TouchableOpacity> | null>>({});
 
   useFocusEffect(
     useCallback(() => {
@@ -137,8 +139,6 @@ export default function TopicPathScreen() {
       <ScrollView
         contentContainerStyle={[styles.scrollContent, { height: contentHeight }]}
         showsVerticalScrollIndicator={false}
-        onScroll={(e) => setScrollY(e.nativeEvent.contentOffset.y)}
-        scrollEventThrottle={16}
         // Close popup when scrolling
         onScrollBeginDrag={() => setSelectedNodeIndex(null)}
       >
@@ -169,6 +169,14 @@ export default function TopicPathScreen() {
 
               {/* The Circle Button */}
               <TouchableOpacity
+                ref={(r) => { nodeRefs.current[node.id] = r; }}
+                onLayout={() => {
+                  nodeRefs.current[node.id]?.measureInWindow((mx, my, mw, mh) => {
+                    if (mh > 0) {
+                      setNodeCenters(prev => ({ ...prev, [node.id]: { cx: mx + mw / 2, cy: my + mh / 2 } }));
+                    }
+                  });
+                }}
                 style={[
                   styles.nodeBtn,
                   { left: x - NODE_SIZE/2, top: y - NODE_SIZE/2 },
@@ -228,22 +236,24 @@ export default function TopicPathScreen() {
 
       {/* --- SPEECH BUBBLE POPUP --- */}
       {selectedNode && selectedNodeIndex !== null && (() => {
-        const i = selectedNodeIndex;
         const cfg = NODE_TYPE_CONFIG[selectedNode.node_type];
-        const st = statuses[i];
+        const st = statuses[selectedNodeIndex];
+        const R = NODE_SIZE / 2;
 
-        // Position relative to the node's on-screen location (scroll aware)
-        const nodeScreenY = getNodeY(i) - scrollY;
-        const belowTop = nodeScreenY + NODE_SIZE / 2 + TAIL / 2 + 6;
-        const fitsBelow = belowTop + POPUP_H_EST < SCREEN_H - HEADER_H;
+        // Measured on-screen center of the tapped circle (fallback to computed)
+        const { cx, cy } = nodeCenters[selectedNode.id] ?? { cx: getNodeX(selectedNodeIndex), cy: getNodeY(selectedNodeIndex) };
+
+        // The tail tip reaches ~10px past the card edge; sink it ~5px into the
+        // circle's area so bubble and circle look physically connected.
+        const fitsBelow = cy + R + 5 + POPUP_H_EST < SCREEN_H;
         const above = !fitsBelow;
         const popupTop = above
-          ? Math.max(nodeScreenY - NODE_SIZE / 2 - TAIL / 2 - 6 - POPUP_H_EST, HEADER_H + 8)
-          : Math.min(belowTop, SCREEN_H - HEADER_H - POPUP_H_EST);
-        const popupLeft = Math.min(Math.max(getNodeX(i) - POPUP_W / 2, 20), PATH_W - POPUP_W - 20);
+          ? Math.max(cy - R - 5 - POPUP_H_EST, HEADER_H + 8)
+          : Math.min(cy + R + 5, SCREEN_H - POPUP_H_EST);
+        const popupLeft = Math.min(Math.max(cx - POPUP_W / 2, 12), SCREEN_W - POPUP_W - 12);
 
         // Tail points at the circle's x, clamped inside the card bounds
-        const tailLeft = Math.min(Math.max(getNodeX(i) - popupLeft - TAIL / 2, 16), POPUP_W - 16 - TAIL);
+        const tailLeft = Math.min(Math.max(cx - popupLeft - TAIL / 2, 16), POPUP_W - 16 - TAIL);
 
         const startLabel =
           st === 'completed' ? 'Review'
