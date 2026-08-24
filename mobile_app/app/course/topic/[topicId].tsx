@@ -1,5 +1,15 @@
-import { useState, useCallback, useRef, type ComponentRef } from 'react';
+import { useState, useCallback, useRef, useEffect, type ComponentRef } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Dimensions, Pressable } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withRepeat,
+  withTiming,
+  withSpring,
+  withDelay,
+  cancelAnimation,
+  Easing,
+} from 'react-native-reanimated';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -60,6 +70,155 @@ function getNodeStatus(node: LearningNode, index: number, allNodes: LearningNode
   return 'locked';
 }
 
+// --- 3D animated node button ---
+const EDGE = 6; // height of the visible "side" under each button face
+const RIPPLE_SIZE = NODE_SIZE + 12;
+
+function shade(hex: string, amount: number): string {
+  const raw = hex.replace('#', '');
+  const full = raw.length === 3 ? raw.split('').map(c => c + c).join('') : raw;
+  const num = parseInt(full.slice(0, 6), 16);
+  const ch = (v: number) => Math.max(0, Math.min(255, v + amount));
+  return `rgb(${ch(num >> 16)},${ch((num >> 8) & 0xff)},${ch(num & 0xff)})`;
+}
+
+type NodeButtonProps = {
+  node: LearningNode;
+  status: 'completed' | 'current' | 'locked';
+  selected: boolean;
+  x: number;
+  y: number;
+  onPress: () => void;
+  onMeasure: (cx: number, cy: number) => void;
+};
+
+function NodeButton({ node, status, selected, x, y, onPress, onMeasure }: NodeButtonProps) {
+  const cfg = NODE_TYPE_CONFIG[node.node_type];
+  const color = cfg.color;
+  const R = NODE_SIZE / 2;
+  const isCurrent = status === 'current';
+
+  const btnRef = useRef<ComponentRef<typeof TouchableOpacity> | null>(null);
+  const pressed = useSharedValue(0);
+  const pulse = useSharedValue(0);
+  const rippleA = useSharedValue(0);
+  const rippleB = useSharedValue(0);
+
+  useEffect(() => {
+    if (isCurrent) {
+      // Breathing pulse
+      pulse.value = withRepeat(withTiming(1, { duration: 900, easing: Easing.inOut(Easing.ease) }), -1, true);
+      // Two ripple rings, staggered half a cycle apart
+      rippleA.value = withRepeat(withTiming(1, { duration: 2200, easing: Easing.out(Easing.quad) }), -1);
+      rippleB.value = withDelay(1100, withRepeat(withTiming(1, { duration: 2200, easing: Easing.out(Easing.quad) }), -1));
+    } else {
+      cancelAnimation(pulse);
+      cancelAnimation(rippleA);
+      cancelAnimation(rippleB);
+      pulse.value = 0;
+    }
+  }, [isCurrent, pulse, rippleA, rippleB]);
+
+  // Button face: slides down when pressed, breathes when current
+  const faceStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: pressed.value * 4 },
+      { scale: 1 + pulse.value * 0.05 },
+    ],
+  }));
+
+  const glowStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: 0.9 + pulse.value * 0.25 }],
+    opacity: 0.32 - pulse.value * 0.18,
+  }));
+
+  const rippleStyleA = useAnimatedStyle(() => ({
+    transform: [{ scale: 1 + rippleA.value * 0.7 }],
+    opacity: 0.4 * (1 - rippleA.value),
+  }));
+
+  const rippleStyleB = useAnimatedStyle(() => ({
+    transform: [{ scale: 1 + rippleB.value * 0.7 }],
+    opacity: 0.4 * (1 - rippleB.value),
+  }));
+
+  const handleMeasure = useCallback(() => {
+    btnRef.current?.measureInWindow((mx, my, mw, mh) => {
+      if (mh > 0) onMeasure(mx + mw / 2, my + mh / 2);
+    });
+  }, [onMeasure]);
+
+  const edgeColor =
+    status === 'completed' ? '#047857'
+    : status === 'locked' ? '#64748B'
+    : shade(color, -45);
+
+  return (
+    <TouchableOpacity
+      ref={(r) => { btnRef.current = r; }}
+      onLayout={handleMeasure}
+      onPressIn={() => { pressed.value = withTiming(1, { duration: 90 }); }}
+      onPressOut={() => { pressed.value = withSpring(0, { damping: 12, stiffness: 220 }); }}
+      onPress={onPress}
+      activeOpacity={1}
+      style={[
+        styles.nodeBtn,
+        { left: x - R, top: y - R },
+        status === 'locked' && styles.nodeLocked,
+        selected && styles.nodeSelected,
+      ]}
+    >
+      {/* Ripple rings emanating from current node */}
+      {isCurrent && (
+        <>
+          <Animated.View pointerEvents="none" style={[styles.ripple, { borderColor: color }, rippleStyleA]} />
+          <Animated.View pointerEvents="none" style={[styles.ripple, { borderColor: color }, rippleStyleB]} />
+        </>
+      )}
+
+      {/* Breathing glow behind current node */}
+      {isCurrent && (
+        <Animated.View pointerEvents="none" style={[styles.glowChild, { backgroundColor: color }, glowStyle]} />
+      )}
+
+      {/* 3D side (base peeking out under the face) */}
+      <View style={[styles.nodeEdge, { backgroundColor: edgeColor }]} />
+
+      {/* Button face (slides down on press, carrying icon + badges) */}
+      <Animated.View style={[styles.faceWrap, faceStyle]}>
+        <LinearGradient
+          colors={
+            status === 'completed' ? ['#10B981', '#059669']
+            : status === 'current' ? [color, color + 'CC']
+            : ['#CBD5E1', '#94A3B8']
+          }
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.nodeCircle}
+        >
+          <Ionicons name={cfg.icon as any} size={isCurrent ? 32 : 26} color="white" />
+        </LinearGradient>
+
+        {status === 'completed' && (
+          <View style={styles.badgeCheck}>
+            <Ionicons name="checkmark" size={13} color="white" />
+          </View>
+        )}
+        {status === 'locked' && (
+          <View style={styles.badgeLock}>
+            <Ionicons name="lock-closed" size={10} color="white" />
+          </View>
+        )}
+      </Animated.View>
+
+      {/* Selection Ring */}
+      {selected && (
+        <View style={[styles.selectionRing, { borderColor: color }]} />
+      )}
+    </TouchableOpacity>
+  );
+}
+
 export default function TopicPathScreen() {
   const { topicId, courseId, title } = useLocalSearchParams<{ topicId: string; courseId: string; title: string }>();
   const router = useRouter();
@@ -71,7 +230,6 @@ export default function TopicPathScreen() {
   const [selectedNodeIndex, setSelectedNodeIndex] = useState<number | null>(null);
   // Real on-screen center of each circle (measured), so the bubble anchors exactly
   const [nodeCenters, setNodeCenters] = useState<Record<number, { cx: number; cy: number }>>({});
-  const nodeRefs = useRef<Record<number, ComponentRef<typeof TouchableOpacity> | null>>({});
 
   useFocusEffect(
     useCallback(() => {
@@ -150,79 +308,20 @@ export default function TopicPathScreen() {
         )}
 
         {/* The Path Nodes */}
-        {nodes.map((node, i) => {
-          const status = statuses[i];
-          const cfg = NODE_TYPE_CONFIG[node.node_type];
-          const x = getNodeX(i);
-          const y = getNodeY(i);
-          const isSelected = selectedNodeIndex === i;
-
-          return (
-            <View key={node.id}>
-              {/* Glow for current node */}
-              {status === 'current' && (
-                <View style={[
-                  styles.glow, 
-                  { left: x - (NODE_SIZE + 20)/2, top: y - (NODE_SIZE + 20)/2, backgroundColor: cfg.color }
-                ]} />
-              )}
-
-              {/* The Circle Button */}
-              <TouchableOpacity
-                ref={(r) => { nodeRefs.current[node.id] = r; }}
-                onLayout={() => {
-                  nodeRefs.current[node.id]?.measureInWindow((mx, my, mw, mh) => {
-                    if (mh > 0) {
-                      setNodeCenters(prev => ({ ...prev, [node.id]: { cx: mx + mw / 2, cy: my + mh / 2 } }));
-                    }
-                  });
-                }}
-                style={[
-                  styles.nodeBtn,
-                  { left: x - NODE_SIZE/2, top: y - NODE_SIZE/2 },
-                  status === 'locked' && styles.nodeLocked,
-                  isSelected && styles.nodeSelected
-                ]}
-                onPress={() => handleNodePress(i)}
-                activeOpacity={0.8}
-              >
-                <LinearGradient
-                  colors={
-                    status === 'completed' ? ['#10B981', '#059669'] :
-                    status === 'current' ? [cfg.color, cfg.color + 'CC'] :
-                    ['#CBD5E1', '#94A3B8']
-                  }
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.nodeCircle}
-                >
-                   <Ionicons
-                    name={cfg.icon as any}
-                    size={status === 'current' ? 32 : 26}
-                    color="white"
-                  />
-                </LinearGradient>
-
-                {/* Status badges (type icon stays inside the circle) */}
-                {status === 'completed' && (
-                  <View style={styles.badgeCheck}>
-                    <Ionicons name="checkmark" size={13} color="white" />
-                  </View>
-                )}
-                {status === 'locked' && (
-                  <View style={styles.badgeLock}>
-                    <Ionicons name="lock-closed" size={10} color="white" />
-                  </View>
-                )}
-
-                {/* Selection Ring */}
-                {isSelected && (
-                  <View style={[styles.selectionRing, { borderColor: cfg.color }]} />
-                )}
-              </TouchableOpacity>
-            </View>
-          );
-        })}
+        {nodes.map((node, i) => (
+          <NodeButton
+            key={node.id}
+            node={node}
+            status={statuses[i]}
+            selected={selectedNodeIndex === i}
+            x={getNodeX(i)}
+            y={getNodeY(i)}
+            onPress={() => handleNodePress(i)}
+            onMeasure={(cx, cy) =>
+              setNodeCenters(prev => ({ ...prev, [node.id]: { cx, cy } }))
+            }
+          />
+        ))}
 
         {/* Trophy at the end */}
         {nodes.length > 0 && (
@@ -374,13 +473,22 @@ const styles = StyleSheet.create({
   emptyTitle: { fontSize: 17, fontFamily: FONTS.bold, color: COLORS.textPrimary },
   
   // Nodes
-  glow: {
+  ripple: {
     position: 'absolute',
+    left: -(RIPPLE_SIZE - NODE_SIZE) / 2,
+    top: -(RIPPLE_SIZE - NODE_SIZE) / 2,
+    width: RIPPLE_SIZE,
+    height: RIPPLE_SIZE,
+    borderRadius: RIPPLE_SIZE / 2,
+    borderWidth: 3,
+  },
+  glowChild: {
+    position: 'absolute',
+    left: -10,
+    top: -10,
     width: NODE_SIZE + 20,
     height: NODE_SIZE + 20,
     borderRadius: (NODE_SIZE + 20) / 2,
-    opacity: 0.3,
-    zIndex: 0,
   },
   nodeBtn: {
     position: 'absolute',
@@ -424,6 +532,21 @@ const styles = StyleSheet.create({
   nodeSelected: {
     transform: [{ scale: 1.1 }],
     zIndex: 10,
+  },
+  nodeEdge: {
+    position: 'absolute',
+    left: 0,
+    top: EDGE,
+    width: NODE_SIZE,
+    height: NODE_SIZE,
+    borderRadius: NODE_SIZE / 2,
+  },
+  faceWrap: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    width: NODE_SIZE,
+    height: NODE_SIZE,
   },
   nodeCircle: {
     width: NODE_SIZE,
