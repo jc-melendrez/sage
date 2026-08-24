@@ -1,136 +1,292 @@
-import { useMemo, useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert,
+  Modal, TextInput, ActivityIndicator,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AdminHeader from '@/components/admin/AdminHeader';
 import SearchBar from '@/components/admin/SearchBar';
 import StatusPill from '@/components/admin/StatusPill';
 import { COLORS, FONTS } from '@/constants/adminTheme';
+import { getCurrentUser } from '@/services/authService';
+import { adminService, ManagedUser, Role } from '@/services/adminService';
 
-type Role = 'Student' | 'Teacher';
+type RoleTab = 'student' | 'educator' | 'admin';
 
-interface PersonRow {
-  id: number;
-  name: string;
-  email: string;
-  role: Role;
-  status: 'active' | 'inactive' | 'suspended';
-  meta: string;
-}
-
-const MOCK_PEOPLE: PersonRow[] = [
-  { id: 1, name: 'Mikaela Santos', email: 'mikaela.santos@sage.edu', role: 'Student', status: 'active', meta: 'BSCS-3A · Lv. 12' },
-  { id: 2, name: 'Josh Villareal', email: 'josh.villareal@sage.edu', role: 'Student', status: 'active', meta: 'BSCS-3A · Lv. 9' },
-  { id: 3, name: 'Anna Bautista', email: 'anna.bautista@sage.edu', role: 'Student', status: 'inactive', meta: 'BSIT-2B · Lv. 5' },
-  { id: 4, name: 'Prof. Ramon Cruz', email: 'r.cruz@sage.edu', role: 'Teacher', status: 'active', meta: '4 courses · 210 students' },
-  { id: 5, name: 'Prof. Liza Fernandez', email: 'l.fernandez@sage.edu', role: 'Teacher', status: 'active', meta: '3 courses · 156 students' },
-  { id: 6, name: 'Carlo Dizon', email: 'carlo.dizon@sage.edu', role: 'Student', status: 'suspended', meta: 'BSIT-1A · Lv. 2' },
-  { id: 7, name: 'Prof. Sarah Lim', email: 's.lim@sage.edu', role: 'Teacher', status: 'active', meta: '2 courses · 98 students' },
-];
+const ROLE_LABELS: Record<RoleTab, string> = {
+  student: 'Student',
+  educator: 'Educator',
+  admin: 'Admin',
+};
 
 export default function AdminUsers() {
-  const [tab, setTab] = useState<Role>('Student');
+  const [tab, setTab] = useState<RoleTab>('student');
   const [query, setQuery] = useState('');
-  const [people, setPeople] = useState(MOCK_PEOPLE);
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+
+  const loadUsers = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const me = await getCurrentUser();
+      const schoolId = me?.school_id;
+      if (!schoolId) throw new Error('No school assigned to this account.');
+      setUsers(await adminService.listUsers(schoolId));
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load users.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadUsers();
+  }, [loadUsers]);
 
   const filtered = useMemo(
     () =>
-      people.filter(
-        (p) =>
-          p.role === tab &&
-          (p.name.toLowerCase().includes(query.toLowerCase()) ||
-            p.email.toLowerCase().includes(query.toLowerCase()))
+      users.filter(
+        (u) =>
+          u.role === tab &&
+          (u.username.toLowerCase().includes(query.toLowerCase()) ||
+            u.email.toLowerCase().includes(query.toLowerCase()))
       ),
-    [people, tab, query]
+    [users, tab, query]
   );
 
-  const toggleStatus = (id: number) => {
-    setPeople((prev) =>
-      prev.map((p) =>
-        p.id === id ? { ...p, status: p.status === 'active' ? 'suspended' : 'active' } : p
-      )
-    );
+  const displayName = (u: ManagedUser) =>
+    [u.first_name, u.last_name].filter(Boolean).join(' ') || u.username;
+
+  const doRoleChange = (u: ManagedUser, role: Role) => {
+    Alert.alert('Change role', `Set ${displayName(u)}'s role to ${role}?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Change',
+        onPress: async () => {
+          try {
+            const me = await getCurrentUser();
+            const updated = await adminService.changeRole(me.school_id, u.id, role);
+            setUsers((prev) => prev.map((p) => (p.id === u.id ? updated : p)));
+          } catch (e: any) {
+            Alert.alert('Failed', e?.message || 'Could not change role.');
+          }
+        },
+      },
+    ]);
   };
 
-  const confirmToggle = (person: PersonRow) => {
-    const action = person.status === 'active' ? 'suspend' : 'reactivate';
+  const promptRole = (u: ManagedUser) => {
+    Alert.alert('Change role', `${displayName(u)}`, [
+      { text: 'Student', onPress: () => doRoleChange(u, 'student') },
+      { text: 'Educator', onPress: () => doRoleChange(u, 'educator') },
+      { text: 'Admin', onPress: () => doRoleChange(u, 'admin') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  };
+
+  const toggleStatus = (u: ManagedUser) => {
+    const action = u.is_active === false ? 'reactivate' : 'suspend';
     Alert.alert(
       `${action === 'suspend' ? 'Suspend' : 'Reactivate'} account?`,
-      `This will ${action} ${person.name}'s account.`,
+      `This will ${action} ${displayName(u)}'s account.`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Confirm', style: 'destructive', onPress: () => toggleStatus(person.id) },
+        {
+          text: 'Confirm',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const me = await getCurrentUser();
+              const updated = await adminService.updateUser(me.school_id, u.id, {
+                is_active: action === 'reactivate',
+              });
+              setUsers((prev) => prev.map((p) => (p.id === u.id ? updated : p)));
+            } catch (e: any) {
+              Alert.alert('Failed', e?.message || 'Could not update user.');
+            }
+          },
+        },
       ]
     );
   };
 
   return (
     <View style={styles.container}>
-      <AdminHeader title="Users & Teachers" subtitle={`${people.length} accounts total`} rightIcon="person-add-outline" onRightPress={() => Alert.alert('Add Account', 'Form to invite a new student or teacher would open here.')} />
+      <AdminHeader
+        title="Users & Teachers"
+        subtitle={`${users.length} accounts total`}
+        rightIcon="person-add-outline"
+        onRightPress={() => setAddOpen(true)}
+      />
 
       <View style={styles.content}>
         <View style={styles.tabs}>
-          {(['Student', 'Teacher'] as Role[]).map((r) => (
+          {(Object.keys(ROLE_LABELS) as RoleTab[]).map((r) => (
             <TouchableOpacity
               key={r}
               style={[styles.tab, tab === r && styles.tabActive]}
               onPress={() => setTab(r)}
             >
-              <Text style={[styles.tabText, tab === r && styles.tabTextActive]}>{r}s</Text>
+              <Text style={[styles.tabText, tab === r && styles.tabTextActive]}>{ROLE_LABELS[r]}s</Text>
             </TouchableOpacity>
           ))}
         </View>
 
         <View style={{ marginTop: 14 }}>
-          <SearchBar value={query} onChangeText={setQuery} placeholder={`Search ${tab.toLowerCase()}s...`} />
+          <SearchBar value={query} onChangeText={setQuery} placeholder={`Search ${ROLE_LABELS[tab].toLowerCase()}s...`} />
         </View>
 
-        <ScrollView style={{ marginTop: 16 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40, gap: 12 }}>
-          {filtered.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Ionicons name="search-outline" size={28} color={COLORS.textMuted} />
-              <Text style={styles.emptyText}>No {tab.toLowerCase()}s match your search.</Text>
-            </View>
-          ) : (
-            filtered.map((person) => (
-              <View key={person.id} style={styles.card}>
-                <View style={styles.cardTop}>
-                  <View style={styles.avatar}>
-                    <Text style={styles.avatarText}>
-                      {person.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase()}
-                    </Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.name}>{person.name}</Text>
-                    <Text style={styles.email}>{person.email}</Text>
-                  </View>
-                  <StatusPill status={person.status} />
-                </View>
-                <Text style={styles.meta}>{person.meta}</Text>
-                <View style={styles.actionsRow}>
-                  <TouchableOpacity style={styles.actionBtn} onPress={() => Alert.alert('Edit', `Edit form for ${person.name} would open here.`)}>
-                    <Ionicons name="create-outline" size={15} color={COLORS.purpleDark} />
-                    <Text style={styles.actionText}>Edit</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.actionBtn, { backgroundColor: person.status === 'active' ? 'rgba(239,68,68,0.1)' : 'rgba(16,185,129,0.1)' }]}
-                    onPress={() => confirmToggle(person)}
-                  >
-                    <Ionicons
-                      name={person.status === 'active' ? 'ban-outline' : 'checkmark-circle-outline'}
-                      size={15}
-                      color={person.status === 'active' ? COLORS.danger : COLORS.success}
-                    />
-                    <Text style={[styles.actionText, { color: person.status === 'active' ? COLORS.danger : COLORS.success }]}>
-                      {person.status === 'active' ? 'Suspend' : 'Reactivate'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
+        {loading ? (
+          <ActivityIndicator style={{ marginTop: 60 }} color={COLORS.purpleDark} />
+        ) : error ? (
+          <View style={styles.emptyState}>
+            <Ionicons name="cloud-offline-outline" size={28} color={COLORS.danger} />
+            <Text style={styles.emptyText}>{error}</Text>
+            <TouchableOpacity style={styles.retryBtn} onPress={loadUsers}>
+              <Text style={styles.retryText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <ScrollView style={{ marginTop: 16 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40, gap: 12 }}>
+            {filtered.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Ionicons name="search-outline" size={28} color={COLORS.textMuted} />
+                <Text style={styles.emptyText}>No {ROLE_LABELS[tab].toLowerCase()}s match your search.</Text>
               </View>
-            ))
-          )}
-        </ScrollView>
+            ) : (
+              filtered.map((u) => {
+                const isActive = u.is_active !== false;
+                return (
+                  <View key={u.id} style={styles.card}>
+                    <View style={styles.cardTop}>
+                      <View style={styles.avatar}>
+                        <Text style={styles.avatarText}>
+                          {displayName(u).split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase()}
+                        </Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.name}>{displayName(u)}</Text>
+                        <Text style={styles.email}>{u.email}</Text>
+                      </View>
+                      <StatusPill status={isActive ? 'active' : 'inactive'} />
+                    </View>
+                    <Text style={styles.meta}>Lv. {u.level} · {u.total_points} XP</Text>
+                    <View style={styles.actionsRow}>
+                      <TouchableOpacity style={styles.actionBtn} onPress={() => promptRole(u)}>
+                        <Ionicons name="swap-horizontal-outline" size={15} color={COLORS.purpleDark} />
+                        <Text style={styles.actionText}>Role: {ROLE_LABELS[u.role as RoleTab]}</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.actionBtn, { backgroundColor: isActive ? 'rgba(239,68,68,0.1)' : 'rgba(16,185,129,0.1)' }]}
+                        onPress={() => toggleStatus(u)}
+                      >
+                        <Ionicons
+                          name={isActive ? 'ban-outline' : 'checkmark-circle-outline'}
+                          size={15}
+                          color={isActive ? COLORS.danger : COLORS.success}
+                        />
+                        <Text style={[styles.actionText, { color: isActive ? COLORS.danger : COLORS.success }]}>
+                          {isActive ? 'Suspend' : 'Reactivate'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                );
+              })
+            )}
+          </ScrollView>
+        )}
       </View>
+
+      <AddUserModal
+        visible={addOpen}
+        onClose={() => setAddOpen(false)}
+        onCreated={(newUser) => setUsers((prev) => [...prev, newUser])}
+      />
     </View>
+  );
+}
+
+function AddUserModal({
+  visible,
+  onClose,
+  onCreated,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onCreated: (u: ManagedUser) => void;
+}) {
+  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [role, setRole] = useState<'student' | 'educator'>('student');
+  const [submitting, setSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+
+  const submit = async () => {
+    if (!username || !email) {
+      Alert.alert('Missing fields', 'Username and email are required.');
+      return;
+    }
+    try {
+      setSubmitting(true);
+      const me = await getCurrentUser();
+      const created = await adminService.createUser(me.school_id, {
+        username,
+        email,
+        password: password || undefined,
+        first_name: firstName,
+        last_name: lastName,
+        role,
+      });
+      onCreated(created);
+      onClose();
+      setUsername(''); setEmail(''); setPassword(''); setFirstName(''); setLastName('');
+    } catch (e: any) {
+      Alert.alert('Failed', e?.message || 'Could not create user.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <Text style={styles.modalTitle}>Add User</Text>
+          <TextInput style={styles.input} placeholder="Username" placeholderTextColor={COLORS.textMuted} value={username} onChangeText={setUsername} autoCapitalize="none" />
+          <TextInput style={styles.input} placeholder="Email" placeholderTextColor={COLORS.textMuted} value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
+          <View style={styles.passwordWrap}>
+            <TextInput style={[styles.input, { flex: 1 }]} placeholder="Password (optional)" placeholderTextColor={COLORS.textMuted} value={password} onChangeText={setPassword} secureTextEntry={!showPassword} />
+            <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword((v) => !v)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          </View>
+          <TextInput style={styles.input} placeholder="First name" placeholderTextColor={COLORS.textMuted} value={firstName} onChangeText={setFirstName} />
+          <TextInput style={styles.input} placeholder="Last name" placeholderTextColor={COLORS.textMuted} value={lastName} onChangeText={setLastName} />
+          <View style={styles.tabs}>
+            {(['student', 'educator'] as const).map((r) => (
+              <TouchableOpacity key={r} style={[styles.tab, role === r && styles.tabActive]} onPress={() => setRole(r)}>
+                <Text style={[styles.tabText, role === r && styles.tabTextActive]}>{ROLE_LABELS[r]}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <View style={styles.modalActions}>
+            <TouchableOpacity style={[styles.modalBtn, { backgroundColor: COLORS.surface }]} onPress={onClose}>
+              <Text style={[styles.modalBtnText, { color: COLORS.textSecondary }]}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.modalBtn, { backgroundColor: COLORS.purpleDark }]} onPress={submit} disabled={submitting}>
+              {submitting ? <ActivityIndicator color="#fff" /> : <Text style={[styles.modalBtnText, { color: '#fff' }]}>Create</Text>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -161,5 +317,32 @@ const styles = StyleSheet.create({
   },
   actionText: { fontSize: 12, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.purpleDark },
   emptyState: { alignItems: 'center', justifyContent: 'center', paddingVertical: 60, gap: 10 },
-  emptyText: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textMuted },
+  emptyText: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textMuted, textAlign: 'center' },
+  retryBtn: { backgroundColor: COLORS.purpleDark, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 10 },
+  retryText: { color: '#fff', fontFamily: FONTS.semiBold, fontSize: 12 },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(15,23,42,0.6)', justifyContent: 'flex-end' },
+  modalCard: { backgroundColor: COLORS.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, gap: 12 },
+  modalTitle: { fontSize: 17, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary },
+  input: {
+    backgroundColor: COLORS.bg,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+  },
+  passwordWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.bg,
+    borderRadius: 12,
+  },
+  eyeBtn: {
+    position: 'absolute',
+    right: 12,
+  },
+  modalActions: { flexDirection: 'row', gap: 10, marginTop: 6 },
+  modalBtn: { flex: 1, alignItems: 'center', paddingVertical: 12, borderRadius: 12 },
+  modalBtnText: { fontSize: 14, fontFamily: FONTS.semiBold, fontWeight: '600' },
 });

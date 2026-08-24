@@ -10,9 +10,8 @@ export default function Login() {
       {/* TEMP: preview button, remove before shipping */}
       <TouchableOpacity
         style={styles.skipBtn}
-        onPress={() => router.replace('/educator/dashboard')}
+        onPress={() => router.replace('/educator')}
       >
-        <Text style={styles.skipText}>Preview Educator Interface →</Text>
       </TouchableOpacity>
     </View>
   );

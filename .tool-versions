@@ -1,0 +1,9 @@
+# SAGE Learning — language runtimes & CLI tools pinned for mise
+# No version pins exist in the repo (.nvmrc, package.json engines/volta,
+# CI workflows, or Dockerfiles), so these are INFERRED to match the
+# currently-tested dev environment (Node 22.18.0, Python 3.14.0).
+node 22.18.0
+python 3.14.0
+# Inferred: latest stable (15.26.0) as of Aug 2026. Deploy-only tool used
+# to publish Firestore rules/indexes from backend_api/firebase-config.
+firebase 15.26.0

@@ -33,6 +33,8 @@ export interface AuthResponse {
     first_name?: string;
     last_name?: string;
     firebase_uid?: string;
+    role?: 'superadmin' | 'admin' | 'educator' | 'student';
+    school_id?: number | null;
     is_student?: boolean;
     is_educator?: boolean;
     is_admin?: boolean;
@@ -41,6 +43,21 @@ export interface AuthResponse {
 
 const TOKEN_KEY = 'auth_token';
 const REFRESH_TOKEN_KEY = 'refresh_token';
+
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 60000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw new Error('Request timed out. If using Render\u2019s free tier, the server may be waking up \u2014 try again in a minute.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export async function refreshAccessToken(): Promise<string | null> {
   const refresh = await getRefreshToken();
@@ -84,7 +101,7 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
   const idToken = await signInWithEmail(credentials.username, credentials.password);
 
   // 2. Exchange Firebase ID token for Django JWT
-  const response = await fetch(`${API_BASE_URL}/users/firebase-login/`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/users/firebase-login/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id_token: idToken }),
@@ -111,7 +128,7 @@ export async function register(credentials: RegisterCredentials): Promise<AuthRe
   const idToken = await signUpWithEmail(credentials.email, credentials.password);
 
   // 2. Sync to Django and get JWT
-  const response = await fetch(`${API_BASE_URL}/users/firebase-login/`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/users/firebase-login/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -194,9 +211,10 @@ export async function isAuthenticated(): Promise<boolean> {
 }
 
 export function roleHomePath(
-  user?: { is_admin?: boolean; is_educator?: boolean } | null
+  user?: { role?: string; is_admin?: boolean; is_educator?: boolean } | null
 ): Href {
-  if (user?.is_admin) return '/admin';
-  if (user?.is_educator) return '/educator';
+  if (user?.role === 'superadmin') return '/superadmin';
+  if (user?.role === 'admin' || user?.is_admin) return '/admin';
+  if (user?.role === 'educator' || user?.is_educator) return '/educator';
   return '/(tabs)';
 }

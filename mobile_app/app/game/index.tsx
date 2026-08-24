@@ -113,6 +113,11 @@ export default function GameCenterScreen() {
     if (modeId === 'classic') {
       setSelectedMode(modeId);
       setShowConfigModal(true);
+    } else if (modeId === 'group') {
+      setSelectedMode(modeId);
+      router.push({ pathname: '/game/classic', params: { mode: 'create', teamMode: 'true' } });
+    } else if (modeId === 'flashcards') {
+      router.push('/game/flashcards');
     } else {
       Alert.alert("Coming Soon", "This mode is under development!");
     }
@@ -163,6 +168,10 @@ export default function GameCenterScreen() {
 
   // 3. Handle Start Press -> Start Game & Countdown
   const handleStartPress = async () => {
+    if (selectedMode === 'group') {
+      router.push({ pathname: '/game/classic', params: { mode: 'create', teamMode: 'true' } });
+      return;
+    }
     if (!roomCode) {
        // If no room exists, create one first silently
        if (!selectedQuiz) {
@@ -279,6 +288,20 @@ export default function GameCenterScreen() {
       title: 'CLASSIC BATTLE',
       description: 'Host or join a room! Compete in real-time quiz battles with friends.',
       icon: 'game-controller' as const,
+      active: true,
+    },
+    {
+      id: 'group',
+      title: 'GROUP MODE',
+      description: 'Split into teams! Host or join a room and battle team vs team in real-time.',
+      icon: 'people' as const,
+      active: true,
+    },
+    {
+      id: 'flashcards',
+      title: 'SOLO MODE',
+      description: 'Flip through flashcards and master any quiz at your own pace.',
+      icon: 'albums' as const,
       active: true,
     },
     {
@@ -417,6 +440,7 @@ export default function GameCenterScreen() {
         <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 10 }]}>
             
             {/* INVITE BUTTON */}
+            {selectedMode !== 'group' && (
             <TouchableOpacity 
                 style={styles.actionBtnInvite} 
                 onPress={handleInvitePress}
@@ -431,6 +455,7 @@ export default function GameCenterScreen() {
                     </>
                 )}
             </TouchableOpacity>
+            )}
 
             {/* START BUTTON */}
             <TouchableOpacity 

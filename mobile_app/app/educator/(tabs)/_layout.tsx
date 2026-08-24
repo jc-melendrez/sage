@@ -104,6 +104,9 @@ export default function EducatorTabLayout() {
         }}
       />
       {/* Hidden sub-screens (reachable via push from within tabs) */}
+      <Tabs.Screen name="classes" options={{ href: null }} />
+      <Tabs.Screen name="content" options={{ href: null }} />
+      <Tabs.Screen name="index" options={{ href: null }} />
       <Tabs.Screen name="courses" options={{ href: null }} />
       <Tabs.Screen name="student-detail" options={{ href: null }} />
       <Tabs.Screen name="host-game" options={{ href: null }} />
@@ -112,6 +115,9 @@ export default function EducatorTabLayout() {
       <Tabs.Screen name="assignments" options={{ href: null }} />
       <Tabs.Screen name="announcements" options={{ href: null }} />
       <Tabs.Screen name="ai-insights" options={{ href: null }} />
+      <Tabs.Screen name="course-detail" options={{ href: null }} />
+      <Tabs.Screen name="topic-detail" options={{ href: null }} />
+      <Tabs.Screen name="add-node" options={{ href: null }} />
     </Tabs>
   );
 }

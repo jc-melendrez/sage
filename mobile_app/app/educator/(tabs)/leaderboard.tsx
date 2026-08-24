@@ -1,17 +1,10 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch } from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, RefreshControl } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, FilterChip, Avatar } from '@/components/educator/EducatorPrimitives';
-
-const LEADERBOARD = [
-  { rank: 1, name: 'Priya Nair', xp: 960 },
-  { rank: 2, name: 'Amara Chen', xp: 840 },
-  { rank: 3, name: 'Sofia Reyes', xp: 705 },
-  { rank: 4, name: 'Owen Blake', xp: 310 },
-  { rank: 5, name: 'Diego Ramos', xp: 220 },
-];
+import { getLeaderboard, LeaderboardEntry } from '@/services/gamificationService';
 
 const PERIODS = ['Weekly', 'Monthly'];
 
@@ -25,12 +18,45 @@ function rankColor(rank: number) {
 export default function LeaderboardScreen() {
   const [enabled, setEnabled] = useState(true);
   const [period, setPeriod] = useState('Weekly');
+  const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadLeaderboard = useCallback(async () => {
+    try {
+      setError(null);
+      const data = await getLeaderboard();
+      setEntries(data.entries);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load leaderboard');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadLeaderboard();
+  }, [loadLeaderboard]);
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    loadLeaderboard();
+  }, [loadLeaderboard]);
 
   return (
     <View style={styles.container}>
       <EducatorHeader title="Leaderboard" subtitle="Manage class rankings" showBack />
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+      <ScrollView
+        style={styles.content}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: 40 }}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.purplePrimary} />
+        }
+      >
         {/* Enable/disable */}
         <View style={styles.section}>
           <View style={styles.toggleCard}>
@@ -82,16 +108,31 @@ export default function LeaderboardScreen() {
                 <Text style={styles.disabledOverlayText}>Leaderboard is currently hidden from students</Text>
               </View>
             )}
-            {LEADERBOARD.map((entry, idx) => (
-              <View key={entry.rank} style={[styles.rankRow, idx > 0 && styles.borderTop]}>
-                <View style={[styles.rankBadge, { backgroundColor: tint(rankColor(entry.rank)) }]}>
-                  <Text style={[styles.rankNumber, { color: rankColor(entry.rank) }]}>{entry.rank}</Text>
-                </View>
-                <Avatar initials={entry.name.split(' ').map((n) => n[0]).join('')} size={36} />
-                <Text style={styles.rankName}>{entry.name}</Text>
-                <Text style={styles.rankXp}>{entry.xp} XP</Text>
+            {loading ? (
+              <View style={styles.loadingNote}>
+                <Text style={styles.disabledOverlayText}>Loading rankings...</Text>
               </View>
-            ))}
+            ) : error ? (
+              <View style={styles.loadingNote}>
+                <Ionicons name="alert-circle-outline" size={14} color={COLORS.danger} />
+                <Text style={styles.errorText}>{error}</Text>
+              </View>
+            ) : entries.length === 0 ? (
+              <View style={styles.loadingNote}>
+                <Text style={styles.disabledOverlayText}>No students on the leaderboard yet.</Text>
+              </View>
+            ) : (
+              entries.map((entry, idx) => (
+                <View key={entry.id} style={[styles.rankRow, idx > 0 && styles.borderTop]}>
+                  <View style={[styles.rankBadge, { backgroundColor: tint(rankColor(entry.rank)) }]}>
+                    <Text style={[styles.rankNumber, { color: rankColor(entry.rank) }]}>{entry.rank}</Text>
+                  </View>
+                  <Avatar initials={entry.display_name.split(' ').map((n) => n[0]).join('').slice(0, 2)} size={36} />
+                  <Text style={styles.rankName}>{entry.display_name}</Text>
+                  <Text style={styles.rankXp}>{entry.total_points} XP</Text>
+                </View>
+              ))
+            )}
           </View>
         </View>
       </ScrollView>
@@ -117,6 +158,8 @@ const styles = StyleSheet.create({
   previewCard: { backgroundColor: COLORS.surface, borderRadius: RADIUS.lg, paddingHorizontal: 16, borderWidth: 1, borderColor: COLORS.border, overflow: 'hidden' },
   disabledOverlayNote: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: COLORS.border },
   disabledOverlayText: { fontSize: 11.5, fontFamily: FONTS.medium, color: COLORS.textMuted },
+  loadingNote: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 20, justifyContent: 'center' },
+  errorText: { fontSize: 12.5, fontFamily: FONTS.medium, color: COLORS.danger },
   borderTop: { borderTopWidth: 1, borderTopColor: COLORS.border },
   rankRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },
   rankBadge: { width: 26, height: 26, borderRadius: 13, justifyContent: 'center', alignItems: 'center' },

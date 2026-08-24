@@ -54,7 +54,7 @@ interface Player {
 const MEDALS = ['🥇', '🥈', '🥉'];
 
 /* ── leaderboard row: staggered entrance + score count-up (mirrors question.tsx StandingsRow) ── */
-function LeaderRow({ item, index, questionCount, showProgress }: { item: Player; index: number; questionCount: number; showProgress: boolean }) {
+function LeaderRow({ item, index, questionCount, showProgress, teamColor }: { item: Player; index: number; questionCount: number; showProgress: boolean; teamColor?: string }) {
   const anim = useRef(new Animated.Value(0)).current;
   const scoreAnim = useRef(new Animated.Value(item.score ?? 0)).current;
   const [displayScore, setDisplayScore] = useState(item.score ?? 0);
@@ -87,6 +87,7 @@ function LeaderRow({ item, index, questionCount, showProgress }: { item: Player;
       <View style={styles.leaderBody}>
         <View style={styles.leaderNameRow}>
           <Text style={styles.leaderName} numberOfLines={1}>{item.displayName}</Text>
+          {teamColor && <View style={[styles.teamDot, { backgroundColor: teamColor }]} />}
           {finished && <Ionicons name="checkmark-circle" size={15} color={COLORS.success} />}
         </View>
         <Text style={styles.leaderMeta}>{answered}/{questionCount} answered</Text>
@@ -101,8 +102,50 @@ function LeaderRow({ item, index, questionCount, showProgress }: { item: Player;
   );
 }
 
+/* ── team leaderboard row (phone) ── */
+function TeamRow({ team, index, memberCount }: { team: any; index: number; memberCount: number }) {
+  const anim = useRef(new Animated.Value(0)).current;
+  const scoreAnim = useRef(new Animated.Value(team.score ?? 0)).current;
+  const [displayScore, setDisplayScore] = useState(team.score ?? 0);
+
+  useEffect(() => {
+    Animated.timing(anim, { toValue: 1, duration: 280, delay: index * 90, useNativeDriver: true }).start();
+  }, []);
+
+  useEffect(() => {
+    Animated.timing(scoreAnim, { toValue: team.score ?? 0, duration: 500, useNativeDriver: false }).start();
+    const id = scoreAnim.addListener(({ value }) => setDisplayScore(Math.round(value)));
+    return () => scoreAnim.removeListener(id);
+  }, [team.score]);
+
+  return (
+    <Animated.View
+      style={[
+        styles.leaderRow,
+        { borderColor: team.color + '55', backgroundColor: team.color + '0d' },
+        {
+          opacity: anim,
+          transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) }],
+        },
+      ]}
+    >
+      <Text style={[styles.rankText, { color: team.color }]}>{MEDALS[index] || `${index + 1}.`}</Text>
+      <View style={styles.leaderBody}>
+        <View style={styles.leaderNameRow}>
+          <View style={[styles.teamDot, { backgroundColor: team.color }]} />
+          <Text style={styles.leaderName} numberOfLines={1}>{team.name}</Text>
+        </View>
+        <Text style={styles.leaderMeta}>
+          {memberCount} {memberCount === 1 ? 'member' : 'members'} · {team.answeredCount ?? 0} answers
+        </Text>
+      </View>
+      <Text style={styles.leaderScore}>{displayScore.toLocaleString()}</Text>
+    </Animated.View>
+  );
+}
+
 /* ── presentation leaderboard row: scaled-up LeaderRow for TV ── */
-function PresentRow({ item, index, questionCount }: { item: Player; index: number; questionCount: number }) {
+function PresentRow({ item, index, questionCount, teamColor }: { item: Player; index: number; questionCount: number; teamColor?: string }) {
   const anim = useRef(new Animated.Value(0)).current;
   const scoreAnim = useRef(new Animated.Value(item.score ?? 0)).current;
   const [displayScore, setDisplayScore] = useState(item.score ?? 0);
@@ -138,6 +181,7 @@ function PresentRow({ item, index, questionCount }: { item: Player; index: numbe
       <View style={styles.presentRowBody}>
         <View style={styles.presentRowNameRow}>
           <Text style={styles.presentRowName} numberOfLines={1}>{item.displayName}</Text>
+          {teamColor && <View style={[styles.presentTeamDot, { backgroundColor: teamColor }]} />}
           {finished && <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />}
         </View>
         <Text style={styles.presentRowMeta}>{answered}/{questionCount} answered</Text>
@@ -150,10 +194,55 @@ function PresentRow({ item, index, questionCount }: { item: Player; index: numbe
   );
 }
 
+/* ── presentation team row (TV) ── */
+function PresentTeamRow({ team, index, memberCount }: { team: any; index: number; memberCount: number }) {
+  const anim = useRef(new Animated.Value(0)).current;
+  const scoreAnim = useRef(new Animated.Value(team.score ?? 0)).current;
+  const [displayScore, setDisplayScore] = useState(team.score ?? 0);
+
+  useEffect(() => {
+    Animated.timing(anim, { toValue: 1, duration: 300, delay: index * 100, useNativeDriver: true }).start();
+  }, []);
+
+  useEffect(() => {
+    Animated.timing(scoreAnim, { toValue: team.score ?? 0, duration: 600, useNativeDriver: false }).start();
+    const id = scoreAnim.addListener(({ value }) => setDisplayScore(Math.round(value)));
+    return () => scoreAnim.removeListener(id);
+  }, [team.score]);
+
+  return (
+    <Animated.View
+      style={[
+        styles.presentRow,
+        { borderColor: team.color + '66', backgroundColor: team.color + '0d' },
+        {
+          opacity: anim,
+          transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] }) }],
+        },
+      ]}
+    >
+      <Text style={[styles.presentRank, { color: team.color }]}>{MEDALS[index] || `${index + 1}.`}</Text>
+      <View style={[styles.presentRowAvatar, { borderColor: team.color, backgroundColor: team.color + '22' }]}>
+        <Text style={[styles.presentRowAvatarText, { color: team.color }]}>{(team.name || 'T').charAt(0).toUpperCase()}</Text>
+      </View>
+      <View style={styles.presentRowBody}>
+        <View style={styles.presentRowNameRow}>
+          <Text style={styles.presentRowName} numberOfLines={1}>{team.name}</Text>
+        </View>
+        <Text style={styles.presentRowMeta}>
+          {memberCount} {memberCount === 1 ? 'member' : 'members'} · {team.answeredCount ?? 0} answers
+        </Text>
+      </View>
+      <Text style={styles.presentRowScore}>{displayScore.toLocaleString()}</Text>
+    </Animated.View>
+  );
+}
+
 /* ── full-screen TV presentation (self-paced: big live leaderboard + controls) ── */
 function PresentationView({
   status, codeChars, topic, students, ranked, questionCount, finishedCount, playerCount,
   livePulse, phaseAnim, codeAnim, listAnim, loading,
+  teamMode, teams, rankedTeams, allAssigned, teamColorOf,
   onStart, onEnd, onBack, onExit,
 }: {
   status: RoomStatus;
@@ -169,6 +258,11 @@ function PresentationView({
   codeAnim: Animated.Value;
   listAnim: Animated.Value;
   loading: boolean;
+  teamMode: boolean;
+  teams: any[];
+  rankedTeams: any[];
+  allAssigned: boolean;
+  teamColorOf: (teamId?: string) => string | undefined;
   onStart: () => void;
   onEnd: () => void;
   onBack: () => void;
@@ -260,11 +354,13 @@ function PresentationView({
                   <ScrollView contentContainerStyle={styles.presentRosterList} showsVerticalScrollIndicator={false}>
                     {students.map((item) => {
                       const initial = (item.displayName || '?').charAt(0).toUpperCase();
+                      const teamColor = teamMode ? teamColorOf(item.teamId) : undefined;
                       return (
                         <View key={item.id} style={styles.presentPlayerCard}>
                           <View style={styles.presentAvatar}><Text style={styles.presentAvatarText}>{initial}</Text></View>
                           <Text style={styles.presentPlayerName} numberOfLines={1}>{item.displayName}</Text>
-                          <View style={styles.presentPlayerReady} />
+                          {teamColor && <View style={[styles.presentTeamDot, { backgroundColor: teamColor }]} />}
+                          <View style={[styles.presentPlayerReady, !item.teamId && { backgroundColor: COLORS.warning }]} />
                         </View>
                       );
                     })}
@@ -276,6 +372,40 @@ function PresentationView({
 
           {(status === 'active' || status === 'finished') && (
             <View style={styles.presentBody}>
+              {teamMode && rankedTeams.length > 0 && (
+                <Animated.View style={{ ...slide(listAnim, 36) }}>
+                  <View style={styles.presentBoardHead}>
+                    <Text style={styles.presentBlockKicker}>TEAM STANDINGS</Text>
+                    <View style={styles.presentFinishTag}>
+                      <Text style={styles.presentFinishText}>{rankedTeams.length} team{rankedTeams.length === 1 ? '' : 's'}</Text>
+                    </View>
+                  </View>
+                  {status === 'finished' && (
+                    <View style={styles.presentPodium}>
+                      {[1, 0, 2].map((rankIdx) => {
+                        const t = rankedTeams[rankIdx];
+                        if (!t) return <View key={rankIdx} style={styles.presentPodiumSlot} />;
+                        return (
+                          <View key={rankIdx} style={styles.presentPodiumSlot}>
+                            <Text style={styles.presentPodiumRank}>{MEDALS[rankIdx]}</Text>
+                            <View style={[styles.presentPodiumAvatar, { borderColor: t.color, backgroundColor: t.color + '22' }]}>
+                              <Text style={[styles.presentPodiumAvatarText, { color: t.color }]}>{(t.name || 'T').charAt(0).toUpperCase()}</Text>
+                            </View>
+                            <Text style={styles.presentPodiumName} numberOfLines={1}>{t.name}</Text>
+                            <Text style={styles.presentPodiumScore}>{(t.score ?? 0).toLocaleString()}</Text>
+                            <View style={[styles.presentPodiumBase, { height: rankIdx === 0 ? 150 : rankIdx === 1 ? 110 : 90, backgroundColor: t.color }]} />
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
+                  <View style={styles.presentTeamList}>
+                    {rankedTeams.map((t, index) => (
+                      <PresentTeamRow key={t.id} team={t} index={index} memberCount={students.filter(s => String(s.teamId) === String(t.id)).length} />
+                    ))}
+                  </View>
+                </Animated.View>
+              )}
               <Animated.View style={{ flex: 1, ...slide(listAnim, 36) }}>
                 <View style={styles.presentBoardHead}>
                   <Text style={styles.presentBoardKicker}>{status === 'active' ? 'LIVE LEADERBOARD' : 'FINAL RESULTS'}</Text>
@@ -326,7 +456,13 @@ function PresentationView({
                 ) : (
                   <ScrollView contentContainerStyle={styles.presentList} showsVerticalScrollIndicator={false}>
                     {ranked.map((item, index) => (
-                      <PresentRow key={item.id} item={item} index={index} questionCount={questionCount} />
+                      <PresentRow
+                        key={item.id}
+                        item={item}
+                        index={index}
+                        questionCount={questionCount}
+                        teamColor={teamMode ? teamColorOf(item.teamId) : undefined}
+                      />
                     ))}
                   </ScrollView>
                 )}
@@ -344,9 +480,9 @@ function PresentationView({
               <TouchableOpacity
                 style={styles.presentStartWrap}
                 onPress={onStart}
-                onPressIn={() => { if (!loading && playerCount > 0) animatePressIn(); }}
+                onPressIn={() => { if (!loading && playerCount > 0 && (!teamMode || allAssigned)) animatePressIn(); }}
                 onPressOut={animatePressOut}
-                disabled={loading || playerCount === 0}
+                disabled={loading || playerCount === 0 || (teamMode && !allAssigned)}
                 activeOpacity={0.85}
               >
                 {loading ? (
@@ -355,6 +491,11 @@ function PresentationView({
                   <View style={styles.presentStartInnerDisabled}>
                     <Ionicons name="play" size={20} color={COLORS.textMuted} style={{ marginRight: 8 }} />
                     <Text style={[styles.presentStartText, { color: COLORS.textMuted }]}>Waiting for players...</Text>
+                  </View>
+                ) : (teamMode && !allAssigned) ? (
+                  <View style={styles.presentStartInnerDisabled}>
+                    <Ionicons name="people" size={20} color={COLORS.textMuted} style={{ marginRight: 8 }} />
+                    <Text style={[styles.presentStartText, { color: COLORS.textMuted }]}>Waiting for teams...</Text>
                   </View>
                 ) : (
                   <LinearGradient
@@ -426,6 +567,8 @@ export default function HostSessionScreen() {
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [questionCount, setQuestionCount] = useState(0);
   const [players, setPlayers] = useState<Player[]>([]);
+  const [teams, setTeams] = useState<any[]>([]);
+  const [teamMode, setTeamMode] = useState(false);
   const [roomMissing, setRoomMissing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [presenting, setPresenting] = useState(false);
@@ -488,6 +631,7 @@ export default function HostSessionScreen() {
         setRoomMissing(false);
         setStatus(data.status ?? 'waiting');
         setHostId(String(data.hostId ?? ''));
+        setTeamMode(!!data.teamMode);
         setQuestionCount(data.questionCount ?? data.questions?.length ?? 0);
       });
 
@@ -501,6 +645,22 @@ export default function HostSessionScreen() {
 
     return () => { unsubRoom(); unsubPlayers(); };
   }, [code]);
+
+  /* ── teams subscription (team mode only) ── */
+  useEffect(() => {
+    if (!teamMode || !code) {
+      setTeams([]);
+      return;
+    }
+    const unsubTeams = firestore()
+      .collection('gameRooms')
+      .doc(code)
+      .collection('teams')
+      .onSnapshot((snap) => {
+        setTeams((snap?.docs?.map((d) => ({ id: d.id, ...d.data() })) ?? []) as any[]);
+      });
+    return () => { unsubTeams(); };
+  }, [teamMode, code]);
 
   const handleStart = async () => {
     setLoading(true);
@@ -542,6 +702,12 @@ export default function HostSessionScreen() {
 
   const students = players.filter((p) => p.id !== hostId && p.id !== currentUserId);
   const ranked = [...students].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const rankedTeams = [...teams].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const allAssigned = players.length > 0 && players.every((p) => p.teamId);
+  const teamColorOf = (teamId?: string) => {
+    if (!teamMode || !teamId) return undefined;
+    return teams.find((t) => String(t.id) === String(teamId))?.color;
+  };
   const codeChars = code.split('');
   const playerCount = students.length;
 
@@ -687,13 +853,15 @@ export default function HostSessionScreen() {
               ) : (
                 students.map((item) => {
                   const initial = (item.displayName || '?').charAt(0).toUpperCase();
+                  const teamColor = teamMode ? teamColorOf(item.teamId) : undefined;
                   return (
                     <View key={item.id} style={styles.playerCard}>
                       <View style={styles.avatar}>
                         <Text style={styles.avatarText}>{initial}</Text>
                       </View>
                       <Text style={styles.playerName} numberOfLines={1}>{item.displayName}</Text>
-                      <View style={styles.readyDot} />
+                      {teamColor && <View style={[styles.teamDot, { backgroundColor: teamColor }]} />}
+                      <View style={[styles.readyDot, teamMode && !item.teamId && { backgroundColor: COLORS.warning }]} />
                     </View>
                   );
                 })
@@ -717,6 +885,16 @@ export default function HostSessionScreen() {
               </View>
             </View>
 
+            {teamMode && rankedTeams.length > 0 && (
+              <View style={styles.teamsBlock}>
+                <Text style={styles.blockKicker}>TEAM STANDINGS</Text>
+                {rankedTeams.map((t, index) => (
+                  <TeamRow key={t.id} team={t} index={index} memberCount={students.filter(s => String(s.teamId) === String(t.id)).length} />
+                ))}
+                <View style={styles.blockDivider} />
+              </View>
+            )}
+
             {ranked.length === 0 ? (
               <View style={styles.ghostSeat}>
                 <View style={styles.ghostAvatar}>
@@ -732,6 +910,7 @@ export default function HostSessionScreen() {
                   index={index}
                   questionCount={questionCount}
                   showProgress={status === 'active'}
+                  teamColor={teamMode ? teamColorOf(item.teamId) : undefined}
                 />
               ))
             )}
@@ -752,9 +931,9 @@ export default function HostSessionScreen() {
             <TouchableOpacity
               style={styles.startWrap}
               onPress={handleStart}
-              onPressIn={() => { if (!loading && playerCount > 0) animatePressIn(); }}
+              onPressIn={() => { if (!loading && playerCount > 0 && (!teamMode || allAssigned)) animatePressIn(); }}
               onPressOut={animatePressOut}
-              disabled={loading || playerCount === 0}
+              disabled={loading || playerCount === 0 || (teamMode && !allAssigned)}
               activeOpacity={0.85}
             >
               {loading ? (
@@ -765,6 +944,11 @@ export default function HostSessionScreen() {
                 <View style={styles.startInnerDisabled}>
                   <Ionicons name="play" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
                   <Text style={[styles.startText, { color: COLORS.textMuted }]}>Waiting for players...</Text>
+                </View>
+              ) : (teamMode && !allAssigned) ? (
+                <View style={styles.startInnerDisabled}>
+                  <Ionicons name="people" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
+                  <Text style={[styles.startText, { color: COLORS.textMuted }]}>Waiting for teams...</Text>
                 </View>
               ) : (
                 <LinearGradient
@@ -1003,6 +1187,21 @@ const styles = StyleSheet.create({
   progressTrack: { height: 6, backgroundColor: 'rgba(139,92,246,0.18)', borderRadius: 3, overflow: 'hidden' },
   progressFill: { height: '100%', backgroundColor: COLORS.purpleVibrant, borderRadius: 3 },
   leaderScore: { fontSize: 17, fontFamily: FONTS.black, color: COLORS.textPrimary },
+  teamDot: { width: 10, height: 10, borderRadius: 5 },
+  teamsBlock: { marginBottom: 4 },
+  blockKicker: {
+    fontSize: 10,
+    fontFamily: FONTS.extraBold,
+    letterSpacing: 2,
+    color: COLORS.textMuted,
+    marginBottom: 10,
+    marginTop: 4,
+  },
+  blockDivider: {
+    height: 1,
+    backgroundColor: 'rgba(127,119,221,0.12)',
+    marginVertical: 14,
+  },
 
   /* ── empty ── */
   ghostSeat: {
@@ -1068,4 +1267,216 @@ const styles = StyleSheet.create({
   },
   endInner: { paddingVertical: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center' },
   endText: { color: COLORS.danger, fontSize: 16, fontFamily: FONTS.extraBold, letterSpacing: 0.3 },
+
+  /* ── presentation (TV) ── */
+  presentRoot: { flex: 1, backgroundColor: COLORS.bg },
+  presentHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 32,
+    paddingTop: 24,
+    paddingBottom: 8,
+  },
+  presentTopic: { fontSize: 22, fontFamily: FONTS.bold, color: COLORS.textPrimary, flex: 1, paddingRight: 16 },
+  presentHeaderRight: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  presentCountPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(34,211,238,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(34,211,238,0.25)',
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  presentCountText: { fontSize: 16, fontFamily: FONTS.extraBold, color: COLORS.accent },
+  presentExitBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(127,119,221,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(127,119,221,0.25)',
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  presentExitText: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.textSecondary },
+
+  presentBody: { flex: 1, paddingHorizontal: 32, paddingVertical: 12 },
+
+  presentCodeLabel: {
+    fontSize: 14,
+    fontFamily: FONTS.extraBold,
+    letterSpacing: 3,
+    color: COLORS.accent,
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  presentCodeRow: { flexDirection: 'row', justifyContent: 'center', gap: 12, marginBottom: 12 },
+  presentCodeChip: {
+    width: 72,
+    height: 84,
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: 'rgba(34,211,238,0.35)',
+    backgroundColor: COLORS.surface,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: 'rgba(34,211,238,0.2)',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  presentCodeChipText: { fontSize: 40, fontFamily: FONTS.black, color: COLORS.textPrimary },
+  presentCodeHint: { fontSize: 14, fontFamily: FONTS.regular, color: COLORS.textMuted, textAlign: 'center' },
+
+  presentRosterHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
+  presentRosterKicker: { fontSize: 14, fontFamily: FONTS.extraBold, letterSpacing: 2.5, color: COLORS.textSecondary },
+  presentWaitingTag: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  presentWaitingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.warning },
+  presentWaitingText: { fontSize: 13, fontFamily: FONTS.semiBold, color: COLORS.textMuted },
+  presentGhost: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingVertical: 40 },
+  presentGhostText: { fontSize: 16, fontFamily: FONTS.semiBold, color: COLORS.textMuted },
+  presentRosterList: { paddingBottom: 16 },
+  presentPlayerCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    backgroundColor: COLORS.cardBg,
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(127,119,221,0.18)',
+    marginBottom: 12,
+  },
+  presentAvatar: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: COLORS.purplePrimary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  presentAvatarText: { fontSize: 22, fontFamily: FONTS.black, color: '#fff' },
+  presentPlayerName: { flex: 1, fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary, flexShrink: 1 },
+  presentPlayerReady: { width: 10, height: 10, borderRadius: 5, backgroundColor: COLORS.success },
+
+  presentBoardHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
+  presentBoardKicker: { fontSize: 14, fontFamily: FONTS.extraBold, letterSpacing: 2.5, color: COLORS.textSecondary },
+  presentBlockKicker: { fontSize: 14, fontFamily: FONTS.extraBold, letterSpacing: 2.5, color: COLORS.accent },
+  presentFinishTag: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  presentLiveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.success },
+  presentFinishText: { fontSize: 13, fontFamily: FONTS.semiBold, color: COLORS.textMuted },
+
+  presentPodium: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'center', gap: 16, marginBottom: 24 },
+  presentPodiumSlot: { alignItems: 'center', width: 120 },
+  presentPodiumRank: { fontSize: 34, marginBottom: 4 },
+  presentPodiumAvatar: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: COLORS.purplePrimary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(139,92,246,0.4)',
+    marginBottom: 8,
+  },
+  presentPodiumAvatarText: { fontSize: 24, fontFamily: FONTS.black, color: '#fff' },
+  presentPodiumName: { color: '#fff', fontSize: 15, fontFamily: FONTS.bold, marginBottom: 2 },
+  presentPodiumScore: { color: COLORS.purpleLight, fontSize: 15, fontFamily: FONTS.extraBold, marginBottom: 6 },
+  presentPodiumBase: {
+    width: '100%',
+    backgroundColor: '#2d2a6e',
+    borderTopLeftRadius: 10,
+    borderTopRightRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(139,92,246,0.4)',
+  },
+
+  presentList: { paddingBottom: 16 },
+  presentTeamList: { marginTop: 4 },
+  presentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    backgroundColor: COLORS.cardBg,
+    borderRadius: 18,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(127,119,221,0.18)',
+    marginBottom: 12,
+  },
+  presentRank: { fontSize: 24, fontFamily: FONTS.black, color: COLORS.purpleVibrant, width: 44 },
+  presentRowAvatar: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: COLORS.purplePrimary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  presentRowAvatarText: { fontSize: 20, fontFamily: FONTS.black, color: '#fff' },
+  presentRowBody: { flex: 1 },
+  presentRowNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
+  presentRowName: { fontSize: 18, fontFamily: FONTS.semiBold, color: COLORS.textPrimary, flexShrink: 1 },
+  presentRowMeta: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textMuted, marginBottom: 8 },
+  presentProgressTrack: { height: 8, backgroundColor: 'rgba(139,92,246,0.18)', borderRadius: 4, overflow: 'hidden' },
+  presentProgressFill: { height: '100%', backgroundColor: COLORS.purpleVibrant, borderRadius: 4 },
+  presentRowScore: { fontSize: 26, fontFamily: FONTS.black, color: COLORS.textPrimary },
+  presentTeamDot: { width: 12, height: 12, borderRadius: 6 },
+
+  presentControls: {
+    position: 'absolute',
+    bottom: 28,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    paddingHorizontal: 32,
+  },
+  presentStartWrap: {
+    borderRadius: 18,
+    overflow: 'hidden',
+    shadowColor: COLORS.accent,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 18,
+    elevation: 10,
+  },
+  presentStartInner: {
+    paddingVertical: 18,
+    paddingHorizontal: 48,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  presentStartInnerDisabled: {
+    paddingVertical: 18,
+    paddingHorizontal: 48,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: COLORS.surfaceLight,
+    borderRadius: 18,
+  },
+  presentStartText: { color: COLORS.bg, fontSize: 18, fontFamily: FONTS.extraBold, letterSpacing: 0.5 },
+  presentEndWrap: {
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: COLORS.danger,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(239,68,68,0.12)',
+  },
+  presentEndInner: {
+    paddingVertical: 18,
+    paddingHorizontal: 48,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  presentEndText: { color: COLORS.danger, fontSize: 18, fontFamily: FONTS.extraBold, letterSpacing: 0.5 },
 });

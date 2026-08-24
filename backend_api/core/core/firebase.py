@@ -71,9 +71,24 @@ def verify_firebase_token(id_token):
     """
     try:
         initialize_firebase()
-        decoded_token = auth.verify_id_token(id_token)
+        decoded_token = auth.verify_id_token(id_token, clock_skew_seconds=60)
         return decoded_token
 
     except Exception as e:
         print(f"[Firebase Token Verification Error] {e}")
+        return None
+
+
+def create_firebase_user(email, password):
+    """
+    Create a Firebase Auth account so a Django user can sign in via the mobile app.
+
+    Returns the Firebase UID, or None if creation fails (e.g. offline / duplicate email).
+    """
+    try:
+        initialize_firebase()
+        user = auth.create_user(email=email, password=password)
+        return user.uid
+    except Exception as e:
+        print(f"[Firebase] Failed to create Auth user {email}: {e}")
         return None

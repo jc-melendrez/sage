@@ -2,6 +2,15 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // ─── TENANT ISOLATION NOTE ───────────────────────────────────
+    // Firestore is read by the mobile app directly. Django is the only
+    // writer and must issue a Firebase custom token that embeds:
+    //   { schoolId: <school_id>, role: 'superadmin'|'admin'|... }
+    // (see users.views.sync_user_to_firestore — sync `schoolId` there).
+    // Without `schoolId` in the token, non-superadmin users only see
+    // their own school's documents below.
+    // ──────────────────────────────────────────────────────────────
+
     // Users can only read/write their own profile
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
@@ -12,33 +21,55 @@ service cloud.firestore {
       }
     }
 
-    // Study groups — members can read; creator can write
+    // Study groups — members can read; creator can write. Same-school only.
     match /studyGroups/{groupId} {
-      allow read: if request.auth != null && 
-                     request.auth.uid in resource.data.members;
+      allow read: if request.auth != null &&
+                     request.auth.uid in resource.data.members &&
+                     (request.auth.token.schoolId == resource.data.schoolId ||
+                      request.auth.token.role == 'superadmin');
       allow create: if request.auth != null;
-      allow update, delete: if request.auth != null && 
-                               request.auth.uid == resource.data.created_by;
+      allow update, delete: if request.auth != null &&
+                               request.auth.uid == resource.data.created_by &&
+                               (request.auth.token.schoolId == resource.data.schoolId ||
+                                request.auth.token.role == 'superadmin');
       
       // Messages — any member can read and write
       match /messages/{messageId} {
         allow read, write: if request.auth != null && 
-                              request.auth.uid in get(/databases/$(database)/documents/studyGroups/$(groupId)).data.members;
+                              request.auth.uid in get(/databases/$(database)/documents/studyGroups/$(groupId)).data.members &&
+                              (request.auth.token.schoolId == get(/databases/$(database)/documents/studyGroups/$(groupId)).data.schoolId ||
+                               request.auth.token.role == 'superadmin');
       }
     }
 
-    // Quizzes — readable by group members
+    // Quizzes — readable by group members (same school)
     match /quizzes/{quizId} {
-      allow read: if request.auth != null;
+      allow read: if request.auth != null &&
+                     (request.auth.token.schoolId == resource.data.schoolId ||
+                      request.auth.token.role == 'superadmin');
       allow write: if request.auth != null;
     }
 
-    // Game rooms — any authenticated user can read and write
+    // Game rooms — same-school players only (superadmin bypass)
     match /gameRooms/{roomCode} {
-      allow read, write: if request.auth != null;
+      allow read, write: if request.auth != null &&
+                            (request.auth.token.schoolId == resource.data.schoolId ||
+                             request.auth.token.role == 'superadmin');
 
       match /players/{playerId} {
-        allow read, write: if request.auth != null;
+        allow read, write: if request.auth != null &&
+                              (request.auth.token.schoolId == resource.data.schoolId ||
+                               request.auth.token.role == 'superadmin');
+      }
+
+      // Teams (group classic mode) — any authenticated user can read/create;
+      // updates must not grow a team past its room's maxTeamSize
+      match /teams/{teamId} {
+        allow read: if request.auth != null;
+        allow create: if request.auth != null;
+        allow update: if request.auth != null &&
+          resource.data.memberIds.size() <
+            get(/databases/$(database)/documents/gameRooms/$(roomCode)).data.maxTeamSize;
       }
     }
   }

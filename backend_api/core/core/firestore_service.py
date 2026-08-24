@@ -18,6 +18,8 @@ def create_user_profile(firebase_uid: str, data: dict):
         'email': data.get('email', ''),
         'first_name': data.get('first_name', ''),
         'last_name': data.get('last_name', ''),
+        'role': data.get('role', 'student'),
+        'schoolId': data.get('schoolId'),
         'is_student': data.get('is_student', True),
         'is_educator': data.get('is_educator', False),
         'is_admin': data.get('is_admin', False),
@@ -145,21 +147,3 @@ def get_messages(group_id: str, limit: int = 50) -> list:
     return [{'id': d.id, **d.to_dict()} for d in docs]
 
 
-# ── QUIZ ─────────────────────────────────────────────────────────
-
-def save_quiz(firebase_uid: str, content: dict, quiz_type: str, group_id: str = None) -> str:
-    db = get_db()
-    doc_ref = db.collection('quizzes').add({
-        'created_by': firebase_uid,
-        'content': content,
-        'quiz_type': quiz_type,
-        'group_id': group_id,
-        'created_at': firestore.SERVER_TIMESTAMP,
-    })
-    return doc_ref[1].id
-
-
-def get_quiz(quiz_id: str):
-    db = get_db()
-    doc = db.collection('quizzes').document(quiz_id).get()
-    return {'id': doc.id, **doc.to_dict()} if doc.exists else None

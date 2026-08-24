@@ -277,6 +277,13 @@ export default function ProfileScreen() {
                 </TouchableOpacity>
               </>
             )}
+            <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/leaderboard')}>
+              <View style={styles.menuItemLeft}>
+                <Ionicons name="podium-outline" size={22} color={COLORS.warning} />
+                <Text style={styles.menuItemText}>Leaderboard</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+            </TouchableOpacity>
             <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={handleLogout}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="log-out-outline" size={22} color={COLORS.danger} />

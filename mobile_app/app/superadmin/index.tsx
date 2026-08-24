@@ -1,9 +1,12 @@
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AdminHeader from '@/components/admin/AdminHeader';
 import StatCard from '@/components/admin/StatCard';
 import { COLORS, FONTS } from '@/constants/adminTheme';
+import { superadminService, PlatformAnalytics } from '@/services/adminService';
+import { useAuth } from '@/hooks/useAuth';
 
 const QUICK_LINKS: {
   icon: keyof typeof Ionicons.glyphMap;
@@ -14,7 +17,7 @@ const QUICK_LINKS: {
   {
     icon: 'business-outline',
     title: 'Admins & Schools',
-    desc: 'Manage deans, program chairs & institutions',
+    desc: 'Register schools & assign initial admins',
     route: '/superadmin/admins',
   },
   {
@@ -22,6 +25,12 @@ const QUICK_LINKS: {
     title: 'Feature Flags & Config',
     desc: 'Toggle features, app settings & env values',
     route: '/superadmin/config',
+  },
+  {
+    icon: 'person-add-outline',
+    title: 'Create Superadmin',
+    desc: 'Provision a new superadmin / platform user',
+    route: '/superadmin/create',
   },
   {
     icon: 'server-outline',
@@ -39,6 +48,40 @@ const QUICK_LINKS: {
 
 export default function SuperAdminDashboard() {
   const router = useRouter();
+  const { logout } = useAuth();
+  const [analytics, setAnalytics] = useState<PlatformAnalytics | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleLogout = async () => {
+    Alert.alert('Log Out', 'Are you sure you want to log out?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Log Out',
+        style: 'destructive',
+        onPress: async () => {
+          await logout();
+          router.replace('/login');
+        },
+      },
+    ]);
+  };
+
+  const loadAnalytics = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      setAnalytics(await superadminService.analytics());
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load analytics.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadAnalytics();
+  }, [loadAnalytics]);
 
   return (
     <View style={styles.container}>
@@ -51,12 +94,24 @@ export default function SuperAdminDashboard() {
 
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <Text style={styles.sectionTitle}>System Overview</Text>
-        <View style={styles.statsGrid}>
-          <StatCard icon="business" label="Schools" value="6" color={COLORS.superAdminGlow} />
-          <StatCard icon="shield-checkmark" label="Admin Accounts" value="14" color={COLORS.superAdminGlow} />
-          <StatCard icon="people" label="Total Users" value="8,942" color={COLORS.superAdminGlow} trend="+120 today" trendUp />
-          <StatCard icon="checkmark-circle" label="API Uptime" value="99.98%" color={COLORS.success} />
-        </View>
+        {loading ? (
+          <ActivityIndicator style={{ marginTop: 30 }} color={COLORS.superAdminGlow} />
+        ) : error ? (
+          <View style={styles.errorBox}>
+            <Ionicons name="cloud-offline-outline" size={20} color={COLORS.danger} />
+            <Text style={styles.errorText}>{error}</Text>
+            <TouchableOpacity style={styles.retryBtn} onPress={loadAnalytics}>
+              <Text style={styles.retryText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        ) : analytics ? (
+          <View style={styles.statsGrid}>
+            <StatCard icon="business" label="Schools" value={String(analytics.total_schools)} color={COLORS.superAdminGlow} />
+            <StatCard icon="shield-checkmark" label="Admins" value={String(analytics.users_by_role?.admin ?? 0)} color={COLORS.superAdminGlow} />
+            <StatCard icon="people" label="Total Users" value={String(analytics.total_users)} color={COLORS.superAdminGlow} />
+            <StatCard icon="checkmark-circle" label="Active Users" value={String(analytics.active_users)} color={COLORS.success} />
+          </View>
+        ) : null}
 
         <Text style={[styles.sectionTitle, { marginTop: 28 }]}>Console</Text>
         <View style={styles.linksList}>
@@ -79,13 +134,10 @@ export default function SuperAdminDashboard() {
           ))}
         </View>
 
-        <View style={styles.noteCard}>
-          <Ionicons name="warning-outline" size={18} color={COLORS.superAdminGlow} />
-          <Text style={styles.noteText}>
-            Developer-level access. Sample data is shown for now — wire these screens to real
-            infrastructure endpoints when your backend is ready.
-          </Text>
-        </View>
+        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout} activeOpacity={0.8}>
+          <Ionicons name="log-out-outline" size={18} color={COLORS.danger} />
+          <Text style={styles.logoutText}>Log Out</Text>
+        </TouchableOpacity>
       </ScrollView>
     </View>
   );
@@ -124,16 +176,21 @@ const styles = StyleSheet.create({
   },
   linkTitle: { fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700', color: '#F1F5F9' },
   linkDesc: { fontSize: 12, fontFamily: FONTS.medium, color: '#94A3B8', marginTop: 2 },
-  noteCard: {
+  errorBox: { alignItems: 'center', gap: 10, paddingVertical: 24 },
+  errorText: { fontSize: 13, fontFamily: FONTS.medium, color: '#94A3B8', textAlign: 'center' },
+  retryBtn: { backgroundColor: COLORS.superAdminGlow, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 10 },
+  retryText: { color: '#0B1020', fontFamily: FONTS.semiBold, fontSize: 12 },
+  logoutBtn: {
     flexDirection: 'row',
-    gap: 10,
-    backgroundColor: 'rgba(34,211,238,0.08)',
-    borderRadius: 16,
-    padding: 14,
-    marginTop: 24,
-    alignItems: 'flex-start',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(239,68,68,0.1)',
     borderWidth: 1,
-    borderColor: 'rgba(34,211,238,0.2)',
+    borderColor: 'rgba(239,68,68,0.3)',
+    paddingVertical: 14,
+    borderRadius: 14,
+    marginTop: 28,
   },
-  noteText: { flex: 1, fontSize: 12, fontFamily: FONTS.medium, color: '#94A3B8', lineHeight: 18 },
+  logoutText: { color: COLORS.danger, fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700' },
 });

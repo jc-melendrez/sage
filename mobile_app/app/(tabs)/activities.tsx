@@ -8,10 +8,14 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Clipboard from 'expo-clipboard';
 import firestore from '@react-native-firebase/firestore';
 import { API_BASE_URL } from '@/config/api';
+import { useRouter } from 'expo-router';
 import { getToken, getCurrentUser } from '@/services/authService';
+import { completeQuiz, completeLesson, getMyProgress } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
-import LessonDisplay from '../../components/LessonDisplay';
 import LessonGenerator from '@/components/LessonGenerator';
+import CourseCard from '@/components/courses/CourseCard';
+import CourseDetailModal from '@/components/courses/CourseDetailModal';
+import EmptyCourseState from '@/components/courses/EmptyCourseState';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 
@@ -101,6 +105,7 @@ interface Quiz {
 }
 
 export default function ActivitiesScreen() {
+  const router = useRouter();
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [selectedTab, setSelectedTab] = useState('groups');
 
@@ -111,7 +116,7 @@ export default function ActivitiesScreen() {
 
   // --- NEW: Courses state ---
   const [courses, setCourses] = useState<Course[]>([]);
-  const [levelProgress, setLevelProgress] = useState<{ [levelId: number]: number }>({});
+  const [levelProgress, setLevelProgress] = useState<{ [key: string]: number }>({});
   const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
   const [isCourseModalOpen, setIsCourseModalOpen] = useState(false);
 
@@ -136,8 +141,6 @@ export default function ActivitiesScreen() {
 
   // --- Generate Lesson Modal ---
   const [isGenerateLessonModalOpen, setIsGenerateLessonModalOpen] = useState(false);
-  const [isLessonDisplayModalOpen, setIsLessonDisplayModalOpen] = useState(false);
-  const [lessonToDisplay, setLessonToDisplay] = useState<any>(null);
 
   // --- Quiz Generator State ---
   const [isGenerateQuizModalOpen, setIsGenerateQuizModalOpen] = useState(false);
@@ -254,6 +257,8 @@ export default function ActivitiesScreen() {
 
       if (groupRes.ok) setGroups(await groupRes.json());
       if (quizRes.ok) setQuizzes(await quizRes.json());
+
+      loadPersistedProgress();
     } catch (error) {
       console.error(error);
     } finally {
@@ -401,17 +406,33 @@ export default function ActivitiesScreen() {
     }
   };
 
-  const getLevelScore = (levelId: number): number => levelProgress[levelId] ?? 0;
+  const levelKey = (courseId: string, levelId: number) => `${courseId}::${levelId}`;
+
+  const getLevelScore = (course: Course, levelId: number): number =>
+    levelProgress[levelKey(course.course_title, levelId)] ?? 0;
 
   const isLevelUnlocked = (course: Course, levelIndex: number): boolean => {
     if (levelIndex === 0) return true;
     const prevLevel = course.levels[levelIndex - 1];
-    const prevScore = getLevelScore(prevLevel.level_id);
+    const prevScore = getLevelScore(course, prevLevel.level_id);
     return prevScore >= prevLevel.passing_score;
   };
 
-  const updateLevelProgress = (levelId: number, score: number) => {
-    setLevelProgress(prev => ({ ...prev, [levelId]: score }));
+  const updateLevelProgress = (course: Course, levelId: number, score: number) => {
+    setLevelProgress(prev => ({ ...prev, [levelKey(course.course_title, levelId)]: score }));
+  };
+
+  const loadPersistedProgress = async () => {
+    try {
+      const data = await getMyProgress();
+      const map: { [key: string]: number } = {};
+      data.lesson_progress.forEach(p => {
+        map[levelKey(p.course_id, p.level_id)] = p.score;
+      });
+      setLevelProgress(map);
+    } catch (error) {
+      console.error('Failed to load persisted course progress:', error);
+    }
   };
 
   const handleCourseGenerated = (course: Course) => {
@@ -426,13 +447,18 @@ export default function ActivitiesScreen() {
   };
 
   const takeQuizForLevel = (level: Level) => {
-    const quizQuestions = level.quiz.map((q, idx) => ({
-      id: idx + 1,
-      question: q.question,
-      type: 'Multiple Choice',
-      options: q.options,
-      correct_answer: q.correct_answer,
-    }));
+    const quizQuestions = level.quiz.map((q, idx) => {
+      const correctAnswer = typeof q.correct_answer === 'number'
+        ? q.options[q.correct_answer]
+        : q.correct_answer;
+      return {
+        id: idx + 1,
+        question: q.question,
+        type: 'Multiple Choice' as const,
+        options: q.options,
+        correct_answer: correctAnswer,
+      };
+    });
     setQuizToTake({
       title: `${level.difficulty} Quiz`,
       questions: quizQuestions,
@@ -440,69 +466,6 @@ export default function ActivitiesScreen() {
       passingScore: level.passing_score,
     });
     setIsQuizModalOpen(true);
-  };
-
-  const renderLevels = (course: Course) => {
-    return course.levels.map((level, index) => {
-      const unlocked = isLevelUnlocked(course, index);
-      const score = getLevelScore(level.level_id);
-      const passed = score >= level.passing_score;
-
-      return (
-        <View key={level.level_id} style={styles.levelCard}>
-          <View style={styles.levelHeader}>
-            <View style={styles.levelLeft}>
-              <Text style={styles.levelDifficulty}>
-                {unlocked ? '' : '🔒'} {level.difficulty}
-              </Text>
-              {score > 0 && (
-                <View style={styles.levelScoreBadge}>
-                  <Text style={styles.levelScoreText}>{score}%</Text>
-                </View>
-              )}
-              {passed && (
-                <View style={styles.levelPassBadge}>
-                  <Text style={styles.levelPassText}>✅ Passed</Text>
-                </View>
-              )}
-            </View>
-            <Text style={styles.levelPassingScore}>Pass: {level.passing_score}%</Text>
-          </View>
-
-          <View style={styles.levelActions}>
-            <TouchableOpacity
-              style={[styles.levelButton, !unlocked && styles.levelButtonDisabled]}
-              disabled={!unlocked}
-              onPress={() => {
-                Alert.alert('Content', level.content.substring(0, 200) + '...');
-              }}
-            >
-              <Ionicons name="book-outline" size={16} color={unlocked ? 'white' : '#9CA3AF'} />
-              <Text style={[styles.levelButtonText, !unlocked && { color: '#9CA3AF' }]}>
-                View Content
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.levelButton, styles.levelQuizButton, !unlocked && styles.levelButtonDisabled]}
-              disabled={!unlocked}
-              onPress={() => takeQuizForLevel(level)}
-            >
-              <Ionicons name="help-circle-outline" size={16} color={unlocked ? 'white' : '#9CA3AF'} />
-              <Text style={[styles.levelButtonText, !unlocked && { color: '#9CA3AF' }]}>
-                Take Quiz
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {index < course.levels.length - 1 && (
-            <View style={styles.levelDivider}>
-              <Ionicons name="arrow-down" size={20} color={COLORS.purpleLight} />
-            </View>
-          )}
-        </View>
-      );
-    });
   };
 
   // --- ACTIVE CHAT VIEW ---
@@ -710,53 +673,39 @@ export default function ActivitiesScreen() {
         {/* COURSES VIEW */}
         {selectedTab === 'lessons' && (
           <View style={styles.itemsList}>
-            {courses.length === 0 && (
-              <View style={styles.emptyStateCard}>
-                <View style={styles.emptyStateIconContainer}>
-                  <Ionicons name="book-outline" size={48} color={COLORS.purpleVibrant} />
-                </View>
-                <Text style={styles.emptyStateTitle}>No courses yet</Text>
-                <Text style={styles.emptyStateText}>Tap + to generate a personalized course.</Text>
-              </View>
-            )}
-            {courses.map((course, index) => (
-              <TouchableOpacity
-                key={`course-${index}`}
-                style={styles.card}
-                onPress={() => openCourseDetail(course)}
-                activeOpacity={0.7}
+            <TouchableOpacity activeOpacity={0.85} onPress={() => router.push('/courses')}>
+              <LinearGradient
+                colors={[COLORS.purpleDeep, COLORS.purpleVibrant]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={styles.coursePathBtn}
               >
-                <View style={styles.cardHeader}>
-                  <View style={{ flex: 1 }}>
-                    <View style={styles.subjectBadge}>
-                      <View style={[styles.colorDot, { backgroundColor: COLORS.purplePrimary }]} />
-                      <Text style={styles.subjectText}>{course.subject}</Text>
-                    </View>
-                    <Text style={styles.cardTitle}>{course.course_title}</Text>
-                    <View style={styles.metaInfo}>
-                      <View style={styles.metaItem}>
-                        <Ionicons name="layers-outline" size={12} color={COLORS.textMuted} />
-                        <Text style={styles.metaText}>{course.levels.length} levels</Text>
-                      </View>
-                    </View>
-                  </View>
-                  <View style={styles.statusIcon}>
-                    <LinearGradient
-                      colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
-                      style={styles.chevronCircle}
-                    >
-                      <Ionicons name="chevron-forward" size={20} color="white" />
-                    </LinearGradient>
-                  </View>
-                </View>
-              </TouchableOpacity>
-            ))}
+                <Ionicons name="map-outline" size={20} color="white" />
+                <Text style={styles.coursePathBtnText}>Open Course Path</Text>
+                <Ionicons name="chevron-forward" size={18} color="white" style={{ opacity: 0.7 }} />
+              </LinearGradient>
+            </TouchableOpacity>
+            {courses.length === 0 && <EmptyCourseState />}
+            {courses.map((course, index) => {
+              const completedLevels = course.levels.filter((l, i) => {
+                const score = levelProgress[levelKey(course.course_title, l.level_id)] ?? 0;
+                return score >= l.passing_score;
+              }).length;
+              return (
+                <CourseCard
+                  key={`course-${index}`}
+                  course={course}
+                  completedLevels={completedLevels}
+                  onPress={() => openCourseDetail(course)}
+                />
+              );
+            })}
           </View>
         )}
 
         {/* QUIZZES VIEW */}
         {selectedTab === 'quizzes' && (
-          <View style={styles.itemsList}>
+          <View style={[styles.itemsList, { paddingHorizontal: 24 }]}>
             {quizzes.length === 0 && !loading && (
               <View style={styles.emptyStateCard}>
                 <View style={styles.emptyStateIconContainer}>
@@ -902,18 +851,49 @@ export default function ActivitiesScreen() {
         <TakeQuiz
           quizTitle={quizToTake?.title || 'Quiz'}
           questions={quizToTake?.questions || []}
-          onFinish={(score) => {
-            if (quizToTake && quizToTake.levelId !== -1) {
-              const levelId = quizToTake.levelId;
-              const passingScore = quizToTake.passingScore;
-              updateLevelProgress(levelId, score);
-              if (score >= passingScore) {
-                Alert.alert(' Passed!', `You scored ${score}% and unlocked the next level.`);
-              } else {
-                Alert.alert('Keep trying!', `You scored ${score}%. Need ${passingScore}% to unlock the next level.`);
+          onFinish={async (score) => {
+            const total = quizToTake?.questions.length ?? 0;
+            const percent = total > 0 ? Math.round((score / total) * 100) : 0;
+
+            try {
+              const quizResult = await completeQuiz(score, total);
+              let message = `You scored ${percent}%`;
+              if (quizResult.xp > 0) message += ` · +${quizResult.xp} XP`;
+              if (quizResult.badges.length > 0) {
+                message += `\n${quizResult.badges.map(b => `${b.icon} ${b.name}`).join('\n')}`;
               }
-            } else {
-              Alert.alert('Quiz Finished', `Your score: ${score}%`);
+              Alert.alert('Quiz Finished', message);
+
+              if (quizToTake && quizToTake.levelId !== -1 && selectedCourse) {
+                const levelId = quizToTake.levelId;
+                const passingScore = quizToTake.passingScore;
+                const passed = percent >= passingScore;
+
+                updateLevelProgress(selectedCourse, levelId, percent);
+
+                try {
+                  await completeLesson(
+                    selectedCourse.course_title,
+                    levelId,
+                    percent,
+                    100,
+                    passed,
+                  );
+                  if (passed) {
+                    Alert.alert('Level Passed! ✅', `You scored ${percent}% and unlocked the next level.`);
+                  } else {
+                    Alert.alert('Keep trying!', `You scored ${percent}%. Need ${passingScore}% to unlock the next level.`);
+                  }
+                } catch (error) {
+                  console.error('Failed to persist lesson progress:', error);
+                }
+              }
+            } catch (error) {
+              console.error('Failed to record quiz completion:', error);
+              // Fall back to local-only progress update so unlocks still work offline.
+              if (quizToTake && quizToTake.levelId !== -1 && selectedCourse) {
+                updateLevelProgress(selectedCourse, quizToTake.levelId, percent);
+              }
             }
             setIsQuizModalOpen(false);
             setQuizToTake(null);
@@ -935,34 +915,12 @@ export default function ActivitiesScreen() {
 
       {/* COURSE DETAIL MODAL */}
       <Modal visible={isCourseModalOpen} animationType="slide">
-        <View style={styles.courseModalContainer}>
-          <LinearGradient
-            colors={[COLORS.purpleDeep, COLORS.purpleDark]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.courseModalHeader}
-          >
-            <TouchableOpacity onPress={() => setIsCourseModalOpen(false)} style={styles.courseModalBack}>
-              <Ionicons name="arrow-back" size={24} color="white" />
-            </TouchableOpacity>
-            <View style={styles.courseModalTitleBox}>
-              <Text style={styles.courseModalTitle}>{selectedCourse?.course_title}</Text>
-              <Text style={styles.courseModalSubtitle}>{selectedCourse?.subject}</Text>
-            </View>
-            <View style={{ width: 40 }} />
-          </LinearGradient>
-          <ScrollView style={styles.courseModalContent}>
-            {selectedCourse && renderLevels(selectedCourse)}
-          </ScrollView>
-        </View>
-      </Modal>
-
-      {/* LEGACY LESSON DISPLAY MODAL */}
-      <Modal visible={isLessonDisplayModalOpen} animationType="slide">
-        {lessonToDisplay && (
-          <LessonDisplay
-            lesson={lessonToDisplay}
-            onClose={() => setIsLessonDisplayModalOpen(false)}
+        {selectedCourse && (
+          <CourseDetailModal
+            course={selectedCourse}
+            levelProgress={levelProgress}
+            onTakeQuiz={takeQuizForLevel}
+            onClose={() => setIsCourseModalOpen(false)}
           />
         )}
       </Modal>
@@ -1202,7 +1160,22 @@ const styles = StyleSheet.create({
   },
   
   content: { flex: 1 },
-  itemsList: { paddingHorizontal: 24, paddingBottom: 20, paddingTop: 16 },
+  itemsList: { paddingBottom: 20, paddingTop: 16 },
+  coursePathBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
+    borderRadius: 16,
+    marginBottom: 16,
+    gap: 8,
+    elevation: 4,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+  },
+  coursePathBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 15 },
   
   emptyStateCard: {
     backgroundColor: COLORS.surface,
@@ -1324,31 +1297,6 @@ const styles = StyleSheet.create({
   modalSubmitBtn: { padding: 16, alignItems: 'center' },
 
   fab: { position: 'absolute', bottom: 24, right: 24, width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 8, shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.4, shadowRadius: 12, zIndex: 10 },
-
-  // Course detail styles
-  courseModalContainer: { flex: 1, backgroundColor: COLORS.bg },
-  courseModalHeader: { paddingTop: Platform.OS === 'ios' ? 50 : 30, paddingBottom: 20, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', borderBottomLeftRadius: 24, borderBottomRightRadius: 24 },
-  courseModalBack: { padding: 4 },
-  courseModalTitleBox: { flex: 1, alignItems: 'center' },
-  courseModalTitle: { color: 'white', fontSize: 18, fontFamily: FONTS.bold },
-  courseModalSubtitle: { color: COLORS.purplePale, fontSize: 12, marginTop: 2, fontFamily: FONTS.medium },
-  courseModalContent: { padding: 24 },
-
-  levelCard: { backgroundColor: COLORS.surface, borderRadius: 20, padding: 20, marginBottom: 16, borderWidth: 1, borderColor: COLORS.border, shadowColor: COLORS.purpleDeep, shadowOffset: {width:0, height:2}, shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
-  levelHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  levelLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  levelDifficulty: { fontSize: 16, fontFamily: FONTS.bold, color: COLORS.textDark },
-  levelScoreBadge: { backgroundColor: COLORS.purpleGhost, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
-  levelScoreText: { fontSize: 12, color: COLORS.purpleDeep, fontFamily: FONTS.bold },
-  levelPassBadge: { backgroundColor: 'rgba(16, 185, 129, 0.15)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
-  levelPassText: { fontSize: 12, color: COLORS.success, fontFamily: FONTS.bold },
-  levelPassingScore: { fontSize: 12, color: COLORS.textMuted, fontFamily: FONTS.medium },
-  levelActions: { flexDirection: 'row', gap: 12 },
-  levelButton: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.purplePrimary, paddingVertical: 12, borderRadius: 12, gap: 8 },
-  levelQuizButton: { backgroundColor: COLORS.purpleVibrant },
-  levelButtonDisabled: { backgroundColor: COLORS.bgSecondary },
-  levelButtonText: { color: 'white', fontFamily: FONTS.semiBold, fontSize: 14 },
-  levelDivider: { alignItems: 'center', marginVertical: 8 },
 
   // Settings modal styles
   bigAvatar: { width: 72, height: 72, borderRadius: 36, justifyContent: 'center', alignItems: 'center', marginBottom: 12, shadowColor: COLORS.purpleDeep, shadowOffset: {width:0, height:4}, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },

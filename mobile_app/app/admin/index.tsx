@@ -1,9 +1,10 @@
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AdminHeader from '@/components/admin/AdminHeader';
 import StatCard from '@/components/admin/StatCard';
 import { COLORS, FONTS } from '@/constants/adminTheme';
+import { useAuth } from '@/hooks/useAuth';
 
 const QUICK_LINKS: {
   icon: keyof typeof Ionicons.glyphMap;
@@ -47,6 +48,21 @@ const QUICK_LINKS: {
 
 export default function AdminDashboard() {
   const router = useRouter();
+  const { logout } = useAuth();
+
+  const handleLogout = () => {
+    Alert.alert('Log out', 'Are you sure you want to log out?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Log out',
+        style: 'destructive',
+        onPress: async () => {
+          await logout();
+          router.replace('/login');
+        },
+      },
+    ]);
+  };
 
   return (
     <View style={styles.container}>
@@ -54,6 +70,8 @@ export default function AdminDashboard() {
         title="Admin Dashboard"
         subtitle="Dean / Program Chair Console"
         showBack={false}
+        rightIcon="log-out-outline"
+        onRightPress={handleLogout}
       />
 
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
