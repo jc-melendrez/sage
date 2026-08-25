@@ -16,20 +16,31 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { getCoursePath } from '@/services/courseService';
 import { LearningNode, NODE_TYPE_CONFIG } from '@/types/learning';
 
+// --- Modern palette: deeper, richer violets + a warm accent pair -----------
 const COLORS = {
-  bg: '#baaeda',
-  surface: '#FFFFFF', // Cards should be white for contrast
-  purpleDeep: '#4C1D95',
+  bgTop: '#2E1065',
+  bgMid: '#5B21B6',
+  bgBottom: '#EDE9FE',
+  surface: '#FFFFFF',
+  surfaceTint: '#F5F3FF',
+  purpleDeep: '#3B0F70',
   purpleDark: '#6D28D9',
   purpleVibrant: '#8B5CF6',
   accent: '#22D3EE',
+  accentPink: '#F472B6',
   success: '#10B981',
+  successDeep: '#047857',
   warning: '#F59E0B',
-  textPrimary: '#1F2937',
-  textSecondary: '#6B7280',
-  textMuted: '#94A3B8',
-  border: 'rgba(0, 0, 0, 0.1)',
-  shadow: 'rgba(76, 29, 149, 0.2)',
+  textPrimary: '#1E1533',
+  textSecondary: '#6B6580',
+  textMuted: '#A79FC2',
+  textOnDark: 'rgba(255,255,255,0.92)',
+  textOnDarkMuted: 'rgba(255,255,255,0.62)',
+  border: 'rgba(76,29,149,0.10)',
+  glassBorder: 'rgba(255,255,255,0.35)',
+  shadow: 'rgba(46,16,101,0.35)',
+  trailDone: '#8B5CF6',
+  trailLocked: 'rgba(107,101,128,0.28)',
 };
 
 const FONTS = {
@@ -42,15 +53,15 @@ const FONTS = {
 // --- Geometry ---
 const SCREEN_W = Dimensions.get('window').width;
 const SCREEN_H = Dimensions.get('window').height;
-const HEADER_H = 90;
+const HEADER_H = 128;
 const PATH_W = Math.min(SCREEN_W - 20, 400);
-const NODE_SIZE = 70; // Slightly bigger for touch targets
-const ROW_H = 110; // Vertical spacing between nodes
-const AMP = PATH_W / 2 - 60; // Horizontal swing amplitude
+const NODE_SIZE = 72;
+const ROW_H = 116; // Vertical spacing between nodes
+const AMP = PATH_W / 2 - 62; // Horizontal swing amplitude
 
 // Popup bubble
-const POPUP_W = 280;
-const POPUP_H_EST = 285;
+const POPUP_W = 288;
+const POPUP_H_EST = 300;
 const TAIL = 14;
 
 // Calculate X position based on index (Sine wave pattern)
@@ -60,7 +71,7 @@ const getNodeX = (index: number) => {
 
 // Calculate Y position
 const getNodeY = (index: number) => {
-  return index * ROW_H + 80; // Start lower to clear header
+  return index * ROW_H + 90;
 };
 
 function getNodeStatus(node: LearningNode, index: number, allNodes: LearningNode[]): 'completed' | 'current' | 'locked' {
@@ -70,9 +81,38 @@ function getNodeStatus(node: LearningNode, index: number, allNodes: LearningNode
   return 'locked';
 }
 
-// --- 3D animated node button ---
-const EDGE = 6; // height of the visible "side" under each button face
-const RIPPLE_SIZE = NODE_SIZE + 12;
+// --- Dotted trail connecting consecutive nodes along the sine path ---------
+const TRAIL_DOTS_PER_SEGMENT = 7;
+const TRAIL_DOT_SIZE = 5;
+
+function TrailSegment({ from, to, done }: { from: { x: number; y: number }; to: { x: number; y: number }; done: boolean }) {
+  const dots = [];
+  for (let i = 1; i < TRAIL_DOTS_PER_SEGMENT; i++) {
+    const t = i / TRAIL_DOTS_PER_SEGMENT;
+    // ease along the curve slightly so dots hug the sine swing, not a straight line
+    const x = from.x + (to.x - from.x) * t;
+    const y = from.y + (to.y - from.y) * t;
+    dots.push(
+      <View
+        key={i}
+        style={[
+          styles.trailDot,
+          {
+            left: x - TRAIL_DOT_SIZE / 2,
+            top: y - TRAIL_DOT_SIZE / 2,
+            backgroundColor: done ? COLORS.trailDone : COLORS.trailLocked,
+            opacity: done ? 0.55 : 0.7,
+          },
+        ]}
+      />
+    );
+  }
+  return <>{dots}</>;
+}
+
+// --- Modern node button ------------------------------------------------
+const RING_SIZE = NODE_SIZE + 16;
+const RIPPLE_SIZE = NODE_SIZE + 14;
 
 function shade(hex: string, amount: number): string {
   const raw = hex.replace('#', '');
@@ -101,45 +141,50 @@ function NodeButton({ node, status, selected, x, y, onPress, onMeasure }: NodeBu
   const btnRef = useRef<ComponentRef<typeof TouchableOpacity> | null>(null);
   const pressed = useSharedValue(0);
   const pulse = useSharedValue(0);
+  const spin = useSharedValue(0);
   const rippleA = useSharedValue(0);
   const rippleB = useSharedValue(0);
 
   useEffect(() => {
     if (isCurrent) {
-      // Breathing pulse
-      pulse.value = withRepeat(withTiming(1, { duration: 900, easing: Easing.inOut(Easing.ease) }), -1, true);
-      // Two ripple rings, staggered half a cycle apart
-      rippleA.value = withRepeat(withTiming(1, { duration: 2200, easing: Easing.out(Easing.quad) }), -1);
-      rippleB.value = withDelay(1100, withRepeat(withTiming(1, { duration: 2200, easing: Easing.out(Easing.quad) }), -1));
+      pulse.value = withRepeat(withTiming(1, { duration: 1100, easing: Easing.inOut(Easing.ease) }), -1, true);
+      spin.value = withRepeat(withTiming(1, { duration: 6000, easing: Easing.linear }), -1, false);
+      rippleA.value = withRepeat(withTiming(1, { duration: 2400, easing: Easing.out(Easing.quad) }), -1);
+      rippleB.value = withDelay(1200, withRepeat(withTiming(1, { duration: 2400, easing: Easing.out(Easing.quad) }), -1));
     } else {
       cancelAnimation(pulse);
+      cancelAnimation(spin);
       cancelAnimation(rippleA);
       cancelAnimation(rippleB);
       pulse.value = 0;
+      spin.value = 0;
     }
-  }, [isCurrent, pulse, rippleA, rippleB]);
+  }, [isCurrent, pulse, spin, rippleA, rippleB]);
 
-  // Button face: slides down when pressed, breathes when current
   const faceStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateY: pressed.value * 4 },
-      { scale: 1 + pulse.value * 0.05 },
+      { translateY: pressed.value * 3 },
+      { scale: 1 - pressed.value * 0.04 + pulse.value * 0.04 },
     ],
   }));
 
+  const ringStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${spin.value * 360}deg` }],
+  }));
+
   const glowStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: 0.9 + pulse.value * 0.25 }],
-    opacity: 0.32 - pulse.value * 0.18,
+    transform: [{ scale: 0.92 + pulse.value * 0.22 }],
+    opacity: 0.35 - pulse.value * 0.18,
   }));
 
   const rippleStyleA = useAnimatedStyle(() => ({
-    transform: [{ scale: 1 + rippleA.value * 0.7 }],
-    opacity: 0.4 * (1 - rippleA.value),
+    transform: [{ scale: 1 + rippleA.value * 0.65 }],
+    opacity: 0.32 * (1 - rippleA.value),
   }));
 
   const rippleStyleB = useAnimatedStyle(() => ({
-    transform: [{ scale: 1 + rippleB.value * 0.7 }],
-    opacity: 0.4 * (1 - rippleB.value),
+    transform: [{ scale: 1 + rippleB.value * 0.65 }],
+    opacity: 0.32 * (1 - rippleB.value),
   }));
 
   const handleMeasure = useCallback(() => {
@@ -148,27 +193,27 @@ function NodeButton({ node, status, selected, x, y, onPress, onMeasure }: NodeBu
     });
   }, [onMeasure]);
 
-  const edgeColor =
-    status === 'completed' ? '#047857'
-    : status === 'locked' ? '#64748B'
-    : shade(color, -45);
+  const shadowColor =
+    status === 'completed' ? COLORS.successDeep
+    : status === 'locked' ? 'transparent'
+    : shade(color, -30);
 
   return (
     <TouchableOpacity
       ref={(r) => { btnRef.current = r; }}
       onLayout={handleMeasure}
       onPressIn={() => { pressed.value = withTiming(1, { duration: 90 }); }}
-      onPressOut={() => { pressed.value = withSpring(0, { damping: 12, stiffness: 220 }); }}
+      onPressOut={() => { pressed.value = withSpring(0, { damping: 14, stiffness: 240 }); }}
       onPress={onPress}
       activeOpacity={1}
       style={[
         styles.nodeBtn,
-        { left: x - R, top: y - R },
+        { left: x - R, top: y - R, shadowColor },
         status === 'locked' && styles.nodeLocked,
         selected && styles.nodeSelected,
       ]}
     >
-      {/* Ripple rings emanating from current node */}
+      {/* Ripple rings emanating from the active node */}
       {isCurrent && (
         <>
           <Animated.View pointerEvents="none" style={[styles.ripple, { borderColor: color }, rippleStyleA]} />
@@ -176,27 +221,49 @@ function NodeButton({ node, status, selected, x, y, onPress, onMeasure }: NodeBu
         </>
       )}
 
-      {/* Breathing glow behind current node */}
+      {/* Soft breathing glow behind the active node */}
       {isCurrent && (
         <Animated.View pointerEvents="none" style={[styles.glowChild, { backgroundColor: color }, glowStyle]} />
       )}
 
-      {/* 3D side (base peeking out under the face) */}
-      <View style={[styles.nodeEdge, { backgroundColor: edgeColor }]} />
+      {/* Slow-rotating gradient ring outline for the active node */}
+      {isCurrent && (
+        <Animated.View pointerEvents="none" style={[styles.rotatingRing, ringStyle]}>
+          <LinearGradient
+            colors={[color, 'transparent', color]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.rotatingRingGradient}
+          />
+        </Animated.View>
+      )}
 
-      {/* Button face (slides down on press, carrying icon + badges) */}
+      {/* Frosted base disc for depth (replaces the old flat 3D edge) */}
+      <View
+        style={[
+          styles.nodeBase,
+          {
+            backgroundColor: status === 'locked' ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.55)',
+          },
+        ]}
+      />
+
       <Animated.View style={[styles.faceWrap, faceStyle]}>
         <LinearGradient
           colors={
-            status === 'completed' ? ['#10B981', '#059669']
-            : status === 'current' ? [color, color + 'CC']
-            : ['#CBD5E1', '#94A3B8']
+            status === 'completed' ? [COLORS.success, COLORS.successDeep]
+            : status === 'current' ? [shade(color, 18), color]
+            : ['#E4E1F0', '#C9C3E0']
           }
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.nodeCircle}
+          start={{ x: 0.15, y: 0 }}
+          end={{ x: 0.85, y: 1 }}
+          style={[styles.nodeCircle, status === 'locked' && styles.nodeCircleLocked]}
         >
-          <Ionicons name={cfg.icon as any} size={isCurrent ? 32 : 26} color="white" />
+          <Ionicons
+            name={cfg.icon as any}
+            size={isCurrent ? 30 : 25}
+            color={status === 'locked' ? COLORS.textMuted : 'white'}
+          />
         </LinearGradient>
 
         {status === 'completed' && (
@@ -211,7 +278,6 @@ function NodeButton({ node, status, selected, x, y, onPress, onMeasure }: NodeBu
         )}
       </Animated.View>
 
-      {/* Selection Ring */}
       {selected && (
         <View style={[styles.selectionRing, { borderColor: color }]} />
       )}
@@ -225,10 +291,8 @@ export default function TopicPathScreen() {
   const [nodes, setNodes] = useState<LearningNode[]>([]);
   const [topicTitle, setTopicTitle] = useState(title || 'Topic');
   const [loading, setLoading] = useState(true);
-  
-  // State for the popup card
+
   const [selectedNodeIndex, setSelectedNodeIndex] = useState<number | null>(null);
-  // Real on-screen center of each circle (measured), so the bubble anchors exactly
   const [nodeCenters, setNodeCenters] = useState<Record<number, { cx: number; cy: number }>>({});
 
   useFocusEffect(
@@ -254,57 +318,85 @@ export default function TopicPathScreen() {
   };
 
   const handleNodePress = (index: number) => {
-    // Toggle selection: if tapping same node, close it. If new node, open it.
-    // Locked nodes also open a bubble (explaining how to unlock).
     setSelectedNodeIndex(prev => (prev === index ? null : index));
   };
 
   const handleStartActivity = (nodeId: number) => {
-    setSelectedNodeIndex(null); // Close popup
+    setSelectedNodeIndex(null);
     router.push(`/course/node/${nodeId}` as any);
   };
 
   const statuses = nodes.map((n, i) => getNodeStatus(n, i, nodes));
   const completedCount = statuses.filter(s => s === 'completed').length;
-  
-  // Calculate total height for the scroll view
+  const progressPct = nodes.length > 0 ? completedCount / nodes.length : 0;
+
   const contentHeight = nodes.length > 0 ? getNodeY(nodes.length) + 100 : 400;
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={COLORS.purpleDark} />
-      </View>
+      <LinearGradient colors={[COLORS.bgTop, COLORS.bgMid, COLORS.bgBottom]} style={styles.center}>
+        <ActivityIndicator size="large" color="#FFFFFF" />
+      </LinearGradient>
     );
   }
 
   const selectedNode = selectedNodeIndex !== null ? nodes[selectedNodeIndex] : null;
 
   return (
-    <View style={styles.container}>
+    <LinearGradient colors={[COLORS.bgTop, COLORS.bgMid, COLORS.bgBottom]} locations={[0, 0.32, 0.75]} style={styles.container}>
       {/* Header */}
-      <LinearGradient colors={[COLORS.purpleDeep, COLORS.purpleDark]} style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
-          <Ionicons name="chevron-back" size={24} color="white" />
-        </TouchableOpacity>
-        <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle} numberOfLines={1}>{topicTitle}</Text>
-          <Text style={styles.headerSub}>{completedCount}/{nodes.length} completed</Text>
+      <View style={styles.header}>
+        <View style={styles.headerRow}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+            <Ionicons name="chevron-back" size={22} color="white" />
+          </TouchableOpacity>
+          <View style={styles.headerCenter}>
+            <Text style={styles.headerTitle} numberOfLines={1}>{topicTitle}</Text>
+            <Text style={styles.headerSub}>{completedCount} of {nodes.length} activities</Text>
+          </View>
+          <View style={{ width: 34 }} />
         </View>
-        <View style={{ width: 32 }} />
-      </LinearGradient>
+
+        <View style={styles.progressTrack}>
+          <LinearGradient
+            colors={[COLORS.accent, COLORS.purpleVibrant, COLORS.accentPink]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={[styles.progressFill, { width: `${Math.max(progressPct * 100, nodes.length ? 4 : 0)}%` }]}
+          />
+        </View>
+      </View>
 
       <ScrollView
         contentContainerStyle={[styles.scrollContent, { height: contentHeight }]}
         showsVerticalScrollIndicator={false}
-        // Close popup when scrolling
         onScrollBeginDrag={() => setSelectedNodeIndex(null)}
       >
         {nodes.length === 0 && (
           <View style={styles.emptyState}>
-            <Ionicons name="construct-outline" size={48} color={COLORS.textMuted} />
+            <View style={styles.emptyIconWrap}>
+              <Ionicons name="construct-outline" size={40} color={COLORS.purpleVibrant} />
+            </View>
             <Text style={styles.emptyTitle}>No activities yet</Text>
+            <Text style={styles.emptySub}>Check back soon — this topic is being built.</Text>
           </View>
+        )}
+
+        {/* Dotted trail connecting each node along the path */}
+        {nodes.slice(0, -1).map((node, i) => (
+          <TrailSegment
+            key={`trail-${node.id}`}
+            from={{ x: getNodeX(i), y: getNodeY(i) }}
+            to={{ x: getNodeX(i + 1), y: getNodeY(i + 1) }}
+            done={statuses[i] === 'completed'}
+          />
+        ))}
+        {nodes.length > 0 && (
+          <TrailSegment
+            from={{ x: getNodeX(nodes.length - 1), y: getNodeY(nodes.length - 1) }}
+            to={{ x: PATH_W / 2, y: getNodeY(nodes.length) + 32 }}
+            done={statuses[nodes.length - 1] === 'completed'}
+          />
         )}
 
         {/* The Path Nodes */}
@@ -325,11 +417,12 @@ export default function TopicPathScreen() {
 
         {/* Trophy at the end */}
         {nodes.length > 0 && (
-           <View style={[styles.trophyWrap, { left: PATH_W/2 - 40, top: getNodeY(nodes.length) }]}>
-             <LinearGradient colors={['#F59E0B', '#D97706']} style={styles.trophyCircle}>
-               <Ionicons name="trophy" size={32} color="white" />
-             </LinearGradient>
-           </View>
+          <View style={[styles.trophyWrap, { left: PATH_W / 2 - 42, top: getNodeY(nodes.length) }]}>
+            <View style={styles.trophyGlow} />
+            <LinearGradient colors={['#FBBF24', '#F59E0B', '#D97706']} style={styles.trophyCircle}>
+              <Ionicons name="trophy" size={30} color="white" />
+            </LinearGradient>
+          </View>
         )}
       </ScrollView>
 
@@ -339,11 +432,8 @@ export default function TopicPathScreen() {
         const st = statuses[selectedNodeIndex];
         const R = NODE_SIZE / 2;
 
-        // Measured on-screen center of the tapped circle (fallback to computed)
         const { cx, cy } = nodeCenters[selectedNode.id] ?? { cx: getNodeX(selectedNodeIndex), cy: getNodeY(selectedNodeIndex) };
 
-        // The tail tip reaches ~10px past the card edge; sink it ~5px into the
-        // circle's area so bubble and circle look physically connected.
         const fitsBelow = cy + R + 5 + POPUP_H_EST < SCREEN_H;
         const above = !fitsBelow;
         const popupTop = above
@@ -351,7 +441,6 @@ export default function TopicPathScreen() {
           : Math.min(cy + R + 5, SCREEN_H - POPUP_H_EST);
         const popupLeft = Math.min(Math.max(cx - POPUP_W / 2, 12), SCREEN_W - POPUP_W - 12);
 
-        // Tail points at the circle's x, clamped inside the card bounds
         const tailLeft = Math.min(Math.max(cx - popupLeft - TAIL / 2, 16), POPUP_W - 16 - TAIL);
 
         const startLabel =
@@ -364,59 +453,60 @@ export default function TopicPathScreen() {
             <View
               style={[
                 styles.popupCard,
-                {
-                  top: popupTop,
-                  left: popupLeft,
-                  borderColor: cfg.color,
-                  opacity: st === 'locked' ? 0.92 : 1,
-                },
+                { top: popupTop, left: popupLeft, opacity: st === 'locked' ? 0.96 : 1 },
               ]}
             >
-              {/* Comic bubble tail pointing at the circle */}
+              <LinearGradient
+                colors={[cfg.color + '14', 'transparent']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 0, y: 0.6 }}
+                style={StyleSheet.absoluteFillObject}
+                pointerEvents="none"
+              />
+
               <View
                 style={[
                   styles.popupTail,
                   above
-                    ? { bottom: -(TAIL / 2), borderBottomWidth: 2, borderRightWidth: 2 }
-                    : { top: -(TAIL / 2), borderTopWidth: 2, borderLeftWidth: 2 },
-                  { borderColor: cfg.color },
+                    ? { bottom: -(TAIL / 2), borderBottomWidth: 1, borderRightWidth: 1 }
+                    : { top: -(TAIL / 2), borderTopWidth: 1, borderLeftWidth: 1 },
+                  { borderColor: COLORS.glassBorder },
                   { left: tailLeft },
                 ]}
               />
 
-              {/* Stop propagation so clicking card doesn't close it */}
               <Pressable onPress={(e) => e.stopPropagation()}>
                 <View style={styles.popupHeader}>
-                  <View style={[styles.typeBadge, { backgroundColor: cfg.color + '20' }]}>
+                  <View style={[styles.typeBadge, { backgroundColor: cfg.color + '1F' }]}>
                     <Ionicons name={cfg.icon as any} size={12} color={cfg.color} />
                     <Text style={[styles.typeText, { color: cfg.color }]}>{cfg.label}</Text>
                   </View>
-                  <TouchableOpacity onPress={() => setSelectedNodeIndex(null)} hitSlop={8}>
-                    <Ionicons name="close" size={20} color={COLORS.textMuted} />
+                  <TouchableOpacity onPress={() => setSelectedNodeIndex(null)} hitSlop={8} style={styles.closeBtn}>
+                    <Ionicons name="close" size={17} color={COLORS.textMuted} />
                   </TouchableOpacity>
                 </View>
 
                 <Text style={styles.popupTitle}>{selectedNode.title}</Text>
                 <Text style={styles.popupDesc} numberOfLines={3}>
-                  {selectedNode.description || "Tap start to begin this activity."}
+                  {selectedNode.description || 'Tap start to begin this activity.'}
                 </Text>
 
                 <View style={styles.popupMeta}>
-                   <View style={styles.metaItem}>
-                     <Ionicons name="time-outline" size={14} color={COLORS.textSecondary} />
-                     <Text style={styles.metaText}>{selectedNode.estimated_minutes} min</Text>
-                   </View>
-                   <View style={styles.metaItem}>
-                     <Ionicons name="star-outline" size={14} color={COLORS.warning} />
-                     <Text style={styles.metaText}>{selectedNode.xp_reward} XP</Text>
-                   </View>
-                   {selectedNode.progress?.score !== undefined && selectedNode.progress.score > 0 && (
-                     <View style={[styles.scorePill, selectedNode.progress.passed ? styles.scorePillPass : styles.scorePillFail]}>
-                       <Text style={[styles.scorePillText, { color: selectedNode.progress.passed ? COLORS.success : COLORS.warning }]}>
-                         {selectedNode.progress.score}%
-                       </Text>
-                     </View>
-                   )}
+                  <View style={styles.metaItem}>
+                    <Ionicons name="time-outline" size={14} color={COLORS.textSecondary} />
+                    <Text style={styles.metaText}>{selectedNode.estimated_minutes} min</Text>
+                  </View>
+                  <View style={styles.metaItem}>
+                    <Ionicons name="star" size={14} color={COLORS.warning} />
+                    <Text style={styles.metaText}>{selectedNode.xp_reward} XP</Text>
+                  </View>
+                  {selectedNode.progress?.score !== undefined && selectedNode.progress.score > 0 && (
+                    <View style={[styles.scorePill, selectedNode.progress.passed ? styles.scorePillPass : styles.scorePillFail]}>
+                      <Text style={[styles.scorePillText, { color: selectedNode.progress.passed ? COLORS.success : COLORS.warning }]}>
+                        {selectedNode.progress.score}%
+                      </Text>
+                    </View>
+                  )}
                 </View>
 
                 {st === 'locked' ? (
@@ -425,53 +515,93 @@ export default function TopicPathScreen() {
                     <Text style={styles.lockNoticeText}>Complete previous activities to unlock</Text>
                   </View>
                 ) : (
-                  <TouchableOpacity
-                    style={[styles.startBtn, { backgroundColor: cfg.color }]}
-                    onPress={() => handleStartActivity(selectedNode.id)}
-                  >
-                    <Text style={styles.startBtnText}>{startLabel}</Text>
-                    <Ionicons name="arrow-forward" size={18} color="white" />
+                  <TouchableOpacity activeOpacity={0.9} onPress={() => handleStartActivity(selectedNode.id)}>
+                    <LinearGradient
+                      colors={[shade(cfg.color, 14), cfg.color]}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                      style={styles.startBtn}
+                    >
+                      <Text style={styles.startBtnText}>{startLabel}</Text>
+                      <Ionicons name="arrow-forward" size={18} color="white" />
+                    </LinearGradient>
                   </TouchableOpacity>
                 )}
-             </Pressable>
+              </Pressable>
             </View>
           </Pressable>
         );
       })()}
-    </View>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg },
-  center: { flex: 1, backgroundColor: COLORS.bg, justifyContent: 'center', alignItems: 'center' },
-  
+  container: { flex: 1 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+
   // Header
   header: {
+    paddingTop: 52,
+    paddingBottom: 16,
+    paddingHorizontal: 20,
+  },
+  headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 48,
-    paddingBottom: 18,
-    paddingHorizontal: 16,
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
-    zIndex: 10,
+    marginBottom: 14,
   },
-  backBtn: { padding: 6, width: 36, alignItems: 'center' },
+  backBtn: {
+    padding: 6,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   headerCenter: { alignItems: 'center', flex: 1 },
-  headerTitle: { color: 'white', fontSize: 17, fontFamily: FONTS.extraBold, fontWeight: '800' },
-  headerSub: { color: 'rgba(255,255,255,0.7)', fontSize: 12, fontFamily: FONTS.medium, marginTop: 2 },
-  
+  headerTitle: { color: COLORS.textOnDark, fontSize: 17, fontFamily: FONTS.extraBold, fontWeight: '800' },
+  headerSub: { color: COLORS.textOnDarkMuted, fontSize: 12, fontFamily: FONTS.medium, marginTop: 3 },
+  progressTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+
   // Scroll & Path
   scrollContent: {
-    paddingTop: 20,
-    paddingBottom: 60,
-    // alignItems: 'center', // Removed because we use absolute positioning for X
+    paddingTop: 24,
+    paddingBottom: 70,
   },
-  emptyState: { alignItems: 'center', paddingVertical: 80, gap: 10 },
+  emptyState: { alignItems: 'center', paddingVertical: 90, gap: 10, paddingHorizontal: 40 },
+  emptyIconWrap: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    backgroundColor: 'rgba(139,92,246,0.12)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
   emptyTitle: { fontSize: 17, fontFamily: FONTS.bold, color: COLORS.textPrimary },
-  
+  emptySub: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textSecondary, textAlign: 'center' },
+
+  // Trail
+  trailDot: {
+    position: 'absolute',
+    width: TRAIL_DOT_SIZE,
+    height: TRAIL_DOT_SIZE,
+    borderRadius: TRAIL_DOT_SIZE / 2,
+    zIndex: 1,
+  },
+
   // Nodes
   ripple: {
     position: 'absolute',
@@ -480,27 +610,47 @@ const styles = StyleSheet.create({
     width: RIPPLE_SIZE,
     height: RIPPLE_SIZE,
     borderRadius: RIPPLE_SIZE / 2,
-    borderWidth: 3,
+    borderWidth: 2.5,
   },
   glowChild: {
     position: 'absolute',
-    left: -10,
-    top: -10,
-    width: NODE_SIZE + 20,
-    height: NODE_SIZE + 20,
-    borderRadius: (NODE_SIZE + 20) / 2,
+    left: -12,
+    top: -12,
+    width: NODE_SIZE + 24,
+    height: NODE_SIZE + 24,
+    borderRadius: (NODE_SIZE + 24) / 2,
+  },
+  rotatingRing: {
+    position: 'absolute',
+    left: -(RING_SIZE - NODE_SIZE) / 2,
+    top: -(RING_SIZE - NODE_SIZE) / 2,
+    width: RING_SIZE,
+    height: RING_SIZE,
+    borderRadius: RING_SIZE / 2,
+    overflow: 'hidden',
+  },
+  rotatingRingGradient: {
+    width: '100%',
+    height: '100%',
+    borderRadius: RING_SIZE / 2,
   },
   nodeBtn: {
     position: 'absolute',
     zIndex: 2,
-    // Shadow for depth
-    shadowColor: COLORS.purpleDeep,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.28,
+    shadowRadius: 10,
     elevation: 6,
   },
-  nodeLocked: { opacity: 0.5 },
+  nodeLocked: { opacity: 0.6 },
+  nodeBase: {
+    position: 'absolute',
+    left: -4,
+    top: -4,
+    width: NODE_SIZE + 8,
+    height: NODE_SIZE + 8,
+    borderRadius: (NODE_SIZE + 8) / 2,
+  },
   badgeCheck: {
     position: 'absolute',
     bottom: -3,
@@ -509,8 +659,8 @@ const styles = StyleSheet.create({
     height: 22,
     borderRadius: 11,
     backgroundColor: COLORS.success,
-    borderWidth: 2,
-    borderColor: COLORS.bg,
+    borderWidth: 2.5,
+    borderColor: '#FFFFFF',
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 5,
@@ -522,24 +672,16 @@ const styles = StyleSheet.create({
     width: 18,
     height: 18,
     borderRadius: 9,
-    backgroundColor: '#64748B',
+    backgroundColor: '#9691AE',
     borderWidth: 2,
-    borderColor: COLORS.bg,
+    borderColor: '#FFFFFF',
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 5,
   },
   nodeSelected: {
-    transform: [{ scale: 1.1 }],
+    transform: [{ scale: 1.08 }],
     zIndex: 10,
-  },
-  nodeEdge: {
-    position: 'absolute',
-    left: 0,
-    top: EDGE,
-    width: NODE_SIZE,
-    height: NODE_SIZE,
-    borderRadius: NODE_SIZE / 2,
   },
   faceWrap: {
     position: 'absolute',
@@ -554,56 +696,70 @@ const styles = StyleSheet.create({
     borderRadius: NODE_SIZE / 2,
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 4,
-    borderColor: 'rgba(255,255,255,0.3)', // Inner ring effect
+    borderWidth: 3,
+    borderColor: 'rgba(255,255,255,0.45)',
+  },
+  nodeCircleLocked: {
+    borderColor: 'rgba(255,255,255,0.6)',
   },
   selectionRing: {
     position: 'absolute',
-    top: -8, left: -8, right: -8, bottom: -8,
-    borderRadius: (NODE_SIZE + 16) / 2,
-    borderWidth: 3,
+    top: -9, left: -9, right: -9, bottom: -9,
+    borderRadius: (NODE_SIZE + 18) / 2,
+    borderWidth: 2.5,
     borderStyle: 'dashed',
-    opacity: 0.8,
+    opacity: 0.85,
   },
 
   // Trophy
   trophyWrap: {
     position: 'absolute',
-    width: 80,
+    width: 84,
     alignItems: 'center',
   },
-  trophyCircle: { 
-    width: 64, height: 64, borderRadius: 32, 
+  trophyGlow: {
+    position: 'absolute',
+    top: -6,
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    backgroundColor: 'rgba(251,191,36,0.35)',
+  },
+  trophyCircle: {
+    width: 64, height: 64, borderRadius: 32,
     justifyContent: 'center', alignItems: 'center',
-    shadowColor: '#F59E0B', shadowOffset: {width:0, height:4}, shadowOpacity: 0.4, shadowRadius: 8, elevation: 5
+    borderWidth: 3, borderColor: 'rgba(255,255,255,0.5)',
+    shadowColor: '#F59E0B', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.4, shadowRadius: 8, elevation: 5,
   },
 
   // Popup Overlay
   overlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'transparent', // Transparent overlay to catch taps
+    backgroundColor: 'transparent',
     zIndex: 100,
   },
-  
+
   // Popup Card
   popupCard: {
     position: 'absolute',
     width: POPUP_W,
-    backgroundColor: COLORS.surface,
-    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.97)',
+    borderRadius: 26,
     padding: 20,
-    borderWidth: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.25,
-    shadowRadius: 20,
-    elevation: 10,
+    borderWidth: 1,
+    borderColor: COLORS.glassBorder,
+    shadowColor: COLORS.shadow,
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.3,
+    shadowRadius: 24,
+    elevation: 12,
+    overflow: 'hidden',
   },
   popupTail: {
     position: 'absolute',
     width: TAIL,
     height: TAIL,
-    backgroundColor: COLORS.surface,
+    backgroundColor: '#FFFFFF',
     transform: [{ rotate: '45deg' }],
     elevation: 10,
   },
@@ -614,9 +770,12 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   typeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
     paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
+    paddingVertical: 5,
+    borderRadius: 14,
   },
   typeText: {
     fontSize: 11,
@@ -625,12 +784,20 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
+  closeBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(148,163,184,0.14)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   popupTitle: {
-    fontSize: 18,
+    fontSize: 19,
     fontFamily: FONTS.bold,
     color: COLORS.textPrimary,
     marginBottom: 8,
-    lineHeight: 24,
+    lineHeight: 25,
   },
   popupDesc: {
     fontSize: 14,
@@ -641,7 +808,8 @@ const styles = StyleSheet.create({
   },
   popupMeta: {
     flexDirection: 'row',
-    gap: 16,
+    alignItems: 'center',
+    gap: 14,
     marginBottom: 20,
     paddingBottom: 16,
     borderBottomWidth: 1,
@@ -650,17 +818,21 @@ const styles = StyleSheet.create({
   metaItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 5,
+    backgroundColor: COLORS.surfaceTint,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 10,
   },
   metaText: {
-    fontSize: 13,
+    fontSize: 12.5,
     fontFamily: FONTS.semiBold,
     color: COLORS.textSecondary,
   },
   scorePill: {
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 10,
     marginLeft: 'auto',
   },
   scorePillPass: { backgroundColor: 'rgba(16,185,129,0.12)' },
@@ -675,8 +847,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
     paddingVertical: 14,
-    borderRadius: 14,
-    backgroundColor: 'rgba(148,163,184,0.15)',
+    borderRadius: 16,
+    backgroundColor: 'rgba(148,163,184,0.14)',
   },
   lockNoticeText: {
     fontSize: 13,
@@ -688,8 +860,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 14,
-    borderRadius: 14,
+    paddingVertical: 15,
+    borderRadius: 16,
     gap: 8,
   },
   startBtnText: {
