@@ -79,3 +79,5 @@ serviceAccountKey.json
 
 .agents/
 skills-lock.json
+
+sage-secrets.tar.gz
