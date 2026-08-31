@@ -101,3 +101,95 @@ export const borderRadius = {
   xl: 24,
   full: 9999,
 };
+
+/**
+ * Semantic palette for the learning screens (courses, quizzes, groups, chat).
+ * Consolidates the five duplicated per-file COLORS objects.
+ * Values are unchanged from the legacy palettes (behavior-preserving migration);
+ * contrast/surface tuning happens centrally here in later passes.
+ */
+export const palette = {
+  // Backgrounds
+  bg: '#baaeda',
+  bgSecondary: '#dad6e7',
+  surface: '#cdc2dd',
+  surfaceLight: '#5A4F6C',
+
+  // Purple ramp aliases (values match colors.purple)
+  purpleDeep: colors.purple[900],
+  purpleDark: colors.purple[700],
+  purplePrimary: colors.purple[600],
+  purpleVibrant: colors.purple[500],
+  purpleLight: colors.purple[400],
+  purplePale: colors.purple[300],
+  purpleGhost: colors.purple[200],
+
+  // Accents
+  accent: '#22D3EE',
+  success: colors.success,
+  successDark: '#059669',
+  warning: colors.warning,
+  warningDark: '#D97706',
+  danger: colors.error,
+
+  // Text
+  textPrimary: '#3a107a',
+  textSecondary: '#CBD5E1',
+  textDark: '#1F2937',
+  textMuted: '#94A3B8',
+  // AA-compliant muted text for light surfaces (use this over textMuted on bg/surface)
+  textMutedStrong: '#6B7280',
+
+  // Borders
+  border: 'rgba(44, 29, 0, 0.15)',
+  // Purple-tinted replacement for `border` (Phase 2 target)
+  borderPurple: 'rgba(76, 29, 149, 0.12)',
+};
+
+/** Montserrat weight map — names must match the fonts loaded in app/_layout.tsx */
+export const fontFamily = {
+  black: 'Montserrat-Black',
+  extraBold: 'Montserrat-ExtraBold',
+  bold: 'Montserrat-Bold',
+  semiBold: 'Montserrat-SemiBold',
+  medium: 'Montserrat-Medium',
+  regular: 'Montserrat-Regular',
+} as const;
+
+/** Type scale */
+export const fontSize = {
+  xs: 10,
+  sm: 12,
+  md: 14,
+  base: 15,
+  lg: 16,
+  xl: 18,
+  xxl: 22,
+  display: 28,
+  hero: 32,
+} as const;
+
+/** Elevation scale — consistent iOS shadows + Android elevation */
+export const elevation = {
+  sm: {
+    shadowColor: '#4C1D95',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  md: {
+    shadowColor: '#4C1D95',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  lg: {
+    shadowColor: '#4C1D95',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+} as const;

@@ -1,20 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-
-const COLORS = {
-  bgSecondary: '#dad6e7',
-  surface: '#cdc2dd',
-  border: 'rgba(44, 29, 0, 0.15)',
-  purpleVibrant: '#8B5CF6',
-  textPrimary: '#3a107a',
-  textMuted: '#94A3B8',
-};
-
-const FONTS = {
-  bold: 'Montserrat-Bold',
-  medium: 'Montserrat-Medium',
-};
+import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
 interface EmptyCourseStateProps {
   title?: string;

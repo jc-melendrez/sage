@@ -2,23 +2,7 @@ import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-
-const COLORS = {
-  success: '#10B981',
-  warning: '#F59E0B',
-  purplePrimary: '#7C3AED',
-  purpleVibrant: '#8B5CF6',
-  purpleLight: '#A78BFA',
-  textPrimary: '#3a107a',
-  textMuted: '#94A3B8',
-  surface: '#cdc2dd',
-};
-
-const FONTS = {
-  bold: 'Montserrat-Bold',
-  semiBold: 'Montserrat-SemiBold',
-  medium: 'Montserrat-Medium',
-};
+import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
 interface Level {
   level_id: number;
@@ -37,7 +21,7 @@ interface LevelNodeProps {
 
 const STATUS_CONFIG = {
   completed: {
-    gradient: [COLORS.success, '#059669'] as [string, string],
+    gradient: [COLORS.success, COLORS.successDark] as [string, string],
     icon: 'checkmark' as const,
     glowColor: COLORS.success,
   },

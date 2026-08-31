@@ -3,22 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import ProgressRing from './ProgressRing';
-
-const COLORS = {
-  surface: '#cdc2dd',
-  border: 'rgba(44, 29, 0, 0.15)',
-  purplePrimary: '#7C3AED',
-  purpleVibrant: '#8B5CF6',
-  purpleLight: '#A78BFA',
-  textPrimary: '#3a107a',
-  textMuted: '#94A3B8',
-};
-
-const FONTS = {
-  bold: 'Montserrat-Bold',
-  semiBold: 'Montserrat-SemiBold',
-  medium: 'Montserrat-Medium',
-};
+import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
 interface Course {
   course_title: string;

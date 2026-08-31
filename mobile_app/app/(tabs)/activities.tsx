@@ -3,6 +3,7 @@ import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
   TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Switch, StatusBar
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Clipboard from 'expo-clipboard';
@@ -18,44 +19,10 @@ import CourseDetailModal from '@/components/courses/CourseDetailModal';
 import EmptyCourseState from '@/components/courses/EmptyCourseState';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
 
-//  Rich Purple Palette (Matching Dashboard)
-const COLORS = {
-  bg: '#baaeda',
-  bgSecondary: '#dad6e7',
-  surface: '#cdc2dd',
-  surfaceLight: '#5A4F6C',
-  
-  purpleDeep: '#4C1D95',
-  purpleDark: '#6D28D9',
-  purplePrimary: '#7C3AED',
-  purpleVibrant: '#8B5CF6',
-  purpleLight: '#A78BFA',
-  purplePale: '#C4B5FD',
-  purpleGhost: '#DDD6FE',
-  
-  accent: '#22D3EE',
-  success: '#10B981',
-  warning: '#F59E0B',
-  danger: '#EF4444',
-  
-  textPrimary: '#3a107a',
-  textSecondary: '#CBD5E1', // Light, used on dark backgrounds
-  textDark: '#1F2937',
-  textMuted: '#94A3B8',
-  border: 'rgba(44, 29, 0, 0.15)',
-};
-
-// 🔠 Typography System
-const FONTS = {
-  black: 'Montserrat-Black',
-  extraBold: 'Montserrat-ExtraBold',
-  bold: 'Montserrat-Bold',
-  semiBold: 'Montserrat-SemiBold',
-  medium: 'Montserrat-Medium',
-  regular: 'Montserrat-Regular',
-};
+// Rich Purple Palette (defined in constants/theme.ts)
 
 // --- Interfaces ---
 interface StudyGroup {
@@ -106,6 +73,7 @@ interface Quiz {
 
 export default function ActivitiesScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [selectedTab, setSelectedTab] = useState('groups');
 
@@ -480,7 +448,7 @@ export default function ActivitiesScreen() {
           colors={[COLORS.purpleDeep, COLORS.purpleDark]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={styles.chatHeader}
+          style={[styles.chatHeader, { paddingTop: insets.top + 10 }]}
         >
           <TouchableOpacity onPress={() => setActiveGroup(null)} style={{ padding: 4 }}>
             <Ionicons name="chevron-back" size={24} color="white" />
@@ -636,7 +604,7 @@ export default function ActivitiesScreen() {
         colors={[COLORS.purpleDeep, COLORS.purpleDark]}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
-        style={styles.header}
+        style={[styles.header, { paddingTop: insets.top + 24 }]}
       >
         <Text style={styles.headerTitle}>Activities</Text>
         <Text style={styles.headerSubtitle}>Lessons, quizzes, and group tasks</Text>
@@ -1106,7 +1074,6 @@ const styles = StyleSheet.create({
   // ✅ UPDATED: Header with purple gradient and curved bottom
   header: {
     paddingHorizontal: 24,
-    paddingTop: Platform.OS === 'ios' ? 60 : 40,
     paddingBottom: 32,
     borderBottomLeftRadius: 32,
     borderBottomRightRadius: 32,
@@ -1261,7 +1228,7 @@ const styles = StyleSheet.create({
   liveTextSmall: { fontSize: 10, color: COLORS.success, fontFamily: FONTS.bold },
   inboxPreview: { fontSize: 13, color: COLORS.textMuted, fontFamily: FONTS.regular },
 
-  chatHeader: { paddingTop: Platform.OS === 'ios' ? 50 : 30, paddingBottom: 16, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', elevation: 4 },
+  chatHeader: { paddingBottom: 16, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', elevation: 4 },
   chatHeaderTitleBox: { flex: 1, alignItems: 'center' },
   chatHeaderTitle: { color: 'white', fontSize: 18, fontFamily: FONTS.bold },
   chatHeaderSubtitle: { color: COLORS.purplePale, fontSize: 12, marginTop: 2, fontFamily: FONTS.medium },

@@ -1,29 +1,11 @@
 import React from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import LevelNode from './LevelNode';
 import ProgressRing from './ProgressRing';
-
-const COLORS = {
-  bg: '#baaeda',
-  surface: '#cdc2dd',
-  border: 'rgba(44, 29, 0, 0.15)',
-  purpleDeep: '#4C1D95',
-  purpleDark: '#6D28D9',
-  purplePrimary: '#7C3AED',
-  purpleVibrant: '#8B5CF6',
-  purpleLight: '#A78BFA',
-  textPrimary: '#3a107a',
-  textMuted: '#94A3B8',
-};
-
-const FONTS = {
-  black: 'Montserrat-Black',
-  bold: 'Montserrat-Bold',
-  semiBold: 'Montserrat-SemiBold',
-  medium: 'Montserrat-Medium',
-};
+import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
 interface Level {
   level_id: number;
@@ -76,6 +58,7 @@ export default function CourseDetailModal({
   onTakeQuiz,
   onClose,
 }: CourseDetailModalProps) {
+  const insets = useSafeAreaInsets();
   const totalLevels = course.levels.length;
   const completedCount = course.levels.filter(
     (l, i) => getLevelStatus(course.levels, i, levelProgress, course.course_title) === 'completed',
@@ -96,7 +79,7 @@ export default function CourseDetailModal({
         colors={[COLORS.purpleDeep, COLORS.purpleDark]}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
-        style={styles.header}
+        style={[styles.header, { paddingTop: insets.top + 24 }]}
       >
         <TouchableOpacity onPress={onClose} style={styles.backBtn}>
           <Ionicons name="arrow-back" size={24} color="white" />
@@ -205,7 +188,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bg,
   },
   header: {
-    paddingTop: 56,
     paddingBottom: 28,
     paddingHorizontal: 24,
     borderBottomLeftRadius: 32,
