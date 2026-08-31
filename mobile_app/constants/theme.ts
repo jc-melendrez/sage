@@ -109,10 +109,10 @@ export const borderRadius = {
  * contrast/surface tuning happens centrally here in later passes.
  */
 export const palette = {
-  // Backgrounds
-  bg: '#baaeda',
-  bgSecondary: '#dad6e7',
-  surface: '#cdc2dd',
+  // Backgrounds — soft neutral canvas, white cards (Phase 2 surface modernization)
+  bg: '#F4F2FA',
+  bgSecondary: '#ECE9F5',
+  surface: '#FFFFFF',
   surfaceLight: '#5A4F6C',
 
   // Purple ramp aliases (values match colors.purple)
@@ -136,14 +136,15 @@ export const palette = {
   textPrimary: '#3a107a',
   textSecondary: '#CBD5E1',
   textDark: '#1F2937',
-  textMuted: '#94A3B8',
-  // AA-compliant muted text for light surfaces (use this over textMuted on bg/surface)
+  // AA-compliant muted text for light surfaces (#6B7280 on white/bg ≈ 4.8:1)
+  textMuted: '#6B7280',
   textMutedStrong: '#6B7280',
 
-  // Borders
-  border: 'rgba(44, 29, 0, 0.15)',
-  // Purple-tinted replacement for `border` (Phase 2 target)
+  // Borders — purple-tinted (replaces legacy brown-black rgba(44,29,0,0.15))
+  border: 'rgba(76, 29, 149, 0.12)',
   borderPurple: 'rgba(76, 29, 149, 0.12)',
+  // Stronger variant for dashed/empty-state outlines that must read at a glance
+  borderStrong: 'rgba(76, 29, 149, 0.28)',
 };
 
 /** Montserrat weight map — names must match the fonts loaded in app/_layout.tsx */

@@ -555,12 +555,9 @@ export default function ActivitiesScreen() {
               </View>
               <ScrollView showsVerticalScrollIndicator={false}>
                 <View style={{ alignItems: 'center', marginBottom: 24 }}>
-                  <LinearGradient
-                    colors={[COLORS.purpleDeep, COLORS.purpleVibrant]}
-                    style={styles.bigAvatar}
-                  >
+                  <View style={styles.bigAvatar}>
                     <Text style={styles.bigAvatarText}>{activeGroup.name.substring(0, 2).toUpperCase()}</Text>
-                  </LinearGradient>
+                  </View>
                   <Text style={styles.settingsGroupName}>{activeGroup.name}</Text>
                   <Text style={styles.settingsGroupDesc}>{activeGroup.description || 'No description provided.'}</Text>
                   {isAdmin && <Text style={styles.adminBadge}>Admin</Text>}
@@ -606,7 +603,6 @@ export default function ActivitiesScreen() {
     >
       <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
 
-      {/* ✅ UPDATED: Purple gradient header matching Dashboard design */}
       <LinearGradient
         colors={[COLORS.purpleDeep, COLORS.purpleDark]}
         start={{ x: 0, y: 0 }}
@@ -614,34 +610,33 @@ export default function ActivitiesScreen() {
         style={[styles.header, { paddingTop: insets.top + 24 }]}
       >
         <Text style={styles.headerTitle}>Activities</Text>
-        <Text style={styles.headerSubtitle}>Lessons, quizzes, and group tasks</Text>
+        <Text style={styles.headerSubtitle}>Courses, quizzes, and study groups</Text>
       </LinearGradient>
 
-      {/* ✅ UPDATED: High-visibility tabs */}
-      <View style={styles.tabsContainer}>
-        <TouchableOpacity 
-          style={[styles.tab, selectedTab === 'lessons' && styles.tabActive]} 
-          onPress={() => setSelectedTab('lessons')}
-        >
-          <Text style={[styles.tabText, selectedTab === 'lessons' && styles.tabTextActive]}>Courses</Text>
-          {selectedTab === 'lessons' && <View style={styles.activeTabIndicator} />}
-        </TouchableOpacity>
-        
-        <TouchableOpacity 
-          style={[styles.tab, selectedTab === 'quizzes' && styles.tabActive]} 
-          onPress={() => setSelectedTab('quizzes')}
-        >
-          <Text style={[styles.tabText, selectedTab === 'quizzes' && styles.tabTextActive]}>Quizzes</Text>
-          {selectedTab === 'quizzes' && <View style={styles.activeTabIndicator} />}
-        </TouchableOpacity>
-        
-        <TouchableOpacity 
-          style={[styles.tab, selectedTab === 'groups' && styles.tabActive]} 
-          onPress={() => setSelectedTab('groups')}
-        >
-          <Text style={[styles.tabText, selectedTab === 'groups' && styles.tabTextActive]}>Groups</Text>
-          {selectedTab === 'groups' && <View style={styles.activeTabIndicator} />}
-        </TouchableOpacity>
+      <View
+        style={styles.tabsContainer}
+        accessibilityRole="tablist"
+      >
+        {([
+          ['lessons', 'Courses'],
+          ['quizzes', 'Quizzes'],
+          ['groups', 'Groups'],
+        ] as const).map(([key, label]) => {
+          const isActive = selectedTab === key;
+          return (
+            <TouchableOpacity
+              key={key}
+              style={styles.tab}
+              onPress={() => setSelectedTab(key)}
+              accessibilityRole="tab"
+              accessibilityLabel={label}
+              accessibilityState={{ selected: isActive }}
+            >
+              <Text style={[styles.tabText, isActive && styles.tabTextActive]}>{label}</Text>
+              <View style={[styles.activeTabIndicator, !isActive && styles.activeTabIndicatorInactive]} />
+            </TouchableOpacity>
+          );
+        })}
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 100 }}>
@@ -696,10 +691,7 @@ export default function ActivitiesScreen() {
                   <View style={{ flex: 1 }}>
                     <View style={styles.badgesRow}>
                       <View style={styles.badgePill}><Text style={styles.badgePillText}>{quiz.questions?.length || 0} Qs</Text></View>
-                      <View style={styles.badgePill}><Text style={styles.badgePillText}>{quiz.quiz_type}</Text></View>
-                      <View style={[styles.badgePill, { borderColor: COLORS.purplePrimary }]}>
-                        <Text style={[styles.badgePillText, { color: COLORS.purplePrimary }]}>AI Generated</Text>
-                      </View>
+                      {quiz.quiz_type && <View style={styles.badgePill}><Text style={styles.badgePillText}>{quiz.quiz_type}</Text></View>}
                     </View>
                     <Text style={styles.cardTitle}>{quiz.title}</Text>
                     <Text style={styles.metaText}>Created {new Date(quiz.created_at).toLocaleDateString()}</Text>
@@ -748,12 +740,9 @@ export default function ActivitiesScreen() {
             {loading ? <ActivityIndicator size="large" color={COLORS.purpleVibrant} style={{ marginTop: 40 }} /> :
               groups.map((group) => (
                 <TouchableOpacity key={group.id} style={styles.inboxRow} onPress={() => openChat(group)} activeOpacity={0.7}>
-                  <LinearGradient
-                    colors={[COLORS.purpleDark, COLORS.purpleVibrant]}
-                    style={styles.inboxAvatar}
-                  >
+                  <View style={styles.inboxAvatar}>
                     <Text style={styles.inboxAvatarText}>{group.name.substring(0, 2).toUpperCase()}</Text>
-                  </LinearGradient>
+                  </View>
                   <View style={styles.inboxDetails}>
                     <View style={styles.inboxRowTop}>
                       <Text style={styles.inboxName} numberOfLines={1}>{group.name}</Text>
@@ -780,16 +769,9 @@ export default function ActivitiesScreen() {
               <TouchableOpacity onPress={() => setIsCreateModalOpen(false)}><Ionicons name="close" size={24} color={COLORS.textDark} /></TouchableOpacity>
             </View>
             <TextInput style={styles.modalInput} placeholder="Group Name" placeholderTextColor="#9CA3AF" value={newGroupName} onChangeText={setNewGroupName} />
-            <LinearGradient
-              colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.modalSubmitBtnGradient}
-            >
-              <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleCreateGroup}>
-                {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 14 }}>Create</Text>}
-              </TouchableOpacity>
-            </LinearGradient>
+            <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleCreateGroup} disabled={isSubmitting}>
+              {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={styles.modalSubmitBtnText}>Create</Text>}
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -803,16 +785,9 @@ export default function ActivitiesScreen() {
               <TouchableOpacity onPress={() => setIsJoinModalOpen(false)}><Ionicons name="close" size={24} color={COLORS.textDark} /></TouchableOpacity>
             </View>
             <TextInput style={[styles.modalInput, { textAlign: 'center', fontSize: 20, letterSpacing: 5 }]} placeholder="CODE" placeholderTextColor="#9CA3AF" autoCapitalize="characters" maxLength={6} value={joinCodeInput} onChangeText={setJoinCodeInput} />
-            <LinearGradient
-              colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.modalSubmitBtnGradient}
-            >
-              <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleJoinGroup}>
-                {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 14 }}>Join</Text>}
-              </TouchableOpacity>
-            </LinearGradient>
+            <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleJoinGroup} disabled={isSubmitting}>
+              {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={styles.modalSubmitBtnText}>Join</Text>}
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -913,15 +888,15 @@ export default function ActivitiesScreen() {
             <View style={styles.quizGenModalHeader}>
               <Text style={styles.quizGenModalTitle}>Quiz Generator</Text>
               <TouchableOpacity onPress={() => setIsGenerateQuizModalOpen(false)}>
-                <Ionicons name="close" size={24} color="#6B7280" />
+                <Ionicons name="close" size={24} color={COLORS.textMuted} />
               </TouchableOpacity>
             </View>
 
             {isGeneratingQuiz ? (
               <View style={styles.quizGenLoadingContainer}>
                 <View style={styles.quizGenLoadingIconContainer}>
-                  <ActivityIndicator size="large" color="#7C3AED" />
-                  <Ionicons name="sparkles" size={24} color="#7C3AED" style={styles.quizGenSparkleIcon} />
+                  <ActivityIndicator size="large" color={COLORS.purplePrimary} />
+                  <Ionicons name="sparkles" size={24} color={COLORS.purplePrimary} style={styles.quizGenSparkleIcon} />
                 </View>
                 <Text style={styles.quizGenStatusTitle}>{quizGenerationStatus}</Text>
                 <Text style={styles.quizGenStatusSubtitle}>SAGE AI is crafting the perfect assessment for you.</Text>
@@ -935,7 +910,7 @@ export default function ActivitiesScreen() {
                 <Text style={styles.quizGenLabel}>Selected Material</Text>
                 <View style={styles.quizGenMaterialPreview}>
                   <View style={styles.quizGenMaterialIconBg}>
-                    <Ionicons name={quizFile ? "document-text" : "cloud-upload-outline"} size={24} color="#7C3AED" />
+                    <Ionicons name={quizFile ? "document-text" : "cloud-upload-outline"} size={24} color={COLORS.purplePrimary} />
                   </View>
                   <View style={{ flex: 1, marginLeft: 12 }}>
                     <Text style={styles.quizGenMaterialName} numberOfLines={1}>
@@ -983,7 +958,7 @@ export default function ActivitiesScreen() {
                       onPress={() => setIsQuizTypeDropdownOpen(!isQuizTypeDropdownOpen)}
                     >
                       <Text style={styles.quizGenSelectorText}>{quizType}</Text>
-                      <Ionicons name="chevron-down" size={20} color="#6B7280" />
+                      <Ionicons name="chevron-down" size={20} color={COLORS.textMuted} />
                     </TouchableOpacity>
                     {isQuizTypeDropdownOpen && (
                       <ScrollView style={styles.quizGenDropdown} nestedScrollEnabled={true}>
@@ -1034,41 +1009,23 @@ export default function ActivitiesScreen() {
         </View>
       </Modal>
 
-      {/* FAB - Courses */}
-      {selectedTab === 'lessons' && (
-        <LinearGradient
-          colors={[COLORS.purpleDeep, COLORS.purpleVibrant]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
+      {/* FAB — contextual per tab */}
+      {(selectedTab === 'lessons' || selectedTab === 'quizzes') && (
+        <TouchableOpacity
           style={styles.fab}
-        >
-          <TouchableOpacity
-            onPress={() => setIsGenerateLessonModalOpen(true)}
-            style={{ width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}
-          >
-            <Ionicons name="add" size={24} color="white" />
-          </TouchableOpacity>
-        </LinearGradient>
-      )}
-
-      {/* FAB - Quizzes */}
-      {selectedTab === 'quizzes' && (
-        <LinearGradient
-          colors={[COLORS.purpleDeep, COLORS.purpleVibrant]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.fab}
-        >
-          <TouchableOpacity
-            onPress={() => {
+          onPress={() => {
+            if (selectedTab === 'lessons') {
+              setIsGenerateLessonModalOpen(true);
+            } else {
               setIsGenerateQuizModalOpen(true);
               setIsQuizTypeDropdownOpen(false);
-            }}
-            style={{ width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}
-          >
-            <Ionicons name="sparkles" size={24} color="white" />
-          </TouchableOpacity>
-        </LinearGradient>
+            }
+          }}
+          accessibilityLabel={selectedTab === 'lessons' ? 'Generate new course' : 'Generate new quiz'}
+          accessibilityRole="button"
+        >
+          <Ionicons name={selectedTab === 'lessons' ? 'add' : 'sparkles'} size={24} color="white" />
+        </TouchableOpacity>
       )}
     </LinearGradient>
   );
@@ -1101,37 +1058,37 @@ const styles = StyleSheet.create({
   },
 
   // ✅ UPDATED: Tabs with high visibility
-  tabsContainer: { 
-    flexDirection: 'row', 
-    backgroundColor: 'transparent', 
-    paddingHorizontal: 24, 
-    paddingTop: 16, 
-    paddingBottom: 8 
+  tabsContainer: {
+    flexDirection: 'row',
+    backgroundColor: 'transparent',
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    paddingBottom: 8,
   },
-  tab: { 
-    flex: 1, 
-    paddingVertical: 12, 
-    alignItems: 'center', 
-    position: 'relative' 
+  tab: {
+    flex: 1,
+    paddingVertical: 12,
+    alignItems: 'center',
+    gap: 6,
   },
-  tabActive: { },
   activeTabIndicator: {
-    position: 'absolute',
-    bottom: 0,
-    width: 24,
+    width: '60%',
+    maxWidth: 40,
     height: 3,
     borderRadius: 1.5,
-    backgroundColor: COLORS.purpleDeep,
+    backgroundColor: COLORS.purplePrimary,
   },
-  tabText: { 
-    fontSize: 15, 
-    color: COLORS.purpleLight, // Visible light purple for inactive
-    fontFamily: FONTS.semiBold 
+  activeTabIndicatorInactive: {
+    backgroundColor: 'transparent',
   },
-  tabTextActive: { 
-    color: COLORS.purpleDeep, // Deep purple for active
-    fontFamily: FONTS.bold, 
-    fontSize: 16 
+  tabText: {
+    fontSize: 15,
+    color: COLORS.textMuted,
+    fontFamily: FONTS.semiBold,
+  },
+  tabTextActive: {
+    color: COLORS.purpleDeep,
+    fontFamily: FONTS.bold,
   },
   
   content: { flex: 1 },
@@ -1158,7 +1115,7 @@ const styles = StyleSheet.create({
     padding: 40,
     alignItems: 'center',
     borderWidth: 1.5,
-    borderColor: COLORS.border,
+    borderColor: COLORS.borderStrong,
     borderStyle: 'dashed',
     marginTop: 20,
   },
@@ -1178,7 +1135,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   emptyStateText: {
-    color: COLORS.purpleLight,
+    color: COLORS.textMuted,
     fontSize: 14,
     fontFamily: FONTS.regular,
     textAlign: 'center',
@@ -1216,8 +1173,8 @@ const styles = StyleSheet.create({
   },
 
   badgesRow: { flexDirection: 'row', gap: 6, marginBottom: 8 },
-  badgePill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: COLORS.border, backgroundColor: 'rgba(255,255,255,0.5)' },
-  badgePillText: { fontSize: 10, color: COLORS.textDark, fontFamily: FONTS.semiBold },
+  badgePill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.bgSecondary },
+  badgePillText: { fontSize: 10, color: COLORS.textMuted, fontFamily: FONTS.semiBold },
   takeQuizBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.purplePrimary, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, gap: 6, alignSelf: 'center', shadowColor: COLORS.purpleDeep, shadowOffset: {width:0, height:2}, shadowOpacity: 0.2, shadowRadius: 4, elevation: 3 },
   takeQuizBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 13 },
 
@@ -1226,7 +1183,7 @@ const styles = StyleSheet.create({
   inboxBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.surface, paddingVertical: 12, borderRadius: 14, gap: 6, borderWidth: 1, borderColor: COLORS.border },
   inboxBtnText: { color: COLORS.purpleDeep, fontFamily: FONTS.semiBold, fontSize: 14 },
   inboxRow: { flexDirection: 'row', padding: 16, backgroundColor: COLORS.surface, borderBottomWidth: 1, borderBottomColor: COLORS.border, alignItems: 'center', marginHorizontal: 24, marginBottom: 12, borderRadius: 16 },
-  inboxAvatar: { width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center', marginRight: 14, shadowColor: COLORS.purpleDeep, shadowOffset: {width:0, height:2}, shadowOpacity: 0.2, shadowRadius: 4, elevation: 3 },
+  inboxAvatar: { width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center', marginRight: 14, backgroundColor: COLORS.purpleVibrant, shadowColor: COLORS.purpleDeep, shadowOffset: {width:0, height:2}, shadowOpacity: 0.2, shadowRadius: 4, elevation: 3 },
   inboxAvatarText: { color: 'white', fontSize: 16, fontFamily: FONTS.bold },
   inboxDetails: { flex: 1 },
   inboxRowTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' },
@@ -1265,13 +1222,29 @@ const styles = StyleSheet.create({
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   modalTitle: { fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textDark },
   modalInput: { backgroundColor: COLORS.bg, borderRadius: 12, padding: 16, fontSize: 16, marginBottom: 20, fontFamily: FONTS.regular, borderWidth: 1, borderColor: COLORS.border },
-  modalSubmitBtnGradient: { borderRadius: 12, overflow: 'hidden' },
-  modalSubmitBtn: { padding: 16, alignItems: 'center' },
+  modalSubmitBtn: { padding: 16, alignItems: 'center', backgroundColor: COLORS.purplePrimary, borderRadius: 12 },
+  modalSubmitBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 14 },
 
-  fab: { position: 'absolute', bottom: 24, right: 24, width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 8, shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.4, shadowRadius: 12, zIndex: 10 },
+  fab: {
+    position: 'absolute',
+    bottom: 24,
+    right: 24,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: COLORS.purplePrimary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 8,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    zIndex: 10,
+  },
 
   // Settings modal styles
-  bigAvatar: { width: 72, height: 72, borderRadius: 36, justifyContent: 'center', alignItems: 'center', marginBottom: 12, shadowColor: COLORS.purpleDeep, shadowOffset: {width:0, height:4}, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
+  bigAvatar: { width: 72, height: 72, borderRadius: 36, justifyContent: 'center', alignItems: 'center', marginBottom: 12, backgroundColor: COLORS.purpleVibrant, shadowColor: COLORS.purpleDeep, shadowOffset: {width:0, height:4}, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
   bigAvatarText: { color: 'white', fontSize: 24, fontFamily: FONTS.bold },
   settingsGroupName: { fontSize: 22, fontFamily: FONTS.bold, color: COLORS.textDark },
   settingsGroupDesc: { fontSize: 14, color: COLORS.textMuted, marginTop: 6, textAlign: 'center', paddingHorizontal: 20, fontFamily: FONTS.regular },
@@ -1287,14 +1260,14 @@ const styles = StyleSheet.create({
   settingsOptionIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: COLORS.surface, justifyContent: 'center', alignItems: 'center', marginRight: 14 },
   settingsOptionText: { flex: 1, fontSize: 15, fontFamily: FONTS.medium, color: COLORS.textDark },
 
-  // Quiz Generator Styles
+  // Quiz Generator Styles (themed to shared palette)
   quizGenModalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.4)',
     justifyContent: 'flex-end',
   },
   quizGenModalContent: {
-    backgroundColor: '#F9FAFB',
+    backgroundColor: COLORS.bg,
     borderTopLeftRadius: 32,
     borderTopRightRadius: 32,
     padding: 24,
@@ -1313,75 +1286,76 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 24,
   },
-  quizGenModalTitle: { fontSize: 22, fontWeight: 'bold', color: '#111827' },
+  quizGenModalTitle: { fontSize: 22, fontWeight: 'bold', color: COLORS.textPrimary, fontFamily: FONTS.bold },
   quizGenModalForm: { marginBottom: 10 },
-  quizGenLabel: { fontSize: 14, fontWeight: '600', color: '#4B5563', marginBottom: 8, marginTop: 16 },
+  quizGenLabel: { fontSize: 14, fontWeight: '600', color: COLORS.textMutedStrong, marginBottom: 8, marginTop: 16, fontFamily: FONTS.semiBold },
   quizGenMaterialPreview: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'white',
+    backgroundColor: COLORS.surface,
     padding: 12,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderColor: COLORS.border,
   },
   quizGenMaterialIconBg: {
     width: 44,
     height: 44,
     borderRadius: 12,
-    backgroundColor: '#F3F0FF',
+    backgroundColor: COLORS.purpleGhost,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  quizGenMaterialName: { fontSize: 15, fontWeight: '600', color: '#1F2937' },
-  quizGenMaterialMeta: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  quizGenMaterialName: { fontSize: 15, fontWeight: '600', color: COLORS.textDark, fontFamily: FONTS.semiBold },
+  quizGenMaterialMeta: { fontSize: 12, color: COLORS.textMuted, marginTop: 2, fontFamily: FONTS.regular },
   quizGenChangeBtn: { paddingHorizontal: 12, paddingVertical: 6 },
-  quizGenChangeBtnText: { color: '#7C3AED', fontSize: 13, fontWeight: '600' },
+  quizGenChangeBtnText: { color: COLORS.purplePrimary, fontSize: 13, fontWeight: '600', fontFamily: FONTS.semiBold },
   quizGenDifficultyRow: { flexDirection: 'row', gap: 10 },
   quizGenChip: {
     flex: 1,
     paddingVertical: 10,
     borderRadius: 12,
-    backgroundColor: 'white',
+    backgroundColor: COLORS.surface,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderColor: COLORS.border,
   },
-  quizGenChipActive: { backgroundColor: '#7C3AED', borderColor: '#7C3AED' },
-  quizGenChipText: { fontSize: 14, fontWeight: '500', color: '#4B5563' },
-  quizGenChipTextActive: { color: 'white', fontWeight: '600' },
+  quizGenChipActive: { backgroundColor: COLORS.purplePrimary, borderColor: COLORS.purplePrimary },
+  quizGenChipText: { fontSize: 14, fontWeight: '500', color: COLORS.textMutedStrong, fontFamily: FONTS.medium },
+  quizGenChipTextActive: { color: 'white', fontWeight: '600', fontFamily: FONTS.semiBold },
   quizGenRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
   quizGenInput: {
-    backgroundColor: 'white',
+    backgroundColor: COLORS.surface,
     borderRadius: 12,
     padding: 12,
     fontSize: 15,
-    color: '#1F2937',
+    color: COLORS.textDark,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderColor: COLORS.border,
+    fontFamily: FONTS.regular,
   },
   quizGenSelector: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: 'white',
+    backgroundColor: COLORS.surface,
     borderRadius: 12,
     padding: 12,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderColor: COLORS.border,
     height: 48,
   },
-  quizGenSelectorText: { fontSize: 15, color: '#1F2937' },
+  quizGenSelectorText: { fontSize: 15, color: COLORS.textDark, fontFamily: FONTS.regular },
   quizGenTextArea: { minHeight: 80, textAlignVertical: 'top' },
   quizGenDropdown: {
     position: 'absolute',
     top: 52,
     left: 0,
     right: 0,
-    backgroundColor: 'white',
+    backgroundColor: COLORS.surface,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderColor: COLORS.border,
     zIndex: 1000,
     maxHeight: 200,
     elevation: 8,
@@ -1391,7 +1365,7 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
   },
   quizGenGenerateButton: {
-    backgroundColor: '#7C3AED',
+    backgroundColor: COLORS.purplePrimary,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1400,37 +1374,38 @@ const styles = StyleSheet.create({
     marginTop: 32,
     marginBottom: 20,
     elevation: 4,
-    shadowColor: '#7C3AED',
+    shadowColor: COLORS.purpleDeep,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
     shadowRadius: 8,
   },
-  quizGenGenerateButtonText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
+  quizGenGenerateButtonText: { color: 'white', fontWeight: 'bold', fontSize: 16, fontFamily: FONTS.bold },
   quizGenDropdownItem: {
     padding: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
+    borderBottomColor: COLORS.bgSecondary,
   },
   quizGenDropdownItemText: {
     fontSize: 15,
-    color: '#1F2937',
+    color: COLORS.textDark,
+    fontFamily: FONTS.regular,
   },
   quizGenLoadingContainer: { paddingVertical: 40, alignItems: 'center', justifyContent: 'center' },
   quizGenLoadingIconContainer: { position: 'relative', marginBottom: 24, width: 80, height: 80, justifyContent: 'center', alignItems: 'center' },
   quizGenSparkleIcon: { position: 'absolute', top: 0, right: 0 },
-  quizGenStatusTitle: { fontSize: 20, fontWeight: '700', color: '#1F2937', marginBottom: 8, textAlign: 'center' },
-  quizGenStatusSubtitle: { fontSize: 14, color: '#6B7280', textAlign: 'center', marginBottom: 32, paddingHorizontal: 20 },
+  quizGenStatusTitle: { fontSize: 20, fontWeight: '700', color: COLORS.textPrimary, marginBottom: 8, textAlign: 'center', fontFamily: FONTS.bold },
+  quizGenStatusSubtitle: { fontSize: 14, color: COLORS.textMuted, textAlign: 'center', marginBottom: 32, paddingHorizontal: 20, fontFamily: FONTS.regular },
   quizGenProgressTrack: {
     width: '100%',
     height: 8,
-    backgroundColor: '#E5E7EB',
+    backgroundColor: COLORS.bgSecondary,
     borderRadius: 4,
     overflow: 'hidden',
     marginBottom: 12,
   },
   quizGenProgressFill: {
     height: '100%',
-    backgroundColor: '#7C3AED',
+    backgroundColor: COLORS.purplePrimary,
   },
-  quizGenProgressText: { fontSize: 12, fontWeight: '600', color: '#7C3AED' },
+  quizGenProgressText: { fontSize: 12, fontWeight: '600', color: COLORS.purplePrimary, fontFamily: FONTS.semiBold },
 });
