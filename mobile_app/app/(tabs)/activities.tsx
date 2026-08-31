@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
-  TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Switch, StatusBar, BackHandler
+  TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Switch, StatusBar, BackHandler, RefreshControl
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Clipboard from 'expo-clipboard';
@@ -25,6 +26,7 @@ import {
   addGeneratedCourse,
   GeneratedCourse,
 } from '@/services/generatedCoursesService';
+import { TabSkeleton } from '@/components/Skeleton';
 
 
 // Rich Purple Palette (defined in constants/theme.ts)
@@ -81,7 +83,8 @@ export default function ActivitiesScreen() {
   // Group & Quiz state
   const [groups, setGroups] = useState<StudyGroup[]>([]);
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   // --- NEW: Courses state ---
   const [courses, setCourses] = useState<GeneratedCourse[]>([]);
@@ -121,13 +124,10 @@ export default function ActivitiesScreen() {
   const [quizInstructions, setQuizInstructions] = useState('');
   const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
   const [quizGenerationStatus, setQuizGenerationStatus] = useState('');
-  const [quizGenerationProgress, setQuizGenerationProgress] = useState(0);
   const questionTypeOptions = ['Multiple Choice', 'True/False', 'Short Answer', 'Fill-in-the-Blank'];
 
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
-
-  useEffect(() => { loadInitialData(); }, []);
 
   useEffect(() => {
     if (!activeGroup) return;
@@ -181,15 +181,14 @@ export default function ActivitiesScreen() {
     }
     setIsGeneratingQuiz(true);
     try {
+      // Honest stage-based progress: real steps only, no fabricated percentages.
       setQuizGenerationStatus("Reading file...");
-      setQuizGenerationProgress(0.1);
 
       const base64Data = await FileSystem.readAsStringAsync(quizFile.uri, {
         encoding: FileSystem.EncodingType.Base64,
       });
 
       setQuizGenerationStatus("Generating questions...");
-      setQuizGenerationProgress(0.4);
 
       const token = await getToken();
       const response = await fetch(`${API_BASE_URL}/ai/generate-quiz/`, {
@@ -212,27 +211,41 @@ export default function ActivitiesScreen() {
         throw new Error(errorData.error || "Failed to generate quiz");
       }
 
-      setQuizGenerationProgress(1.0);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert("Quiz Ready!", `Successfully generated ${quizCount} ${quizDifficulty} ${quizType} questions.`);
       setIsGenerateQuizModalOpen(false);
       setQuizFile(null);
       setQuizInstructions('');
-      await loadInitialData();
+      await loadInitialData({ isRefresh: true });
     } catch (err) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       console.error("Generation Error Details:", err);
       Alert.alert("Generation Failed", err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setIsGeneratingQuiz(false);
       setQuizGenerationStatus('');
-      setQuizGenerationProgress(0);
     }
   };
 
-  const loadInitialData = async () => {
+  const levelKey = (courseId: string, levelId: number) => `${courseId}::${levelId}`;
+
+  const loadPersistedProgress = React.useCallback(async () => {
     try {
-      setLoading(true);
+      const data = await getMyProgress();
+      const map: { [key: string]: number } = {};
+      data.lesson_progress.forEach(p => {
+        map[levelKey(p.course_id, p.level_id)] = p.score;
+      });
+      setLevelProgress(map);
+    } catch (error) {
+      console.error('Failed to load persisted course progress:', error);
+    }
+  }, []);
+
+  const loadInitialData = React.useCallback(async (opts?: { isRefresh?: boolean }) => {
+    const isRefresh = opts?.isRefresh ?? false;
+    try {
+      setLoading(!isRefresh);
       const user = await getCurrentUser();
       setCurrentUser(user);
       const token = await getToken();
@@ -254,7 +267,19 @@ export default function ActivitiesScreen() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [loadPersistedProgress]);
+
+  const handleRefresh = React.useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await loadInitialData({ isRefresh: true });
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadInitialData]);
+
+  // Initial load
+  useEffect(() => { loadInitialData(); }, [loadInitialData]);
 
   const copyToClipboard = async (code: string) => {
     await Clipboard.setStringAsync(code);
@@ -326,6 +351,7 @@ export default function ActivitiesScreen() {
 
   const sendChatMessage = async () => {
     if (!chatInput.trim() || !activeGroup) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const textToSend = chatInput.trim();
     setChatInput('');
 
@@ -413,23 +439,8 @@ export default function ActivitiesScreen() {
     }
   };
 
-  const levelKey = (courseId: string, levelId: number) => `${courseId}::${levelId}`;
-
   const updateLevelProgress = (course: Course, levelId: number, score: number) => {
     setLevelProgress(prev => ({ ...prev, [levelKey(course.course_title, levelId)]: score }));
-  };
-
-  const loadPersistedProgress = async () => {
-    try {
-      const data = await getMyProgress();
-      const map: { [key: string]: number } = {};
-      data.lesson_progress.forEach(p => {
-        map[levelKey(p.course_id, p.level_id)] = p.score;
-      });
-      setLevelProgress(map);
-    } catch (error) {
-      console.error('Failed to load persisted course progress:', error);
-    }
   };
 
   const handleCourseGenerated = (course: GeneratedCourse) => {
@@ -464,6 +475,12 @@ export default function ActivitiesScreen() {
       passingScore: level.passing_score,
     });
     setIsQuizModalOpen(true);
+  };
+
+  const handleSelectTab = (tab: 'lessons' | 'quizzes' | 'groups') => {
+    if (tab === selectedTab) return;
+    Haptics.selectionAsync();
+    setSelectedTab(tab);
   };
 
   // --- ACTIVE CHAT VIEW ---
@@ -627,7 +644,7 @@ export default function ActivitiesScreen() {
             <TouchableOpacity
               key={key}
               style={styles.tab}
-              onPress={() => setSelectedTab(key)}
+              onPress={() => handleSelectTab(key)}
               accessibilityRole="tab"
               accessibilityLabel={label}
               accessibilityState={{ selected: isActive }}
@@ -639,9 +656,22 @@ export default function ActivitiesScreen() {
         })}
       </View>
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 100 }}>
+      <ScrollView
+        style={styles.content}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: 100 }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={COLORS.purplePrimary}
+            colors={[COLORS.purplePrimary]}
+          />
+        }
+      >
         {/* COURSES VIEW */}
-        {selectedTab === 'lessons' && (
+        {selectedTab === 'lessons' && loading && <TabSkeleton tab="lessons" />}
+        {selectedTab === 'lessons' && !loading && (
           <View style={styles.itemsList}>
             <TouchableOpacity activeOpacity={0.85} onPress={() => router.push('/courses')}>
               <LinearGradient
@@ -657,7 +687,7 @@ export default function ActivitiesScreen() {
             </TouchableOpacity>
             {courses.length === 0 && <EmptyCourseState />}
             {courses.map((course, index) => {
-              const completedLevels = course.levels.filter((l, i) => {
+              const completedLevels = course.levels.filter((l) => {
                 const score = levelProgress[levelKey(course.course_title, l.level_id)] ?? 0;
                 return score >= l.passing_score;
               }).length;
@@ -674,9 +704,10 @@ export default function ActivitiesScreen() {
         )}
 
         {/* QUIZZES VIEW */}
-        {selectedTab === 'quizzes' && (
+        {selectedTab === 'quizzes' && loading && <TabSkeleton tab="quizzes" />}
+        {selectedTab === 'quizzes' && !loading && (
           <View style={[styles.itemsList, { paddingHorizontal: 24 }]}>
-            {quizzes.length === 0 && !loading && (
+            {quizzes.length === 0 && (
               <View style={styles.emptyStateCard}>
                 <View style={styles.emptyStateIconContainer}>
                   <Ionicons name="help-circle-outline" size={48} color={COLORS.purpleVibrant} />
@@ -724,7 +755,8 @@ export default function ActivitiesScreen() {
         )}
 
         {/* GROUPS VIEW */}
-        {selectedTab === 'groups' && (
+        {selectedTab === 'groups' && loading && <TabSkeleton tab="groups" />}
+        {selectedTab === 'groups' && !loading && (
           <View style={styles.inboxContainer}>
             <View style={styles.inboxActions}>
               <TouchableOpacity style={styles.inboxBtn} onPress={() => setIsCreateModalOpen(true)}>
@@ -737,23 +769,39 @@ export default function ActivitiesScreen() {
               </TouchableOpacity>
             </View>
 
-            {loading ? <ActivityIndicator size="large" color={COLORS.purpleVibrant} style={{ marginTop: 40 }} /> :
-              groups.map((group) => (
-                <TouchableOpacity key={group.id} style={styles.inboxRow} onPress={() => openChat(group)} activeOpacity={0.7}>
-                  <View style={styles.inboxAvatar}>
-                    <Text style={styles.inboxAvatarText}>{group.name.substring(0, 2).toUpperCase()}</Text>
+            {groups.length === 0 && (
+              <View style={styles.emptyStateCard}>
+                <View style={styles.emptyStateIconContainer}>
+                  <Ionicons name="people-outline" size={48} color={COLORS.purpleVibrant} />
+                </View>
+                <Text style={styles.emptyStateTitle}>No study groups yet</Text>
+                <Text style={styles.emptyStateText}>Create a group for your class, or join one with a code from a classmate.</Text>
+                <View style={styles.emptyStateActions}>
+                  <TouchableOpacity style={styles.emptyStatePrimaryBtn} onPress={() => setIsCreateModalOpen(true)}>
+                    <Ionicons name="add" size={16} color="white" />
+                    <Text style={styles.emptyStatePrimaryBtnText}>Create Group</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.emptyStateSecondaryBtn} onPress={() => setIsJoinModalOpen(true)}>
+                    <Text style={styles.emptyStateSecondaryBtnText}>Join with Code</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+            {groups.map((group) => (
+              <TouchableOpacity key={group.id} style={styles.inboxRow} onPress={() => openChat(group)} activeOpacity={0.7}>
+                <View style={styles.inboxAvatar}>
+                  <Text style={styles.inboxAvatarText}>{group.name.substring(0, 2).toUpperCase()}</Text>
+                </View>
+                <View style={styles.inboxDetails}>
+                  <View style={styles.inboxRowTop}>
+                    <Text style={styles.inboxName} numberOfLines={1}>{group.name}</Text>
                   </View>
-                  <View style={styles.inboxDetails}>
-                    <View style={styles.inboxRowTop}>
-                      <Text style={styles.inboxName} numberOfLines={1}>{group.name}</Text>
-                    </View>
-                    <Text style={styles.inboxPreview} numberOfLines={1}>
-                      {group.members_count} {group.members_count === 1 ? 'member' : 'members'} • Tap to enter chat
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              ))
-            }
+                  <Text style={styles.inboxPreview} numberOfLines={1}>
+                    {group.members_count} {group.members_count === 1 ? 'member' : 'members'} • Tap to enter chat
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            ))}
           </View>
         )}
       </ScrollView>
@@ -900,10 +948,6 @@ export default function ActivitiesScreen() {
                 </View>
                 <Text style={styles.quizGenStatusTitle}>{quizGenerationStatus}</Text>
                 <Text style={styles.quizGenStatusSubtitle}>SAGE AI is crafting the perfect assessment for you.</Text>
-                <View style={styles.quizGenProgressTrack}>
-                  <View style={[styles.quizGenProgressFill, { width: `${quizGenerationProgress * 100}%` }]} />
-                </View>
-                <Text style={styles.quizGenProgressText}>{Math.round(quizGenerationProgress * 100)}% Complete</Text>
               </View>
             ) : (
               <ScrollView showsVerticalScrollIndicator={false} style={styles.quizGenModalForm}>
@@ -1140,6 +1184,37 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.regular,
     textAlign: 'center',
     lineHeight: 20,
+  },
+  emptyStateActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 20,
+  },
+  emptyStatePrimaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: COLORS.purplePrimary,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+  },
+  emptyStatePrimaryBtnText: {
+    color: 'white',
+    fontFamily: FONTS.bold,
+    fontSize: 13,
+  },
+  emptyStateSecondaryBtn: {
+    borderWidth: 1,
+    borderColor: COLORS.borderStrong,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+  },
+  emptyStateSecondaryBtnText: {
+    color: COLORS.purpleDeep,
+    fontFamily: FONTS.semiBold,
+    fontSize: 13,
   },
 
   card: { 
@@ -1395,17 +1470,4 @@ const styles = StyleSheet.create({
   quizGenSparkleIcon: { position: 'absolute', top: 0, right: 0 },
   quizGenStatusTitle: { fontSize: 20, fontWeight: '700', color: COLORS.textPrimary, marginBottom: 8, textAlign: 'center', fontFamily: FONTS.bold },
   quizGenStatusSubtitle: { fontSize: 14, color: COLORS.textMuted, textAlign: 'center', marginBottom: 32, paddingHorizontal: 20, fontFamily: FONTS.regular },
-  quizGenProgressTrack: {
-    width: '100%',
-    height: 8,
-    backgroundColor: COLORS.bgSecondary,
-    borderRadius: 4,
-    overflow: 'hidden',
-    marginBottom: 12,
-  },
-  quizGenProgressFill: {
-    height: '100%',
-    backgroundColor: COLORS.purplePrimary,
-  },
-  quizGenProgressText: { fontSize: 12, fontWeight: '600', color: COLORS.purplePrimary, fontFamily: FONTS.semiBold },
 });
