@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
-  TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Switch, StatusBar
+  TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Switch, StatusBar, BackHandler
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,6 +20,11 @@ import EmptyCourseState from '@/components/courses/EmptyCourseState';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
+import {
+  loadGeneratedCourses,
+  addGeneratedCourse,
+  GeneratedCourse,
+} from '@/services/generatedCoursesService';
 
 
 // Rich Purple Palette (defined in constants/theme.ts)
@@ -35,19 +40,15 @@ interface StudyGroup {
 }
 
 interface GroupMessage {
-  id: number;
+  // Firestore doc ids are strings; optimistic local echoes use Date.now() numbers.
+  id: number | string;
   text: string;
   sender_id: number;
   sender_name: string;
   time: string;
 }
 
-interface Course {
-  course_title: string;
-  subject: string;
-  user_id?: number;
-  levels: Level[];
-}
+type Course = GeneratedCourse;
 
 interface Level {
   level_id: number;
@@ -83,7 +84,7 @@ export default function ActivitiesScreen() {
   const [loading, setLoading] = useState(false);
 
   // --- NEW: Courses state ---
-  const [courses, setCourses] = useState<Course[]>([]);
+  const [courses, setCourses] = useState<GeneratedCourse[]>([]);
   const [levelProgress, setLevelProgress] = useState<{ [key: string]: number }>({});
   const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
   const [isCourseModalOpen, setIsCourseModalOpen] = useState(false);
@@ -127,6 +128,24 @@ export default function ActivitiesScreen() {
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
 
   useEffect(() => { loadInitialData(); }, []);
+
+  useEffect(() => {
+    if (!activeGroup) return;
+    // Android hardware back closes the chat (or its open modals) instead of exiting the app.
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (isSettingsOpen) {
+        setIsSettingsOpen(false);
+        return true;
+      }
+      if (isActionMenuOpen) {
+        setIsActionMenuOpen(false);
+        return true;
+      }
+      setActiveGroup(null);
+      return true;
+    });
+    return () => sub.remove();
+  }, [activeGroup, isSettingsOpen, isActionMenuOpen]);
 
   useEffect(() => {
     if (!activeGroup && chatUnsubscribeRef.current) {
@@ -226,6 +245,9 @@ export default function ActivitiesScreen() {
       if (groupRes.ok) setGroups(await groupRes.json());
       if (quizRes.ok) setQuizzes(await quizRes.json());
 
+      const savedCourses = await loadGeneratedCourses();
+      setCourses(savedCourses);
+
       loadPersistedProgress();
     } catch (error) {
       console.error(error);
@@ -282,7 +304,8 @@ export default function ActivitiesScreen() {
             });
 
             setMessages(prev => {
-              const tempMessages = prev.filter(m => m.id > 1000000000000);
+              const isOptimisticEcho = (m: GroupMessage) => typeof m.id === 'number' && m.id > 1000000000000;
+              const tempMessages = prev.filter(isOptimisticEcho);
               const unsyncedTemp = tempMessages.filter(temp =>
                 !firestoreMsgs.some(f => f.sender_id === temp.sender_id && f.text === temp.text)
               );
@@ -333,58 +356,64 @@ export default function ActivitiesScreen() {
   };
 
   const handleCreateGroup = async () => {
-    if (!newGroupName.trim()) return;
+    const name = newGroupName.trim();
+    if (!name) {
+      Alert.alert('Name Required', 'Please enter a name for your group.');
+      return;
+    }
     try {
       setIsSubmitting(true);
       const token = await getToken();
       const res = await fetch(`${API_BASE_URL}/users/groups/create/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ name: newGroupName })
+        body: JSON.stringify({ name })
       });
       if (res.ok) {
         setNewGroupName('');
         setIsCreateModalOpen(false);
         loadInitialData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Could Not Create Group', (err as any).error || (err as any).name?.[0] || 'Please try again.');
       }
+    } catch {
+      Alert.alert('Connection Error', 'Could not reach the server. Check your connection and try again.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleJoinGroup = async () => {
-    if (!joinCodeInput.trim()) return;
+    const code = joinCodeInput.trim().toUpperCase();
+    if (!code) {
+      Alert.alert('Code Required', 'Please enter the 6-character join code.');
+      return;
+    }
     try {
       setIsSubmitting(true);
       const token = await getToken();
       const res = await fetch(`${API_BASE_URL}/users/groups/join/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ join_code: joinCodeInput.toUpperCase() })
+        body: JSON.stringify({ join_code: code })
       });
       if (res.ok) {
         setJoinCodeInput('');
         setIsJoinModalOpen(false);
         loadInitialData();
       } else {
-        Alert.alert("Error", "Invalid Join Code");
+        const err = await res.json().catch(() => ({}));
+        Alert.alert('Could Not Join', (err as any).error || (err as any).detail || 'Invalid join code.');
       }
+    } catch {
+      Alert.alert('Connection Error', 'Could not reach the server. Check your connection and try again.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const levelKey = (courseId: string, levelId: number) => `${courseId}::${levelId}`;
-
-  const getLevelScore = (course: Course, levelId: number): number =>
-    levelProgress[levelKey(course.course_title, levelId)] ?? 0;
-
-  const isLevelUnlocked = (course: Course, levelIndex: number): boolean => {
-    if (levelIndex === 0) return true;
-    const prevLevel = course.levels[levelIndex - 1];
-    const prevScore = getLevelScore(course, prevLevel.level_id);
-    return prevScore >= prevLevel.passing_score;
-  };
 
   const updateLevelProgress = (course: Course, levelId: number, score: number) => {
     setLevelProgress(prev => ({ ...prev, [levelKey(course.course_title, levelId)]: score }));
@@ -403,8 +432,9 @@ export default function ActivitiesScreen() {
     }
   };
 
-  const handleCourseGenerated = (course: Course) => {
+  const handleCourseGenerated = (course: GeneratedCourse) => {
     setCourses(prev => [course, ...prev]);
+    addGeneratedCourse(course);
     setIsGenerateLessonModalOpen(false);
     Alert.alert('Success', 'Course generated successfully!');
   };
@@ -480,26 +510,14 @@ export default function ActivitiesScreen() {
         {isActionMenuOpen && (
           <View style={styles.actionMenuContainer}>
             <View style={styles.actionRow}>
-              <TouchableOpacity style={styles.actionBtn}>
+              <TouchableOpacity style={styles.actionBtn} onPress={() => Alert.alert('Coming Soon', 'File sharing is on the roadmap.')}>
                 <View style={[styles.actionIconBox, { backgroundColor: COLORS.purplePrimary }]}><Ionicons name="document-text" size={20} color="white" /></View>
                 <Text style={styles.actionBtnText}>File</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.actionBtn}>
+              <TouchableOpacity style={styles.actionBtn} onPress={() => Alert.alert('Coming Soon', 'Photo sharing is on the roadmap.')}>
                 <View style={[styles.actionIconBox, { backgroundColor: COLORS.success }]}><Ionicons name="image" size={20} color="white" /></View>
                 <Text style={styles.actionBtnText}>Photo</Text>
               </TouchableOpacity>
-              {isAdmin && (
-                <>
-                  <TouchableOpacity style={styles.actionBtn} onPress={() => Alert.alert("Admin Tool", "Launching Mock Quiz...")}>
-                    <View style={[styles.actionIconBox, { backgroundColor: COLORS.warning }]}><Ionicons name="bulb" size={20} color="white" /></View>
-                    <Text style={styles.actionBtnText}>Start Mock Quiz</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.actionBtn}>
-                    <View style={[styles.actionIconBox, { backgroundColor: COLORS.accent }]}><Ionicons name="calendar" size={20} color="white" /></View>
-                    <Text style={styles.actionBtnText}>Schedule</Text>
-                  </TouchableOpacity>
-                </>
-              )}
             </View>
           </View>
         )}
@@ -564,21 +582,10 @@ export default function ActivitiesScreen() {
                     <Text style={styles.settingsOptionText}>Mute Notifications</Text>
                     <Switch value={isMuted} onValueChange={setIsMuted} trackColor={{ false: '#D1D5DB', true: COLORS.purpleVibrant }} />
                   </View>
-                  <TouchableOpacity style={styles.settingsOptionRow}>
-                    <View style={styles.settingsOptionIcon}><Ionicons name="people-outline" size={20} color={COLORS.textDark} /></View>
-                    <Text style={styles.settingsOptionText}>View Members ({activeGroup.members_count})</Text>
+                  <TouchableOpacity style={[styles.settingsOptionRow, { borderBottomWidth: 0 }]} onPress={() => copyToClipboard(activeGroup.join_code)}>
+                    <View style={styles.settingsOptionIcon}><Ionicons name="copy-outline" size={20} color={COLORS.textDark} /></View>
+                    <Text style={styles.settingsOptionText}>Copy Invite Code</Text>
                     <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
-                  </TouchableOpacity>
-                  {isAdmin && (
-                    <TouchableOpacity style={styles.settingsOptionRow}>
-                      <View style={styles.settingsOptionIcon}><Ionicons name="create-outline" size={20} color={COLORS.textDark} /></View>
-                      <Text style={styles.settingsOptionText}>Edit Group Info</Text>
-                      <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
-                    </TouchableOpacity>
-                  )}
-                  <TouchableOpacity style={[styles.settingsOptionRow, { borderBottomWidth: 0 }]} onPress={() => { setIsSettingsOpen(false); setActiveGroup(null); }}>
-                    <View style={[styles.settingsOptionIcon, { backgroundColor: '#FEE2E2' }]}><Ionicons name="log-out-outline" size={20} color={COLORS.danger} /></View>
-                    <Text style={[styles.settingsOptionText, { color: COLORS.danger }]}>Leave Group</Text>
                   </TouchableOpacity>
                 </View>
               </ScrollView>
@@ -750,13 +757,9 @@ export default function ActivitiesScreen() {
                   <View style={styles.inboxDetails}>
                     <View style={styles.inboxRowTop}>
                       <Text style={styles.inboxName} numberOfLines={1}>{group.name}</Text>
-                      <View style={styles.liveBadgeSmall}>
-                         <View style={styles.liveDotSmall} />
-                         <Text style={styles.liveTextSmall}>Active</Text>
-                      </View>
                     </View>
                     <Text style={styles.inboxPreview} numberOfLines={1}>
-                      {group.members_count} members • Tap to enter chat...
+                      {group.members_count} {group.members_count === 1 ? 'member' : 'members'} • Tap to enter chat
                     </Text>
                   </View>
                 </TouchableOpacity>
@@ -825,12 +828,12 @@ export default function ActivitiesScreen() {
 
             try {
               const quizResult = await completeQuiz(score, total);
+              let title = 'Quiz Finished';
               let message = `You scored ${percent}%`;
               if (quizResult.xp > 0) message += ` · +${quizResult.xp} XP`;
               if (quizResult.badges.length > 0) {
                 message += `\n${quizResult.badges.map(b => `${b.icon} ${b.name}`).join('\n')}`;
               }
-              Alert.alert('Quiz Finished', message);
 
               if (quizToTake && quizToTake.levelId !== -1 && selectedCourse) {
                 const levelId = quizToTake.levelId;
@@ -848,20 +851,25 @@ export default function ActivitiesScreen() {
                     passed,
                   );
                   if (passed) {
-                    Alert.alert('Level Passed! ✅', `You scored ${percent}% and unlocked the next level.`);
+                    title = 'Level Passed!';
+                    message += `\n\nYou unlocked the next level.`;
                   } else {
-                    Alert.alert('Keep trying!', `You scored ${percent}%. Need ${passingScore}% to unlock the next level.`);
+                    title = 'Keep trying!';
+                    message += `\n\nNeed ${passingScore}% to unlock the next level.`;
                   }
                 } catch (error) {
                   console.error('Failed to persist lesson progress:', error);
                 }
               }
+
+              Alert.alert(title, message);
             } catch (error) {
               console.error('Failed to record quiz completion:', error);
               // Fall back to local-only progress update so unlocks still work offline.
               if (quizToTake && quizToTake.levelId !== -1 && selectedCourse) {
                 updateLevelProgress(selectedCourse, quizToTake.levelId, percent);
               }
+              Alert.alert('Quiz Finished', `You scored ${percent}%. Progress saved offline.`);
             }
             setIsQuizModalOpen(false);
             setQuizToTake(null);
@@ -1223,9 +1231,6 @@ const styles = StyleSheet.create({
   inboxDetails: { flex: 1 },
   inboxRowTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' },
   inboxName: { fontSize: 16, fontFamily: FONTS.bold, color: COLORS.textPrimary, flex: 1 },
-  liveBadgeSmall: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(16, 185, 129, 0.1)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 },
-  liveDotSmall: { width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.success, marginRight: 4 },
-  liveTextSmall: { fontSize: 10, color: COLORS.success, fontFamily: FONTS.bold },
   inboxPreview: { fontSize: 13, color: COLORS.textMuted, fontFamily: FONTS.regular },
 
   chatHeader: { paddingBottom: 16, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', elevation: 4 },
