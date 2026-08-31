@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -60,16 +60,14 @@ export default function CourseDetailModal({
 }: CourseDetailModalProps) {
   const insets = useSafeAreaInsets();
   const totalLevels = course.levels.length;
+  const [readingLevel, setReadingLevel] = React.useState<Level | null>(null);
   const completedCount = course.levels.filter(
     (l, i) => getLevelStatus(course.levels, i, levelProgress, course.course_title) === 'completed',
   ).length;
   const overallProgress = totalLevels > 0 ? Math.round((completedCount / totalLevels) * 100) : 0;
 
   const handleViewContent = (level: Level) => {
-    Alert.alert(
-      `${level.difficulty} Content`,
-      level.content.substring(0, 300) + (level.content.length > 300 ? '...' : ''),
-    );
+    setReadingLevel(level);
   };
 
   return (
@@ -178,6 +176,50 @@ export default function CourseDetailModal({
           </View>
         </View>
       </ScrollView>
+
+      {/* Lesson Reader Modal */}
+      <Modal visible={readingLevel !== null} animationType="slide" onRequestClose={() => setReadingLevel(null)}>
+        {readingLevel && (
+          <View style={styles.readerContainer}>
+            <LinearGradient
+              colors={[COLORS.purpleDeep, COLORS.purpleDark]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={[styles.readerHeader, { paddingTop: insets.top + 16 }]}
+            >
+              <TouchableOpacity onPress={() => setReadingLevel(null)} style={styles.backBtn} accessibilityLabel="Close lesson">
+                <Ionicons name="close" size={24} color="white" />
+              </TouchableOpacity>
+              <View style={styles.readerHeaderTextBox}>
+                <Text style={styles.readerLevelLabel}>{readingLevel.difficulty} Level</Text>
+                <Text style={styles.readerTitle} numberOfLines={2}>{course.course_title}</Text>
+              </View>
+            </LinearGradient>
+
+            <ScrollView
+              style={styles.readerScroll}
+              contentContainerStyle={{ padding: 24, paddingBottom: insets.bottom + 120 }}
+              showsVerticalScrollIndicator={false}
+            >
+              <Text style={styles.readerBody}>{readingLevel.content}</Text>
+            </ScrollView>
+
+            <View style={[styles.readerFooter, { paddingBottom: Math.max(16, insets.bottom) }]}>
+              <TouchableOpacity
+                style={styles.readerQuizBtn}
+                onPress={() => {
+                  const level = readingLevel;
+                  setReadingLevel(null);
+                  onTakeQuiz(level);
+                }}
+              >
+                <Ionicons name="help-circle-outline" size={18} color="white" />
+                <Text style={styles.readerQuizBtnText}>Take the Quiz</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+      </Modal>
     </View>
   );
 }
@@ -318,5 +360,71 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: FONTS.bold,
     color: '#F59E0B',
+  },
+
+  // Lesson Reader styles
+  readerContainer: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+  },
+  readerHeader: {
+    paddingBottom: 24,
+    paddingHorizontal: 24,
+    borderBottomLeftRadius: 32,
+    borderBottomRightRadius: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  readerHeaderTextBox: {
+    flex: 1,
+  },
+  readerLevelLabel: {
+    color: COLORS.purplePale,
+    fontSize: 11,
+    fontFamily: FONTS.bold,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  readerTitle: {
+    color: 'white',
+    fontSize: 18,
+    fontFamily: FONTS.bold,
+    lineHeight: 24,
+  },
+  readerScroll: {
+    flex: 1,
+  },
+  readerBody: {
+    fontSize: 16,
+    lineHeight: 28,
+    color: COLORS.textDark,
+    fontFamily: FONTS.regular,
+  },
+  readerFooter: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 24,
+    paddingTop: 12,
+    backgroundColor: 'rgba(244, 242, 250, 0.94)',
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  readerQuizBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: COLORS.purplePrimary,
+    paddingVertical: 16,
+    borderRadius: 16,
+  },
+  readerQuizBtnText: {
+    color: 'white',
+    fontFamily: FONTS.bold,
+    fontSize: 15,
   },
 });

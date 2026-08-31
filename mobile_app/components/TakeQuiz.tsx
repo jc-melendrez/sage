@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, Modal } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, Modal, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 
@@ -12,10 +12,16 @@ interface QuizQuestion {
   correct_answer?: string; // For validation (optional for this template)
 }
 
+export interface QuizRewardInfo {
+  xp: number;
+  badges: { icon: string; name: string }[];
+}
+
 interface TakeQuizProps {
   quizTitle: string;
   questions: QuizQuestion[];
-  onFinish: (score: number) => void; // Callback when the quiz is finished
+  /** May be async and return reward info (XP/badges) to display in the results view. */
+  onFinish: (score: number) => QuizRewardInfo | void | Promise<QuizRewardInfo | void>;
   onClose: () => void; // Callback to close the quiz
 }
 
@@ -24,6 +30,8 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
   const [userAnswers, setUserAnswers] = useState<{ [key: number]: string | string[] }>({});
   const [score, setScore] = useState<number | null>(null);
   const [showResults, setShowResults] = useState(false);
+  const [reward, setReward] = useState<QuizRewardInfo | null>(null);
+  const [isFinishing, setIsFinishing] = useState(false);
 
   if (!questions || questions.length === 0) return null;
 
@@ -146,6 +154,30 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
     setShowResults(true);
   };
 
+  const handleFinish = async () => {
+    if (score === null || isFinishing) return;
+    if (reward !== null) {
+      // Rewards already recorded — second tap dismisses the quiz entirely.
+      onClose();
+      return;
+    }
+    setIsFinishing(true);
+    try {
+      const result = await onFinish(score);
+      if (result && typeof result === 'object') {
+        setReward(result as QuizRewardInfo);
+      } else {
+        // No reward info (e.g. legacy callers) — close immediately.
+        onClose();
+      }
+    } catch (err) {
+      console.error('Failed to record quiz result:', err);
+      onClose();
+    } finally {
+      setIsFinishing(false);
+    }
+  };
+
   return (
     <View style={styles.container}>
       {/* Modern Gradient Header */}
@@ -217,16 +249,41 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
               <Text style={styles.resultsSubtitle}>
                 You&apos;ve completed the &quot;{quizTitle}&quot; quiz.
               </Text>
+
+              {score !== null && (
+                <Text style={styles.resultsPercent}>
+                  {Math.round((score / questions.length) * 100)}% score
+                </Text>
+              )}
+
+              {reward && reward.xp > 0 && (
+                <View style={styles.xpRow}>
+                  <Ionicons name="flash" size={16} color="#F59E0B" />
+                  <Text style={styles.xpText}>+{reward.xp} XP earned</Text>
+                </View>
+              )}
+
+              {reward && reward.badges.length > 0 && (
+                <View style={styles.badgesRow}>
+                  {reward.badges.map(b => (
+                    <View key={b.name} style={styles.badgeChip}>
+                      <Text style={styles.badgeChipText}>{b.icon} {b.name}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
             </View>
 
-            <TouchableOpacity 
-              style={styles.finishButton} 
-              onPress={() => {
-                setShowResults(false);
-                onFinish(score || 0);
-              }}
+            <TouchableOpacity
+              style={[styles.finishButton, isFinishing && { opacity: 0.7 }]}
+              onPress={handleFinish}
+              disabled={isFinishing}
             >
-              <Text style={styles.finishButtonText}>Finish</Text>
+              {isFinishing ? (
+                <ActivityIndicator color="white" />
+              ) : (
+                <Text style={styles.finishButtonText}>{reward ? 'Done' : 'Finish'}</Text>
+              )}
             </TouchableOpacity>
           </LinearGradient>
         </View>
@@ -388,6 +445,28 @@ const styles = StyleSheet.create({
   scoreTotal: { fontSize: 18, color: '#6B7280', marginLeft: 4, marginTop: 10 },
   resultsTitle: { fontSize: 24, fontWeight: 'bold', color: '#1F2937', marginBottom: 8 },
   resultsSubtitle: { fontSize: 14, color: '#6B7280', textAlign: 'center', lineHeight: 20 },
+  resultsPercent: { fontSize: 15, fontWeight: '700', color: '#6D28D9', marginTop: 8 },
+  xpRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  xpText: { fontSize: 13, fontWeight: '700', color: '#B45309' },
+  badgesRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10, justifyContent: 'center' },
+  badgeChip: {
+    backgroundColor: 'rgba(109, 40, 217, 0.08)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(109, 40, 217, 0.2)',
+  },
+  badgeChipText: { fontSize: 12, fontWeight: '600', color: '#6D28D9' },
   finishButton: {
     backgroundColor: '#6D28D9',
     paddingVertical: 16,
