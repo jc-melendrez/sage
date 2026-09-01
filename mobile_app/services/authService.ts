@@ -4,6 +4,7 @@ import type { Href } from 'expo-router';
 import {
   signInWithEmail,
   signUpWithEmail,
+  signInWithGoogle,
   signOutFirebase,
 } from './firebaseAuthService';
 
@@ -39,6 +40,14 @@ export interface AuthResponse {
     is_educator?: boolean;
     is_admin?: boolean;
   };
+}
+
+/** Response from the login endpoint when an emailed OTP is required first. */
+export interface OtpChallengeResponse {
+  otp_required: true;
+  challenge_token: string;
+  email: string;
+  expires_in: number;
 }
 
 const TOKEN_KEY = 'auth_token';
@@ -94,13 +103,16 @@ function extractErrorMessage(error: any, fallback: string): string {
 }
 
 /**
- * Login: Firebase Auth → Django JWT
+ * Login: Firebase Auth → Django JWT (possibly via emailed OTP).
+ *
+ * Email/password logins return an OtpChallengeResponse (no tokens yet).
+ * Call verifyOtp() with the code the user received to finish the login.
  */
-export async function login(credentials: LoginCredentials): Promise<AuthResponse> {
+export async function login(credentials: LoginCredentials): Promise<AuthResponse | OtpChallengeResponse> {
   // 1. Sign in with Firebase using email
   const idToken = await signInWithEmail(credentials.username, credentials.password);
 
-  // 2. Exchange Firebase ID token for Django JWT
+  // 2. Exchange Firebase ID token for Django JWT (or an OTP challenge)
   const response = await fetchWithTimeout(`${API_BASE_URL}/users/firebase-login/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -114,20 +126,66 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
 
   const data = await response.json();
 
-  await SecureStore.setItemAsync(TOKEN_KEY, data.access);
-  await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, data.refresh);
+  if (data.otp_required) {
+    return data as OtpChallengeResponse;
+  }
 
+  await storeTokens(data);
+  return data as AuthResponse;
+}
+
+/**
+ * Verify the emailed OTP and finish the login (issues the JWT pair).
+ */
+export async function verifyOtp(challengeToken: string, otp: string): Promise<AuthResponse> {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/users/firebase-login/verify-otp/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ challenge_token: challengeToken, otp }),
+  });
+
+  if (!response.ok) {
+    const error = await safeJson(response);
+    throw new Error(extractErrorMessage(error, 'Verification failed.'));
+  }
+
+  const data = await response.json();
+  await storeTokens(data);
   return data;
 }
 
 /**
- * Register: Firebase Auth → Django JWT
+ * Login with Google: Firebase Google credential → Django JWT (no OTP).
  */
-export async function register(credentials: RegisterCredentials): Promise<AuthResponse> {
+export async function loginWithGoogle(): Promise<AuthResponse> {
+  // 1. Sign in with Google and exchange for a Firebase credential
+  const idToken = await signInWithGoogle();
+
+  // 2. Exchange Firebase ID token for Django JWT
+  const response = await fetchWithTimeout(`${API_BASE_URL}/users/firebase-login/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id_token: idToken }),
+  });
+
+  if (!response.ok) {
+    const error = await safeJson(response);
+    throw new Error(extractErrorMessage(error, 'Google sign-in failed.'));
+  }
+
+  const data = await response.json();
+  await storeTokens(data);
+  return data;
+}
+
+/**
+ * Register: Firebase Auth → Django JWT (via the same OTP login flow).
+ */
+export async function register(credentials: RegisterCredentials): Promise<AuthResponse | OtpChallengeResponse> {
   // 1. Create Firebase user
   const idToken = await signUpWithEmail(credentials.email, credentials.password);
 
-  // 2. Sync to Django and get JWT
+  // 2. Sync to Django — the backend replies with an OTP challenge
   const response = await fetchWithTimeout(`${API_BASE_URL}/users/firebase-login/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -149,10 +207,17 @@ export async function register(credentials: RegisterCredentials): Promise<AuthRe
 
   const data = await response.json();
 
+  if (data.otp_required) {
+    return data as OtpChallengeResponse;
+  }
+
+  await storeTokens(data);
+  return data as AuthResponse;
+}
+
+async function storeTokens(data: AuthResponse): Promise<void> {
   await SecureStore.setItemAsync(TOKEN_KEY, data.access);
   await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, data.refresh);
-
-  return data;
 }
 
 /**

@@ -2,12 +2,15 @@ import { useState, useCallback } from 'react';
 import {
   login,
   register,
+  verifyOtp,
+  loginWithGoogle,
   logout,
   isAuthenticated,
   getCurrentUser,
   LoginCredentials,
   RegisterCredentials,
   AuthResponse,
+  OtpChallengeResponse,
 } from '../services/authService';
 
 
@@ -16,8 +19,10 @@ interface UseAuthReturn {
   user: AuthResponse['user'] | null;
   loading: boolean;
   error: string | null;
-  login: (credentials: LoginCredentials) => Promise<AuthResponse>;
-  register: (credentials: RegisterCredentials) => Promise<AuthResponse>;
+  login: (credentials: LoginCredentials) => Promise<AuthResponse | OtpChallengeResponse>;
+  register: (credentials: RegisterCredentials) => Promise<AuthResponse | OtpChallengeResponse>;
+  verifyOtp: (challengeToken: string, otp: string) => Promise<AuthResponse>;
+  loginWithGoogle: () => Promise<AuthResponse>;
   logout: () => Promise<void>;
   clearError: () => void;
 }
@@ -33,8 +38,10 @@ export function useAuth(): UseAuthReturn {
     setError(null);
     try {
       const response = await login(credentials);
-      setUser(response.user);
-      setIsAuthenticatedState(true);
+      if (!('otp_required' in response)) {
+        setUser(response.user);
+        setIsAuthenticatedState(true);
+      }
       return response;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Login failed';
@@ -50,11 +57,47 @@ export function useAuth(): UseAuthReturn {
     setError(null);
     try {
       const response = await register(credentials);
+      if (!('otp_required' in response)) {
+        setUser(response.user);
+        setIsAuthenticatedState(true);
+      }
+      return response;
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Registration failed';
+      setError(errorMessage);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const handleVerifyOtp = useCallback(async (challengeToken: string, otp: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await verifyOtp(challengeToken, otp);
       setUser(response.user);
       setIsAuthenticatedState(true);
       return response;
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Registration failed';
+      const errorMessage = err instanceof Error ? err.message : 'Verification failed';
+      setError(errorMessage);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const handleLoginWithGoogle = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await loginWithGoogle();
+      setUser(response.user);
+      setIsAuthenticatedState(true);
+      return response;
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Google sign-in failed';
       setError(errorMessage);
       throw err;
     } finally {
@@ -88,6 +131,8 @@ export function useAuth(): UseAuthReturn {
     error,
     login: handleLogin,
     register: handleRegister,
+    verifyOtp: handleVerifyOtp,
+    loginWithGoogle: handleLoginWithGoogle,
     logout: handleLogout,
     clearError,
   };

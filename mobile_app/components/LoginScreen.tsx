@@ -1,16 +1,19 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { Platform } from 'react-native';
 import { useRouter } from 'expo-router';
 import { 
   View, Text, TextInput, TouchableOpacity, StyleSheet, 
-  ActivityIndicator, Alert, Platform, StatusBar, KeyboardAvoidingView 
+  ActivityIndicator, Alert, StatusBar, KeyboardAvoidingView 
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../hooks/useAuth';
 import { roleHomePath } from '../services/authService';
+import { initFirebaseAuth } from '../services/firebaseAuthService';
 
 type AccountType = 'student' | 'educator' | 'admin';
+type Step = 'form' | 'otp';
 
 const ROLE_OPTIONS: { type: AccountType; label: string; icon: string }[] = [
   { type: 'student', label: 'Student', icon: 'school-outline' },
@@ -50,11 +53,19 @@ const FONTS = {
   regular: 'Montserrat-Regular',
 };
 
+function GoogleLogo() {
+  return (
+    <View style={styles.googleLogo}>
+      <Text style={styles.googleLogoG}>G</Text>
+    </View>
+  );
+}
+
 export default function LoginScreen() {
   const [isSignUp, setIsSignUp] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const router = useRouter();
-  const { login, register, loading, error, clearError } = useAuth();
+  const { login, register, verifyOtp, loginWithGoogle, loading, error, clearError } = useAuth();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -62,6 +73,16 @@ export default function LoginScreen() {
   const [lastName, setLastName] = useState('');
   const [username, setUsername] = useState('');
   const [accountType, setAccountType] = useState<AccountType>('student');
+
+  // OTP second-factor state
+  const [step, setStep] = useState<Step>('form');
+  const [challengeToken, setChallengeToken] = useState<string | null>(null);
+  const [otpCode, setOtpCode] = useState('');
+  const [otpEmail, setOtpEmail] = useState('');
+
+  useEffect(() => {
+    initFirebaseAuth();
+  }, []);
 
   const handleLogin = async () => {
     if (!email || !password) {
@@ -71,7 +92,14 @@ export default function LoginScreen() {
     try {
       clearError();
       const response = await login({ username: email, password: password });
-      router.replace(roleHomePath(response.user));
+      if ('otp_required' in response) {
+        setChallengeToken(response.challenge_token);
+        setOtpEmail(response.email);
+        setOtpCode('');
+        setStep('otp');
+      } else {
+        router.replace(roleHomePath(response.user));
+      }
     } catch (err) {
       Alert.alert('Login Failed', error || 'Please check your credentials');
     }
@@ -94,10 +122,56 @@ export default function LoginScreen() {
         is_educator: accountType === 'educator',
         is_admin: accountType === 'admin',
       });
-      router.replace(roleHomePath(response.user));
+      if ('otp_required' in response) {
+        setChallengeToken(response.challenge_token);
+        setOtpEmail(response.email);
+        setOtpCode('');
+        setStep('otp');
+      } else {
+        router.replace(roleHomePath(response.user));
+      }
     } catch (err) {
       Alert.alert('Sign Up Failed', error || 'Please try again');
     }
+  };
+
+  const handleVerifyOtp = async () => {
+    if (!challengeToken) {
+      setStep('form');
+      return;
+    }
+    if (otpCode.length !== 6) {
+      Alert.alert('Error', 'Please enter the 6-digit code from your email');
+      return;
+    }
+    try {
+      clearError();
+      const response = await verifyOtp(challengeToken, otpCode);
+      router.replace(roleHomePath(response.user));
+    } catch (err) {
+      Alert.alert('Verification Failed', error || 'Please try again');
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    try {
+      clearError();
+      const response = await loginWithGoogle();
+      router.replace(roleHomePath(response.user));
+    } catch (err) {
+      // Cancelled sign-ins are silent; real errors get shown
+      const message = err instanceof Error ? err.message : 'Google sign-in failed';
+      if (!message.includes('cancelled')) {
+        Alert.alert('Google Sign-In Failed', message);
+      }
+    }
+  };
+
+  const backToForm = () => {
+    setStep('form');
+    setChallengeToken(null);
+    setOtpCode('');
+    clearError();
   };
 
   return (
@@ -135,26 +209,82 @@ export default function LoginScreen() {
             {/* Card – now with marginTop to push it lower */}
             <View style={styles.cardWrapper}>
               <View style={styles.card}>
-                <View style={styles.tabContainer}>
-                  <TouchableOpacity 
-                    style={[styles.tab, !isSignUp && styles.activeTab]}
-                    onPress={() => setIsSignUp(false)}
-                    disabled={loading}
-                  >
-                    <Text style={[styles.tabText, !isSignUp && styles.activeTabText]}>
-                      Log In
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity 
-                    style={[styles.tab, isSignUp && styles.activeTab]}
-                    onPress={() => setIsSignUp(true)}
-                    disabled={loading}
-                  >
-                    <Text style={[styles.tabText, isSignUp && styles.activeTabText]}>
-                      Sign Up
-                    </Text>
-                  </TouchableOpacity>
-                </View>
+                {step === 'otp' ? (
+                  <>
+                    <View style={styles.otpHeader}>
+                      <View style={styles.otpIconCircle}>
+                        <Ionicons name="mail-outline" size={22} color={COLORS.purplePrimary} />
+                      </View>
+                      <Text style={styles.otpTitle}>Check your email</Text>
+                      <Text style={styles.otpSubtitle}>
+                        We sent a 6-digit code to{' '}
+                        <Text style={styles.otpEmailText}>{otpEmail}</Text>
+                      </Text>
+                    </View>
+
+                    <View style={[styles.inputWrapper, styles.otpInputWrapper]}>
+                      <Ionicons name="keypad-outline" size={14} color={COLORS.purpleDeep} style={styles.inputIcon} />
+                      <TextInput
+                        placeholder="6-digit code"
+                        style={styles.otpInput}
+                        value={otpCode}
+                        onChangeText={(text) => setOtpCode(text.replace(/[^0-9]/g, '').slice(0, 6))}
+                        keyboardType="number-pad"
+                        maxLength={6}
+                        autoFocus
+                        placeholderTextColor="#9CA3AF"
+                      />
+                    </View>
+
+                    <TouchableOpacity
+                      style={[styles.submitButton, loading && styles.submitButtonDisabled]}
+                      onPress={handleVerifyOtp}
+                      disabled={loading}
+                    >
+                      <LinearGradient
+                        colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 0 }}
+                        style={styles.submitButtonGradient}
+                      >
+                        {loading ? (
+                          <ActivityIndicator color="white" size="small" />
+                        ) : (
+                          <>
+                            <Text style={styles.submitButtonText}>Verify Code</Text>
+                            <Ionicons name="shield-checkmark-outline" size={16} color="white" />
+                          </>
+                        )}
+                      </LinearGradient>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity onPress={backToForm} style={styles.otpBackLink} disabled={loading}>
+                      <Ionicons name="arrow-back" size={12} color={COLORS.purplePrimary} />
+                      <Text style={styles.otpBackText}>Use a different account</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <>
+                    <View style={styles.tabContainer}>
+                      <TouchableOpacity
+                        style={[styles.tab, !isSignUp && styles.activeTab]}
+                        onPress={() => setIsSignUp(false)}
+                        disabled={loading}
+                      >
+                        <Text style={[styles.tabText, !isSignUp && styles.activeTabText]}>
+                          Log In
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.tab, isSignUp && styles.activeTab]}
+                        onPress={() => setIsSignUp(true)}
+                        disabled={loading}
+                      >
+                        <Text style={[styles.tabText, isSignUp && styles.activeTabText]}>
+                          Sign Up
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
 
                 {error && (
                   <View style={styles.errorContainer}>
@@ -268,9 +398,9 @@ export default function LoginScreen() {
                   </View>
                 )}
 
-                <TouchableOpacity 
-                  style={[styles.submitButton, loading && styles.submitButtonDisabled]} 
-                  onPress={isSignUp ? handleSignUp : handleLogin} 
+                <TouchableOpacity
+                  style={[styles.submitButton, loading && styles.submitButtonDisabled]}
+                  onPress={isSignUp ? handleSignUp : handleLogin}
                   disabled={loading}
                 >
                   <LinearGradient
@@ -286,15 +416,36 @@ export default function LoginScreen() {
                         <Text style={styles.submitButtonText}>
                           {isSignUp ? 'Create Account' : 'Log In'}
                         </Text>
-                        <Ionicons 
-                          name={isSignUp ? "arrow-forward" : "log-in"} 
-                          size={16} 
-                          color="white" 
+                        <Ionicons
+                          name={isSignUp ? "arrow-forward" : "log-in"}
+                          size={16}
+                          color="white"
                         />
                       </>
                     )}
                   </LinearGradient>
                 </TouchableOpacity>
+
+                {Platform.OS !== 'web' && (
+                  <>
+                    <View style={styles.dividerRow}>
+                      <View style={styles.dividerLine} />
+                      <Text style={styles.dividerText}>or continue with</Text>
+                      <View style={styles.dividerLine} />
+                    </View>
+
+                    <TouchableOpacity
+                      style={[styles.googleButton, loading && styles.submitButtonDisabled]}
+                      onPress={handleGoogleLogin}
+                      disabled={loading}
+                    >
+                      <GoogleLogo />
+                      <Text style={styles.googleButtonText}>Continue with Google</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+                  </>
+                )}
               </View>
             </View>
 
@@ -517,6 +668,115 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   submitButtonDisabled: { opacity: 0.7 },
+
+  // Divider + Google button
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 12,
+    gap: 8,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#E5E7EB',
+  },
+  dividerText: {
+    fontSize: 11,
+    fontFamily: FONTS.medium,
+    color: '#6B7280',
+  },
+  googleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 11,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    backgroundColor: '#FFFFFF',
+  },
+  googleButtonText: {
+    fontSize: 13,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  googleLogo: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#FFFFFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  googleLogoG: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#4285F4',
+    fontFamily: FONTS.bold,
+  },
+
+  // OTP step
+  otpHeader: {
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  otpIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  otpTitle: {
+    fontSize: 17,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: COLORS.inputText,
+    marginBottom: 4,
+  },
+  otpSubtitle: {
+    fontSize: 12,
+    fontFamily: FONTS.regular,
+    color: '#6B7280',
+    textAlign: 'center',
+    lineHeight: 17,
+  },
+  otpEmailText: {
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.purpleDeep,
+  },
+  otpInputWrapper: {
+    marginBottom: 10,
+  },
+  otpInput: {
+    flex: 1,
+    fontSize: 18,
+    letterSpacing: 8,
+    fontFamily: FONTS.bold,
+    color: COLORS.inputText,
+    textAlign: 'center',
+  },
+  otpBackLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    marginTop: 14,
+  },
+  otpBackText: {
+    fontSize: 12,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.purplePrimary,
+  },
 
   // Footer
   footer: {
