@@ -3,6 +3,7 @@ import os
 import json
 import requests
 import re
+from django.core.exceptions import ValidationError
 from django.db import models
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -36,6 +37,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework_simplejwt.tokens import RefreshToken
 from core.firebase import verify_firebase_token, create_firebase_user
 from .models import User
+from .otp import create_otp_challenge, otp_matches
 from core.firestore_service import (
     get_user_profile, get_badges,
     create_study_group, join_group_by_code, get_user_groups,
@@ -59,6 +61,7 @@ class FirebaseLoginView(APIView):
 
         firebase_uid = decoded_token['uid']
         email = decoded_token.get('email', '')
+        sign_in_provider = (decoded_token.get('firebase') or {}).get('sign_in_provider', '')
 
         # 2. Find the Django User linked to this Firebase UID, or link by email.
         #    (Admins/superadmins created via the backend have no firebase_uid,
@@ -107,10 +110,34 @@ class FirebaseLoginView(APIView):
             # Sync the new user to Firestore immediately
             sync_user_to_firestore(user)
 
-        # 3. Issue a Django JWT for the rest of the app to use
+        # 3. Email/password sign-ins require an emailed OTP before a JWT is
+        #    issued (2FA-style). Google sign-ins skip OTP — Google has already
+        #    verified the account.
+        if sign_in_provider == 'password':
+            try:
+                challenge = create_otp_challenge(user)
+            except Exception:
+                # Email delivery failed; the challenge row would be useless.
+                from .models import LoginOtpChallenge
+                LoginOtpChallenge.objects.filter(user=user, verified=False).delete()
+                return Response(
+                    {"error": "Could not send the verification code. Please try again."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            return Response({
+                "otp_required": True,
+                "challenge_token": str(challenge.challenge_token),
+                "email": user.email,
+                "expires_in": 300,
+            })
+
+        # 4. Issue a Django JWT for the rest of the app to use
         refresh = RefreshToken.for_user(user)
-        
-        return Response({
+        return Response(self._auth_payload(user, refresh))
+
+    @staticmethod
+    def _auth_payload(user, refresh):
+        return {
             "access": str(refresh.access_token),
             "refresh": str(refresh),
             "user": {
@@ -126,8 +153,89 @@ class FirebaseLoginView(APIView):
                 "is_educator": user.is_educator,
                 "is_admin": user.is_admin
             }
-        })
-    
+        }
+
+
+class FirebaseLoginVerifyOtpView(APIView):
+    """
+    Second step of the email/password login: verify the emailed OTP code
+    referenced by `challenge_token` and issue the Django JWT pair.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        challenge_token = request.data.get('challenge_token')
+        submitted_otp = request.data.get('otp', '')
+
+        if not challenge_token or not submitted_otp:
+            return Response(
+                {"error": "challenge_token and otp are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .models import LoginOtpChallenge
+        try:
+            challenge = LoginOtpChallenge.objects.select_related('user').get(
+                challenge_token=challenge_token,
+            )
+        except LoginOtpChallenge.DoesNotExist:
+            return Response(
+                {"error": "Invalid or unknown verification request."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except (ValueError, TypeError, ValidationError):
+            # Not a well-formed UUID
+            return Response(
+                {"error": "Invalid or unknown verification request."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if challenge.verified:
+            return Response(
+                {"error": "This code was already used. Please sign in again."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if challenge.is_locked:
+            return Response(
+                {"error": "Too many incorrect attempts. Please sign in again to get a new code."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        if challenge.is_expired:
+            challenge.verified = True  # consume it
+            challenge.save(update_fields=['verified'])
+            return Response(
+                {"error": "Code expired. Please sign in again to get a new code."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not otp_matches(challenge, submitted_otp):
+            challenge.attempts += 1
+            challenge.save(update_fields=['attempts'])
+            remaining = LoginOtpChallenge.MAX_ATTEMPTS - challenge.attempts
+            if remaining <= 0:
+                return Response(
+                    {"error": "Too many incorrect attempts. Please sign in again to get a new code."},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                )
+            return Response(
+                {"error": f"Incorrect code. {remaining} attempt{'s' if remaining != 1 else ''} remaining."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Valid code — consume the challenge and issue the JWT pair.
+        challenge.verified = True
+        challenge.save(update_fields=['verified'])
+
+        user = challenge.user
+        if not user.is_active:
+            return Response(
+                {"error": "This account is disabled."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        refresh = RefreshToken.for_user(user)
+        return Response(FirebaseLoginView._auth_payload(user, refresh))
+
 # ---------- Helper: safe JSON parsing ----------
 def _as_bool(value, default=False):
     """Coerce incoming role flags (bool, string, or int) to a real boolean."""

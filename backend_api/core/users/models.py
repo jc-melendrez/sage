@@ -1,8 +1,10 @@
 import random
 import string
+import uuid
 from django.contrib.auth.models import AbstractUser, UserManager
 from django.db import models
 from django.conf import settings
+from django.utils import timezone
 
 # Automatically generate a 6-character random code like "A7X9PQ"
 def generate_join_code():
@@ -228,6 +230,42 @@ class RoleChangeLog(models.Model):
 
     def __str__(self):
         return f"{self.changed_by.username} {self.from_role}->{self.to_role} for {self.target_user.username}"
+
+
+class LoginOtpChallenge(models.Model):
+    """
+    A pending email-OTP challenge issued during Firebase email/password login.
+
+    The mobile app is stateless (JWT only, no sessions), so the OTP challenge
+    lives in the DB keyed by a random UUID token that the client holds until
+    the code is verified. Codes are stored HMAC-hashed, never in plaintext.
+    """
+    OTP_TTL_MINUTES = 5
+    MAX_ATTEMPTS = 5
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='otp_challenges',
+    )
+    challenge_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    otp_hash = models.CharField(max_length=64)  # HMAC-SHA256 hex digest
+    expires_at = models.DateTimeField()
+    attempts = models.IntegerField(default=0)
+    verified = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    @property
+    def is_expired(self):
+        return timezone.now() >= self.expires_at
+
+    @property
+    def is_locked(self):
+        return self.attempts >= self.MAX_ATTEMPTS
+
+    def __str__(self):
+        return f"OTP challenge for {self.user.username} ({'verified' if self.verified else 'pending'})"
 
 
 # --- LEARNING PATH: Topics, Nodes, and Progress ---

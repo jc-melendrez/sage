@@ -1,12 +1,17 @@
+import re
 from datetime import date, timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.core import mail
+from django.test import TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Badge, Course, LessonProgress, User
+from .models import Badge, Course, LessonProgress, LoginOtpChallenge, User
 from . import gamification
+from . import views as users_views
 
 User = get_user_model()
 
@@ -268,3 +273,201 @@ class GamificationEndpointTests(TestCase):
         self.client.force_authenticate(user=None)
         res = self.client.get('/api/users/leaderboard/')
         self.assertEqual(res.status_code, 401)
+
+
+class FirebaseLoginOtpTests(APITestCase):
+    """
+    Email/password logins must go through an emailed OTP (2FA-style);
+    Google logins must skip OTP and get a JWT immediately.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='otpuser',
+            email='otp@example.com',
+            password='pass12345',
+            role='student',
+            firebase_uid='fb-uid-otp',
+            first_name='Olive',
+            last_name='Tp',
+        )
+
+    def _login(self, provider='password'):
+        """Mock Firebase token verification and hit the login endpoint."""
+        decoded = {
+            'uid': self.user.firebase_uid,
+            'email': self.user.email,
+            'firebase': {'sign_in_provider': provider},
+        }
+        with patch.object(users_views, 'verify_firebase_token', return_value=decoded), \
+             patch.object(users_views, 'sync_user_to_firestore'):
+            return self.client.post(
+                reverse('firebase_login'),
+                {'id_token': 'fake-token'},
+                format='json',
+            )
+
+    def _otp_from_outbox(self):
+        """Extract the 6-digit code from the captured email body."""
+        body = mail.outbox[-1].body
+        match = re.search(r'code is: (\d{6})', body)
+        self.assertIsNotNone(match, f"No OTP found in email body: {body}")
+        return match.group(1)
+
+    @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
+    def test_password_login_returns_otp_challenge_not_jwt(self):
+        res = self._login(provider='password')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['otp_required'])
+        self.assertIn('challenge_token', res.data)
+        self.assertNotIn('access', res.data)
+        self.assertNotIn('refresh', res.data)
+        # An OTP email was sent
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn(self.user.email, mail.outbox[0].to)
+        self.assertFalse(LoginOtpChallenge.objects.get().verified)
+
+    @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
+    def test_otp_verify_issues_jwt(self):
+        res = self._login(provider='password')
+        challenge_token = res.data['challenge_token']
+
+        otp = self._otp_from_outbox()
+        res2 = self.client.post(
+            reverse('firebase_login_verify_otp'),
+            {'challenge_token': challenge_token, 'otp': otp},
+            format='json',
+        )
+        self.assertEqual(res2.status_code, 200)
+        self.assertIn('access', res2.data)
+        self.assertIn('refresh', res2.data)
+        self.assertEqual(res2.data['user']['username'], self.user.username)
+        # Challenge is consumed — single-use
+        self.assertTrue(LoginOtpChallenge.objects.get().verified)
+
+    @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
+    def test_otp_cannot_be_reused(self):
+        res = self._login(provider='password')
+        challenge_token = res.data['challenge_token']
+        otp = self._otp_from_outbox()
+
+        self.client.post(
+            reverse('firebase_login_verify_otp'),
+            {'challenge_token': challenge_token, 'otp': otp},
+            format='json',
+        )
+        res2 = self.client.post(
+            reverse('firebase_login_verify_otp'),
+            {'challenge_token': challenge_token, 'otp': otp},
+            format='json',
+        )
+        self.assertEqual(res2.status_code, 400)
+        self.assertIn('already used', res2.data['error'])
+
+    @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
+    def test_wrong_otp_increments_attempts_then_locks(self):
+        res = self._login(provider='password')
+        challenge_token = res.data['challenge_token']
+
+        # Burn through the 5 attempts with wrong codes
+        for i in range(5):
+            res2 = self.client.post(
+                reverse('firebase_login_verify_otp'),
+                {'challenge_token': challenge_token, 'otp': '000000'},
+                format='json',
+            )
+            # The final wrong attempt locks the challenge -> 429, earlier ones 400
+            expected = 429 if i == 4 else 400
+            self.assertEqual(res2.status_code, expected)
+        challenge = LoginOtpChallenge.objects.get()
+        self.assertEqual(challenge.attempts, 5)
+
+        # Even the correct code is now rejected — challenge is locked
+        otp = self._otp_from_outbox()
+        res3 = self.client.post(
+            reverse('firebase_login_verify_otp'),
+            {'challenge_token': challenge_token, 'otp': otp},
+            format='json',
+        )
+        self.assertEqual(res3.status_code, 429)
+        self.assertNotIn('access', res3.data)
+
+    @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
+    def test_expired_otp_rejected(self):
+        res = self._login(provider='password')
+        challenge_token = res.data['challenge_token']
+        otp = self._otp_from_outbox()
+
+        challenge = LoginOtpChallenge.objects.get()
+        challenge.expires_at = timezone.now() - timezone.timedelta(seconds=1)
+        challenge.save(update_fields=['expires_at'])
+
+        res2 = self.client.post(
+            reverse('firebase_login_verify_otp'),
+            {'challenge_token': challenge_token, 'otp': otp},
+            format='json',
+        )
+        self.assertEqual(res2.status_code, 400)
+        self.assertIn('expired', res2.data['error'])
+        # Expired challenge is consumed
+        challenge.refresh_from_db()
+        self.assertTrue(challenge.verified)
+
+    @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
+    def test_new_login_invalidates_previous_challenge(self):
+        res = self._login(provider='password')
+        first_token = res.data['challenge_token']
+        first_otp = self._otp_from_outbox()
+
+        # A second login request issues a fresh challenge, killing the first
+        res2 = self._login(provider='password')
+        self.assertNotEqual(res2.data['challenge_token'], first_token)
+        second_otp = self._otp_from_outbox()
+
+        # Old challenge + old code no longer works
+        res3 = self.client.post(
+            reverse('firebase_login_verify_otp'),
+            {'challenge_token': first_token, 'otp': first_otp},
+            format='json',
+        )
+        self.assertEqual(res3.status_code, 400)
+
+        # New challenge + new code works
+        res4 = self.client.post(
+            reverse('firebase_login_verify_otp'),
+            {'challenge_token': res2.data['challenge_token'], 'otp': second_otp},
+            format='json',
+        )
+        self.assertEqual(res4.status_code, 200)
+        self.assertIn('access', res4.data)
+
+    def test_google_login_skips_otp(self):
+        # No email should be sent; JWT comes back immediately
+        res = self._login(provider='google.com')
+        self.assertEqual(res.status_code, 200)
+        self.assertNotIn('otp_required', res.data)
+        self.assertIn('access', res.data)
+        self.assertIn('refresh', res.data)
+        self.assertEqual(res.data['user']['username'], self.user.username)
+        self.assertEqual(LoginOtpChallenge.objects.count(), 0)
+
+    @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
+    def test_otp_hash_not_plaintext(self):
+        self._login(provider='password')
+        challenge = LoginOtpChallenge.objects.get()
+        otp = self._otp_from_outbox()
+        # Stored hash must not contain the plaintext OTP
+        self.assertNotEqual(challenge.otp_hash, otp)
+        self.assertEqual(len(challenge.otp_hash), 64)  # SHA-256 hex digest
+
+    @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
+    def test_unknown_challenge_token_rejected(self):
+        self._login(provider='password')
+        otp = self._otp_from_outbox()
+        res = self.client.post(
+            reverse('firebase_login_verify_otp'),
+            {'challenge_token': 'not-a-real-uuid', 'otp': otp},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 400)

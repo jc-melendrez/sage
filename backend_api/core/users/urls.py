@@ -52,6 +52,7 @@ urlpatterns = [
     path('lessons/generate/', views.generate_lesson, name='generate_lesson'),
 
     path('firebase-login/', views.FirebaseLoginView.as_view(), name='firebase_login'),
+    path('firebase-login/verify-otp/', views.FirebaseLoginVerifyOtpView.as_view(), name='firebase_login_verify_otp'),
 
     # --- Superadmin (global scope) ---
     path('superadmin/analytics/', views.SuperadminAnalyticsView.as_view(), name='superadmin_analytics'),
