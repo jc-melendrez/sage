@@ -12,6 +12,7 @@ import firestore from '@react-native-firebase/firestore';
 import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser } from '@/services/authService';
+import { getFirebaseUid } from '@/services/firebaseAuthService';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
 interface StudyGroup {
@@ -23,17 +24,65 @@ interface StudyGroup {
   created_by: number;
 }
 
+// Normalized message shape: Firestore docs, REST responses, and optimistic
+// echoes all flow through mapMessage().
 interface GroupMessage {
-  // Firestore doc ids are strings; optimistic local echoes use Date.now() numbers.
-  id: number | string;
+  id: string;
   text: string;
-  sender_id: number;
+  sender_uid: string | null;
   sender_name: string;
-  time: string;
+  created_at: number | string | null; // ISO string (REST) or ms/µs epoch (Firestore)
+  local?: boolean; // true while this is an unsent optimistic echo
 }
 
-function isOptimisticEcho(m: GroupMessage): boolean {
-  return typeof m.id === 'number' && m.id > 1000000000000;
+type RawMessage = Partial<Omit<GroupMessage, 'created_at'>> & {
+  id: string | number;
+  created_at?: GroupMessage['created_at'];
+};
+
+// Firestore may deliver ms or µs depending on platform; REST delivers ISO strings.
+function toTimestamp(created_at: GroupMessage['created_at']): number | null {
+  if (created_at == null) return null;
+  if (typeof created_at === 'number') {
+    return created_at > 1e14 ? created_at / 1000 : created_at;
+  }
+  const parsed = new Date(created_at).getTime();
+  return isNaN(parsed) ? null : parsed;
+}
+
+function formatTime(created_at: GroupMessage['created_at']): string {
+  const ms = toTimestamp(created_at);
+  if (!ms) return '';
+  const date = new Date(ms);
+  const now = new Date();
+  const sameDay =
+    date.getDate() === now.getDate() &&
+    date.getMonth() === now.getMonth() &&
+    date.getFullYear() === now.getFullYear();
+  return sameDay
+    ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+// Accepts REST GET, REST POST, and Firestore snapshot docs alike.
+function mapMessage(raw: RawMessage): GroupMessage {
+  return {
+    id: String(raw.id),
+    text: raw.text ?? '',
+    sender_uid: raw.sender_uid ?? null,
+    sender_name: raw.sender_name || 'Member',
+    created_at: raw.created_at ?? null,
+    local: raw.local,
+  };
+}
+
+// Merge server messages with any still-unsent optimistic echoes. A local echo
+// is dropped as soon as the server copy (same sender + text) shows up.
+function mergeMessages(prev: GroupMessage[], incoming: GroupMessage[]): GroupMessage[] {
+  const unsyncedLocal = prev.filter(m => m.local).filter(m =>
+    !incoming.some(f => f.sender_uid === m.sender_uid && f.text === m.text),
+  );
+  return [...incoming, ...unsyncedLocal];
 }
 
 export default function GroupChatScreen() {
@@ -43,6 +92,7 @@ export default function GroupChatScreen() {
 
   const [group, setGroup] = useState<StudyGroup | null>(null);
   const [currentUser, setCurrentUser] = useState<any>(null);
+  const [myUid, setMyUid] = useState<string | null>(null);
   const [messages, setMessages] = useState<GroupMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
@@ -60,14 +110,21 @@ export default function GroupChatScreen() {
     });
   }, []);
 
-  // Load group metadata (from my-groups list) + current user
+  // Load group metadata (from my-groups list) + current user + our Firebase uid
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [user, token] = await Promise.all([getCurrentUser(), getToken()]);
+        const [user, token, storedUid] = await Promise.all([
+          getCurrentUser(), getToken(), getFirebaseUid(),
+        ]);
         if (cancelled) return;
         setCurrentUser(user);
+
+        // Messages identify senders by firebase_uid. Prefer the profile's
+        // firebase_uid; fall back to the uid cached at Firebase sign-in.
+        const uid = user?.firebase_uid || storedUid || null;
+        setMyUid(uid);
 
         const res = await fetch(`${API_BASE_URL}/users/groups/mine/`, {
           headers: { 'Authorization': `Bearer ${token}` },
@@ -102,8 +159,8 @@ export default function GroupChatScreen() {
           headers: { 'Authorization': `Bearer ${token}` },
         });
         if (res.ok) {
-          const initialMsgs: GroupMessage[] = await res.json();
-          setMessages(initialMsgs);
+          const initialMsgs: GroupMessage[] = (await res.json()).map(mapMessage);
+          setMessages(prev => mergeMessages(prev, initialMsgs));
           scrollToEnd(false);
         }
       } catch (err) {
@@ -121,22 +178,17 @@ export default function GroupChatScreen() {
           if (!snapshot) return;
           const firestoreMsgs: GroupMessage[] = snapshot.docs.map(doc => {
             const data = doc.data();
-            return {
+            return mapMessage({
               id: doc.id,
-              text: data.text,
-              sender_id: data.sender_id,
-              sender_name: data.sender_name,
-              time: data.time || '',
-            };
+              text: data?.text,
+              sender_uid: data?.sender_uid,
+              sender_name: data?.sender_name,
+              // react-native-firestore timestamps arrive as ms since epoch.
+              created_at: typeof data?.created_at === 'number' ? data.created_at : null,
+            });
           });
 
-          setMessages(prev => {
-            const unsyncedTemp = prev.filter(isOptimisticEcho).filter(temp =>
-              !firestoreMsgs.some(f => f.sender_id === temp.sender_id && f.text === temp.text),
-            );
-            return [...firestoreMsgs, ...unsyncedTemp];
-          });
-
+          setMessages(prev => mergeMessages(prev, firestoreMsgs));
           scrollToEnd(true);
         }, error => {
           console.error('Firestore Chat Subscription Error:', error);
@@ -162,11 +214,12 @@ export default function GroupChatScreen() {
     setChatInput('');
 
     const tempMsg: GroupMessage = {
-      id: Date.now(),
+      id: `local-${Date.now()}`,
       text: textToSend,
-      sender_id: currentUser?.id,
+      sender_uid: myUid,
       sender_name: currentUser?.first_name || 'Me',
-      time: 'Just now',
+      created_at: Date.now(),
+      local: true,
     };
     setMessages(prev => [...prev, tempMsg]);
     scrollToEnd(true);
@@ -179,7 +232,9 @@ export default function GroupChatScreen() {
         body: JSON.stringify({ text: textToSend }),
       });
       if (res.ok) {
-        const realMsg = await res.json();
+        const realMsg = mapMessage(await res.json());
+        // Replace the echo with the server copy; dedupes against the
+        // Firestore snapshot that lands moments later.
         setMessages(prev => prev.map(m => (m.id === tempMsg.id ? realMsg : m)));
       }
     } catch (err) {
@@ -196,9 +251,9 @@ export default function GroupChatScreen() {
   const isAdmin = currentUser?.id === group?.created_by;
 
   const renderMessage = (msg: GroupMessage, index: number) => {
-    const isMe = msg.sender_id === currentUser?.id;
+    const isMe = msg.sender_uid != null && msg.sender_uid === myUid;
     const prev = messages[index - 1];
-    const showSender = !isMe && (!prev || prev.sender_id !== msg.sender_id);
+    const showSender = !isMe && (!prev || prev.sender_uid !== msg.sender_uid);
 
     return (
       <View key={msg.id} style={[styles.messageWrapper, isMe ? styles.messageMe : styles.messageOther]}>
@@ -206,7 +261,7 @@ export default function GroupChatScreen() {
         <View style={[styles.messageBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
           <Text style={[styles.messageText, isMe ? { color: 'white' } : { color: COLORS.textDark }]}>{msg.text}</Text>
         </View>
-        <Text style={styles.messageTime}>{msg.time}</Text>
+        <Text style={styles.messageTime}>{formatTime(msg.created_at)}</Text>
       </View>
     );
   };
