@@ -117,6 +117,7 @@ class CreateGameView(APIView):
             'status': 'waiting',
             'hostId': request.user.id,
             'hostName': get_display_name(request.user),
+            'schoolId': request.user.school_id,  # None for independent learners
             'topic': topic,
             'questionCount': question_count,
             'timePerQuestion': time_per_question,
@@ -243,6 +244,13 @@ class JoinGameView(APIView):
 
         if room_data['status'] != 'waiting':
             return Response({'error': 'Game already started'}, status=400)
+
+        # School tenancy: rooms are only joinable within the host's school.
+        # Superadmins bypass; school-less hosts and joiners can find each other.
+        room_school = room_data.get('schoolId')
+        joiner_school = request.user.school_id
+        if room_school != joiner_school and request.user.role != 'superadmin':
+            return Response({'error': 'This room is not in your school'}, status=403)
 
         is_team_mode = bool(room_data.get('teamMode', False))
 

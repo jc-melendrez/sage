@@ -4,7 +4,7 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 
-from users.models import User
+from users.models import User, School
 from ai_assistant.models import Quiz, QuizQuestion
 from game.test_firestore_fake import FakeFirestoreClient
 
@@ -261,3 +261,94 @@ class TeamModeGameTests(TestCase):
         room = room_ref.get().to_dict()
         self.assertEqual(room['status'], 'finished')
         self.assertNotIn('teamResults', room)
+
+
+class SchoolScopedRoomTests(TestCase):
+    """
+    Game rooms carry the host's schoolId and are only joinable within that
+    school. Superadmins bypass; school-less hosts/joiners can find each other.
+    """
+
+    def setUp(self):
+        self.school_a = School.objects.create(name='Game School A')
+        self.school_b = School.objects.create(name='Game School B')
+
+        self.host_a = User.objects.create_user(
+            username='hosta', password='pass', role='educator', school=self.school_a
+        )
+        self.student_a = User.objects.create_user(
+            username='studa', password='pass', role='student', school=self.school_a
+        )
+        self.student_b = User.objects.create_user(
+            username='studb', password='pass', role='student', school=self.school_b
+        )
+        self.superadmin = User.objects.create_user(
+            username='root', role='superadmin'
+        )
+        self.lone_host = User.objects.create_user(username='lonehost', password='pass', role='student')
+        self.lone_joiner = User.objects.create_user(username='lonejoin', password='pass', role='student')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        self.mock_firestore = patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+
+    def make_quiz(self, user, question_count=2):
+        quiz = Quiz.objects.create(user=user, title=f'{user.username} quiz')
+        for i in range(question_count):
+            QuizQuestion.objects.create(
+                quiz=quiz,
+                question_text=f'Question {i + 1}',
+                options=['one', 'two', 'three', 'four'],
+                correct_answer='one',
+            )
+        return quiz
+
+    def create_room(self, host):
+        self.client.force_authenticate(user=host)
+        quiz = self.make_quiz(host)
+        resp = self.client.post(reverse('create-game'), {'quizId': quiz.id}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        return resp.json()['roomCode']
+
+    def join(self, joiner, room_code):
+        self.client.force_authenticate(user=joiner)
+        return self.client.post(reverse('join-game'), {'roomCode': room_code}, format='json')
+
+    def test_create_stamps_host_school(self):
+        room_code = self.create_room(self.host_a)
+        room = self.store.collection('gameRooms').document(room_code).get().to_dict()
+        self.assertEqual(room['schoolId'], self.school_a.id)
+
+    def test_create_schoolless_host_stamps_none(self):
+        room_code = self.create_room(self.lone_host)
+        room = self.store.collection('gameRooms').document(room_code).get().to_dict()
+        self.assertIsNone(room['schoolId'])
+
+    def test_same_school_join_allowed(self):
+        room_code = self.create_room(self.host_a)
+        resp = self.join(self.student_a, room_code)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_cross_school_join_rejected(self):
+        room_code = self.create_room(self.host_a)
+        resp = self.join(self.student_b, room_code)
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn('school', resp.json()['error'])
+
+    def test_superadmin_cross_school_join_allowed(self):
+        room_code = self.create_room(self.host_a)
+        resp = self.join(self.superadmin, room_code)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_schoolless_host_and_joiner_can_meet(self):
+        room_code = self.create_room(self.lone_host)
+        resp = self.join(self.lone_joiner, room_code)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_school_user_cannot_join_schoolless_room(self):
+        room_code = self.create_room(self.lone_host)
+        resp = self.join(self.student_a, room_code)
+        self.assertEqual(resp.status_code, 403)
