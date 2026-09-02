@@ -76,6 +76,8 @@ interface User {
   streak?: number;
   level?: number;
   total_points?: number;
+  role?: string;
+  school_id?: number | null;
 }
 interface Badge {
   id: number;
@@ -332,10 +334,20 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
     rooms.map(r => ({ ...r, playerCount: playerCountsRef.current[r.code] ?? 0 }));
 
   useEffect(() => {
-    const roomsUnsub = firestore()
+    // Wait for the profile before subscribing — the query is school-scoped,
+    // and we need /users/me/ to know our schoolId (null for independent
+    // learners, which still matches rooms stamped null) and role.
+    if (!user) return;
+    const isSuperadmin = user.role === 'superadmin';
+
+    let roomsQuery = firestore()
       .collection('gameRooms')
-      .where('status', 'in', ['waiting', 'active'])
-      .onSnapshot(snapshot => {
+      .where('status', 'in', ['waiting', 'active']);
+    if (!isSuperadmin) {
+      roomsQuery = roomsQuery.where('schoolId', '==', user.school_id ?? null);
+    }
+
+    const roomsUnsub = roomsQuery.onSnapshot(snapshot => {
         const rooms: GameRoom[] = (snapshot?.docs ?? [])
           .map(doc => {
             const d = doc.data();
@@ -374,7 +386,10 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       playerUnsubsRef.current.forEach(unsub => unsub());
       playerUnsubsRef.current = [];
     };
-  }, []);
+    // Deliberately keyed on the profile fields the query depends on, not the
+    // whole `user` object, so profile refreshes don't tear down the listener.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, user?.school_id, user?.role]);
 
   const [joiningRoom, setJoiningRoom] = useState<string | null>(null);
 
@@ -707,7 +722,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
                 <Ionicons name="school-outline" size={48} color={COLORS.purpleVibrant} />
               </View>
               <Text style={styles.emptyStateTitle}>No live games right now</Text>
-              <Text style={styles.emptyStateText}>Rooms waiting for players will appear here</Text>
+              <Text style={styles.emptyStateText}>Rooms from your school will appear here</Text>
               <TouchableOpacity
                 style={styles.emptyStatePrimaryBtn}
                 onPress={() => router.push('/(tabs)/games' as any)}
