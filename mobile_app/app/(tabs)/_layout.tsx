@@ -102,7 +102,6 @@ export default function TabLayout() {
       {/* Explicitly hide unwanted tabs that exist as files in the directory */}
       <Tabs.Screen name="explore" options={{ href: null }} />
       <Tabs.Screen name="dashboard" options={{ href: null }} />
-      <Tabs.Screen name="courses" options={{ href: null }} />
       <Tabs.Screen name="leaderboard" options={{ href: null }} />
     </Tabs>
   );

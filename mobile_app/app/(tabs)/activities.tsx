@@ -16,6 +16,7 @@ import LessonGenerator from '@/components/LessonGenerator';
 import CourseCard from '@/components/courses/CourseCard';
 import CourseDetailModal from '@/components/courses/CourseDetailModal';
 import EmptyCourseState from '@/components/courses/EmptyCourseState';
+import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
@@ -74,9 +75,15 @@ export default function ActivitiesScreen() {
 
   // --- NEW: Courses state ---
   const [courses, setCourses] = useState<GeneratedCourse[]>([]);
+  const [enrolledCourses, setEnrolledCourses] = useState<CourseSummary[]>([]);
   const [levelProgress, setLevelProgress] = useState<{ [key: string]: number }>({});
   const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
   const [isCourseModalOpen, setIsCourseModalOpen] = useState(false);
+
+  // --- Join Class Modal (enrolled backend courses) ---
+  const [isJoinCourseModalOpen, setIsJoinCourseModalOpen] = useState(false);
+  const [classCodeInput, setClassCodeInput] = useState('');
+  const [isJoiningClass, setIsJoiningClass] = useState(false);
 
   // --- Quiz Player State ---
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
@@ -192,13 +199,15 @@ export default function ActivitiesScreen() {
       setLoading(!isRefresh);
       const token = await getToken();
 
-      const [groupRes, quizRes] = await Promise.all([
+      const [groupRes, quizRes, enrolled] = await Promise.all([
         fetch(`${API_BASE_URL}/users/groups/mine/`, { headers: { 'Authorization': `Bearer ${token}` } }),
-        fetch(`${API_BASE_URL}/ai/quizzes/`, { headers: { 'Authorization': `Bearer ${token}` } })
+        fetch(`${API_BASE_URL}/ai/quizzes/`, { headers: { 'Authorization': `Bearer ${token}` } }),
+        getEnrolledCourses().catch(() => null),
       ]);
 
       if (groupRes.ok) setGroups(await groupRes.json());
       if (quizRes.ok) setQuizzes(await quizRes.json());
+      if (Array.isArray(enrolled)) setEnrolledCourses(enrolled);
 
       const savedCourses = await loadGeneratedCourses();
       setCourses(savedCourses);
@@ -282,6 +291,26 @@ export default function ActivitiesScreen() {
       Alert.alert('Connection Error', 'Could not reach the server. Check your connection and try again.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleJoinClass = async () => {
+    const code = classCodeInput.trim().toUpperCase();
+    if (!code) {
+      Alert.alert('Code Required', 'Please enter the join code shared by your educator.');
+      return;
+    }
+    try {
+      setIsJoiningClass(true);
+      await joinCourseByCode(code);
+      setClassCodeInput('');
+      setIsJoinCourseModalOpen(false);
+      await loadInitialData({ isRefresh: true });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err) {
+      Alert.alert('Could Not Join Class', err instanceof Error ? err.message : 'Invalid join code.');
+    } finally {
+      setIsJoiningClass(false);
     }
   };
 
@@ -393,19 +422,48 @@ export default function ActivitiesScreen() {
         {selectedTab === 'lessons' && loading && <TabSkeleton tab="lessons" />}
         {selectedTab === 'lessons' && !loading && (
           <View style={styles.itemsList}>
-            <TouchableOpacity activeOpacity={0.85} onPress={() => router.push('/courses')}>
-              <LinearGradient
-                colors={[COLORS.purpleDeep, COLORS.purpleVibrant]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={styles.coursePathBtn}
+            {/* MY CLASSES — educator-created, joined via code */}
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>My Classes</Text>
+              <TouchableOpacity
+                style={styles.sectionAction}
+                onPress={() => setIsJoinCourseModalOpen(true)}
+                accessibilityLabel="Join a class with a code"
               >
-                <Ionicons name="map-outline" size={20} color="white" />
-                <Text style={styles.coursePathBtnText}>Open Course Path</Text>
-                <Ionicons name="chevron-forward" size={18} color="white" style={{ opacity: 0.7 }} />
-              </LinearGradient>
-            </TouchableOpacity>
-            {courses.length === 0 && <EmptyCourseState />}
+                <Ionicons name="add" size={16} color={COLORS.purpleDeep} />
+                <Text style={styles.sectionActionText}>Join</Text>
+              </TouchableOpacity>
+            </View>
+            {enrolledCourses.map((course) => (
+              <TouchableOpacity
+                key={course.id}
+                style={styles.classCard}
+                activeOpacity={0.7}
+                onPress={() => router.push(`/course/${course.id}` as any)}
+              >
+                <View style={styles.classIconBox}>
+                  <Ionicons name="school-outline" size={20} color="white" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.classTitle} numberOfLines={2}>{course.name}</Text>
+                  <Text style={styles.classMeta} numberOfLines={1}>
+                    {course.educator?.display_name || 'Educator'} · {course.student_count} {course.student_count === 1 ? 'student' : 'students'}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            ))}
+            {enrolledCourses.length === 0 && (
+              <Text style={styles.sectionEmptyText}>
+                No classes yet. Join with a code from your educator.
+              </Text>
+            )}
+
+            {/* SELF-STUDY — AI-generated courses on this device */}
+            <Text style={[styles.sectionTitle, styles.sectionSpacing]}>Self-Study</Text>
+            {courses.length === 0 && (
+              <EmptyCourseState onJoinClass={() => setIsJoinCourseModalOpen(true)} />
+            )}
             {courses.map((course, index) => {
               const completedLevels = course.levels.filter((l) => {
                 const score = levelProgress[levelKey(course.course_title, l.level_id)] ?? 0;
@@ -555,6 +613,30 @@ export default function ActivitiesScreen() {
             <TextInput style={[styles.modalInput, { textAlign: 'center', fontSize: 20, letterSpacing: 5 }]} placeholder="CODE" placeholderTextColor="#9CA3AF" autoCapitalize="characters" maxLength={6} value={joinCodeInput} onChangeText={setJoinCodeInput} />
             <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleJoinGroup} disabled={isSubmitting}>
               {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={styles.modalSubmitBtnText}>Join</Text>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Join Class Modal (educator courses) */}
+      <Modal visible={isJoinCourseModalOpen} animationType="fade" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Join Class</Text>
+              <TouchableOpacity onPress={() => setIsJoinCourseModalOpen(false)}><Ionicons name="close" size={24} color={COLORS.textDark} /></TouchableOpacity>
+            </View>
+            <TextInput
+              style={[styles.modalInput, { textAlign: 'center', fontSize: 20, letterSpacing: 5 }]}
+              placeholder="CLASS CODE"
+              placeholderTextColor="#9CA3AF"
+              autoCapitalize="characters"
+              maxLength={6}
+              value={classCodeInput}
+              onChangeText={setClassCodeInput}
+            />
+            <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleJoinClass} disabled={isJoiningClass}>
+              {isJoiningClass ? <ActivityIndicator color="white" /> : <Text style={styles.modalSubmitBtnText}>Join Class</Text>}
             </TouchableOpacity>
           </View>
         </View>
@@ -846,21 +928,18 @@ const styles = StyleSheet.create({
   
   content: { flex: 1 },
   itemsList: { paddingBottom: 20, paddingTop: 16 },
-  coursePathBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 16,
-    borderRadius: 16,
-    marginBottom: 16,
-    gap: 8,
-    elevation: 4,
-    shadowColor: COLORS.purpleDeep,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-  },
-  coursePathBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 15 },
+
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginHorizontal: 24, marginBottom: 12 },
+  sectionTitle: { fontSize: 13, fontFamily: FONTS.bold, color: COLORS.textMuted, letterSpacing: 1.2, textTransform: 'uppercase' },
+  sectionSpacing: { marginHorizontal: 24, marginBottom: 12 },
+  sectionAction: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 6 },
+  sectionActionText: { fontSize: 12, fontFamily: FONTS.semiBold, color: COLORS.purpleDeep },
+  sectionEmptyText: { marginHorizontal: 24, marginBottom: 16, fontSize: 13, fontFamily: FONTS.regular, color: COLORS.textMuted, fontStyle: 'italic' },
+
+  classCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.surface, borderRadius: 16, borderWidth: 1, borderColor: COLORS.border, marginHorizontal: 24, marginBottom: 12, padding: 16, gap: 12, shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.08, shadowRadius: 8, elevation: 2 },
+  classIconBox: { width: 44, height: 44, borderRadius: 14, backgroundColor: COLORS.purpleVibrant, justifyContent: 'center', alignItems: 'center' },
+  classTitle: { fontSize: 15, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginBottom: 3 },
+  classMeta: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted },
   
   emptyStateCard: {
     backgroundColor: COLORS.surface,

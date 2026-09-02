@@ -431,7 +431,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
               <TouchableOpacity
                 style={styles.headerIconBtn}
                 activeOpacity={0.7}
-                onPress={() => router.push('/courses')}
+                onPress={() => router.push('/(tabs)/activities')}
               >
                 <Ionicons name="book" size={22} color={COLORS.textSecondary} />
               </TouchableOpacity>
