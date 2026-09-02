@@ -5,6 +5,7 @@ import requests
 import re
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
@@ -516,8 +517,17 @@ class GroupChatView(APIView):
         text = request.data.get('text')
         if not text:
             return Response({"error": "Message text is required"}, status=400)
-        msg_id = send_message(group_id, request.user.firebase_uid, text)
-        return Response({"id": msg_id, "text": text})
+        sender_name = request.user.get_full_name() or request.user.username
+        msg_id = send_message(group_id, request.user.firebase_uid, text, sender_name)
+        return Response({
+            "id": msg_id,
+            "sender_uid": request.user.firebase_uid,
+            "sender_name": sender_name,
+            "text": text,
+            # Millisecond epoch; Firestore's server timestamp resolves moments
+            # later, this just gives the client an instant timestamp for render.
+            "created_at": int(timezone.now().timestamp() * 1000) * 1000,
+        }, status=201)
 
 
 # ---------- COURSES: each course has its own set of students ----------

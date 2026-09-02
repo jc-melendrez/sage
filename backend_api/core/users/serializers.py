@@ -19,13 +19,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name', # 🌟 Unhidden here!
-            'role', 'school_id',
+            'role', 'school_id', 'firebase_uid',
             'is_student', 'is_educator', 'is_admin', 'level', 'current_xp', 
             'next_level_xp', 'total_points', 'streak',
             'courses_completed', 'study_hours', 'quizzes_taken', 
             'group_activities_count', 'badges', 'date_joined'
         ]
-        read_only_fields = ['id', 'username', 'email', 'date_joined', 'role', 'school_id']
+        read_only_fields = ['id', 'username', 'email', 'date_joined', 'role', 'school_id', 'firebase_uid']
         
     def get_next_level_xp(self, obj):
         return obj.level * 1000

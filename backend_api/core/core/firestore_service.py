@@ -126,10 +126,11 @@ def get_user_groups(firebase_uid: str) -> list:
 
 # ── GROUP MESSAGES ───────────────────────────────────────────────
 
-def send_message(group_id: str, sender_uid: str, text: str) -> str:
+def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '') -> str:
     db = get_db()
     msg_ref = db.collection('studyGroups').document(group_id).collection('messages').add({
         'sender_uid': sender_uid,
+        'sender_name': sender_name,
         'text': text,
         'created_at': firestore.SERVER_TIMESTAMP,
         'is_synced': True,
@@ -144,6 +145,16 @@ def get_messages(group_id: str, limit: int = 50) -> list:
             .order_by('created_at')
             .limit(limit)
             .stream())
-    return [{'id': d.id, **d.to_dict()} for d in docs]
+    messages = []
+    for d in docs:
+        data = d.to_dict() or {}
+        messages.append({
+            'id': d.id,
+            'sender_uid': data.get('sender_uid'),
+            'sender_name': data.get('sender_name') or 'Member',
+            'text': data.get('text'),
+            'created_at': data.get('created_at'),
+        })
+    return messages
 
 

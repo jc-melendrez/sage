@@ -471,3 +471,65 @@ class FirebaseLoginOtpTests(APITestCase):
             format='json',
         )
         self.assertEqual(res.status_code, 400)
+
+
+class GroupChatMessageTests(APITestCase):
+    """
+    POST /groups/<id>/chat/ must return the full message payload
+    (sender_uid + sender_name) so the mobile app can render the
+    sender's own messages on the right side.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='chatter', password='pass12345', role='student',
+            first_name='Chat', last_name='Person',
+            firebase_uid='fb-uid-chat',
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_post_returns_sender_identity(self):
+        with patch.object(users_views, 'send_message', return_value='msg-123') as mock_send:
+            res = self.client.post(
+                reverse('group_chat', args=['group-abc']),
+                {'text': 'hello world'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['id'], 'msg-123')
+        self.assertEqual(res.data['text'], 'hello world')
+        self.assertEqual(res.data['sender_uid'], 'fb-uid-chat')
+        self.assertEqual(res.data['sender_name'], 'Chat Person')
+        self.assertIn('created_at', res.data)
+        mock_send.assert_called_once_with(
+            'group-abc', 'fb-uid-chat', 'hello world', 'Chat Person',
+        )
+
+    def test_post_requires_text(self):
+        res = self.client.post(
+            reverse('group_chat', args=['group-abc']),
+            {'text': ''},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_get_returns_normalized_messages(self):
+        fake_messages = [{
+            'id': 'msg-1',
+            'sender_uid': 'fb-uid-chat',
+            'sender_name': 'Member',  # legacy docs have no name
+            'text': 'old message',
+            'created_at': 1700000000000000,
+        }]
+        with patch.object(users_views, 'get_messages', return_value=fake_messages):
+            res = self.client.get(reverse('group_chat', args=['group-abc']))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.data), 1)
+        self.assertEqual(res.data[0]['sender_uid'], 'fb-uid-chat')
+        self.assertEqual(res.data[0]['text'], 'old message')
+
+    def test_me_includes_firebase_uid(self):
+        res = self.client.get(reverse('current_user_profile'))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['firebase_uid'], 'fb-uid-chat')
