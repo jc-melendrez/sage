@@ -178,13 +178,18 @@ export default function GroupChatScreen() {
           if (!snapshot) return;
           const firestoreMsgs: GroupMessage[] = snapshot.docs.map(doc => {
             const data = doc.data();
+            // v24 SDK returns created_at as a firestore Timestamp object.
+            const ts = data?.created_at;
+            const createdAt =
+              typeof ts?.toMillis === 'function' ? ts.toMillis()
+              : typeof ts === 'number' ? ts
+              : null;
             return mapMessage({
               id: doc.id,
               text: data?.text,
               sender_uid: data?.sender_uid,
               sender_name: data?.sender_name,
-              // react-native-firestore timestamps arrive as ms since epoch.
-              created_at: typeof data?.created_at === 'number' ? data.created_at : null,
+              created_at: createdAt,
             });
           });
 
