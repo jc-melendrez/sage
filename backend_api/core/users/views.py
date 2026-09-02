@@ -524,9 +524,9 @@ class GroupChatView(APIView):
             "sender_uid": request.user.firebase_uid,
             "sender_name": sender_name,
             "text": text,
-            # Millisecond epoch; Firestore's server timestamp resolves moments
-            # later, this just gives the client an instant timestamp for render.
-            "created_at": int(timezone.now().timestamp() * 1000) * 1000,
+            # Server timestamp resolves in Firestore moments later; give the
+            # client an instant ISO timestamp to render with.
+            "created_at": timezone.now().isoformat(),
         }, status=201)
 
 

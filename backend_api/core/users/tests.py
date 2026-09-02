@@ -520,7 +520,7 @@ class GroupChatMessageTests(APITestCase):
             'sender_uid': 'fb-uid-chat',
             'sender_name': 'Member',  # legacy docs have no name
             'text': 'old message',
-            'created_at': 1700000000000000,
+            'created_at': '2026-09-01T12:00:00+00:00',
         }]
         with patch.object(users_views, 'get_messages', return_value=fake_messages):
             res = self.client.get(reverse('group_chat', args=['group-abc']))

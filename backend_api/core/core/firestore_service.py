@@ -1,6 +1,6 @@
 from firebase_admin import firestore
 from core.firebase import initialize_firebase
-import random, string
+import random, string, datetime
 
 def get_db():
     initialize_firebase()
@@ -148,12 +148,17 @@ def get_messages(group_id: str, limit: int = 50) -> list:
     messages = []
     for d in docs:
         data = d.to_dict() or {}
+        # Serialize the Firestore Timestamp to ISO-8601 — raw Timestamp
+        # objects are not always JSON-serializable by DRF.
+        created_at = data.get('created_at')
+        if isinstance(created_at, datetime):
+            created_at = created_at.isoformat()
         messages.append({
             'id': d.id,
             'sender_uid': data.get('sender_uid'),
             'sender_name': data.get('sender_name') or 'Member',
             'text': data.get('text'),
-            'created_at': data.get('created_at'),
+            'created_at': created_at,
         })
     return messages
 
