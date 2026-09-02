@@ -32,12 +32,16 @@ interface GroupMessage {
   sender_uid: string | null;
   sender_name: string;
   created_at: number | string | null; // ISO string (REST) or ms/µs epoch (Firestore)
+  reactions: Record<string, string[]>; // emoji -> list of firebase uids
   local?: boolean; // true while this is an unsent optimistic echo
 }
 
-type RawMessage = Partial<Omit<GroupMessage, 'created_at'>> & {
+const ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢'];
+
+type RawMessage = Partial<Omit<GroupMessage, 'created_at' | 'reactions'>> & {
   id: string | number;
   created_at?: GroupMessage['created_at'];
+  reactions?: Record<string, string[]> | null;
 };
 
 // Firestore may deliver ms or µs depending on platform; REST delivers ISO strings.
@@ -72,6 +76,7 @@ function mapMessage(raw: RawMessage): GroupMessage {
     sender_uid: raw.sender_uid ?? null,
     sender_name: raw.sender_name || 'Member',
     created_at: raw.created_at ?? null,
+    reactions: raw.reactions ?? {},
     local: raw.local,
   };
 }
@@ -99,6 +104,7 @@ export default function GroupChatScreen() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [reactionTarget, setReactionTarget] = useState<GroupMessage | null>(null);
 
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
@@ -190,6 +196,7 @@ export default function GroupChatScreen() {
               sender_uid: data?.sender_uid,
               sender_name: data?.sender_name,
               created_at: createdAt,
+              reactions: data?.reactions,
             });
           });
 
@@ -224,6 +231,7 @@ export default function GroupChatScreen() {
       sender_uid: myUid,
       sender_name: currentUser?.first_name || 'Me',
       created_at: Date.now(),
+      reactions: {},
       local: true,
     };
     setMessages(prev => [...prev, tempMsg]);
@@ -247,6 +255,48 @@ export default function GroupChatScreen() {
     }
   };
 
+  const toggleReaction = async (msg: GroupMessage, emoji: string) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setReactionTarget(null);
+    if (!myUid || msg.local) return;
+
+    // Optimistically flip this emoji's entry for myUid.
+    const prevReactions = msg.reactions;
+    const nextReactions = { ...prevReactions };
+    const uids = nextReactions[emoji] || [];
+    nextReactions[emoji] = uids.includes(myUid)
+      ? uids.filter(u => u !== myUid)
+      : [...uids, myUid];
+    if (nextReactions[emoji].length === 0) delete nextReactions[emoji];
+
+    const applyReactions = (r: Record<string, string[]>) =>
+      setMessages(prev => prev.map(m => (m.id === msg.id ? { ...m, reactions: r } : m)));
+
+    applyReactions(nextReactions);
+
+    try {
+      const token = await getToken();
+      const res = await fetch(
+        `${API_BASE_URL}/users/groups/${groupId}/chat/${msg.id}/reactions/`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ emoji }),
+        },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        // Server map wins (resolves any concurrent toggles).
+        applyReactions(data.reactions || {});
+      } else {
+        applyReactions(prevReactions);
+      }
+    } catch (err) {
+      console.error('Failed to toggle reaction:', err);
+      applyReactions(prevReactions);
+    }
+  };
+
   const copyToClipboard = async (code: string) => {
     await Clipboard.setStringAsync(code);
     Haptics.selectionAsync();
@@ -259,13 +309,42 @@ export default function GroupChatScreen() {
     const isMe = msg.sender_uid != null && msg.sender_uid === myUid;
     const prev = messages[index - 1];
     const showSender = !isMe && (!prev || prev.sender_uid !== msg.sender_uid);
+    const reactionEntries = Object.entries(msg.reactions || {}).filter(([, uids]) => uids.length > 0);
+
+    const renderPills = () =>
+      reactionEntries.length > 0 && (
+        <View style={[styles.reactionRow, isMe && { justifyContent: 'flex-end' }]}>
+          {reactionEntries.map(([emoji, uids]) => {
+            const mine = myUid != null && uids.includes(myUid);
+            return (
+              <TouchableOpacity
+                key={emoji}
+                style={[styles.reactionPill, mine && styles.reactionPillMine]}
+                onPress={() => toggleReaction(msg, emoji)}
+                accessibilityLabel={`${emoji} reaction, ${uids.length} ${uids.length === 1 ? 'person' : 'people'}. Tap to toggle.`}
+              >
+                <Text style={styles.reactionPillEmoji}>{emoji}</Text>
+                <Text style={[styles.reactionPillCount, mine && { color: COLORS.purpleVibrant }]}>{uids.length}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      );
 
     return (
       <View key={msg.id} style={[styles.messageWrapper, isMe ? styles.messageMe : styles.messageOther]}>
         {showSender && <Text style={styles.senderName}>{msg.sender_name}</Text>}
-        <View style={[styles.messageBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
-          <Text style={[styles.messageText, isMe ? { color: 'white' } : { color: COLORS.textDark }]}>{msg.text}</Text>
-        </View>
+        <TouchableOpacity
+          activeOpacity={0.9}
+          onLongPress={() => setReactionTarget(msg)}
+          delayLongPress={300}
+          accessibilityLabel={`Message from ${isMe ? 'you' : msg.sender_name}. Long press to react.`}
+        >
+          <View style={[styles.messageBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
+            <Text style={[styles.messageText, isMe ? { color: 'white' } : { color: COLORS.textDark }]}>{msg.text}</Text>
+          </View>
+        </TouchableOpacity>
+        {renderPills()}
         <Text style={styles.messageTime}>{formatTime(msg.created_at)}</Text>
       </View>
     );
@@ -399,6 +478,36 @@ export default function GroupChatScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Reaction Picker */}
+      <Modal
+        visible={reactionTarget != null}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setReactionTarget(null)}
+      >
+        <TouchableOpacity
+          style={styles.reactionOverlay}
+          activeOpacity={1}
+          onPress={() => setReactionTarget(null)}
+        >
+          <View style={styles.reactionPicker}>
+            {ALLOWED_REACTIONS.map(emoji => {
+              const mine = reactionTarget?.reactions?.[emoji]?.includes(myUid ?? '');
+              return (
+                <TouchableOpacity
+                  key={emoji}
+                  style={[styles.reactionOption, mine && styles.reactionOptionMine]}
+                  onPress={() => reactionTarget && toggleReaction(reactionTarget, emoji)}
+                  accessibilityLabel={`React with ${emoji}`}
+                >
+                  <Text style={styles.reactionOptionEmoji}>{emoji}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -422,6 +531,18 @@ const styles = StyleSheet.create({
   bubbleOther: { backgroundColor: COLORS.surface, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: COLORS.border },
   messageText: { fontSize: 15, lineHeight: 22, fontFamily: FONTS.regular },
   messageTime: { fontSize: 10, color: COLORS.textMuted, marginTop: 4, fontFamily: FONTS.medium },
+
+  reactionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
+  reactionPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 3 },
+  reactionPillMine: { borderColor: COLORS.purpleVibrant, backgroundColor: 'rgba(139, 92, 246, 0.08)' },
+  reactionPillEmoji: { fontSize: 12 },
+  reactionPillCount: { fontSize: 11, color: COLORS.textMuted, marginLeft: 3, fontFamily: FONTS.medium },
+
+  reactionOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
+  reactionPicker: { flexDirection: 'row', backgroundColor: COLORS.surface, borderRadius: 28, padding: 8, borderWidth: 1, borderColor: COLORS.border, gap: 4, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8 },
+  reactionOption: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
+  reactionOptionMine: { backgroundColor: 'rgba(139, 92, 246, 0.15)' },
+  reactionOptionEmoji: { fontSize: 24 },
 
   actionMenuContainer: { backgroundColor: COLORS.surface, paddingVertical: 16, paddingHorizontal: 16, borderTopWidth: 1, borderTopColor: COLORS.border },
   actionRow: { flexDirection: 'row', justifyContent: 'flex-start', flexWrap: 'wrap', gap: 16 },
