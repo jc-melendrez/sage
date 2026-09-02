@@ -91,7 +91,7 @@ export default function RootLayout() {
         <Stack.Screen name="superadmin" options={{ headerShown: false }} />
         <Stack.Screen name="educator" options={{ headerShown: false }} />
         <Stack.Screen name="course" options={{ headerShown: false }} />
-        <Stack.Screen name="chat" options={{ headerShown: false, presentation: 'card' }} />
+        <Stack.Screen name="chat/[groupId]" options={{ headerShown: false, presentation: 'card' }} />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>
