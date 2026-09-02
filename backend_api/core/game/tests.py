@@ -101,6 +101,20 @@ class TeamModeGameTests(TestCase):
         player = room_ref.collection('players').document(str(self.host.id)).get().to_dict()
         self.assertIsNone(player['teamId'])
 
+    def test_create_room_stores_host_name(self):
+        # Rooms carry hostName so the dashboard's live-rooms list can show
+        # who is hosting without a separate user lookup.
+        quiz = self.make_quiz(self.host, 2)
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('create-game'), {
+            'quizId': quiz.id,
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        room_code = resp.json()['roomCode']
+        room = self.store.collection('gameRooms').document(room_code).get().to_dict()
+        self.assertEqual(room['hostId'], self.host.id)
+        self.assertEqual(room['hostName'], 'host')  # username fallback (no first/last name)
+
     def test_create_team_count_validation(self):
         self.client.force_authenticate(user=self.host)
         resp = self.client.post(reverse('create-game'), {

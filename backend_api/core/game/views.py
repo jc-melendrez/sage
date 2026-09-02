@@ -116,6 +116,7 @@ class CreateGameView(APIView):
         room_data = {
             'status': 'waiting',
             'hostId': request.user.id,
+            'hostName': get_display_name(request.user),
             'topic': topic,
             'questionCount': question_count,
             'timePerQuestion': time_per_question,
