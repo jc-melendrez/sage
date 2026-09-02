@@ -43,6 +43,7 @@ from core.firestore_service import (
     get_user_profile, get_badges,
     create_study_group, join_group_by_code, get_user_groups,
     send_message, get_messages, generate_join_code,
+    toggle_reaction, ALLOWED_REACTIONS,
 )
 
 
@@ -511,7 +512,10 @@ class GroupChatView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, group_id):
-        return Response(get_messages(group_id))
+        def resolve_names(uids):
+            users = User.objects.filter(firebase_uid__in=uids)
+            return {u.firebase_uid: (u.get_full_name() or u.username) for u in users}
+        return Response(get_messages(group_id, resolve_names=resolve_names))
 
     def post(self, request, group_id):
         text = request.data.get('text')
@@ -524,10 +528,34 @@ class GroupChatView(APIView):
             "sender_uid": request.user.firebase_uid,
             "sender_name": sender_name,
             "text": text,
+            "reactions": {},
             # Server timestamp resolves in Firestore moments later; give the
             # client an instant ISO timestamp to render with.
             "created_at": timezone.now().isoformat(),
         }, status=201)
+
+
+class GroupChatReactionView(APIView):
+    """
+    Toggle the current user's emoji reaction on a group message.
+    Body: { "emoji": "👍" }. Returns the message's updated reactions map.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, group_id, message_id):
+        emoji = request.data.get('emoji')
+        if emoji not in ALLOWED_REACTIONS:
+            return Response(
+                {"error": f"emoji must be one of: {', '.join(ALLOWED_REACTIONS)}"},
+                status=400,
+            )
+        if not request.user.firebase_uid:
+            return Response({"error": "Account has no linked Firebase profile"}, status=400)
+        try:
+            reactions = toggle_reaction(group_id, message_id, request.user.firebase_uid, emoji)
+        except LookupError:
+            return Response({"error": "Message not found"}, status=404)
+        return Response({"id": message_id, "reactions": reactions})
 
 
 # ---------- COURSES: each course has its own set of students ----------

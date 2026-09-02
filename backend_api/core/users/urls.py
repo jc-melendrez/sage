@@ -28,6 +28,7 @@ urlpatterns = [
     path('groups/join/', views.JoinGroupView.as_view(), name='join_group'),
     path('groups/mine/', views.MyGroupsView.as_view(), name='my_groups'),
     path('groups/<str:group_id>/chat/', views.GroupChatView.as_view(), name='group_chat'),
+    path('groups/<str:group_id>/chat/<str:message_id>/reactions/', views.GroupChatReactionView.as_view(), name='group_chat_reactions'),
 
     path('courses/create/', views.CreateCourseView.as_view(), name='create_course'),
     path('courses/mine/', views.MyCoursesView.as_view(), name='my_courses'),

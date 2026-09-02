@@ -126,19 +126,23 @@ def get_user_groups(firebase_uid: str) -> list:
 
 # ── GROUP MESSAGES ───────────────────────────────────────────────
 
+ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢']
+
+
 def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '') -> str:
     db = get_db()
     msg_ref = db.collection('studyGroups').document(group_id).collection('messages').add({
         'sender_uid': sender_uid,
         'sender_name': sender_name,
         'text': text,
+        'reactions': {},
         'created_at': firestore.SERVER_TIMESTAMP,
         'is_synced': True,
     })
     return msg_ref[1].id
 
 
-def get_messages(group_id: str, limit: int = 50) -> list:
+def get_messages(group_id: str, limit: int = 50, resolve_names: callable = None) -> list:
     db = get_db()
     docs = (db.collection('studyGroups').document(group_id)
             .collection('messages')
@@ -159,7 +163,50 @@ def get_messages(group_id: str, limit: int = 50) -> list:
             'sender_name': data.get('sender_name') or 'Member',
             'text': data.get('text'),
             'created_at': created_at,
+            'reactions': data.get('reactions') or {},
         })
+
+    # Legacy messages (pre sender_name) get real names resolved from Django.
+    if resolve_names:
+        unknown = {m['sender_uid'] for m in messages if m['sender_name'] == 'Member' and m['sender_uid']}
+        if unknown:
+            name_by_uid = resolve_names(unknown)
+            for m in messages:
+                if m['sender_name'] == 'Member' and m['sender_uid'] in name_by_uid:
+                    m['sender_name'] = name_by_uid[m['sender_uid']]
     return messages
+
+
+def get_message_reactions(group_id: str, message_id: str) -> dict | None:
+    db = get_db()
+    doc = (db.collection('studyGroups').document(group_id)
+           .collection('messages').document(message_id).get())
+    if not doc.exists:
+        return None
+    return doc.to_dict().get('reactions') or {}
+
+
+def toggle_reaction(group_id: str, message_id: str, firebase_uid: str, emoji: str) -> dict:
+    """
+    Add or remove `firebase_uid`'s reaction of `emoji` on a message.
+    Reactions are stored as { emoji: [uid, ...] }; an empty list deletes
+    the key. Returns the resulting reactions map.
+    """
+    reactions = get_message_reactions(group_id, message_id)
+    if reactions is None:
+        raise LookupError('Message not found')
+
+    db = get_db()
+    msg_ref = (db.collection('studyGroups').document(group_id)
+               .collection('messages').document(message_id))
+    if firebase_uid in (reactions.get(emoji) or []):
+        msg_ref.update({f'reactions.{emoji}': firestore.ArrayRemove([firebase_uid])})
+        reactions[emoji] = [u for u in reactions[emoji] if u != firebase_uid]
+        if not reactions[emoji]:
+            del reactions[emoji]
+    else:
+        msg_ref.update({f'reactions.{emoji}': firestore.ArrayUnion([firebase_uid])})
+        reactions[emoji] = (reactions.get(emoji) or []) + [firebase_uid]
+    return reactions
 
 

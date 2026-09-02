@@ -521,15 +521,75 @@ class GroupChatMessageTests(APITestCase):
             'sender_name': 'Member',  # legacy docs have no name
             'text': 'old message',
             'created_at': '2026-09-01T12:00:00+00:00',
+            'reactions': {'👍': ['some-other-uid']},
         }]
-        with patch.object(users_views, 'get_messages', return_value=fake_messages):
+        with patch.object(users_views, 'get_messages', return_value=fake_messages) as mock_get:
             res = self.client.get(reverse('group_chat', args=['group-abc']))
         self.assertEqual(res.status_code, 200)
         self.assertEqual(len(res.data), 1)
         self.assertEqual(res.data[0]['sender_uid'], 'fb-uid-chat')
         self.assertEqual(res.data[0]['text'], 'old message')
+        self.assertEqual(res.data[0]['reactions'], {'👍': ['some-other-uid']})
+        # View passes a legacy-name resolver into the service
+        mock_get.assert_called_once()
+        self.assertTrue(callable(mock_get.call_args.kwargs.get('resolve_names')))
 
     def test_me_includes_firebase_uid(self):
         res = self.client.get(reverse('current_user_profile'))
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data['firebase_uid'], 'fb-uid-chat')
+
+
+class GroupChatReactionTests(APITestCase):
+    """
+    POST /groups/<id>/chat/<msg_id>/reactions/ toggles the caller's emoji
+    reaction on a message and returns the updated reactions map.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='reactor', password='pass12345', role='student',
+            first_name='Re', last_name='Actor',
+            firebase_uid='fb-uid-react',
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def _post(self, emoji, message_id='msg-9', group_id='group-abc'):
+        return self.client.post(
+            reverse('group_chat_reactions', args=[group_id, message_id]),
+            {'emoji': emoji},
+            format='json',
+        )
+
+    def test_valid_emoji_toggles_on_and_returns_map(self):
+        with patch.object(users_views, 'toggle_reaction',
+                          return_value={'👍': ['fb-uid-react']}) as mock_toggle:
+            res = self._post('👍')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['id'], 'msg-9')
+        self.assertEqual(res.data['reactions'], {'👍': ['fb-uid-react']})
+        mock_toggle.assert_called_once_with('group-abc', 'msg-9', 'fb-uid-react', '👍')
+
+    def test_invalid_emoji_rejected(self):
+        res = self._post('🔥')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('error', res.data)
+
+    def test_missing_emoji_rejected(self):
+        res = self._post(None)
+        self.assertEqual(res.status_code, 400)
+
+    def test_unknown_message_returns_404(self):
+        with patch.object(users_views, 'toggle_reaction', side_effect=LookupError):
+            res = self._post('👍')
+        self.assertEqual(res.status_code, 404)
+
+    def test_requires_auth(self):
+        self.client.force_authenticate(user=None)
+        res = self.client.post(
+            reverse('group_chat_reactions', args=['group-abc', 'msg-9']),
+            {'emoji': '👍'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 401)
