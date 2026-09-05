@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
-  TextInput, ActivityIndicator, Alert, Platform, StatusBar, RefreshControl
+  TextInput, ActivityIndicator, Alert, Platform, StatusBar, RefreshControl,
+  KeyboardAvoidingView
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
@@ -588,7 +589,7 @@ export default function ActivitiesScreen() {
 
       {/* Create Group Modal */}
       <Modal visible={isCreateModalOpen} animationType="fade" transparent={true}>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Create Group</Text>
@@ -599,12 +600,12 @@ export default function ActivitiesScreen() {
               {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={styles.modalSubmitBtnText}>Create</Text>}
             </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* Join Group Modal */}
       <Modal visible={isJoinModalOpen} animationType="fade" transparent={true}>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Join Group</Text>
@@ -615,12 +616,12 @@ export default function ActivitiesScreen() {
               {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={styles.modalSubmitBtnText}>Join</Text>}
             </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* Join Class Modal (educator courses) */}
       <Modal visible={isJoinCourseModalOpen} animationType="fade" transparent={true}>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Join Class</Text>
@@ -639,7 +640,7 @@ export default function ActivitiesScreen() {
               {isJoiningClass ? <ActivityIndicator color="white" /> : <Text style={styles.modalSubmitBtnText}>Join Class</Text>}
             </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* TAKE QUIZ MODAL */}
@@ -722,7 +723,7 @@ export default function ActivitiesScreen() {
         visible={isGenerateQuizModalOpen}
         onRequestClose={() => setIsGenerateQuizModalOpen(false)}
       >
-        <View style={styles.quizGenModalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.quizGenModalOverlay}>
           <View style={styles.quizGenModalContent}>
             <View style={styles.quizGenModalHeader}>
               <Text style={styles.quizGenModalTitle}>Quiz Generator</Text>
@@ -841,7 +842,7 @@ export default function ActivitiesScreen() {
               </ScrollView>
             )}
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* FAB — contextual per tab */}

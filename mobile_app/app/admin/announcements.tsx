@@ -1,4 +1,4 @@
-import { useState } from 'react';
+﻿import { useState } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal, TextInput, Alert, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AdminHeader from '@/components/admin/AdminHeader';
@@ -20,7 +20,7 @@ interface ApprovalRequest {
 }
 
 const INITIAL_ANNOUNCEMENTS: Announcement[] = [
-  { id: 1, title: 'Midterm Schedule Released', body: 'Midterm exams will run from Oct 20–24. Check your course pages for room assignments.', audience: 'All Students', date: 'Jul 10' },
+  { id: 1, title: 'Midterm Schedule Released', body: 'Midterm exams will run from Oct 20â€“24. Check your course pages for room assignments.', audience: 'All Students', date: 'Jul 10' },
   { id: 2, title: 'New Study Group Feature', body: 'Students can now create study groups directly from the Activities tab.', audience: 'All Users', date: 'Jul 6' },
 ];
 
@@ -70,7 +70,7 @@ export default function AdminAnnouncements() {
         {approvals.length === 0 ? (
           <View style={styles.emptyState}>
             <Ionicons name="checkmark-done-outline" size={26} color={COLORS.success} />
-            <Text style={styles.emptyText}>All caught up — no pending requests.</Text>
+            <Text style={styles.emptyText}>All caught up â€” no pending requests.</Text>
           </View>
         ) : (
           <View style={{ gap: 12 }}>
@@ -113,7 +113,7 @@ export default function AdminAnnouncements() {
       </ScrollView>
 
       <Modal visible={modalVisible} animationType="slide" transparent onRequestClose={() => setModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>New Announcement</Text>

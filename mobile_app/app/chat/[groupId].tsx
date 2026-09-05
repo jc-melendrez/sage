@@ -361,7 +361,9 @@ export default function GroupChatScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
+      contentContainerStyle={{ flex: 1 }}
     >
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} />
 

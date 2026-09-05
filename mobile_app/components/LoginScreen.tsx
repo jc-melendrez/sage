@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+﻿import React, { useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { useRouter } from 'expo-router';
 import { 
@@ -184,7 +184,7 @@ export default function LoginScreen() {
       <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
       <SafeAreaView style={{ flex: 1 }}>
         <KeyboardAvoidingView 
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={{ flex: 1 }}
         >
           <View style={styles.content}>
@@ -206,7 +206,7 @@ export default function LoginScreen() {
               </Text>
             </View>
 
-            {/* Card – now with marginTop to push it lower */}
+            {/* Card â€“ now with marginTop to push it lower */}
             <View style={styles.cardWrapper}>
               <View style={styles.card}>
                 {step === 'otp' ? (

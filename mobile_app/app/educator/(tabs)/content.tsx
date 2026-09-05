@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS, RADIUS, STATUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
@@ -60,6 +60,7 @@ export default function ContentScreen() {
   const filteredAssignments = assignFilter === 'all' ? ASSIGNMENTS : ASSIGNMENTS.filter((a) => a.status === assignFilter);
 
   return (
+    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
     <View style={styles.container}>
       <EducatorHeader
         title="Content"
@@ -262,6 +263,7 @@ export default function ContentScreen() {
         )}
       </ScrollView>
     </View>
+    </KeyboardAvoidingView>
   );
 }
 

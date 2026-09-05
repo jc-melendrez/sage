@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS } from '@/constants/educatorTheme';
@@ -32,6 +32,7 @@ export default function ClassesScreen() {
   };
 
   return (
+    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
     <View style={styles.container}>
       <EducatorHeader
         title="My Classes"
@@ -117,6 +118,7 @@ export default function ClassesScreen() {
         )}
       </ScrollView>
     </View>
+    </KeyboardAvoidingView>
   );
 }
 

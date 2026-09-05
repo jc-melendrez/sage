@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+﻿import { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Animated
@@ -69,7 +69,7 @@ export default function HostGameScreen() {
   const [loading, setLoading] = useState(false);
   const [segWidth, setSegWidth] = useState(0);
 
-  /* ── UI-only animation refs ── */
+  /* â”€â”€ UI-only animation refs â”€â”€ */
   const headAnim = useRef(new Animated.Value(0)).current;
   const step1Anim = useRef(new Animated.Value(0)).current;
   const step2Anim = useRef(new Animated.Value(0)).current;
@@ -182,7 +182,7 @@ export default function HostGameScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <LinearGradient
         colors={[COLORS.bg, COLORS.bgSecondary]}
@@ -192,7 +192,7 @@ export default function HostGameScreen() {
       >
         <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
 
-        {/* ── header ── */}
+        {/* â”€â”€ header â”€â”€ */}
         <View style={styles.header}>
           <TouchableOpacity style={styles.backChip} onPress={() => router.back()} activeOpacity={0.7}>
             <Ionicons name="arrow-back" size={18} color={COLORS.purpleLight} />
@@ -205,7 +205,7 @@ export default function HostGameScreen() {
 
         <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
           <View>
-            {/* ── form header ── */}
+            {/* â”€â”€ form header â”€â”€ */}
             <Animated.View style={{ opacity: headAnim, transform: [{ translateY: headAnim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] }) }] }}>
               <View style={styles.formHeader}>
                 <View style={styles.formTitleCol}>
@@ -215,7 +215,7 @@ export default function HostGameScreen() {
               </View>
             </Animated.View>
 
-            {/* ── STEP 1 ── */}
+            {/* â”€â”€ STEP 1 â”€â”€ */}
             <Animated.View style={{ opacity: step1Anim, transform: [{ translateY: step1Anim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] }) }] }}>
             <View style={styles.section}>
               <View style={styles.sectionHead}>
@@ -324,7 +324,7 @@ export default function HostGameScreen() {
                           >
                             <View style={styles.ddItemBody}>
                               <Text style={styles.ddItemTitle}>{q.title}</Text>
-                              <Text style={styles.ddItemMeta}>{q.questions?.length || 0} Qs · {q.quiz_type}</Text>
+                              <Text style={styles.ddItemMeta}>{q.questions?.length || 0} Qs Â· {q.quiz_type}</Text>
                             </View>
                             {selectedQuiz?.id === q.id && (
                               <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />
@@ -339,7 +339,7 @@ export default function HostGameScreen() {
             </View>
             </Animated.View>
 
-            {/* ── STEP 2 ── */}
+            {/* â”€â”€ STEP 2 â”€â”€ */}
             <Animated.View style={{ opacity: step2Anim, transform: [{ translateY: step2Anim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] }) }] }}>
             <View style={styles.section}>
               <View style={styles.sectionHead}>
@@ -433,7 +433,7 @@ export default function HostGameScreen() {
             </View>
             </Animated.View>
 
-            {/* ── generate CTA (cyan = proceed) ── */}
+            {/* â”€â”€ generate CTA (cyan = proceed) â”€â”€ */}
             <Animated.View style={{ opacity: ctaEnterAnim, transform: [{ translateY: ctaEnterAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }, { scale: ctaScale }] }}>
               <TouchableOpacity
                 style={[styles.ctaWrap, createDisabled && styles.ctaDisabled]}
@@ -476,7 +476,7 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   fullScreen: { flex: 1 },
 
-  /* ── header ── */
+  /* â”€â”€ header â”€â”€ */
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -510,7 +510,7 @@ const styles = StyleSheet.create({
 
   scrollContent: { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 40 },
 
-  /* ── form header ── */
+  /* â”€â”€ form header â”€â”€ */
   formHeader: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingBottom: 24 },
   formTitleCol: { flex: 1 },
   formKicker: {
@@ -522,7 +522,7 @@ const styles = StyleSheet.create({
   },
   formTitle: { fontSize: 24, fontFamily: FONTS.bold, color: COLORS.textPrimary },
 
-  /* ── sections ── */
+  /* â”€â”€ sections â”€â”€ */
   section: { marginBottom: 24 },
   sectionHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 14 },
   stepTab: {
@@ -536,7 +536,7 @@ const styles = StyleSheet.create({
   stepTabText: { color: COLORS.accent, fontSize: 11, fontFamily: FONTS.extraBold, letterSpacing: 1 },
   sectionTitle: { fontSize: 16, fontFamily: FONTS.extraBold, color: COLORS.textPrimary, letterSpacing: 0.3 },
 
-  /* ── segmented control ── */
+  /* â”€â”€ segmented control â”€â”€ */
   segment: {
     flexDirection: 'row',
     backgroundColor: COLORS.surface,
@@ -572,7 +572,7 @@ const styles = StyleSheet.create({
   segmentBtnText: { fontSize: 13, fontFamily: FONTS.semiBold, color: COLORS.textMuted },
   segmentBtnTextActive: { color: '#fff', fontFamily: FONTS.bold },
 
-  /* ── upload card ── */
+  /* â”€â”€ upload card â”€â”€ */
   uploadCard: {
     backgroundColor: COLORS.cardBg,
     borderRadius: 24,
@@ -629,7 +629,7 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 24,
   },
 
-  /* ── dropdown ── */
+  /* â”€â”€ dropdown â”€â”€ */
   ddTrigger: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -678,7 +678,7 @@ const styles = StyleSheet.create({
   ddItemTitle: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.textPrimary, marginBottom: 3 },
   ddItemMeta: { fontSize: 11, fontFamily: FONTS.medium, color: COLORS.textMuted },
 
-  /* ── badges ── */
+  /* â”€â”€ badges â”€â”€ */
   badgeRow: { flexDirection: 'row', gap: 8, marginTop: 10 },
   badge: {
     backgroundColor: 'rgba(124,58,237,0.12)',
@@ -690,7 +690,7 @@ const styles = StyleSheet.create({
   },
   badgeText: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.purpleLight },
 
-  /* ── settings card ── */
+  /* â”€â”€ settings card â”€â”€ */
   settingsCard: {
     backgroundColor: COLORS.cardBg,
     borderRadius: 24,
@@ -754,7 +754,7 @@ const styles = StyleSheet.create({
   teamCountChipText: { fontSize: 14, fontFamily: FONTS.bold, color: COLORS.textMuted },
   teamCountChipTextActive: { color: '#FBBF24' },
 
-  /* ── CTA ── */
+  /* â”€â”€ CTA â”€â”€ */
   ctaWrap: {
     borderRadius: 16,
     overflow: 'hidden',

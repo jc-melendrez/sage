@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar, KeyboardAvoidingView } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Ionicons } from '@expo/vector-icons';
@@ -277,6 +277,11 @@ export default function AIAssistantScreen() {
   };
 
   return (
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      contentContainerStyle={{ flex: 1 }}
+    >
     <LinearGradient
       colors={[COLORS.bgSecondary, COLORS.bg]}
       start={{ x: 0, y: 0 }}
@@ -544,6 +549,7 @@ export default function AIAssistantScreen() {
         </View>
       </View>
     </LinearGradient>
+    </KeyboardAvoidingView>
   );
 }
 

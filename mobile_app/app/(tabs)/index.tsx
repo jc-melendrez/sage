@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { View, StyleSheet, Modal, Text, TouchableOpacity, TextInput, ScrollView, Platform, Alert, ActivityIndicator } from 'react-native';
+import { View, StyleSheet, Modal, Text, TouchableOpacity, TextInput, ScrollView, Platform, Alert, ActivityIndicator, KeyboardAvoidingView } from 'react-native';
 import LoginScreen from '../../components/LoginScreen';
 import Dashboard from '../../components/Dashboard';
 import { Colors } from '@/constants/theme';
@@ -132,7 +132,7 @@ export default function HomeScreen() {
         visible={isModalVisible}
         onRequestClose={() => setIsModalVisible(false)}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Quiz Generator</Text>
@@ -253,7 +253,7 @@ export default function HomeScreen() {
             </ScrollView>
             )}
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, Modal, ActivityIndicator } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, Modal, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 
@@ -179,6 +179,7 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
   };
 
   return (
+    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
     <View style={styles.container}>
       {/* Modern Gradient Header */}
       <LinearGradient colors={['#6D28D9', '#4F46E5']} style={styles.header}>
@@ -289,6 +290,7 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
         </View>
       </Modal>
     </View>
+    </KeyboardAvoidingView>
   );
 };
 

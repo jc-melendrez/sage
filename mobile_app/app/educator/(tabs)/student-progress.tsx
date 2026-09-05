@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { View, StyleSheet, ScrollView, TextInput, TouchableOpacity } from 'react-native';
+import { View, StyleSheet, ScrollView, TextInput, TouchableOpacity, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS } from '@/constants/educatorTheme';
@@ -35,6 +35,7 @@ export default function StudentProgressScreen() {
   }, [query, filter]);
 
   return (
+    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
     <View style={styles.container}>
       <EducatorHeader title="Students" subtitle={`${CLASS_LABEL} · ${ROSTER.length} students`} />
 
@@ -96,6 +97,7 @@ export default function StudentProgressScreen() {
         </View>
       </ScrollView>
     </View>
+    </KeyboardAvoidingView>
   );
 }
 

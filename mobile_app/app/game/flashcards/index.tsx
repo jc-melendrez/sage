@@ -10,6 +10,7 @@ import {
   TextInput,
   Modal,
   Platform,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -151,6 +152,7 @@ export default function FlashcardsHome() {
   const totalDue = decks.reduce((sum, d) => sum + (summaries[d.id]?.dueCount ?? 0), 0);
 
   return (
+    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
     <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} translucent={false} />
 
@@ -470,6 +472,7 @@ export default function FlashcardsHome() {
         </View>
       </Modal>
     </View>
+    </KeyboardAvoidingView>
   );
 }
 

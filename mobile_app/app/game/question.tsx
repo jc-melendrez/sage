@@ -11,6 +11,7 @@ import {
   Dimensions,
   ActivityIndicator,
   Platform,
+  KeyboardAvoidingView,
 } from 'react-native';
 // ✨ NEW: Reanimated imports for timer shake/pulse
 import Animated, {
@@ -652,7 +653,11 @@ export default function QuestionScreen() {
      RENDER
      ═══════════════════════════════════════════════════════════ */
   return (
-    <View style={styles.container}>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
+      <View style={styles.container}>
       {/* ── frozen screen tint ── */}
       {isFrozen && <View style={styles.frozenTint} />}
 
@@ -1068,7 +1073,8 @@ export default function QuestionScreen() {
       )}
 
       <View style={styles.safeBottom} />
-    </View>
+      </View>
+    </KeyboardAvoidingView>
   );
 }
 

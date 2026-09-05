@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+﻿import { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Animated
@@ -72,7 +72,7 @@ export default function ClassicGameSetupScreen() {
   const [selectedFile, setSelectedFile] = useState<{ name: string; uri: string; mimeType: string } | null>(null);
   const [segWidth, setSegWidth] = useState(0);
 
-  /* ── original data effect (unchanged) ── */
+  /* â”€â”€ original data effect (unchanged) â”€â”€ */
   useEffect(() => {
     if (mode !== 'create') return;
     setSelectedQuiz(null);
@@ -92,11 +92,11 @@ export default function ClassicGameSetupScreen() {
     fetchQuizzes();
   }, [mode]);
 
-  /* ── press-scale refs (original) ── */
+  /* â”€â”€ press-scale refs (original) â”€â”€ */
   const createCardScale = useRef(new Animated.Value(1)).current;
   const joinCardScale = useRef(new Animated.Value(1)).current;
 
-  /* ── new UI-only refs ── */
+  /* â”€â”€ new UI-only refs â”€â”€ */
   const codeRefs = useRef<any[]>([]);
   const heroAnim = useRef(new Animated.Value(0)).current;
   const createCardAnim = useRef(new Animated.Value(0)).current;
@@ -113,7 +113,7 @@ export default function ClassicGameSetupScreen() {
     Animated.spring(anim, { toValue: 1, friction: 6, tension: 100, useNativeDriver: true }).start();
   };
 
-  /* ── entrance stagger + live pulse + segment slide (UI only) ── */
+  /* â”€â”€ entrance stagger + live pulse + segment slide (UI only) â”€â”€ */
   useEffect(() => {
     if (mode === 'home') {
       heroAnim.setValue(0); createCardAnim.setValue(0); joinCardAnim.setValue(0); stripAnim.setValue(0);
@@ -142,7 +142,7 @@ export default function ClassicGameSetupScreen() {
     Animated.spring(segmentSlide, { toValue: useFileUpload ? 1 : 0, friction: 8, tension: 80, useNativeDriver: true }).start();
   }, [useFileUpload]);
 
-  /* ── join-code box handlers (feed the SAME joinCode state) ── */
+  /* â”€â”€ join-code box handlers (feed the SAME joinCode state) â”€â”€ */
   const handleCodeChange = (text: string, index: number) => {
     const char = text.slice(-1).toUpperCase();
     const slots = Array.from({ length: 6 }, (_, i) => joinCode[i] || '');
@@ -159,7 +159,7 @@ export default function ClassicGameSetupScreen() {
     }
   };
 
-  /* ── original handlers (unchanged) ── */
+  /* â”€â”€ original handlers (unchanged) â”€â”€ */
   const pickDocument = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -251,9 +251,9 @@ export default function ClassicGameSetupScreen() {
   const createDisabled = (!selectedQuiz && !selectedFile) || loading;
   const joinDisabled = !joinCode.trim() || loading;
 
-  /* ═══════════════════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      HOME
-     ═══════════════════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   if (mode === 'home') {
     return (
       <LinearGradient
@@ -264,7 +264,7 @@ export default function ClassicGameSetupScreen() {
       >
         <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
 
-        {/* ── header ── */}
+        {/* â”€â”€ header â”€â”€ */}
         <View style={styles.header}>
           <TouchableOpacity style={styles.backChip} onPress={() => router.back()} activeOpacity={0.7}>
             <Ionicons name="arrow-back" size={18} color={COLORS.purpleLight} />
@@ -276,7 +276,7 @@ export default function ClassicGameSetupScreen() {
         </View>
 
         <ScrollView contentContainerStyle={styles.homeScroll} showsVerticalScrollIndicator={false}>
-          {/* ── hero deck (stacked flash cards) ── */}
+          {/* â”€â”€ hero deck (stacked flash cards) â”€â”€ */}
           <Animated.View
             style={[styles.heroDeck, {
               opacity: heroAnim,
@@ -302,7 +302,7 @@ export default function ClassicGameSetupScreen() {
               <View style={styles.heroBody}>
                 <View style={styles.heroTextCol}>
                   <Text style={styles.heroTitle}>Quiz{'\n'}Battle</Text>
-                  <Text style={styles.heroSub}>Host a room or jump into one — answer head-to-head in real time.</Text>
+                  <Text style={styles.heroSub}>Host a room or jump into one â€” answer head-to-head in real time.</Text>
                 </View>
                 <View style={styles.heroTrophyWrap}>
                   <View style={styles.heroTrophyGlow} />
@@ -319,7 +319,7 @@ export default function ClassicGameSetupScreen() {
             </View>
           </Animated.View>
 
-          {/* ── HOST card ── */}
+          {/* â”€â”€ HOST card â”€â”€ */}
           <Animated.View style={{ opacity: createCardAnim, transform: [{ translateY: createCardAnim.interpolate({ inputRange: [0, 1], outputRange: [26, 0] }) }] }}>
             <Animated.View style={{ transform: [{ scale: createCardScale }] }}>
               <TouchableOpacity
@@ -354,7 +354,7 @@ export default function ClassicGameSetupScreen() {
             </Animated.View>
           </Animated.View>
 
-          {/* ── JOIN card ── */}
+          {/* â”€â”€ JOIN card â”€â”€ */}
           <Animated.View style={{ opacity: joinCardAnim, transform: [{ translateY: joinCardAnim.interpolate({ inputRange: [0, 1], outputRange: [26, 0] }) }] }}>
             <Animated.View style={{ transform: [{ scale: joinCardScale }] }}>
               <TouchableOpacity
@@ -384,7 +384,7 @@ export default function ClassicGameSetupScreen() {
             </Animated.View>
           </Animated.View>
 
-          {/* ── feature strip (single bar, not three cards) ── */}
+          {/* â”€â”€ feature strip (single bar, not three cards) â”€â”€ */}
           <Animated.View
             style={[styles.featureStrip, {
               opacity: stripAnim,
@@ -411,13 +411,13 @@ export default function ClassicGameSetupScreen() {
     );
   }
 
-  /* ═══════════════════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      CREATE / JOIN
-     ═══════════════════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <LinearGradient
         colors={[COLORS.bg, COLORS.bgSecondary]}
@@ -429,7 +429,7 @@ export default function ClassicGameSetupScreen() {
 
         <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
           <Animated.View style={{ opacity: formAnim, transform: [{ translateY: formAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }] }}>
-            {/* ── form header ── */}
+            {/* â”€â”€ form header â”€â”€ */}
             <View style={styles.formHeader}>
               <TouchableOpacity style={styles.backCircle} onPress={() => (groupMode ? router.back() : setMode('home'))} activeOpacity={0.7}>
                 <Ionicons name="arrow-back" size={18} color={COLORS.purpleLight} />
@@ -442,7 +442,7 @@ export default function ClassicGameSetupScreen() {
 
             {mode === 'create' ? (
               <>
-                {/* ── STEP 1 ── */}
+                {/* â”€â”€ STEP 1 â”€â”€ */}
                 <View style={styles.section}>
                   <View style={styles.sectionHead}>
                     <View style={styles.stepTab}><Text style={styles.stepTabText}>S1</Text></View>
@@ -542,7 +542,7 @@ export default function ClassicGameSetupScreen() {
                               >
                                 <View style={styles.ddItemBody}>
                                   <Text style={styles.ddItemTitle}>{q.title}</Text>
-                                  <Text style={styles.ddItemMeta}>{q.questions?.length || 0} Qs · {q.quiz_type}</Text>
+                                  <Text style={styles.ddItemMeta}>{q.questions?.length || 0} Qs Â· {q.quiz_type}</Text>
                                 </View>
                                 {selectedQuiz?.id === q.id && (
                                   <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />
@@ -556,7 +556,7 @@ export default function ClassicGameSetupScreen() {
                   )}
                 </View>
 
-                {/* ── STEP 2 ── */}
+                {/* â”€â”€ STEP 2 â”€â”€ */}
                 <View style={styles.section}>
                   <View style={styles.sectionHead}>
                     <View style={styles.stepTab}><Text style={styles.stepTabText}>S2</Text></View>
@@ -654,7 +654,7 @@ export default function ClassicGameSetupScreen() {
                   </View>
                 </View>
 
-                {/* ── generate CTA (cyan = proceed) ── */}
+                {/* â”€â”€ generate CTA (cyan = proceed) â”€â”€ */}
                 <TouchableOpacity
                   style={[styles.ctaWrap, createDisabled && styles.ctaDisabled]}
                   onPress={handleCreate}
@@ -685,7 +685,7 @@ export default function ClassicGameSetupScreen() {
               </>
             ) : (
               <>
-                {/* ── JOIN CODE ── */}
+                {/* â”€â”€ JOIN CODE â”€â”€ */}
                 <View style={styles.section}>
                   <View style={styles.codeCard}>
                     <View style={styles.cardEdgeSoft} />
@@ -695,7 +695,7 @@ export default function ClassicGameSetupScreen() {
                     </View>
                     <Text style={styles.codeLabel}>Enter Room Code</Text>
 
-                    {/* 6 character boxes — same DNA as the identification answer boxes */}
+                    {/* 6 character boxes â€” same DNA as the identification answer boxes */}
                     <View style={styles.codeBoxes}>
                       {Array.from({ length: 6 }).map((_, i) => (
                         <TextInput
@@ -716,7 +716,7 @@ export default function ClassicGameSetupScreen() {
                   </View>
                 </View>
 
-                {/* ── join CTA ── */}
+                {/* â”€â”€ join CTA â”€â”€ */}
                 <TouchableOpacity
                   style={[styles.ctaWrap, joinDisabled && styles.ctaDisabled]}
                   onPress={handleJoin}
@@ -753,14 +753,14 @@ export default function ClassicGameSetupScreen() {
   );
 }
 
-/* ═══════════════════════════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    STYLES
-   ═══════════════════════════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 const styles = StyleSheet.create({
   container: { flex: 1 },
   fullScreen: { flex: 1 },
 
-  /* ── header ── */
+  /* â”€â”€ header â”€â”€ */
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -794,7 +794,7 @@ const styles = StyleSheet.create({
 
   homeScroll: { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 40 },
 
-  /* ── hero deck ── */
+  /* â”€â”€ hero deck â”€â”€ */
   heroDeck: { position: 'relative', marginBottom: 26 },
   heroCardBack2: {
     position: 'absolute', top: 18, left: 18, right: 18, bottom: -18,
@@ -857,7 +857,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.5, shadowRadius: 14, elevation: 8,
   },
 
-  /* ── action cards ── */
+  /* â”€â”€ action cards â”€â”€ */
   actionWrap: {
     borderRadius: 24, overflow: 'hidden', marginBottom: 16,
     shadowColor: '#000', shadowOffset: { width: 0, height: 12 },
@@ -906,7 +906,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center', alignItems: 'center',
   },
 
-  /* ── feature strip ── */
+  /* â”€â”€ feature strip â”€â”€ */
   featureStrip: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: COLORS.surface, borderWidth: 1, borderColor: 'rgba(127,119,221,0.15)',
@@ -916,7 +916,7 @@ const styles = StyleSheet.create({
   featureItemText: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.textMuted },
   featureDivider: { width: 1, height: 16, backgroundColor: 'rgba(127,119,221,0.15)' },
 
-  /* ── form header ── */
+  /* â”€â”€ form header â”€â”€ */
   formHeader: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingBottom: 24 },
   backCircle: {
     width: 38, height: 38, borderRadius: 19,
@@ -932,7 +932,7 @@ const styles = StyleSheet.create({
 
   scrollContent: { paddingHorizontal: 24, paddingTop: Platform.OS === 'ios' ? 60 : 40, paddingBottom: 40 },
 
-  /* ── sections ── */
+  /* â”€â”€ sections â”€â”€ */
   section: { marginBottom: 24 },
   sectionHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 14 },
   stepTab: {
@@ -942,7 +942,7 @@ const styles = StyleSheet.create({
   stepTabText: { color: COLORS.accent, fontSize: 11, fontFamily: FONTS.extraBold, letterSpacing: 1 },
   sectionTitle: { fontSize: 16, fontFamily: FONTS.extraBold, color: COLORS.textPrimary, letterSpacing: 0.3 },
 
-  /* ── segmented control ── */
+  /* â”€â”€ segmented control â”€â”€ */
   segment: {
     flexDirection: 'row', backgroundColor: COLORS.surface,
     borderRadius: 16, padding: 4, marginBottom: 14,
@@ -962,7 +962,7 @@ const styles = StyleSheet.create({
   segmentBtnText: { fontSize: 13, fontFamily: FONTS.semiBold, color: COLORS.textMuted },
   segmentBtnTextActive: { color: '#fff', fontFamily: FONTS.bold },
 
-  /* ── upload card ── */
+  /* â”€â”€ upload card â”€â”€ */
   uploadCard: {
     backgroundColor: COLORS.cardBg, borderRadius: 24, padding: 28,
     alignItems: 'center', borderWidth: 2, borderColor: COLORS.cardBorder,
@@ -986,7 +986,7 @@ const styles = StyleSheet.create({
   uploadFileName: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.success, marginBottom: 4, textAlign: 'center' },
   uploadChangeHint: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted },
 
-  /* ── dropdown ── */
+  /* â”€â”€ dropdown â”€â”€ */
   ddTrigger: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: COLORS.cardBg, borderRadius: 16, padding: 14,
@@ -1014,7 +1014,7 @@ const styles = StyleSheet.create({
   ddItemTitle: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.textPrimary, marginBottom: 3 },
   ddItemMeta: { fontSize: 11, fontFamily: FONTS.medium, color: COLORS.textMuted },
 
-  /* ── badges ── */
+  /* â”€â”€ badges â”€â”€ */
   badgeRow: { flexDirection: 'row', gap: 8, marginTop: 10 },
   badge: {
     backgroundColor: 'rgba(124,58,237,0.12)', borderRadius: 8,
@@ -1023,7 +1023,7 @@ const styles = StyleSheet.create({
   },
   badgeText: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.purpleLight },
 
-  /* ── settings card ── */
+  /* â”€â”€ settings card â”€â”€ */
   settingsCard: {
     backgroundColor: COLORS.cardBg, borderRadius: 24, padding: 18,
     borderWidth: 1, borderColor: COLORS.cardBorder,
@@ -1071,7 +1071,7 @@ const styles = StyleSheet.create({
   teamCountChipText: { fontSize: 14, fontFamily: FONTS.bold, color: COLORS.textMuted },
   teamCountChipTextActive: { color: '#FBBF24' },
 
-  /* ── join code card ── */
+  /* â”€â”€ join code card â”€â”€ */
   codeCard: {
     backgroundColor: COLORS.cardBg, borderRadius: 24, padding: 26,
     alignItems: 'center', borderWidth: 1, borderColor: COLORS.cardBorder,
@@ -1101,7 +1101,7 @@ const styles = StyleSheet.create({
   codeBoxFilled: { borderColor: COLORS.accent, backgroundColor: 'rgba(34,211,238,0.08)' },
   codeHint: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, textAlign: 'center' },
 
-  /* ── CTA ── */
+  /* â”€â”€ CTA â”€â”€ */
   ctaWrap: {
     borderRadius: 16, overflow: 'hidden',
     shadowColor: COLORS.accent, shadowOffset: { width: 0, height: 6 },

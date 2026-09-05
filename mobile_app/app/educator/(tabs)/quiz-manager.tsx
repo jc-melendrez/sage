@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, Modal, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -327,7 +327,7 @@ export default function QuizManagerScreen() {
     <View style={styles.container}>
       <EducatorHeader
         title="Quiz & Content"
-        subtitle={`${quizzes.length} quizzes · AI generated`}
+        subtitle={`${quizzes.length} quizzes Â· AI generated`}
         rightIcon={creating ? 'close' : 'add'}
         onRightPress={() => {
           setCreating(!creating);
@@ -369,7 +369,7 @@ export default function QuizManagerScreen() {
                     <View style={{ flex: 1 }}>
                       <Text style={styles.quizCardTitle}>{q.title}</Text>
                       <Text style={styles.quizCardMeta}>
-                        {q.questions?.length || 0} questions · {q.quiz_type} · {new Date(q.created_at).toLocaleDateString()}
+                        {q.questions?.length || 0} questions Â· {q.quiz_type} Â· {new Date(q.created_at).toLocaleDateString()}
                       </Text>
                     </View>
                     <Pill label="AI Generated" color={COLORS.purpleVibrant} icon="sparkles" />
@@ -406,7 +406,7 @@ export default function QuizManagerScreen() {
           setIsTypeDropdownOpen(false);
         }}
       >
-        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           <View style={styles.modalSheet}>
             <View style={styles.sheetHeader}>
               <Text style={styles.sheetTitle}>New Quiz</Text>
@@ -446,7 +446,7 @@ export default function QuizManagerScreen() {
                     </Text>
                     <Text style={styles.materialMeta}>
                       {selectedFile
-                        ? `${selectedFile.name.split('.').pop()?.toUpperCase() || 'FILE'} • ${selectedFile.size ? (selectedFile.size / (1024 * 1024)).toFixed(1) + ' MB' : 'Unknown size'}`
+                        ? `${selectedFile.name.split('.').pop()?.toUpperCase() || 'FILE'} â€¢ ${selectedFile.size ? (selectedFile.size / (1024 * 1024)).toFixed(1) + ' MB' : 'Unknown size'}`
                         : 'Select a PDF or text file'}
                     </Text>
                   </View>
@@ -535,7 +535,7 @@ export default function QuizManagerScreen() {
               <View style={{ flex: 1, paddingRight: 16 }}>
                 <Text style={styles.sheetTitle} numberOfLines={1}>{previewQuiz?.title}</Text>
                 <Text style={styles.previewMeta}>
-                  {previewQuiz?.questions?.length || 0} questions · {previewQuiz?.quiz_type}
+                  {previewQuiz?.questions?.length || 0} questions Â· {previewQuiz?.quiz_type}
                 </Text>
               </View>
               <TouchableOpacity onPress={() => setPreviewQuiz(null)}>
@@ -580,7 +580,7 @@ export default function QuizManagerScreen() {
         animationType="slide"
         onRequestClose={closeEditor}
       >
-        <KeyboardAvoidingView style={styles.editorRoot} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <KeyboardAvoidingView style={styles.editorRoot} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           <View style={styles.editorHeader}>
             <TouchableOpacity onPress={closeEditor} style={styles.editorHeaderBtn} disabled={isSaving}>
               <Ionicons name="close" size={24} color={COLORS.textPrimary} />
@@ -607,7 +607,7 @@ export default function QuizManagerScreen() {
                   placeholderTextColor={COLORS.textMuted}
                 />
                 <Text style={styles.editorMeta}>
-                  {draft.questions.length} questions · {draft.quiz_type} · Tap an option to mark the correct answer
+                  {draft.questions.length} questions Â· {draft.quiz_type} Â· Tap an option to mark the correct answer
                 </Text>
 
                 {draft.questions.map((question, qIndex) => (
