@@ -28,6 +28,7 @@ import { API_BASE_URL } from '@/config/api';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
 import { getCurrentUser, getToken, logout } from '@/services/authService';
+import { dailyCheckIn } from '@/services/gamificationService';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -151,7 +152,17 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
     },
   });
 
+  const streakCount = user?.streak || 0;
+
   const featurePages = [
+    {
+      id: 'streak',
+      icon: 'flame',
+      title: 'Day Streak',
+      description: `${streakCount} days ${streakCount > 0 ? '– keep it up! 🔥' : '– start your journey today!'}`,
+      color: '#FBBF24',
+      route: null,
+    },
     {
       id: 'leaderboard',
       icon: 'podium',
@@ -242,6 +253,22 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
   // --- Data fetching ---
   useEffect(() => {
     fetchUserData();
+  }, []);
+
+  // Daily check-in (once per session)
+  const checkInRanRef = useRef(false);
+  useEffect(() => {
+    if (checkInRanRef.current) return;
+    checkInRanRef.current = true;
+    dailyCheckIn()
+      .then((result) => {
+        if (result.checked_in) {
+          const streakText = result.streak > 1 ? `${result.streak} day streak!` : 'Your streak begins today!';
+          Alert.alert('Daily Check-In 🔥', `+${result.xp} XP · ${streakText}`);
+          fetchUserData();
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const fetchUserData = async () => {
@@ -499,7 +526,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
               <TouchableOpacity
                 style={styles.headerIconBtn}
                 activeOpacity={0.7}
-                onPress={() => router.push('/(tabs)/activities')}
+                onPress={() => console.log('Notifications pressed')}
               >
                 <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />
               </TouchableOpacity>
@@ -507,7 +534,116 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
           </View>
         </LinearGradient>
 
-        {/* WHAT'S HAPPENING — Active Sessions (live multiplayer rooms) */}
+        {/* CAROUSEL with Smooth Transitions */}
+        <View style={styles.carouselWrapper}>
+          <LinearGradient
+            colors={['#4C1D95', '#6D28D9', '#7C3AED']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.carouselCard}
+          >
+            <Animated.ScrollView
+              ref={scrollViewRef}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              onMomentumScrollEnd={handleMomentumScrollEnd}
+              onScroll={onScroll}
+              scrollEventThrottle={16}
+              snapToInterval={CAROUSEL_PAGE_WIDTH}
+              snapToOffsets={featurePages.map((_, i) => i * CAROUSEL_PAGE_WIDTH)}
+              removeClippedSubviews={true}
+              style={styles.carouselScroll}
+              contentContainerStyle={{ paddingHorizontal: 0 }}
+            >
+              {featurePages.map((page) => (
+                <View key={page.id} style={styles.carouselPageContainer}>
+                  <View style={styles.featurePage}>
+                    <View
+                      style={[
+                        styles.featureIconContainer,
+                        { backgroundColor: `${page.color}30` },
+                      ]}
+                    >
+                      <Ionicons name={page.icon as any} size={28} color={page.color} />
+                    </View>
+                    <View style={styles.featureContent}>
+                      <Text style={styles.featureTitle}>{page.title}</Text>
+                      <Text style={styles.featureDescription}>{page.description}</Text>
+                      {page.route ? (
+                        <TouchableOpacity
+                          style={styles.featureButton}
+                          onPress={() => router.push(page.route)}
+                          activeOpacity={0.8}
+                        >
+                          <LinearGradient
+                            colors={[page.color, page.color + 'CC']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 0 }}
+                            style={styles.featureButtonGradient}
+                          >
+                            <Text style={styles.featureButtonText}>Go</Text>
+                            <Ionicons name="arrow-forward" size={14} color="white" />
+                          </LinearGradient>
+                        </TouchableOpacity>
+                      ) : (
+                        <View style={styles.streakBadgeInline}>
+                          <Ionicons name="flash" size={12} color="#FBBF24" />
+                          <Text style={styles.streakBadgeInlineText}>
+                            {streakCount > 0 ? 'Active' : 'Start now'}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                </View>
+              ))}
+            </Animated.ScrollView>
+
+            {/* Animated Dot Indicator */}
+            <View style={styles.dotContainer}>
+              {featurePages.map((_, idx) => {
+                return (
+                  <DotIndicator
+                    key={idx}
+                    index={idx}
+                    scrollX={scrollX}
+                  />
+                );
+              })}
+            </View>
+          </LinearGradient>
+        </View>
+
+        {/* STATS CARDS */}
+        <View style={styles.statsContainer}>
+          <LinearGradient
+            colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.statCard}
+          >
+            <View style={styles.statIconContainer}>
+              <Ionicons name="trophy" size={20} color="white" />
+            </View>
+            <Text style={styles.statValue}>{totalPoints}</Text>
+            <Text style={styles.statLabel}>Points</Text>
+          </LinearGradient>
+
+          <LinearGradient
+            colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.statCard}
+          >
+            <View style={styles.statIconContainer}>
+              <Ionicons name="trending-up" size={20} color="white" />
+            </View>
+            <Text style={styles.statValue}>Lv {level}</Text>
+            <Text style={styles.statLabel}>Level</Text>
+          </LinearGradient>
+        </View>
+
+        {/* Active Sessions — live multiplayer rooms */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <View style={styles.sectionTitleContainer}>
@@ -599,79 +735,6 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
           )}
         </View>
 
-        {/* CAROUSEL with Smooth Transitions */}
-        <View style={styles.carouselWrapper}>
-          <LinearGradient
-            colors={['#4C1D95', '#6D28D9', '#7C3AED']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.carouselCard}
-          >
-            <Animated.ScrollView
-              ref={scrollViewRef}
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              onMomentumScrollEnd={handleMomentumScrollEnd}
-              onScroll={onScroll}
-              scrollEventThrottle={16}
-              snapToInterval={CAROUSEL_PAGE_WIDTH}
-              snapToOffsets={featurePages.map((_, i) => i * CAROUSEL_PAGE_WIDTH)}
-              removeClippedSubviews={true}
-              style={styles.carouselScroll}
-              contentContainerStyle={{ paddingHorizontal: 0 }}
-            >
-              {featurePages.map((page) => (
-                <View key={page.id} style={styles.carouselPageContainer}>
-                  <View style={styles.featurePage}>
-                    <View
-                      style={[
-                        styles.featureIconContainer,
-                        { backgroundColor: `${page.color}30` },
-                      ]}
-                    >
-                      <Ionicons name={page.icon as any} size={28} color={page.color} />
-                    </View>
-                    <View style={styles.featureContent}>
-                      <Text style={styles.featureTitle}>{page.title}</Text>
-                      <Text style={styles.featureDescription}>{page.description}</Text>
-                      {page.route ? (
-                        <TouchableOpacity
-                          style={styles.featureButton}
-                          onPress={() => router.push(page.route)}
-                          activeOpacity={0.8}
-                        >
-                          <LinearGradient
-                            colors={[page.color, page.color + 'CC']}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 0 }}
-                            style={styles.featureButtonGradient}
-                          >
-                            <Text style={styles.featureButtonText}>Go</Text>
-                            <Ionicons name="arrow-forward" size={14} color="white" />
-                          </LinearGradient>
-                        </TouchableOpacity>
-                      ) : null}
-                    </View>
-                  </View>
-                </View>
-              ))}
-            </Animated.ScrollView>
-
-            {/* Animated Dot Indicator */}
-            <View style={styles.dotContainer}>
-              {featurePages.map((_, idx) => {
-                return (
-                  <DotIndicator
-                    key={idx}
-                    index={idx}
-                    scrollX={scrollX}
-                  />
-                );
-              })}
-            </View>
-          </LinearGradient>
-        </View>
-
         {/* For You */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
@@ -706,11 +769,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
                   [COLORS.purpleVibrant, COLORS.purpleLight],
                 ];
                 return (
-                  <TouchableOpacity
-                    key={rec.id}
-                    activeOpacity={0.7}
-                    onPress={() => router.push('/(tabs)/activities')}
-                  >
+                  <TouchableOpacity key={rec.id} activeOpacity={0.7}>
                     <LinearGradient
                       colors={gradients[index % gradients.length]}
                       start={{ x: 0, y: 0 }}
@@ -831,20 +890,6 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
             </ScrollView>
           </View>
         )}
-
-        {/* YOUR PROGRESS — compact strip (secondary, see design.md) */}
-        <TouchableOpacity
-          style={styles.progressStrip}
-          activeOpacity={0.7}
-          onPress={() => router.push('/(tabs)/profile')}
-          accessibilityLabel="Your points and level"
-        >
-          <Ionicons name="trophy" size={16} color={COLORS.purpleDeep} />
-          <Text style={styles.progressStripText}>{totalPoints} pts</Text>
-          <View style={styles.progressStripDivider} />
-          <Ionicons name="trending-up" size={16} color={COLORS.purpleDeep} />
-          <Text style={styles.progressStripText}>Lv {level}</Text>
-        </TouchableOpacity>
       </ScrollView>
 
       {/* FAB Menu */}
@@ -1038,6 +1083,22 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.semiBold,
     fontWeight: '600',
   },
+  streakBadgeInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(251, 191, 36, 0.2)',
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 12,
+    gap: 4,
+    alignSelf: 'flex-start',
+  },
+  streakBadgeInlineText: {
+    color: '#FBBF24',
+    fontSize: 11,
+    fontFamily: FONTS.bold,
+    letterSpacing: 0.3,
+  },
   dotContainer: {
     flexDirection: 'row',
     justifyContent: 'center',
@@ -1049,30 +1110,45 @@ const styles = StyleSheet.create({
     borderRadius: 3.5,
   },
 
-  progressStrip: {
+  statsContainer: {
     flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'center',
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 20,
-    paddingHorizontal: 18,
-    paddingVertical: 8,
-    gap: 6,
+    paddingHorizontal: 24,
     marginBottom: 24,
-    marginTop: 16,
+    gap: 10,
   },
-  progressStripText: {
-    color: COLORS.textPrimary,
-    fontSize: 13,
-    fontFamily: FONTS.bold,
+  statCard: {
+    flex: 1,
+    borderRadius: 16,
+    padding: 16,
+    alignItems: 'center',
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
   },
-  progressStripDivider: {
-    width: 1,
-    height: 14,
-    backgroundColor: COLORS.border,
-    marginHorizontal: 4,
+  statIconContainer: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  statValue: {
+    color: 'white',
+    fontSize: 22,
+    fontFamily: FONTS.black,
+    marginBottom: 2,
+    letterSpacing: -0.5,
+  },
+  statLabel: {
+    color: 'rgba(255, 255, 255, 0.85)',
+    fontSize: 11,
+    fontFamily: FONTS.semiBold,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
   },
 
   section: {
