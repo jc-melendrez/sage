@@ -64,7 +64,9 @@ export default function ClassicGameSetupScreen() {
   const [teamCount, setTeamCount] = useState(2);
   const [loading, setLoading] = useState(false);
   const [loadingQuizzes, setLoadingQuizzes] = useState(false);
-  const [mode, setMode] = useState<'home' | 'create' | 'join'>(paramMode === 'create' ? 'create' : 'home');
+  const [mode, setMode] = useState<'home' | 'create' | 'join'>(
+    paramMode === 'create' ? 'create' : paramMode === 'join' ? 'join' : 'home'
+  );
   const [quizzes, setQuizzes] = useState<SavedQuiz[]>([]);
   const [selectedQuiz, setSelectedQuiz] = useState<SavedQuiz | null>(null);
   const [showDropdown, setShowDropdown] = useState(false);

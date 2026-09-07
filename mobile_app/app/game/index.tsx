@@ -438,7 +438,16 @@ export default function GameCenterScreen() {
 
         {/* Bottom Action Bar */}
         <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 10 }]}>
-            
+
+            {/* JOIN BUTTON — enter a room code */}
+            <TouchableOpacity
+                style={styles.actionBtnJoin}
+                onPress={() => router.push({ pathname: '/game/classic', params: { mode: 'join' } })}
+            >
+                <Ionicons name="enter" size={20} color={COLORS.purplePrimary} style={{marginRight: 8}} />
+                <Text style={styles.actionBtnJoinText}>JOIN</Text>
+            </TouchableOpacity>
+
             {/* INVITE BUTTON */}
             {selectedMode !== 'group' && (
             <TouchableOpacity 
@@ -809,6 +818,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.border,
+  },
+  actionBtnJoin: {
+    flex: 1,
+    height: 50,
+    borderRadius: 12,
+    backgroundColor: 'white',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  actionBtnJoinText: {
+    color: COLORS.purplePrimary,
+    fontFamily: FONTS.extraBold,
+    fontSize: 16,
+    letterSpacing: 0.5,
   },
   actionBtnStart: {
     flex: 1,
