@@ -31,6 +31,9 @@ load_dotenv(ENV_FILE_PATH)
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 
+# Number of prior chat messages sent to the AI for conversation memory
+CHAT_MEMORY_LIMIT = int(os.environ.get('CHAT_MEMORY_LIMIT', 20))
+
 # (Optional but highly recommended: You can also secure your Django Secret Key while you're at it!)
 # SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'your-default-insecure-key-here')
 

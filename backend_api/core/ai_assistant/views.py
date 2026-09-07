@@ -70,6 +70,18 @@ class AskSAGEView(APIView):
         # Combine message with extracted context if available for the AI's perspective
         ai_prompt = f"[File Content]:\n{attachment_text}\n\nUser Question: {user_message}" if attachment_text else user_message
 
+        # 🌟 CONVERSATION MEMORY: send recent session history so the AI has context
+        history_messages = []
+        if session:
+            recent = (ChatMessage.objects
+                      .filter(session=session)
+                      .order_by('-created_at')[:settings.CHAT_MEMORY_LIMIT])
+            for msg in reversed(recent):
+                history_messages.append({
+                    "role": "assistant" if msg.is_ai else "user",
+                    "content": msg.text
+                })
+
         # Groq uses the exact same payload format as DeepSeek and OpenAI
         payload = {
             # 🌟 Using Llama 3.3 70B for high-quality reasoning and educational support
@@ -79,6 +91,7 @@ class AskSAGEView(APIView):
                     "role": "system", 
                     "content": "You are SAGE, a Smart Assistant for Group-Based Education. You help students learn by providing clear, concise, and engaging educational explanations."
                 },
+                *history_messages,
                 {
                     "role": "user", 
                     "content": ai_prompt
