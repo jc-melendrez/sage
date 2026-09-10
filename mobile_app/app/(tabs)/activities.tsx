@@ -11,21 +11,12 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
 import { useRouter } from 'expo-router';
 import { getToken } from '@/services/authService';
-import { completeQuiz, completeLesson, getMyProgress } from '@/services/gamificationService';
+import { completeQuiz } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
-import LessonGenerator from '@/components/LessonGenerator';
-import CourseCard from '@/components/courses/CourseCard';
-import CourseDetailModal from '@/components/courses/CourseDetailModal';
-import EmptyCourseState from '@/components/courses/EmptyCourseState';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
-import {
-  loadGeneratedCourses,
-  addGeneratedCourse,
-  GeneratedCourse,
-} from '@/services/generatedCoursesService';
 import { TabSkeleton } from '@/components/Skeleton';
 
 
@@ -37,22 +28,6 @@ interface StudyGroup {
   members_count: number;
   join_code: string;
   created_by: number;
-}
-
-type Course = GeneratedCourse;
-
-interface Level {
-  level_id: number;
-  difficulty: 'Beginner' | 'Intermediate' | 'Advanced';
-  content: string;
-  quiz: QuizQuestion[];
-  passing_score: number;
-}
-
-interface QuizQuestion {
-  question: string;
-  options: string[];
-  correct_answer: number;
 }
 
 interface Quiz {
@@ -75,11 +50,14 @@ export default function ActivitiesScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   // --- NEW: Courses state ---
-  const [courses, setCourses] = useState<GeneratedCourse[]>([]);
   const [enrolledCourses, setEnrolledCourses] = useState<CourseSummary[]>([]);
-  const [levelProgress, setLevelProgress] = useState<{ [key: string]: number }>({});
-  const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
-  const [isCourseModalOpen, setIsCourseModalOpen] = useState(false);
+
+  // --- Group Management Modals ---
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [joinCodeInput, setJoinCodeInput] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // --- Join Class Modal (enrolled backend courses) ---
   const [isJoinCourseModalOpen, setIsJoinCourseModalOpen] = useState(false);
@@ -89,16 +67,6 @@ export default function ActivitiesScreen() {
   // --- Quiz Player State ---
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
   const [quizToTake, setQuizToTake] = useState<{ title: string; questions: any[]; levelId: number; passingScore: number } | null>(null);
-
-  // --- Group Management Modals ---
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
-  const [newGroupName, setNewGroupName] = useState('');
-  const [joinCodeInput, setJoinCodeInput] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // --- Generate Lesson Modal ---
-  const [isGenerateLessonModalOpen, setIsGenerateLessonModalOpen] = useState(false);
 
   // --- Quiz Generator State ---
   const [isGenerateQuizModalOpen, setIsGenerateQuizModalOpen] = useState(false);
@@ -179,21 +147,6 @@ export default function ActivitiesScreen() {
     }
   };
 
-  const levelKey = (courseId: string, levelId: number) => `${courseId}::${levelId}`;
-
-  const loadPersistedProgress = React.useCallback(async () => {
-    try {
-      const data = await getMyProgress();
-      const map: { [key: string]: number } = {};
-      data.lesson_progress.forEach(p => {
-        map[levelKey(p.course_id, p.level_id)] = p.score;
-      });
-      setLevelProgress(map);
-    } catch (error) {
-      console.error('Failed to load persisted course progress:', error);
-    }
-  }, []);
-
   const loadInitialData = React.useCallback(async (opts?: { isRefresh?: boolean }) => {
     const isRefresh = opts?.isRefresh ?? false;
     try {
@@ -209,17 +162,12 @@ export default function ActivitiesScreen() {
       if (groupRes.ok) setGroups(await groupRes.json());
       if (quizRes.ok) setQuizzes(await quizRes.json());
       if (Array.isArray(enrolled)) setEnrolledCourses(enrolled);
-
-      const savedCourses = await loadGeneratedCourses();
-      setCourses(savedCourses);
-
-      loadPersistedProgress();
     } catch (error) {
       console.error(error);
     } finally {
       setLoading(false);
     }
-  }, [loadPersistedProgress]);
+  }, []);
 
   const handleRefresh = React.useCallback(async () => {
     setRefreshing(true);
@@ -313,44 +261,6 @@ export default function ActivitiesScreen() {
     } finally {
       setIsJoiningClass(false);
     }
-  };
-
-  const updateLevelProgress = (course: Course, levelId: number, score: number) => {
-    setLevelProgress(prev => ({ ...prev, [levelKey(course.course_title, levelId)]: score }));
-  };
-
-  const handleCourseGenerated = (course: GeneratedCourse) => {
-    setCourses(prev => [course, ...prev]);
-    addGeneratedCourse(course);
-    setIsGenerateLessonModalOpen(false);
-    Alert.alert('Success', 'Course generated successfully!');
-  };
-
-  const openCourseDetail = (course: Course) => {
-    setSelectedCourse(course);
-    setIsCourseModalOpen(true);
-  };
-
-  const takeQuizForLevel = (level: Level) => {
-    const quizQuestions = level.quiz.map((q, idx) => {
-      const correctAnswer = typeof q.correct_answer === 'number'
-        ? q.options[q.correct_answer]
-        : q.correct_answer;
-      return {
-        id: idx + 1,
-        question: q.question,
-        type: 'Multiple Choice' as const,
-        options: q.options,
-        correct_answer: correctAnswer,
-      };
-    });
-    setQuizToTake({
-      title: `${level.difficulty} Quiz`,
-      questions: quizQuestions,
-      levelId: level.level_id,
-      passingScore: level.passing_score,
-    });
-    setIsQuizModalOpen(true);
   };
 
   const handleSelectTab = (tab: 'lessons' | 'quizzes' | 'groups') => {
@@ -459,26 +369,6 @@ export default function ActivitiesScreen() {
                 No classes yet. Join with a code from your educator.
               </Text>
             )}
-
-            {/* SELF-STUDY — AI-generated courses on this device */}
-            <Text style={[styles.sectionTitle, styles.sectionSpacing]}>Self-Study</Text>
-            {courses.length === 0 && (
-              <EmptyCourseState onJoinClass={() => setIsJoinCourseModalOpen(true)} />
-            )}
-            {courses.map((course, index) => {
-              const completedLevels = course.levels.filter((l) => {
-                const score = levelProgress[levelKey(course.course_title, l.level_id)] ?? 0;
-                return score >= l.passing_score;
-              }).length;
-              return (
-                <CourseCard
-                  key={`course-${index}`}
-                  course={course}
-                  completedLevels={completedLevels}
-                  onPress={() => openCourseDetail(course)}
-                />
-              );
-            })}
           </View>
         )}
 
@@ -650,42 +540,12 @@ export default function ActivitiesScreen() {
           questions={quizToTake?.questions || []}
           onFinish={async (score) => {
             const total = quizToTake?.questions.length ?? 0;
-            const percent = total > 0 ? Math.round((score / total) * 100) : 0;
 
             try {
               const quizResult = await completeQuiz(score, total);
-
-              if (quizToTake && quizToTake.levelId !== -1 && selectedCourse) {
-                const levelId = quizToTake.levelId;
-                const passingScore = quizToTake.passingScore;
-                const passed = percent >= passingScore;
-
-                updateLevelProgress(selectedCourse, levelId, percent);
-
-                try {
-                  await completeLesson(
-                    selectedCourse.course_title,
-                    levelId,
-                    percent,
-                    100,
-                    passed,
-                  );
-                  if (passed) {
-                    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-                  }
-                } catch (error) {
-                  console.error('Failed to persist lesson progress:', error);
-                }
-              }
-
-              // Reward info is rendered inside the TakeQuiz results screen.
               return { xp: quizResult.xp, badges: quizResult.badges };
             } catch (error) {
               console.error('Failed to record quiz completion:', error);
-              // Fall back to local-only progress update so unlocks still work offline.
-              if (quizToTake && quizToTake.levelId !== -1 && selectedCourse) {
-                updateLevelProgress(selectedCourse, quizToTake.levelId, percent);
-              }
               return { xp: 0, badges: [] };
             }
           }}
@@ -694,26 +554,6 @@ export default function ActivitiesScreen() {
             setQuizToTake(null);
           }}
         />
-      </Modal>
-
-      {/* GENERATE COURSE MODAL */}
-      <Modal visible={isGenerateLessonModalOpen} animationType="slide">
-        <LessonGenerator
-          onCourseGenerated={handleCourseGenerated}
-          onCancel={() => setIsGenerateLessonModalOpen(false)}
-        />
-      </Modal>
-
-      {/* COURSE DETAIL MODAL */}
-      <Modal visible={isCourseModalOpen} animationType="slide">
-        {selectedCourse && (
-          <CourseDetailModal
-            course={selectedCourse}
-            levelProgress={levelProgress}
-            onTakeQuiz={takeQuizForLevel}
-            onClose={() => setIsCourseModalOpen(false)}
-          />
-        )}
       </Modal>
 
       {/* QUIZ GENERATOR MODAL */}
@@ -845,22 +685,18 @@ export default function ActivitiesScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* FAB — contextual per tab */}
-      {(selectedTab === 'lessons' || selectedTab === 'quizzes') && (
+      {/* FAB — contextual per tab (not on Courses; students join instead of creating) */}
+      {selectedTab === 'quizzes' && (
         <TouchableOpacity
           style={styles.fab}
           onPress={() => {
-            if (selectedTab === 'lessons') {
-              setIsGenerateLessonModalOpen(true);
-            } else {
-              setIsGenerateQuizModalOpen(true);
-              setIsQuizTypeDropdownOpen(false);
-            }
+            setIsGenerateQuizModalOpen(true);
+            setIsQuizTypeDropdownOpen(false);
           }}
-          accessibilityLabel={selectedTab === 'lessons' ? 'Generate new course' : 'Generate new quiz'}
+          accessibilityLabel='Generate new quiz'
           accessibilityRole="button"
         >
-          <Ionicons name={selectedTab === 'lessons' ? 'add' : 'sparkles'} size={24} color="white" />
+          <Ionicons name='sparkles' size={24} color="white" />
         </TouchableOpacity>
       )}
     </LinearGradient>

@@ -47,7 +47,6 @@ from core.firestore_service import (
 )
 
 
-
 class FirebaseLoginView(APIView):
     permission_classes = [AllowAny]
 
@@ -115,23 +114,26 @@ class FirebaseLoginView(APIView):
         # 3. Email/password sign-ins require an emailed OTP before a JWT is
         #    issued (2FA-style). Google sign-ins skip OTP — Google has already
         #    verified the account.
+        
+        # TEMPORARY DEV FIX: Skip OTP for all users
         if sign_in_provider == 'password':
-            try:
-                challenge = create_otp_challenge(user)
-            except Exception:
-                # Email delivery failed; the challenge row would be useless.
-                from .models import LoginOtpChallenge
-                LoginOtpChallenge.objects.filter(user=user, verified=False).delete()
-                return Response(
-                    {"error": "Could not send the verification code. Please try again."},
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-            return Response({
-                "otp_required": True,
-                "challenge_token": str(challenge.challenge_token),
-                "email": user.email,
-                "expires_in": 300,
-            })
+            # COMMENTED OUT FOR DEVELOPMENT:
+            # try:
+            #     challenge = create_otp_challenge(user)
+            # except Exception:
+            #     from .models import LoginOtpChallenge
+            #     LoginOtpChallenge.objects.filter(user=user, verified=False).delete()
+            #     return Response(
+            #         {"error": "Could not send the verification code. Please try again."},
+            #         status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            #     )
+            # return Response({
+            #     "otp_required": True,
+            #     "challenge_token": str(challenge.challenge_token),
+            #     "email": user.email,
+            #     "expires_in": 300,
+            # })
+            pass # Skip the OTP challenge entirely
 
         # 4. Issue a Django JWT for the rest of the app to use
         refresh = RefreshToken.for_user(user)
