@@ -21,7 +21,6 @@ export interface RegisterCredentials {
   last_name?: string;
   is_student?: boolean;
   is_educator?: boolean;
-  is_admin?: boolean;
 }
 
 export interface AuthResponse {
@@ -34,11 +33,9 @@ export interface AuthResponse {
     first_name?: string;
     last_name?: string;
     firebase_uid?: string;
-    role?: 'superadmin' | 'admin' | 'educator' | 'student';
-    school_id?: number | null;
+    role?: 'superadmin' | 'educator' | 'student';
     is_student?: boolean;
     is_educator?: boolean;
-    is_admin?: boolean;
   };
 }
 
@@ -196,7 +193,6 @@ export async function register(credentials: RegisterCredentials): Promise<AuthRe
       last_name: credentials.last_name || '',
       is_student: credentials.is_student ?? true,
       is_educator: credentials.is_educator ?? false,
-      is_admin: credentials.is_admin ?? false,
     }),
   });
 
@@ -276,10 +272,9 @@ export async function isAuthenticated(): Promise<boolean> {
 }
 
 export function roleHomePath(
-  user?: { role?: string; is_admin?: boolean; is_educator?: boolean } | null
+  user?: { role?: string; is_educator?: boolean } | null
 ): Href {
   if (user?.role === 'superadmin') return '/superadmin';
-  if (user?.role === 'admin' || user?.is_admin) return '/admin';
   if (user?.role === 'educator' || user?.is_educator) return '/educator';
   return '/(tabs)';
 }

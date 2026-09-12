@@ -12,13 +12,12 @@ import { useAuth } from '../hooks/useAuth';
 import { roleHomePath } from '../services/authService';
 import { initFirebaseAuth } from '../services/firebaseAuthService';
 
-type AccountType = 'student' | 'educator' | 'admin';
+type AccountType = 'student' | 'educator';
 type Step = 'form' | 'otp';
 
 const ROLE_OPTIONS: { type: AccountType; label: string; icon: string }[] = [
   { type: 'student', label: 'Student', icon: 'school-outline' },
   { type: 'educator', label: 'Educator', icon: 'book-outline' },
-  { type: 'admin', label: 'Admin', icon: 'shield-checkmark-outline' },
 ];
 
 const COLORS = {
@@ -120,7 +119,6 @@ export default function LoginScreen() {
         last_name: lastName,
         is_student: accountType === 'student',
         is_educator: accountType === 'educator',
-        is_admin: accountType === 'admin',
       });
       if ('otp_required' in response) {
         setChallengeToken(response.challenge_token);

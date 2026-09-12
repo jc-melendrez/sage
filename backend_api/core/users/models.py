@@ -10,22 +10,6 @@ from django.utils import timezone
 def generate_join_code():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
-class School(models.Model):
-    name = models.CharField(max_length=255, unique=True)
-    address = models.TextField(blank=True, default="")
-    contact_email = models.EmailField(blank=True, default="")
-    contact_phone = models.CharField(max_length=30, blank=True, default="")
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, null=True, blank=True,
-        on_delete=models.SET_NULL, related_name='created_schools',
-    )
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return self.name
-
-
 class SageUserManager(UserManager):
     """Ensures superusers created via `createsuperuser` get role='superadmin'."""
 
@@ -40,7 +24,6 @@ class User(AbstractUser):
 
     ROLE_CHOICES = [
         ('superadmin', 'Superadmin'),
-        ('admin', 'Admin'),
         ('educator', 'Educator'),
         ('student', 'Student'),
     ]
@@ -50,19 +33,12 @@ class User(AbstractUser):
     # Single source of truth for the user's role.
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='student')
 
-    # Tenant (school) scope. Null for superadmins / unassigned users.
-    school = models.ForeignKey(
-        School, null=True, blank=True,
-        on_delete=models.PROTECT, related_name='members',
-    )
-
     # Bumped on role change / deactivation to revoke outstanding JWTs.
     token_version = models.IntegerField(default=0)
 
     # --- Role flags (kept in sync with `role` for mobile/Firestore compat) ---
     is_student = models.BooleanField(default=False, editable=False)
     is_educator = models.BooleanField(default=False, editable=False)
-    is_admin = models.BooleanField(default=False, editable=False)
 
     firebase_uid = models.CharField(max_length=128, unique=True, null=True, blank=True)
     
@@ -99,7 +75,6 @@ class User(AbstractUser):
         # Derive the legacy boolean role flags from the canonical `role` field.
         self.is_student = self.role == 'student'
         self.is_educator = self.role == 'educator'
-        self.is_admin = self.role == 'admin'
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -223,7 +198,6 @@ class RoleChangeLog(models.Model):
     target_user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='role_changes_received',
     )
-    school = models.ForeignKey(School, null=True, on_delete=models.SET_NULL)
     from_role = models.CharField(max_length=20)
     to_role = models.CharField(max_length=20)
     created_at = models.DateTimeField(auto_now_add=True)

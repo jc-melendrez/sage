@@ -78,7 +78,6 @@ interface User {
   level?: number;
   total_points?: number;
   role?: string;
-  school_id?: number | null;
 }
 interface Badge {
   id: number;
@@ -335,18 +334,13 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
     rooms.map(r => ({ ...r, playerCount: playerCountsRef.current[r.code] ?? 0 }));
 
   useEffect(() => {
-    // Wait for the profile before subscribing — the query is school-scoped,
-    // and we need /users/me/ to know our schoolId (null for independent
-    // learners, which still matches rooms stamped null) and role.
+    // Wait for the profile before subscribing — we need the user id and role
+    // for the player-count listeners below.
     if (!user) return;
-    const isSuperadmin = user.role === 'superadmin';
 
-    let roomsQuery = firestore()
+    const roomsQuery = firestore()
       .collection('gameRooms')
       .where('status', 'in', ['waiting', 'active']);
-    if (!isSuperadmin) {
-      roomsQuery = roomsQuery.where('schoolId', '==', user.school_id ?? null);
-    }
 
     const roomsUnsub = roomsQuery.onSnapshot(snapshot => {
         const rooms: GameRoom[] = (snapshot?.docs ?? [])
@@ -390,7 +384,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
     // Deliberately keyed on the profile fields the query depends on, not the
     // whole `user` object, so profile refreshes don't tear down the listener.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, user?.school_id, user?.role]);
+  }, [user?.id, user?.role]);
 
   const [joiningRoom, setJoiningRoom] = useState<string | null>(null);
 
@@ -723,7 +717,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
                 <Ionicons name="school-outline" size={48} color={COLORS.purpleVibrant} />
               </View>
               <Text style={styles.emptyStateTitle}>No live games right now</Text>
-              <Text style={styles.emptyStateText}>Rooms from your school will appear here</Text>
+              <Text style={styles.emptyStateText}>Live rooms will appear here</Text>
               <TouchableOpacity
                 style={styles.emptyStatePrimaryBtn}
                 onPress={() => router.push('/(tabs)/games' as any)}

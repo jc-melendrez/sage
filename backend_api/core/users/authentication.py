@@ -5,13 +5,12 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 
 class SAGETokenObtainPairSerializer(TokenObtainPairSerializer):
-    """Adds role / school / token_version claims to the access token."""
+    """Adds role / token_version claims to the access token."""
 
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
         token['role'] = user.role
-        token['school_id'] = user.school_id
         token['token_version'] = user.token_version
         return token
 

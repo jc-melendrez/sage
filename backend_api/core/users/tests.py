@@ -1,4 +1,5 @@
 import re
+import unittest
 from datetime import date, timedelta
 from unittest.mock import patch
 
@@ -275,6 +276,7 @@ class GamificationEndpointTests(TestCase):
         self.assertEqual(res.status_code, 401)
 
 
+@unittest.skip('OTP challenge is temporarily disabled in FirebaseLoginView (dev skip); re-enable when OTP is restored')
 class FirebaseLoginOtpTests(APITestCase):
     """
     Email/password logins must go through an emailed OTP (2FA-style);

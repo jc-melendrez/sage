@@ -83,7 +83,7 @@ export default function ProfileScreen() {
   const nextLevelXP = userData?.next_level_xp || 1000;
   const progressPercent = Math.min((currentXP / nextLevelXP) * 100, 100);
   const earnedBadges = userData?.badges || [];
-  const roleLabel = userData?.is_admin ? 'Admin' : userData?.is_educator ? 'Educator' : 'Student';
+  const roleLabel = userData?.role === 'superadmin' ? 'Superadmin' : userData?.is_educator ? 'Educator' : 'Student';
 
   return (
     <View style={styles.container}>
@@ -253,29 +253,17 @@ export default function ProfileScreen() {
               </View>
               <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
             </TouchableOpacity>
-            {userData?.is_admin && (
-              <>
-                <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/admin')}>
-                  <View style={styles.menuItemLeft}>
-                    <Ionicons name="shield-checkmark-outline" size={22} color={COLORS.purpleVibrant} />
-                    <Text style={styles.menuItemText}>Admin Panel</Text>
-                  </View>
-                  <View style={styles.menuItemRight}>
-                    <Text style={styles.menuItemHint}>Dean / Program Chair</Text>
-                    <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
-                  </View>
-                </TouchableOpacity>
-                <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/superadmin')}>
-                  <View style={styles.menuItemLeft}>
-                    <Ionicons name="terminal-outline" size={22} color={COLORS.purpleDeep} />
-                    <Text style={styles.menuItemText}>Developer Panel</Text>
-                  </View>
-                  <View style={styles.menuItemRight}>
-                    <Text style={styles.menuItemHint}>Super Admin</Text>
-                    <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
-                  </View>
-                </TouchableOpacity>
-              </>
+            {userData?.role === 'superadmin' && (
+              <TouchableOpacity style={[styles.menuItem, styles.borderTop]} onPress={() => router.push('/superadmin')}>
+                <View style={styles.menuItemLeft}>
+                  <Ionicons name="terminal-outline" size={22} color={COLORS.purpleDeep} />
+                  <Text style={styles.menuItemText}>Developer Panel</Text>
+                </View>
+                <View style={styles.menuItemRight}>
+                  <Text style={styles.menuItemHint}>Super Admin</Text>
+                  <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+                </View>
+              </TouchableOpacity>
             )}
             <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/leaderboard')}>
               <View style={styles.menuItemLeft}>

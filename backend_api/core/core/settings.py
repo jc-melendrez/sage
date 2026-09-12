@@ -147,7 +147,7 @@ SIMPLE_JWT = {
     # Make the refresh token last for 30 days
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
 
-    # Embed role / school / token_version in our JWTs
+    # Embed role / token_version in our JWTs
     'TOKEN_OBTAIN_SERIALIZER': 'users.authentication.SAGETokenObtainPairSerializer',
 }
 

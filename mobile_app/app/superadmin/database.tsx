@@ -5,7 +5,7 @@ import AdminHeader from '@/components/admin/AdminHeader';
 import SearchBar from '@/components/admin/SearchBar';
 import { COLORS, FONTS } from '@/constants/adminTheme';
 
-type Role = 'All' | 'Student' | 'Teacher' | 'Admin';
+type Role = 'All' | 'Student' | 'Teacher' | 'Superadmin';
 
 interface DbUser {
   id: number;
@@ -19,19 +19,19 @@ const MOCK_USERS: DbUser[] = [
   { id: 1001, username: 'mikaela.santos', email: 'mikaela.santos@sage.edu', role: 'Student', joined: 'Jan 2025' },
   { id: 1002, username: 'josh.villareal', email: 'josh.villareal@sage.edu', role: 'Student', joined: 'Feb 2025' },
   { id: 1003, username: 'r.cruz', email: 'r.cruz@sage.edu', role: 'Teacher', joined: 'Aug 2024' },
-  { id: 1004, username: 'e.marquez', email: 'e.marquez@sage.edu', role: 'Admin', joined: 'Jun 2023' },
+  { id: 1004, username: 'e.marquez', email: 'e.marquez@sage.edu', role: 'Superadmin', joined: 'Jun 2023' },
   { id: 1005, username: 'anna.bautista', email: 'anna.bautista@sage.edu', role: 'Student', joined: 'Mar 2025' },
   { id: 1006, username: 'l.fernandez', email: 'l.fernandez@sage.edu', role: 'Teacher', joined: 'Sep 2024' },
-  { id: 1007, username: 'm.torres', email: 'm.torres@sage.edu', role: 'Admin', joined: 'Jul 2023' },
+  { id: 1007, username: 'm.torres', email: 'm.torres@sage.edu', role: 'Superadmin', joined: 'Jul 2023' },
   { id: 1008, username: 'carlo.dizon', email: 'carlo.dizon@sage.edu', role: 'Student', joined: 'Apr 2025' },
 ];
 
-const ROLE_FILTERS: Role[] = ['All', 'Student', 'Teacher', 'Admin'];
+const ROLE_FILTERS: Role[] = ['All', 'Student', 'Teacher', 'Superadmin'];
 
 const ROLE_COLORS: Record<Exclude<Role, 'All'>, string> = {
   Student: COLORS.purpleLight,
   Teacher: COLORS.info,
-  Admin: COLORS.superAdminGlow,
+  Superadmin: COLORS.superAdminGlow,
 };
 
 export default function SuperAdminDatabase() {

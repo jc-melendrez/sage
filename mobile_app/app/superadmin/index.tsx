@@ -15,22 +15,16 @@ const QUICK_LINKS: {
   route: string;
 }[] = [
   {
-    icon: 'business-outline',
-    title: 'Admins & Schools',
-    desc: 'Register schools & assign initial admins',
-    route: '/superadmin/admins',
+    icon: 'person-add-outline',
+    title: 'Create User',
+    desc: 'Provision a new superadmin / platform user',
+    route: '/superadmin/create',
   },
   {
     icon: 'flag-outline',
     title: 'Feature Flags & Config',
     desc: 'Toggle features, app settings & env values',
     route: '/superadmin/config',
-  },
-  {
-    icon: 'person-add-outline',
-    title: 'Create Superadmin',
-    desc: 'Provision a new superadmin / platform user',
-    route: '/superadmin/create',
   },
   {
     icon: 'server-outline',
@@ -106,10 +100,10 @@ export default function SuperAdminDashboard() {
           </View>
         ) : analytics ? (
           <View style={styles.statsGrid}>
-            <StatCard icon="business" label="Schools" value={String(analytics.total_schools)} color={COLORS.superAdminGlow} />
-            <StatCard icon="shield-checkmark" label="Admins" value={String(analytics.users_by_role?.admin ?? 0)} color={COLORS.superAdminGlow} />
             <StatCard icon="people" label="Total Users" value={String(analytics.total_users)} color={COLORS.superAdminGlow} />
             <StatCard icon="checkmark-circle" label="Active Users" value={String(analytics.active_users)} color={COLORS.success} />
+            <StatCard icon="school" label="Educators" value={String(analytics.users_by_role?.educator ?? 0)} color={COLORS.superAdminGlow} />
+            <StatCard icon="shield-checkmark" label="Superadmins" value={String(analytics.users_by_role?.superadmin ?? 0)} color={COLORS.superAdminGlow} />
           </View>
         ) : null}
 

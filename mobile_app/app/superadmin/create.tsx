@@ -1,14 +1,13 @@
-﻿import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, Alert, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AdminHeader from '@/components/admin/AdminHeader';
 import { COLORS, FONTS } from '@/constants/adminTheme';
-import { superadminService, Role, School } from '@/services/adminService';
+import { superadminService, Role } from '@/services/adminService';
 
 const ROLE_OPTIONS: { role: Role; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { role: 'superadmin', label: 'Superadmin', icon: 'shield-checkmark-outline' },
-  { role: 'admin', label: 'Admin', icon: 'business-outline' },
   { role: 'educator', label: 'Educator', icon: 'book-outline' },
   { role: 'student', label: 'Student', icon: 'school-outline' },
 ];
@@ -21,24 +20,8 @@ export default function SuperAdminCreateUser() {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [role, setRole] = useState<Role>('superadmin');
-  const [schoolId, setSchoolId] = useState<number | null>(null);
-  const [schools, setSchools] = useState<School[]>([]);
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-
-  const loadSchools = useCallback(async () => {
-    try {
-      setSchools(await superadminService.listSchools());
-    } catch {
-      setSchools([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadSchools();
-  }, [loadSchools]);
-
-  const showSchoolPicker = role !== 'superadmin';
 
   const submit = async () => {
     if (!username.trim() || !email.trim() || !password) {
@@ -47,10 +30,6 @@ export default function SuperAdminCreateUser() {
     }
     if (password.length < 8) {
       Alert.alert('Weak password', 'Password must be at least 8 characters.');
-      return;
-    }
-    if (showSchoolPicker && !schoolId) {
-      Alert.alert('Missing info', 'Select a school for this user.');
       return;
     }
     try {
@@ -62,7 +41,6 @@ export default function SuperAdminCreateUser() {
         first_name: firstName.trim(),
         last_name: lastName.trim(),
         role,
-        school: showSchoolPicker ? schoolId : null,
       });
       Alert.alert('User created', `${user.username} created as ${user.role}.`, [
         { text: 'OK', onPress: () => router.back() },
@@ -78,7 +56,7 @@ export default function SuperAdminCreateUser() {
     <View style={styles.container}>
       <AdminHeader
         title="Create User"
-        subtitle="Provision a platform or school account"
+        subtitle="Provision a platform account"
         variant="superadmin"
       />
 
@@ -92,10 +70,7 @@ export default function SuperAdminCreateUser() {
                 <TouchableOpacity
                   key={opt.role}
                   style={[styles.roleOption, active && styles.roleOptionActive]}
-                  onPress={() => {
-                    setRole(opt.role);
-                    if (opt.role === 'superadmin') setSchoolId(null);
-                  }}
+                  onPress={() => setRole(opt.role)}
                 >
                   <Ionicons name={opt.icon} size={14} color={active ? '#0B1020' : COLORS.superAdminGlow} />
                   <Text style={[styles.roleOptionText, active && styles.roleOptionTextActive]}>{opt.label}</Text>
@@ -115,31 +90,6 @@ export default function SuperAdminCreateUser() {
           </View>
           <TextInput style={styles.input} placeholder="First name" placeholderTextColor="#64748B" value={firstName} onChangeText={setFirstName} />
           <TextInput style={styles.input} placeholder="Last name" placeholderTextColor="#64748B" value={lastName} onChangeText={setLastName} />
-
-          {showSchoolPicker && (
-            <>
-              <Text style={styles.sectionLabel}>SCHOOL</Text>
-              {schools.length === 0 ? (
-                <Text style={styles.hintText}>No schools registered yet.</Text>
-              ) : (
-                <View style={styles.schoolList}>
-                  {schools.map((school) => {
-                    const active = schoolId === school.id;
-                    return (
-                      <TouchableOpacity
-                        key={school.id}
-                        style={[styles.schoolOption, active && styles.schoolOptionActive]}
-                        onPress={() => setSchoolId(school.id)}
-                      >
-                        <Ionicons name="business-outline" size={14} color={active ? '#0B1020' : '#94A3B8'} />
-                        <Text style={[styles.schoolOptionText, active && styles.schoolOptionTextActive]}>{school.name}</Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              )}
-            </>
-          )}
 
           <Text style={styles.hintText}>
             {role === 'superadmin'
@@ -194,21 +144,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(34,211,238,0.15)',
   },
-  schoolList: { gap: 8 },
-  schoolOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#151B2E',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(34,211,238,0.15)',
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-  },
-  schoolOptionActive: { backgroundColor: COLORS.superAdminGlow, borderColor: COLORS.superAdminGlow },
-  schoolOptionText: { fontSize: 13, fontFamily: FONTS.medium, color: '#F1F5F9' },
-  schoolOptionTextActive: { color: '#0B1020' },
   hintText: { fontSize: 12, fontFamily: FONTS.medium, color: '#64748B', lineHeight: 17 },
   submitBtn: {
     flexDirection: 'row',

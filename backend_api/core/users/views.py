@@ -4,14 +4,13 @@ import json
 import requests
 import re
 from django.core.exceptions import ValidationError
-from django.db import models
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, School, RoleChangeLog, Topic, LearningNode, NodeProgress
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
@@ -26,12 +25,10 @@ from .serializers import (
     BadgeSerializer, RecommendationSerializer,
     SessionSerializer, ActivitySerializer,
     CourseSerializer, CourseRosterSerializer,
-    SchoolSerializer, SchoolCreateSerializer, SchoolAdminCreateSerializer,
-    AdminUserCreateSerializer, AdminUserUpdateSerializer, AdminRoleUpdateSerializer,
     SuperadminUserUpdateSerializer, SuperadminCreateUserSerializer, RoleChangeLogSerializer,
     TopicSerializer, LearningNodeSerializer, NodeProgressSerializer, CoursePathTopicSerializer,
 )
-from .permissions import IsSuperadmin, IsSchoolAdmin, IsSameSchool
+from .permissions import IsSuperadmin
 from .utils.file_parser import extract_text_from_file
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -87,10 +84,7 @@ class FirebaseLoginView(APIView):
             last_name = request.data.get('last_name', '')
 
             # SECURITY: role is NEVER taken from the client. New users always start as 'student'
-            # and are promoted via authorized admin/superadmin endpoints only.
-            is_student = True
-            is_educator = False
-            is_admin = False
+            # and are promoted via authorized superadmin endpoints only.
 
             # Ensure username is unique; if taken, append a random string from the UID
             if User.objects.filter(username=username).exists():
@@ -102,9 +96,6 @@ class FirebaseLoginView(APIView):
                 firebase_uid=firebase_uid,
                 first_name=first_name,
                 last_name=last_name,
-                is_student=is_student,
-                is_educator=is_educator,
-                is_admin=is_admin,
                 role='student',
                 password=None # Password is managed by Firebase now
             )
@@ -152,10 +143,8 @@ class FirebaseLoginView(APIView):
                 "last_name": user.last_name,
                 "firebase_uid": user.firebase_uid,
                 "role": user.role,
-                "school_id": user.school_id,
                 "is_student": user.is_student,
-                "is_educator": user.is_educator,
-                "is_admin": user.is_admin
+                "is_educator": user.is_educator
             }
         }
 
@@ -392,11 +381,9 @@ class RegisterUserView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 def _can_access_user(actor, target):
-    """Global admins see everything; admins only same school; everyone else only self."""
+    """Superadmins see everything; everyone else only self."""
     if actor.role == 'superadmin':
         return True
-    if actor.role == 'admin':
-        return actor.school_id is not None and actor.school_id == target.school_id
     return actor.id == target.id
 
 
@@ -896,7 +883,7 @@ class TestModelConfigView(APIView):
         })
 
 
-# ---------- Role / School Management (Superadmin + Admin) ----------
+# ---------- Role Management (Superadmin) ----------
 
 def apply_role_change(actor, target_user, new_role):
     """Update role, bump token_version to revoke stale JWTs, and audit the change."""
@@ -905,11 +892,10 @@ def apply_role_change(actor, target_user, new_role):
         return False
     target_user.role = new_role
     target_user.token_version += 1
-    target_user.save(update_fields=['role', 'token_version', 'is_student', 'is_educator', 'is_admin'])
+    target_user.save(update_fields=['role', 'token_version', 'is_student', 'is_educator'])
     RoleChangeLog.objects.create(
         changed_by=actor,
         target_user=target_user,
-        school=target_user.school,
         from_role=old_role,
         to_role=new_role,
     )
@@ -922,20 +908,9 @@ class SuperadminAnalyticsView(APIView):
     permission_classes = [IsSuperadmin]
 
     def get(self, request):
-        schools = School.objects.all()
         return Response({
-            'total_schools': schools.count(),
-            'active_schools': schools.filter(is_active=True).count(),
             'total_users': User.objects.count(),
             'active_users': User.objects.filter(is_active=True).count(),
-            'users_by_school': [
-                {
-                    'school_id': s.id,
-                    'name': s.name,
-                    'members': s.members.count(),
-                }
-                for s in schools
-            ],
             'users_by_role': {
                 role: User.objects.filter(role=role).count()
                 for role, _ in User.ROLE_CHOICES
@@ -943,79 +918,12 @@ class SuperadminAnalyticsView(APIView):
         })
 
 
-class SuperadminSchoolListView(APIView):
-    permission_classes = [IsSuperadmin]
-
-    def get(self, request):
-        schools = School.objects.annotate(member_count=models.Count('members')).order_by('-created_at')
-        return Response(SchoolSerializer(schools, many=True).data)
-
-    def post(self, request):
-        serializer = SchoolCreateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        school = serializer.save(created_by=request.user)
-        school = School.objects.annotate(member_count=models.Count('members')).get(pk=school.pk)
-        return Response(
-            SchoolSerializer(school).data,
-            status=status.HTTP_201_CREATED,
-        )
-
-
-class SuperadminSchoolDetailView(APIView):
-    permission_classes = [IsSuperadmin]
-
-    def get_object(self, school_id):
-        try:
-            return School.objects.annotate(member_count=models.Count('members')).get(id=school_id)
-        except School.DoesNotExist:
-            return None
-
-    def get(self, request, school_id):
-        school = self.get_object(school_id)
-        if not school:
-            return Response({'error': 'School not found'}, status=status.HTTP_404_NOT_FOUND)
-        return Response(SchoolSerializer(school).data)
-
-
-class SuperadminSchoolAdminCreateView(APIView):
-    permission_classes = [IsSuperadmin]
-
-    def post(self, request, school_id):
-        try:
-            school = School.objects.get(id=school_id)
-        except School.DoesNotExist:
-            return Response({'error': 'School not found'}, status=status.HTTP_404_NOT_FOUND)
-        serializer = SchoolAdminCreateSerializer(data=request.data, context={'school': school})
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        admin = serializer.save()
-        password = request.data.get('password')
-        if not admin.firebase_uid and admin.email and password:
-            uid = create_firebase_user(admin.email, password)
-            if uid:
-                admin.firebase_uid = uid
-                admin.save(update_fields=['firebase_uid'])
-        sync_user_to_firestore(admin)
-        RoleChangeLog.objects.create(
-            changed_by=request.user,
-            target_user=admin,
-            school=school,
-            from_role='',
-            to_role='admin',
-        )
-        return Response(UserSerializer(admin).data, status=status.HTTP_201_CREATED)
-
-
 class SuperadminUserListView(APIView):
     permission_classes = [IsSuperadmin]
 
     def get(self, request):
-        users = User.objects.select_related('school').order_by('id')
-        school_id = request.query_params.get('school')
+        users = User.objects.order_by('id')
         role = request.query_params.get('role')
-        if school_id:
-            users = users.filter(school_id=school_id)
         if role:
             users = users.filter(role=role)
         return Response(UserSerializer(users, many=True).data)
@@ -1035,7 +943,6 @@ class SuperadminUserListView(APIView):
         RoleChangeLog.objects.create(
             changed_by=request.user,
             target_user=user,
-            school=user.school,
             from_role='',
             to_role=user.role,
         )
@@ -1047,7 +954,7 @@ class SuperadminUserDetailView(APIView):
 
     def get_object(self, user_id):
         try:
-            return User.objects.select_related('school').get(id=user_id)
+            return User.objects.get(id=user_id)
         except User.DoesNotExist:
             return None
 
@@ -1064,124 +971,22 @@ class SuperadminUserDetailView(APIView):
         if user.id == request.user.id and new_role != 'superadmin':
             return Response({'error': 'You cannot change your own role.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        old_school = user.school
         was_active = user.is_active
 
         # Role changes go through apply_role_change (audit + token revocation).
         if 'role' in validated and validated['role'] != user.role:
             apply_role_change(request.user, user, validated.pop('role'))
 
-        # Apply the remaining fields (school, is_active, name/email).
+        # Apply the remaining fields (is_active, name/email).
         for field, value in validated.items():
             setattr(user, field, value)
         user.save()
 
-        school_changed = user.school != old_school
-        active_changed = user.is_active != was_active
-        if school_changed or active_changed:
-            user.token_version += 1
-            user.save(update_fields=['token_version'])
-        if school_changed:
-            sync_user_to_firestore(user)
-        return Response(UserSerializer(user).data)
-
-
-# --- Admin views (tenant-scoped: school derived from the JWT, URL is verified) ---
-
-class AdminUserListView(APIView):
-    permission_classes = [IsSchoolAdmin]
-
-    def get(self, request, school_id):
-        if school_id != request.user.school_id:
-            return Response({'error': 'You are not authorized for this school.'}, status=status.HTTP_403_FORBIDDEN)
-        users = User.objects.filter(school_id=school_id).select_related('school').order_by('id')
-        return Response(UserSerializer(users, many=True).data)
-
-    def post(self, request, school_id):
-        if school_id != request.user.school_id:
-            return Response({'error': 'You are not authorized for this school.'}, status=status.HTTP_403_FORBIDDEN)
-        serializer = AdminUserCreateSerializer(
-            data=request.data, context={'school': request.user.school}
-        )
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        user = serializer.save()
-        password = request.data.get('password')
-        if not user.firebase_uid and user.email and password:
-            uid = create_firebase_user(user.email, password)
-            if uid:
-                user.firebase_uid = uid
-                user.save(update_fields=['firebase_uid'])
-        sync_user_to_firestore(user)
-        return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
-
-
-class AdminUserDetailView(APIView):
-    permission_classes = [IsSchoolAdmin]
-
-    def get_object(self, request, school_id, user_id):
-        if school_id != request.user.school_id:
-            return None
-        try:
-            user = User.objects.get(id=user_id, school_id=school_id)
-        except User.DoesNotExist:
-            return None
-        if user.role in ('admin', 'superadmin'):
-            return None
-        return user
-
-    def patch(self, request, school_id, user_id):
-        user = self.get_object(request, school_id, user_id)
-        if not user:
-            return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
-        serializer = AdminUserUpdateSerializer(user, data=request.data, partial=True)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        was_active = user.is_active
-        serializer.save()
         if user.is_active != was_active:
             user.token_version += 1
             user.save(update_fields=['token_version'])
-            sync_user_to_firestore(user)
         return Response(UserSerializer(user).data)
 
-
-class AdminUserRoleView(APIView):
-    permission_classes = [IsSchoolAdmin]
-
-    def patch(self, request, school_id, user_id):
-        if school_id != request.user.school_id:
-            return Response({'error': 'You are not authorized for this school.'}, status=status.HTTP_403_FORBIDDEN)
-
-        try:
-            target = User.objects.get(id=user_id, school_id=school_id)
-        except User.DoesNotExist:
-            return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
-
-        # Escalation guards
-        if target.role in ('admin', 'superadmin'):
-            return Response({'error': 'You cannot change the role of this user.'}, status=status.HTTP_403_FORBIDDEN)
-        if target.id == request.user.id:
-            return Response({'error': 'You cannot change your own role.'}, status=status.HTTP_403_FORBIDDEN)
-
-        serializer = AdminRoleUpdateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        new_role = serializer.validated_data['role']
-        apply_role_change(request.user, target, new_role)
-        sync_user_to_firestore(target)
-        return Response(UserSerializer(target).data)
-
-
-class SchoolRoleChangeLogView(APIView):
-    permission_classes = [IsSchoolAdmin]
-
-    def get(self, request, school_id):
-        if school_id != request.user.school_id:
-            return Response({'error': 'You are not authorized for this school.'}, status=status.HTTP_403_FORBIDDEN)
-        logs = RoleChangeLog.objects.filter(school_id=school_id).select_related('changed_by', 'target_user').order_by('-created_at')
-        return Response(RoleChangeLogSerializer(logs, many=True).data)
 
 def sync_user_to_firestore(user):
     try:
@@ -1193,10 +998,8 @@ def sync_user_to_firestore(user):
             'displayName': display_name,
             'email': user.email,
             'role': user.role,
-            'schoolId': user.school_id,
             'is_student': user.is_student,
             'is_educator': user.is_educator,
-            'is_admin': user.is_admin,
             'level': user.level,
             'current_xp': user.current_xp,
             'total_points': user.total_points,

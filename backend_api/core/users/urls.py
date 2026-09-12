@@ -57,16 +57,7 @@ urlpatterns = [
 
     # --- Superadmin (global scope) ---
     path('superadmin/analytics/', views.SuperadminAnalyticsView.as_view(), name='superadmin_analytics'),
-    path('superadmin/schools/<int:school_id>/admins/', views.SuperadminSchoolAdminCreateView.as_view(), name='superadmin_school_admin_create'),
-    path('superadmin/schools/<int:school_id>/', views.SuperadminSchoolDetailView.as_view(), name='superadmin_school_detail'),
-    path('superadmin/schools/', views.SuperadminSchoolListView.as_view(), name='superadmin_schools'),
     path('superadmin/users/<int:user_id>/', views.SuperadminUserDetailView.as_view(), name='superadmin_user_detail'),
     path('superadmin/users/', views.SuperadminUserListView.as_view(), name='superadmin_users'),
 
-    # --- Admin (school-scoped) ---
-    path('schools/<int:school_id>/users/<int:user_id>/role/', views.AdminUserRoleView.as_view(), name='admin_user_role'),
-    path('schools/<int:school_id>/users/<int:user_id>/', views.AdminUserDetailView.as_view(), name='admin_user_detail'),
-    path('schools/<int:school_id>/role-logs/', views.SchoolRoleChangeLogView.as_view(), name='school_role_logs'),
-    path('schools/<int:school_id>/users/', views.AdminUserListView.as_view(), name='admin_users'),
-    
 ]
