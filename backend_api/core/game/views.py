@@ -152,7 +152,12 @@ class CreateGameView(APIView):
             'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
         }
         if team_mode:
-            player_data['teamId'] = None
+            player_data['teamId'] = '1'
+            db.collection('gameRooms').document(room_code)\
+              .collection('teams').document('1').update({
+                  'memberIds': fs.ArrayUnion([str(request.user.id)]),
+                  'memberCount': fs.Increment(1),
+              })
 
         db.collection('gameRooms').document(room_code)\
           .collection('players').document(str(request.user.id)).set(player_data)

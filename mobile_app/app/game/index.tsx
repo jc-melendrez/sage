@@ -128,7 +128,7 @@ export default function GameCenterScreen() {
       setActiveTab('custom');
     } else if (modeId === 'group') {
       setSelectedMode(modeId);
-      router.push({ pathname: '/game/classic', params: { mode: 'create', teamMode: 'true' } });
+      setActiveTab('custom');
     } else if (modeId === 'flashcards') {
       router.push('/game/flashcards');
     } else {
@@ -162,6 +162,8 @@ export default function GameCenterScreen() {
         body: JSON.stringify({
           quizId: selectedQuiz.id,
           timePerQuestion: parseInt(timePerQuestion) || 15,
+          teamMode: selectedMode === 'group' ? 'true' : 'false',
+          ...(selectedMode === 'group' ? { teamCount: 2 } : {}),
         }),
       });
 
@@ -181,10 +183,6 @@ export default function GameCenterScreen() {
 
   // 3. Handle Start Press -> Start Game & Countdown
   const handleStartPress = async () => {
-    if (selectedMode === 'group') {
-      router.push({ pathname: '/game/classic', params: { mode: 'create', teamMode: 'true' } });
-      return;
-    }
     if (!roomCode) {
        // If no room exists, create one first silently
        if (!selectedQuiz) {
@@ -204,6 +202,8 @@ export default function GameCenterScreen() {
           body: JSON.stringify({
             quizId: selectedQuiz.id,
             timePerQuestion: parseInt(timePerQuestion) || 15,
+            teamMode: selectedMode === 'group' ? 'true' : 'false',
+            ...(selectedMode === 'group' ? { teamCount: 2 } : {}),
           }),
         });
         const data = await response.json();
@@ -370,12 +370,6 @@ export default function GameCenterScreen() {
                     </View>
                 ))}
             </View>
-
-            {/* Player Count Dropdown (Visual Only) */}
-            <TouchableOpacity style={styles.playerDropdown} activeOpacity={0.8}>
-                <Text style={styles.playerDropdownText}>2-20 PLAYERS</Text>
-                <Ionicons name="caret-down" size={20} color="white" />
-            </TouchableOpacity>
         </View>
 
         {/* Main Content Card */}
@@ -558,7 +552,6 @@ export default function GameCenterScreen() {
             </TouchableOpacity>
 
             {/* INVITE BUTTON */}
-            {selectedMode !== 'group' && (
             <TouchableOpacity 
                 style={styles.actionBtnInvite} 
                 onPress={handleInvitePress}
@@ -573,7 +566,6 @@ export default function GameCenterScreen() {
                     </>
                 )}
             </TouchableOpacity>
-            )}
 
             {/* START BUTTON */}
             <TouchableOpacity 
@@ -718,24 +710,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: FONTS.bold,
     textTransform: 'uppercase',
-  },
-  playerDropdown: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 12,
-    width: '100%',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.3)',
-  },
-  playerDropdownText: {
-    color: 'white',
-    fontFamily: FONTS.bold,
-    fontSize: 16,
-    letterSpacing: 0.5,
   },
 
   // Content Card
