@@ -15,6 +15,22 @@ class SAGETokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
 
+class SAGERefreshToken(RefreshToken):
+    """RefreshToken subclass that carries role / token_version claims.
+
+    Must be used everywhere a token pair is issued programmatically
+    (firebase-login, OTP verify) — TokenVersionAuthentication rejects
+    access tokens whose token_version claim is stale or missing.
+    """
+
+    @classmethod
+    def for_user(cls, user):
+        token = super().for_user(user)
+        token['role'] = user.role
+        token['token_version'] = user.token_version
+        return token
+
+
 class TokenVersionAuthentication(JWTAuthentication):
     """Rejects tokens whose `token_version` claim is stale (role changed, deactivated, etc.)."""
 

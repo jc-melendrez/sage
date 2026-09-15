@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { 
   View, 
   Text, 
@@ -7,12 +7,13 @@ import {
   ScrollView, 
   Platform, 
   StatusBar,
+  RefreshControl,
   Modal,
   ActivityIndicator,
   Alert,
   Animated
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -69,9 +70,11 @@ export default function GameCenterScreen() {
   const [timePerQuestion, setTimePerQuestion] = useState('15');
   const [loadingQuizzes, setLoadingQuizzes] = useState(false);
   const [isCreatingRoom, setIsCreatingRoom] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   
   // Modal States
-  const [showConfigModal, setShowConfigModal] = useState(false);
+  const [activeTab, setActiveTab] = useState<'presets' | 'custom'>('presets');
+  const [showQuizDropdown, setShowQuizDropdown] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [roomTopic, setRoomTopic] = useState<string>('');
@@ -82,12 +85,7 @@ export default function GameCenterScreen() {
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
-  // --- Effects ---
-  useEffect(() => {
-    fetchQuizzes();
-  }, []);
-
-  const fetchQuizzes = async () => {
+  const fetchQuizzes = useCallback(async () => {
     setLoadingQuizzes(true);
     try {
       const token = await getToken();
@@ -104,7 +102,22 @@ export default function GameCenterScreen() {
     } finally {
       setLoadingQuizzes(false);
     }
-  };
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchQuizzes();
+    }, [fetchQuizzes])
+  );
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await fetchQuizzes();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchQuizzes]);
 
   // --- Handlers ---
   
@@ -112,7 +125,7 @@ export default function GameCenterScreen() {
   const handleModePress = (modeId: string) => {
     if (modeId === 'classic') {
       setSelectedMode(modeId);
-      setShowConfigModal(true);
+      setActiveTab('custom');
     } else if (modeId === 'group') {
       setSelectedMode(modeId);
       router.push({ pathname: '/game/classic', params: { mode: 'create', teamMode: 'true' } });
@@ -369,19 +382,35 @@ export default function GameCenterScreen() {
         <View style={styles.contentCard}>
             {/* Tabs: PRESETS | CUSTOM SETTINGS */}
             <View style={styles.tabsContainer}>
-                <View style={styles.tabActive}>
-                    <Text style={styles.tabTextActive}>PRESETS</Text>
-                </View>
-                <TouchableOpacity style={styles.tabInactive}>
-                    <Text style={styles.tabTextInactive}>CUSTOM SETTINGS</Text>
+                <TouchableOpacity
+                    style={activeTab === 'presets' ? styles.tabActive : styles.tabInactive}
+                    onPress={() => setActiveTab('presets')}
+                    activeOpacity={0.7}
+                >
+                    <Text numberOfLines={1} adjustsFontSizeToFit style={activeTab === 'presets' ? styles.tabTextActive : styles.tabTextInactive}>PRESETS</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                    style={activeTab === 'custom' ? styles.tabActive : styles.tabInactive}
+                    onPress={() => setActiveTab('custom')}
+                    activeOpacity={0.7}
+                >
+                    <Text numberOfLines={1} adjustsFontSizeToFit style={activeTab === 'custom' ? styles.tabTextActive : styles.tabTextInactive}>CUSTOM SETTINGS</Text>
                 </TouchableOpacity>
             </View>
 
-            {/* Modes List */}
+            {activeTab === 'presets' ? (
             <ScrollView 
                 style={styles.modesScroll} 
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={{ paddingBottom: 100 }}
+                refreshControl={
+                    <RefreshControl
+                        refreshing={refreshing}
+                        onRefresh={handleRefresh}
+                        tintColor={COLORS.purplePale}
+                        colors={[COLORS.purplePale]}
+                    />
+                }
             >
                 {gameModes.map((mode) => {
                     const isSelected = selectedMode === mode.id;
@@ -434,6 +463,86 @@ export default function GameCenterScreen() {
                     );
                 })}
             </ScrollView>
+            ) : (
+            <ScrollView 
+                style={styles.modesScroll} 
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={{ paddingBottom: 100 }}
+                refreshControl={
+                    <RefreshControl
+                        refreshing={refreshing}
+                        onRefresh={handleRefresh}
+                        tintColor={COLORS.purplePale}
+                        colors={[COLORS.purplePale]}
+                    />
+                }
+            >
+                <View style={styles.configSection}>
+                    <Text style={styles.configLabel}>SELECT QUIZ</Text>
+                    {loadingQuizzes ? (
+                        <ActivityIndicator size="small" color={COLORS.purpleLight} />
+                    ) : quizzes.length === 0 ? (
+                        <Text style={styles.emptyQuizText}>No quizzes found. Create one in Activities!</Text>
+                    ) : (
+                        <View>
+                            <TouchableOpacity
+                                style={styles.quizSelector}
+                                onPress={() => setShowQuizDropdown(!showQuizDropdown)}
+                                activeOpacity={0.7}
+                            >
+                                <Ionicons name="document-text" size={18} color={COLORS.purplePrimary} style={{marginRight: 8}} />
+                                <Text
+                                    style={[styles.quizSelectorText, !selectedQuiz && styles.quizSelectorTextPlaceholder]}
+                                    numberOfLines={1}
+                                >
+                                    {selectedQuiz?.title || 'Select a quiz...'}
+                                </Text>
+                                <Ionicons name={showQuizDropdown ? 'chevron-up' : 'chevron-down'} size={20} color={COLORS.textMuted} />
+                            </TouchableOpacity>
+
+                            {showQuizDropdown && (
+                                <ScrollView style={styles.quizDropdown} nestedScrollEnabled={true} showsVerticalScrollIndicator={false}>
+                                    {quizzes.map((q) => {
+                                        const isQSelected = selectedQuiz?.id === q.id;
+                                        return (
+                                            <TouchableOpacity
+                                                key={q.id}
+                                                style={[styles.quizDropdownItem, isQSelected && styles.quizDropdownItemActive]}
+                                                onPress={() => {
+                                                    setSelectedQuiz(q);
+                                                    setShowQuizDropdown(false);
+                                                }}
+                                                activeOpacity={0.7}
+                                            >
+                                                <Text style={[styles.quizDropdownItemText, isQSelected && styles.quizDropdownItemTextActive]} numberOfLines={1}>
+                                                    {q.title}
+                                                </Text>
+                                                {isQSelected && <Ionicons name="checkmark" size={18} color={COLORS.purplePrimary} />}
+                                            </TouchableOpacity>
+                                        );
+                                    })}
+                                </ScrollView>
+                            )}
+                        </View>
+                    )}
+                </View>
+
+                <View style={styles.configSection}>
+                    <Text style={styles.configLabel}>TIME PER QUESTION</Text>
+                    <View style={styles.timeOptions}>
+                        {['10', '15', '20', '30'].map((t) => (
+                            <TouchableOpacity
+                                key={t}
+                                style={[styles.timeBtn, timePerQuestion === t && styles.timeBtnActive]}
+                                onPress={() => setTimePerQuestion(t)}
+                            >
+                                <Text style={[styles.timeBtnText, timePerQuestion === t && styles.timeBtnTextActive]}>{t}s</Text>
+                            </TouchableOpacity>
+                        ))}
+                    </View>
+                </View>
+            </ScrollView>
+            )}
         </View>
 
         {/* Bottom Action Bar */}
@@ -482,66 +591,6 @@ export default function GameCenterScreen() {
                 )}
             </TouchableOpacity>
         </View>
-
-        {/* --- CONFIGURATION MODAL --- */}
-        <Modal visible={showConfigModal} animationType="slide" transparent={true}>
-            <View style={styles.modalOverlay}>
-                <View style={styles.configModalCard}>
-                    <View style={styles.modalHeader}>
-                        <Text style={styles.modalTitle}>Game Settings</Text>
-                        <TouchableOpacity onPress={() => setShowConfigModal(false)}>
-                            <Ionicons name="close" size={24} color={COLORS.textMuted} />
-                        </TouchableOpacity>
-                    </View>
-
-                    <ScrollView showsVerticalScrollIndicator={false}>
-                        <View style={styles.configSection}>
-                            <Text style={styles.configLabel}>SELECT QUIZ</Text>
-                            {loadingQuizzes ? (
-                                <ActivityIndicator size="small" color={COLORS.purplePrimary} />
-                            ) : (
-                                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.quizScroll}>
-                                    {quizzes.length === 0 ? (
-                                        <Text style={styles.emptyQuizText}>No quizzes found. Create one in Activities!</Text>
-                                    ) : (
-                                        quizzes.map((q) => {
-                                            const isQSelected = selectedQuiz?.id === q.id;
-                                            return (
-                                                <TouchableOpacity
-                                                    key={q.id}
-                                                    style={[styles.quizChip, isQSelected && styles.quizChipActive]}
-                                                    onPress={() => setSelectedQuiz(q)}
-                                                >
-                                                    <Ionicons name="document-text" size={16} color={isQSelected ? 'white' : COLORS.purplePrimary} style={{marginRight: 6}} />
-                                                    <Text style={[styles.quizChipText, isQSelected && styles.quizChipTextActive]} numberOfLines={1}>
-                                                        {q.title}
-                                                    </Text>
-                                                </TouchableOpacity>
-                                            );
-                                        })
-                                    )}
-                                </ScrollView>
-                            )}
-                        </View>
-
-                        <View style={styles.configSection}>
-                            <Text style={styles.configLabel}>TIME PER QUESTION</Text>
-                            <View style={styles.timeOptions}>
-                                {['10', '15', '20', '30'].map((t) => (
-                                    <TouchableOpacity
-                                        key={t}
-                                        style={[styles.timeBtn, timePerQuestion === t && styles.timeBtnActive]}
-                                        onPress={() => setTimePerQuestion(t)}
-                                    >
-                                        <Text style={[styles.timeBtnText, timePerQuestion === t && styles.timeBtnTextActive]}>{t}s</Text>
-                                    </TouchableOpacity>
-                                ))}
-                            </View>
-                        </View>
-                    </ScrollView>
-                </View>
-            </View>
-        </Modal>
 
         {/* --- INVITE CODE MODAL --- */}
         <Modal visible={showInviteModal} animationType="fade" transparent={true}>
@@ -919,40 +968,68 @@ const styles = StyleSheet.create({
   configLabel: {
     fontSize: 12,
     fontFamily: FONTS.bold,
-    color: COLORS.textSecondary,
+    color: 'rgba(255,255,255,0.9)',
     marginBottom: 12,
     letterSpacing: 0.5,
   },
-  quizScroll: {
-    flexGrow: 0,
-  },
-  quizChip: {
+  quizSelector: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 12,
     borderWidth: 1,
     borderColor: COLORS.border,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 20,
-    marginRight: 8,
+    height: 48,
   },
-  quizChipActive: {
-    backgroundColor: COLORS.purplePrimary,
-    borderColor: COLORS.purplePrimary,
-  },
-  quizChipText: {
-    fontSize: 14,
+  quizSelectorText: {
+    flex: 1,
+    fontSize: 15,
     fontFamily: FONTS.semiBold,
     color: COLORS.textPrimary,
-    maxWidth: 150,
   },
-  quizChipTextActive: {
-    color: 'white',
+  quizSelectorTextPlaceholder: {
+    color: COLORS.textMuted,
+  },
+  quizDropdown: {
+    backgroundColor: 'white',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginTop: 6,
+    maxHeight: 260,
+    elevation: 6,
+    zIndex: 1000,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  quizDropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  quizDropdownItemActive: {
+    backgroundColor: '#F3E8FF',
+  },
+  quizDropdownItemText: {
+    flex: 1,
+    fontSize: 15,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+  },
+  quizDropdownItemTextActive: {
+    fontFamily: FONTS.bold,
+    color: COLORS.purpleDeep,
   },
   emptyQuizText: {
     fontSize: 14,
-    color: COLORS.textMuted,
+    color: 'rgba(255,255,255,0.75)',
     fontStyle: 'italic',
     paddingVertical: 10,
   },

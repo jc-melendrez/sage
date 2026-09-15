@@ -32,7 +32,8 @@ from .permissions import IsSuperadmin
 from .utils.file_parser import extract_text_from_file
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import RefreshToken  # noqa: F401 (kept for imports elsewhere)
+from .authentication import SAGERefreshToken
 from core.firebase import verify_firebase_token, create_firebase_user
 from .models import User
 from .otp import create_otp_challenge, otp_matches
@@ -127,7 +128,9 @@ class FirebaseLoginView(APIView):
             pass # Skip the OTP challenge entirely
 
         # 4. Issue a Django JWT for the rest of the app to use
-        refresh = RefreshToken.for_user(user)
+        #    SAGERefreshToken embeds role/token_version claims required by
+        #    TokenVersionAuthentication — plain RefreshToken would 401.
+        refresh = SAGERefreshToken.for_user(user)
         return Response(self._auth_payload(user, refresh))
 
     @staticmethod
@@ -226,7 +229,7 @@ class FirebaseLoginVerifyOtpView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        refresh = RefreshToken.for_user(user)
+        refresh = SAGERefreshToken.for_user(user)
         return Response(FirebaseLoginView._auth_payload(user, refresh))
 
 # ---------- Helper: safe JSON parsing ----------
