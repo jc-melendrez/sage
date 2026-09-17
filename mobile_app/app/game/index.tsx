@@ -117,7 +117,7 @@ export default function GameCenterScreen() {
       setSelectedMode(modeId);
       router.push({ pathname: '/game/classic', params: { mode: 'create', teamMode: 'true' } });
     } else if (modeId === 'flashcards') {
-      router.push('/game/flashcards');
+      router.push('/flashcards');
     } else {
       Alert.alert("Coming Soon", "This mode is under development!");
     }

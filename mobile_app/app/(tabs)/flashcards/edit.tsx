@@ -16,7 +16,8 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { COLORS, FONTS, DECK_COLORS } from '@/constants/gameTheme';
+import { LinearGradient } from 'expo-linear-gradient';
+import { COLORS, FONTS, DECK_COLORS, GRADIENT_COLORS } from '@/constants/gameTheme';
 import FlashBanner, { BannerType } from '@/components/FlashBanner';
 import {
   Card,
@@ -191,7 +192,8 @@ export default function EditDeckScreen() {
   };
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardAvoidingView style={styles.keyboardWrap} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
     <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} translucent={false} />
 
@@ -378,7 +380,7 @@ export default function EditDeckScreen() {
                 <Ionicons name="close" size={22} color={COLORS.textMuted} />
               </TouchableOpacity>
             </View>
-            <Text style={styles.inputLabel}>PASTE CARDS — "FRONT | BACK" PER LINE, OR JSON</Text>
+            <Text style={styles.inputLabel}>{'PASTE CARDS — "FRONT | BACK" PER LINE, OR JSON'}</Text>
             <TextInput
               style={[styles.input, styles.bulkInput]}
               value={bulkText}
@@ -406,12 +408,15 @@ export default function EditDeckScreen() {
         </View>
       </Modal>
     </View>
+    </LinearGradient>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg, paddingHorizontal: 20 },
+  keyboardWrap: { flex: 1 },
+  gradient: { flex: 1 },
+  container: { flex: 1, paddingHorizontal: 20 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -422,11 +427,11 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(127,119,221,0.15)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(127,119,221,0.25)',
+    borderColor: 'rgba(255,255,255,0.2)',
   },
   headerBtnPlaceholder: { width: 40 },
   headerTitleWrap: { alignItems: 'center' },
@@ -530,7 +535,7 @@ const styles = StyleSheet.create({
     width: 26,
     height: 26,
     borderRadius: 13,
-    backgroundColor: 'rgba(139,92,246,0.15)',
+    backgroundColor: 'rgba(139,92,246,0.3)',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -546,7 +551,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
   modalCard: {
-    backgroundColor: COLORS.surface,
+    backgroundColor: COLORS.surfaceLight,
     borderRadius: 20,
     padding: 20,
     borderWidth: 1,

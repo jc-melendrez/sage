@@ -16,7 +16,8 @@ import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { COLORS, FONTS, DECK_COLORS } from '@/constants/gameTheme';
+import { LinearGradient } from 'expo-linear-gradient';
+import { COLORS, FONTS, DECK_COLORS, GRADIENT_COLORS } from '@/constants/gameTheme';
 import FlashBanner, { BannerType } from '@/components/FlashBanner';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
@@ -94,8 +95,8 @@ export default function FlashcardsHome() {
     return Math.round(((totals.good + totals.easy) / total) * 100);
   }, [totals]);
 
-  const openStudy = (deckId: number) => router.push({ pathname: '/game/flashcards/study', params: { deckId } });
-  const openEdit = (deckId: number) => router.push({ pathname: '/game/flashcards/edit', params: { deckId } });
+  const openStudy = (deckId: number) => router.push({ pathname: '/flashcards/study', params: { deckId } });
+  const openEdit = (deckId: number) => router.push({ pathname: '/flashcards/edit', params: { deckId } });
 
   const createNewDeck = () => {
     const name = deckName.trim();
@@ -152,7 +153,8 @@ export default function FlashcardsHome() {
   const totalDue = decks.reduce((sum, d) => sum + (summaries[d.id]?.dueCount ?? 0), 0);
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardAvoidingView style={styles.keyboardWrap} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
     <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} translucent={false} />
 
@@ -472,12 +474,15 @@ export default function FlashcardsHome() {
         </View>
       </Modal>
     </View>
+    </LinearGradient>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg, paddingHorizontal: 20 },
+  keyboardWrap: { flex: 1 },
+  gradient: { flex: 1 },
+  container: { flex: 1, paddingHorizontal: 20 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -488,11 +493,11 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(127,119,221,0.15)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(127,119,221,0.25)',
+    borderColor: 'rgba(255,255,255,0.2)',
   },
   headerTitleWrap: { alignItems: 'center' },
   headerTitle: {
@@ -521,7 +526,7 @@ const styles = StyleSheet.create({
   statCell: { flex: 1, alignItems: 'center' },
   statValue: { color: COLORS.textPrimary, fontSize: 18, fontFamily: FONTS.black },
   statLabel: { color: COLORS.textMuted, fontSize: 9, fontFamily: FONTS.bold, letterSpacing: 0.8, marginTop: 4 },
-  statDivider: { width: 1, backgroundColor: 'rgba(127,119,221,0.2)' },
+  statDivider: { width: 1, backgroundColor: 'rgba(255,255,255,0.2)' },
 
   searchWrap: {
     flexDirection: 'row',
@@ -540,9 +545,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: 'rgba(16,185,129,0.12)',
+    backgroundColor: 'rgba(16,185,129,0.15)',
     borderWidth: 1,
-    borderColor: 'rgba(16,185,129,0.4)',
+    borderColor: 'rgba(16,185,129,0.45)',
     borderRadius: 14,
     padding: 14,
     marginBottom: 14,
@@ -585,7 +590,7 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -613,7 +618,7 @@ const styles = StyleSheet.create({
     width: 104,
     height: 104,
     borderRadius: 52,
-    backgroundColor: 'rgba(167,139,250,0.1)',
+    backgroundColor: 'rgba(167,139,250,0.15)',
     borderWidth: 1,
     borderColor: COLORS.border,
     justifyContent: 'center',
@@ -644,7 +649,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: 'rgba(139,92,246,0.15)',
+    backgroundColor: 'rgba(139,92,246,0.3)',
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: 12,
@@ -677,7 +682,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
   modalCard: {
-    backgroundColor: COLORS.surface,
+    backgroundColor: COLORS.surfaceLight,
     borderRadius: 20,
     padding: 20,
     borderWidth: 1,
@@ -726,7 +731,7 @@ const styles = StyleSheet.create({
     width: 38,
     height: 38,
     borderRadius: 10,
-    backgroundColor: 'rgba(34,211,238,0.12)',
+    backgroundColor: 'rgba(34,211,238,0.15)',
     justifyContent: 'center',
     alignItems: 'center',
   },
