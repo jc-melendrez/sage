@@ -11,7 +11,8 @@ import {
   Modal,
   ActivityIndicator,
   Alert,
-  Animated
+  Animated,
+  TextInput,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -75,7 +76,12 @@ export default function GameCenterScreen() {
   // Modal States
   const [activeTab, setActiveTab] = useState<'presets' | 'custom'>('presets');
   const [showQuizDropdown, setShowQuizDropdown] = useState(false);
+  const [teamCount, setTeamCount] = useState(2);
+  const [teamCountDraft, setTeamCountDraft] = useState('');
   const [showInviteModal, setShowInviteModal] = useState(false);
+  const [showJoinModal, setShowJoinModal] = useState(false);
+  const [joinCode, setJoinCode] = useState('');
+  const [joining, setJoining] = useState(false);
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [roomTopic, setRoomTopic] = useState<string>('');
 
@@ -163,7 +169,8 @@ export default function GameCenterScreen() {
           quizId: selectedQuiz.id,
           timePerQuestion: parseInt(timePerQuestion) || 15,
           teamMode: selectedMode === 'group' ? 'true' : 'false',
-          ...(selectedMode === 'group' ? { teamCount: 2 } : {}),
+          autoAssignTeams: selectedMode === 'group' ? 'true' : 'false',
+          ...(selectedMode === 'group' ? { teamCount } : {}),
         }),
       });
 
@@ -203,7 +210,8 @@ export default function GameCenterScreen() {
             quizId: selectedQuiz.id,
             timePerQuestion: parseInt(timePerQuestion) || 15,
             teamMode: selectedMode === 'group' ? 'true' : 'false',
-            ...(selectedMode === 'group' ? { teamCount: 2 } : {}),
+            autoAssignTeams: selectedMode === 'group' ? 'true' : 'false',
+            ...(selectedMode === 'group' ? { teamCount } : {}),
           }),
         });
         const data = await response.json();
@@ -291,6 +299,51 @@ export default function GameCenterScreen() {
     if (roomCode) {
       await Clipboard.setStringAsync(roomCode);
       Alert.alert("Copied!", "Room code copied to clipboard");
+    }
+  };
+
+  const handleJoin = async () => {
+    const code = joinCode.trim().toUpperCase();
+    if (!code) {
+      Alert.alert('Error', 'Please enter a room code');
+      return;
+    }
+    setJoining(true);
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/game/join/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ roomCode: code }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to join room');
+      setShowJoinModal(false);
+      setJoinCode('');
+      router.push({ pathname: '/game/lobby', params: { roomCode: code, isHost: 'false', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
+    } catch (error: any) {
+      Alert.alert('Error', error.message);
+    } finally {
+      setJoining(false);
+    }
+  };
+
+  const codeBoxRefs = useRef<any[]>([]);
+  const handleCodeChange = (t: string, i: number) => {
+    const char = t.slice(-1).toUpperCase();
+    const next = joinCode.split('').slice(0, 6);
+    while (next.length < i) next.push('');
+    next[i] = char;
+    const clean = next.join('').slice(0, 6);
+    setJoinCode(clean);
+    if (char && i < 5) codeBoxRefs.current[i + 1]?.focus();
+  };
+  const handleCodeKeyPress = (e: any, i: number) => {
+    if (e.nativeEvent.key === 'Backspace' && !joinCode[i] && i > 0) {
+      codeBoxRefs.current[i - 1]?.focus();
     }
   };
 
@@ -535,6 +588,40 @@ export default function GameCenterScreen() {
                         ))}
                     </View>
                 </View>
+
+                {selectedMode === 'group' && (
+                <View style={styles.configSection}>
+                    <Text style={styles.configLabel}>NUMBER OF TEAMS</Text>
+                    <View style={styles.teamCountRow}>
+                        {[2, 3, 4, 5, 6].map((n) => (
+                            <TouchableOpacity
+                                key={n}
+                                style={[styles.teamCountChip, teamCount === n && !teamCountDraft && styles.teamCountChipActive]}
+                                onPress={() => { setTeamCount(n); setTeamCountDraft(''); }}
+                            >
+                                <Text style={[styles.teamCountChipText, teamCount === n && !teamCountDraft && styles.teamCountChipTextActive]}>{n}</Text>
+                            </TouchableOpacity>
+                        ))}
+                    </View>
+                    <View style={[styles.teamCountInputWrap, teamCountDraft && styles.teamCountChipActive]}>
+                        <Text style={styles.teamCountInputPrefix}>Custom</Text>
+                        <TextInput
+                            style={styles.teamCountInputText}
+                            value={teamCountDraft}
+                            onChangeText={(t) => {
+                                const cleaned = t.replace(/[^0-9]/g, '').slice(0, 2);
+                                setTeamCountDraft(cleaned);
+                                if (cleaned) setTeamCount(Math.max(2, Math.min(20, parseInt(cleaned, 10))));
+                            }}
+                            keyboardType="number-pad"
+                            placeholder="amount"
+                            placeholderTextColor={COLORS.textMuted}
+                            maxLength={2}
+                        />
+                        {teamCountDraft !== '' && <Text style={styles.teamCountInputSuffix}>teams</Text>}
+                    </View>
+                </View>
+                )}
             </ScrollView>
             )}
         </View>
@@ -545,7 +632,7 @@ export default function GameCenterScreen() {
             {/* JOIN BUTTON — enter a room code */}
             <TouchableOpacity
                 style={styles.actionBtnJoin}
-                onPress={() => router.push({ pathname: '/game/classic', params: { mode: 'join' } })}
+                onPress={() => setShowJoinModal(true)}
             >
                 <Ionicons name="enter" size={20} color={COLORS.purplePrimary} style={{marginRight: 8}} />
                 <Text style={styles.actionBtnJoinText}>JOIN</Text>
@@ -612,6 +699,55 @@ export default function GameCenterScreen() {
                     >
                         <Ionicons name="copy-outline" size={20} color="white" style={{marginRight: 8}} />
                         <Text style={styles.copyCodeBtnText}>Copy Code</Text>
+                    </TouchableOpacity>
+                </View>
+            </View>
+        </Modal>
+
+        {/* --- JOIN ROOM MODAL --- */}
+        <Modal visible={showJoinModal} animationType="fade" transparent={true}>
+            <View style={styles.modalOverlay}>
+                <View style={styles.inviteModalCard}>
+                    <TouchableOpacity 
+                        style={styles.closeInviteBtn}
+                        onPress={() => { if (!joining) setShowJoinModal(false); }}
+                    >
+                        <Ionicons name="close" size={24} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+
+                    <Text style={styles.modalTitle}>JOIN ROOM</Text>
+                    <Text style={styles.modalSub}>Enter the room code to join a game</Text>
+
+                    <View style={styles.codeBoxes}>
+                        {Array.from({ length: 6 }).map((_, i) => (
+                            <TextInput
+                                key={i}
+                                ref={(r) => { codeBoxRefs.current[i] = r; }}
+                                style={[styles.codeBox, joinCode[i] ? styles.codeBoxFilled : null]}
+                                value={joinCode[i] || ''}
+                                onChangeText={(t) => handleCodeChange(t, i)}
+                                onKeyPress={(e) => handleCodeKeyPress(e, i)}
+                                maxLength={1}
+                                autoCapitalize="characters"
+                                autoCorrect={false}
+                                editable={!joining}
+                            />
+                        ))}
+                    </View>
+
+                    <TouchableOpacity 
+                        style={[styles.copyCodeBtn, joining && { opacity: 0.7 }]}
+                        onPress={handleJoin}
+                        disabled={joining}
+                    >
+                        {joining ? (
+                            <ActivityIndicator color="white" />
+                        ) : (
+                            <>
+                                <Ionicons name="enter" size={20} color="white" style={{marginRight: 8}} />
+                                <Text style={styles.copyCodeBtnText}>Join Game</Text>
+                            </>
+                        )}
                     </TouchableOpacity>
                 </View>
             </View>
@@ -1033,6 +1169,65 @@ const styles = StyleSheet.create({
     color: 'white',
   },
 
+  // Number of Teams chips + custom input
+  teamCountRow: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  teamCountChip: {
+    backgroundColor: 'white',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    minWidth: 48,
+  },
+  teamCountChipActive: {
+    backgroundColor: COLORS.purpleDark,
+    borderColor: COLORS.purpleDark,
+  },
+  teamCountChipText: {
+    fontSize: 16,
+    fontFamily: FONTS.bold,
+    color: COLORS.textPrimary,
+  },
+  teamCountChipTextActive: {
+    color: 'white',
+  },
+  teamCountInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+    backgroundColor: 'white',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  teamCountInputPrefix: {
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textSecondary,
+  },
+  teamCountInputText: {
+    flex: 1,
+    fontSize: 16,
+    fontFamily: FONTS.bold,
+    color: COLORS.textPrimary,
+    paddingVertical: 0,
+    minWidth: 30,
+  },
+  teamCountInputSuffix: {
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textSecondary,
+  },
+
   // Invite Modal Styles
   codeDisplayRow: {
     flexDirection: 'row',
@@ -1054,6 +1249,29 @@ const styles = StyleSheet.create({
     fontSize: 24,
     fontFamily: FONTS.black,
     color: COLORS.purpleDark,
+  },
+  codeBoxes: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 24,
+  },
+  codeBox: {
+    width: 40,
+    height: 50,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: COLORS.purpleLight,
+    backgroundColor: COLORS.bgSecondary,
+    color: COLORS.purpleDark,
+    fontSize: 24,
+    fontFamily: FONTS.black,
+    textAlign: 'center',
+    paddingVertical: 0,
+  },
+  codeBoxFilled: {
+    borderColor: COLORS.success,
+    backgroundColor: 'white',
   },
   copyCodeBtn: {
     flexDirection: 'row',

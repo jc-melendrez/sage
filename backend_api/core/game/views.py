@@ -52,8 +52,8 @@ class CreateGameView(APIView):
         team_mode = str(request.data.get('teamMode', 'false')).lower() == 'true'
         team_count = int(request.data.get('teamCount', 2))
 
-        if team_mode and team_count not in (2, 3, 4):
-            return Response({'error': 'teamCount must be between 2 and 4'}, status=400)
+        if team_mode and not (2 <= team_count <= MAX_PLAYERS):
+            return Response({'error': 'teamCount must be between 2 and 20'}, status=400)
 
         if quiz_id:
             from ai_assistant.models import Quiz
@@ -123,6 +123,9 @@ class CreateGameView(APIView):
             'questions': questions,
             'createdAt': fs.SERVER_TIMESTAMP,
         }
+        auto_assign = str(request.data.get('autoAssignTeams', 'false')).lower() == 'true'
+        if auto_assign:
+            room_data['autoAssignTeams'] = True
         if team_mode:
             room_data['teamMode'] = True
             room_data['teamCount'] = team_count
@@ -152,12 +155,7 @@ class CreateGameView(APIView):
             'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
         }
         if team_mode:
-            player_data['teamId'] = '1'
-            db.collection('gameRooms').document(room_code)\
-              .collection('teams').document('1').update({
-                  'memberIds': fs.ArrayUnion([str(request.user.id)]),
-                  'memberCount': fs.Increment(1),
-              })
+            player_data['teamId'] = None
 
         db.collection('gameRooms').document(room_code)\
           .collection('players').document(str(request.user.id)).set(player_data)
@@ -312,7 +310,39 @@ class StartGameView(APIView):
 
         players = list(room_ref.collection('players').stream())
 
-        if room_data.get('teamMode', False):
+        auto_assign = room_data.get('autoAssignTeams', False)
+
+        if auto_assign and room_data.get('teamMode', False):
+            team_count = room_data.get('teamCount', 2)
+            player_ids = [p.id for p in players]
+            rng.shuffle(player_ids)
+            assignments = []
+            for idx, pid in enumerate(player_ids):
+                team_id = str((idx % team_count) + 1)
+                team_color = TEAM_COLORS[(int(team_id) - 1) % len(TEAM_COLORS)]
+                player_snap = next((p for p in players if p.id == pid), None)
+                display_name = (player_snap.to_dict() or {}).get('displayName', 'Player') if player_snap else 'Player'
+                player_snap.reference.update({'teamId': team_id})
+                assignments.append({
+                    'id': pid,
+                    'displayName': display_name,
+                    'teamId': team_id,
+                    'teamName': f'Team {team_id}',
+                    'teamColor': team_color,
+                })
+            for t in room_ref.collection('teams').stream():
+                t.reference.update({
+                    'memberIds': [],
+                    'memberCount': 0,
+                })
+            for a in assignments:
+                team_ref = room_ref.collection('teams').document(a['teamId'])
+                team_ref.update({
+                    'memberIds': fs.ArrayUnion([a['id']]),
+                    'memberCount': fs.Increment(1),
+                })
+
+        if not auto_assign and room_data.get('teamMode', False):
             for player in players:
                 if not (player.to_dict() or {}).get('teamId'):
                     return Response({'error': 'All players must join a team before starting'}, status=400)
@@ -324,11 +354,13 @@ class StartGameView(APIView):
             random.shuffle(order)
             player.reference.update({'questionOrder': order})
 
-        # Set status to active
-        room_ref.update({
+        update_fields = {
             'status': 'active',
             'startedAt': fs.SERVER_TIMESTAMP,
-        })
+        }
+        if auto_assign and room_data.get('teamMode', False):
+            update_fields['teamAssignments'] = assignments
+        room_ref.update(update_fields)
 
         return Response({'message': 'Game started!'})
 

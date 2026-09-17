@@ -118,7 +118,7 @@ class TeamModeGameTests(TestCase):
     def test_create_team_count_validation(self):
         self.client.force_authenticate(user=self.host)
         resp = self.client.post(reverse('create-game'), {
-            'teamMode': 'true', 'teamCount': '5',
+            'teamMode': 'true', 'teamCount': '21',
         }, format='json')
         self.assertEqual(resp.status_code, 400)
         self.assertIn('teamCount', resp.json()['error'])

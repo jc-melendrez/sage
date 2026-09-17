@@ -28,6 +28,7 @@ import firestore from '@react-native-firebase/firestore';
 import * as Haptics from 'expo-haptics';
 import { getToken, getCurrentUser } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
+import TeamRevealOverlay from '@/components/TeamRevealOverlay';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -155,6 +156,8 @@ export default function QuestionScreen() {
   const [teamMode, setTeamMode] = useState(false);
   const [teams, setTeams] = useState<any[]>([]);
   const [myTeamId, setMyTeamId] = useState<string | null>(null);
+  const [teamAssignments, setTeamAssignments] = useState<any[] | null>(null);
+  const [showTeamReveal, setShowTeamReveal] = useState(false);
 
   // ✨ UPDATED: RNAnimated refs
   const standingsAnim = useRef(new RNAnimated.Value(0)).current;
@@ -246,6 +249,9 @@ export default function QuestionScreen() {
           setTimeLeft(data.timePerQuestion || 15);
           setRoomStatus(data.status || 'waiting');
           setTeamMode(!!data.teamMode);
+          const assignments = data.teamAssignments || null;
+          setTeamAssignments(assignments);
+          setShowTeamReveal(!!(data.teamMode && data.status === 'active' && assignments));
         } else if (data.status === 'finished' && !navigatedRef.current) {
           navigatedRef.current = true;
           setRoomStatus('finished');
@@ -372,7 +378,7 @@ export default function QuestionScreen() {
   }, [showRoulette, rouletteTarget]);
 
   useEffect(() => {
-    if (questions.length === 0) return;
+    if (questions.length === 0 || showTeamReveal) return;
     startTimeRef.current = Date.now();
     setTimeLeft(timePerQuestion);
     timerBarAnim.setValue(1);
@@ -383,7 +389,7 @@ export default function QuestionScreen() {
       });
     }, 1000);
     return () => clearInterval(timerRef.current);
-  }, [currentIndex, questions]);
+  }, [currentIndex, questions, showTeamReveal]);
 
   useEffect(() => {
     const target = isFrozen ? (timePerQuestion > 0 ? timeLeft / timePerQuestion : 0) : (timePerQuestion > 0 ? timeLeft / timePerQuestion : 0);
@@ -659,7 +665,7 @@ export default function QuestionScreen() {
     >
       <View style={styles.container}>
       {/* ── frozen screen tint ── */}
-      {isFrozen && <View style={styles.frozenTint} />}
+      {isFrozen && <View style={styles.frozenTint} pointerEvents="none" />}
 
       {/* ── HEADER ROW ── */}
       <View style={styles.header}>
@@ -1074,6 +1080,14 @@ export default function QuestionScreen() {
 
       <View style={styles.safeBottom} />
       </View>
+
+      {showTeamReveal && teamAssignments && (
+        <TeamRevealOverlay
+          assignments={teamAssignments}
+          myUserId={userId}
+          onComplete={() => setShowTeamReveal(false)}
+        />
+      )}
     </KeyboardAvoidingView>
   );
 }
