@@ -254,21 +254,31 @@ export async function logout(): Promise<void> {
   await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
 }
 
-function decodeJwtPayload(token: string): { exp?: number } | null {
+function decodeJwt(token: string): Record<string, any> | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
     const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    return JSON.parse(atob(payload));
+    const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4);
+    return JSON.parse(atob(padded));
   } catch { return null; }
 }
 
 export async function isAuthenticated(): Promise<boolean> {
   const token = await getToken();
   if (!token) return false;
-  const payload = decodeJwtPayload(token);
+  const payload = decodeJwt(token);
   if (!payload || !payload.exp) return true;
   return payload.exp * 1000 > Date.now();
+}
+
+export async function getCachedUserId(): Promise<number | null> {
+  const token = await getToken();
+  if (!token) return null;
+  const payload = decodeJwt(token);
+  if (!payload || payload.user_id == null) return null;
+  const id = Number(payload.user_id);
+  return Number.isFinite(id) ? id : null;
 }
 
 export function roleHomePath(

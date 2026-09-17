@@ -27,6 +27,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import * as Haptics from 'expo-haptics';
 import { getToken, getCurrentUser } from '@/services/authService';
+import { getCurrentOfflineGame, saveOfflineGameResult, clearCurrentOfflineGame } from '@/services/offlineGameService';
 import { API_BASE_URL } from '@/config/api';
 import TeamRevealOverlay from '@/components/TeamRevealOverlay';
 
@@ -126,7 +127,9 @@ const POWERUP_ITEMS = [
 
 export default function QuestionScreen() {
   const router = useRouter();
-  const { roomCode } = useLocalSearchParams<{ roomCode: string }>();
+  const params = useLocalSearchParams<{ roomCode: string; offline?: string; quizTitle?: string }>();
+  const roomCode = params.roomCode;
+  const isOffline = params.offline === 'true';
   const [questions, setQuestions] = useState<any[]>([]);
   const [questionOrder, setQuestionOrder] = useState<number[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -140,7 +143,7 @@ export default function QuestionScreen() {
   const [biggestMover, setBiggestMover] = useState<{ name: string; jump: number } | null>(null);
   const [timeLeft, setTimeLeft] = useState(15);
   const [timePerQuestion, setTimePerQuestion] = useState(15);
-  const [userId, setUserId] = useState<number | null>(null);
+  const [userId, setUserId] = useState<number | string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingAnswer, setPendingAnswer] = useState<string | null>(null);
   const [powerups, setPowerups] = useState({ freeze: 0, hint: 0, doublePoints: 0, shield: 0 });
@@ -225,6 +228,26 @@ export default function QuestionScreen() {
 
   useEffect(() => {
     const init = async () => {
+      if (isOffline) {
+        const game = getCurrentOfflineGame();
+        if (!game) return;
+        setQuestions(game.questions);
+        setQuestionOrder(game.questionOrder);
+        setTimePerQuestion(game.timePerQuestion);
+        setTimeLeft(game.timePerQuestion);
+        setRoomStatus('active');
+        setUserId('me');
+        setPowerups({ ...game.powerups });
+        setStandings([{
+          id: 'me',
+          displayName: 'You',
+          score: game.score,
+          streak: game.streak,
+          movement: 0,
+          prevScore: 0,
+        }]);
+        return;
+      }
       const user = await getCurrentUser();
       setUserId(user?.id);
       const player = await firestore().collection('gameRooms').doc(roomCode)
@@ -310,7 +333,7 @@ export default function QuestionScreen() {
   }, []);
 
   useEffect(() => {
-    if (!userId) return;
+    if (isOffline || !userId) return;
     const unsub = firestore()
       .collection('gameRooms').doc(roomCode)
       .collection('players').doc(String(userId))
@@ -484,6 +507,14 @@ export default function QuestionScreen() {
   const handleFreeze = async () => {
     if (powerups.freeze <= 0 || selected || isFrozen) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
+    if (isOffline) {
+      const game = getCurrentOfflineGame();
+      if (!game || !game.consumePowerup('freeze')) return;
+      clearInterval(timerRef.current);
+      setIsFrozen(true);
+      setPowerups({ ...game.powerups });
+      return;
+    }
     clearInterval(timerRef.current);
     setIsFrozen(true);
     setPowerups(p => ({ ...p, freeze: p.freeze - 1 }));
@@ -496,6 +527,19 @@ export default function QuestionScreen() {
   const handleHint = async () => {
     if (powerups.hint <= 0 || selected || activePowerups.hint) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
+    if (isOffline) {
+      const game = getCurrentOfflineGame();
+      if (!game || !game.consumePowerup('hint')) return;
+      setPowerups({ ...game.powerups });
+      setActivePowerups(p => ({ ...p, hint: true }));
+      const q = questions[questionOrder[currentIndex]];
+      if (q?.type === 'mcq' && q.choices) {
+        const wrong = q.choices.filter((c: string) => c !== q.correctAnswer);
+        const shuffled = wrong.sort(() => Math.random() - 0.5);
+        setHintedChoices(shuffled.slice(0, 2));
+      }
+      return;
+    }
     setPowerups(p => ({ ...p, hint: p.hint - 1 }));
     setActivePowerups(p => ({ ...p, hint: true }));
     const q = questions[questionOrder[currentIndex]];
@@ -513,6 +557,13 @@ export default function QuestionScreen() {
   const handleDoublePoints = async () => {
     if (powerups.doublePoints <= 0 || selected || activePowerups.doublePoints) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
+    if (isOffline) {
+      const game = getCurrentOfflineGame();
+      if (!game || !game.consumePowerup('doublePoints')) return;
+      setPowerups({ ...game.powerups });
+      setActivePowerups(p => ({ ...p, doublePoints: true }));
+      return;
+    }
     setPowerups(p => ({ ...p, doublePoints: p.doublePoints - 1 }));
     setActivePowerups(p => ({ ...p, doublePoints: true }));
     const user = await getCurrentUser();
@@ -524,6 +575,13 @@ export default function QuestionScreen() {
   const handleShield = async () => {
     if (powerups.shield <= 0 || selected || activePowerups.shield) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
+    if (isOffline) {
+      const game = getCurrentOfflineGame();
+      if (!game || !game.consumePowerup('shield')) return;
+      setPowerups({ ...game.powerups });
+      setActivePowerups(p => ({ ...p, shield: true }));
+      return;
+    }
     setPowerups(p => ({ ...p, shield: p.shield - 1 }));
     setActivePowerups(p => ({ ...p, shield: true }));
     const user = await getCurrentUser();
@@ -540,6 +598,30 @@ export default function QuestionScreen() {
     setError(null);
     const timeTaken = (Date.now() - startTimeRef.current) / 1000;
     const actualIndex = questionOrder[currentIndex];
+    if (isOffline) {
+      const game = getCurrentOfflineGame();
+      if (!game) return;
+      const outcome = game.answer(actualIndex, answer || '', timeTaken, {
+        useHint: activePowerups.hint,
+        useDoublePoints: activePowerups.doublePoints,
+        useShield: activePowerups.shield,
+      });
+      setResult({ correct: outcome.correct, correctAnswer: outcome.correctAnswer, points: outcome.pointsAwarded });
+      setPowerups({ ...game.powerups });
+      setStandings([{
+        id: 'me',
+        displayName: 'You',
+        score: game.score,
+        streak: game.streak,
+        movement: 0,
+        prevScore: 0,
+      }]);
+      if (outcome.powerupEarned) {
+        setShowRoulette(true);
+        setRouletteTarget(outcome.powerupEarned);
+      }
+      return;
+    }
     try {
       const token = await getToken();
       const controller = new AbortController();
@@ -599,6 +681,24 @@ export default function QuestionScreen() {
 
   const handleNext = async () => {
     if (currentIndex + 1 >= questionOrder.length) {
+      if (isOffline) {
+        const game = getCurrentOfflineGame();
+        if (game) saveOfflineGameResult(game);
+        clearCurrentOfflineGame();
+        navigatedRef.current = true;
+        router.replace({
+          pathname: '/game/final',
+          params: {
+            roomCode: 'OFFLINE',
+            offline: 'true',
+            quizTitle: params.quizTitle || game?.quizTitle || '',
+            score: String(game?.score ?? 0),
+            correctCount: String(game?.correctCount ?? 0),
+            totalQuestions: String(game?.totalQuestions ?? 0),
+          },
+        });
+        return;
+      }
       const token = await getToken();
       await fetch(`${API_BASE_URL}/game/finish/`, {
         method: 'POST',

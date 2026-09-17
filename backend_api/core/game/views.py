@@ -7,11 +7,14 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.conf import settings
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from core.firebase import get_firestore
 from firebase_admin import firestore as fs
 from users.utils.file_parser import extract_text_from_file
 from users.gamification import award_xp, record_game_finish
 from users.models import User
+from .models import OfflineGameResult
 
 
 def generate_room_code():
@@ -647,3 +650,48 @@ class FinishGameView(APIView):
                     record_game_finish(user, rank)
                 except Exception as e:
                     print(f'[FinishGame XP Award Error] user {entry["user_id"]}: {e}')
+
+
+class OfflineResultsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        session_key = str(request.data.get('sessionKey') or '').strip()
+        if not session_key:
+            return Response({'error': 'sessionKey is required'}, status=400)
+
+        completed_at = parse_datetime(str(request.data.get('completedAt') or ''))
+        if completed_at is None:
+            completed_at = timezone.now()
+        elif timezone.is_naive(completed_at):
+            completed_at = timezone.make_aware(completed_at)
+
+        try:
+            quiz_id = request.data.get('quizId')
+            quiz_id = int(quiz_id) if quiz_id not in (None, '') else None
+        except (TypeError, ValueError):
+            quiz_id = None
+
+        defaults = {
+            'quiz_id': quiz_id,
+            'quiz_title': str(request.data.get('quizTitle') or '')[:255],
+            'quiz_type': str(request.data.get('quizType') or '')[:50],
+            'time_per_question': int(request.data.get('timePerQuestion') or 15),
+            'score': int(request.data.get('score') or 0),
+            'correct_count': int(request.data.get('correctCount') or 0),
+            'answered_count': int(request.data.get('answeredCount') or 0),
+            'total_questions': int(request.data.get('totalQuestions') or 0),
+            'completed_at': completed_at,
+        }
+
+        record, created = OfflineGameResult.objects.update_or_create(
+            user=request.user,
+            session_key=session_key,
+            defaults=defaults,
+        )
+
+        return Response({
+            'message': 'Offline result saved',
+            'created': created,
+            'id': record.id,
+        })

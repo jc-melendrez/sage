@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { 
   View, 
   Text, 
@@ -20,6 +20,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
+import NetInfo from '@react-native-community/netinfo';
+import { cacheQuizzes, getCachedQuizzes, createOfflineGame } from '@/services/offlineGameService';
 import * as Clipboard from 'expo-clipboard';
 
 // 🎨 SAGE Design System Colors
@@ -56,8 +58,8 @@ const FONTS = {
 interface Quiz {
   id: number;
   title: string;
-  quiz_type: string;
-  questions: any[];
+  quiz_type?: string;
+  questions?: any[];
 }
 
 export default function GameCenterScreen() {
@@ -72,6 +74,8 @@ export default function GameCenterScreen() {
   const [loadingQuizzes, setLoadingQuizzes] = useState(false);
   const [isCreatingRoom, setIsCreatingRoom] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [isOffline, setIsOffline] = useState(false);
+  const [usingCachedQuizzes, setUsingCachedQuizzes] = useState(false);
   
   // Modal States
   const [activeTab, setActiveTab] = useState<'presets' | 'custom'>('presets');
@@ -91,6 +95,13 @@ export default function GameCenterScreen() {
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener(state => {
+      setIsOffline(state.isConnected === false);
+    });
+    return () => unsub();
+  }, []);
+
   const fetchQuizzes = useCallback(async () => {
     setLoadingQuizzes(true);
     try {
@@ -100,14 +111,24 @@ export default function GameCenterScreen() {
       });
       if (res.ok) {
         const data = await res.json();
-        setQuizzes(data);
-        if (data.length > 0) setSelectedQuiz(data[0]);
+        const list = Array.isArray(data) ? data : [];
+        setQuizzes(list);
+        setUsingCachedQuizzes(false);
+        cacheQuizzes(list);
+        if (list.length > 0) setSelectedQuiz(list[0]);
+        setLoadingQuizzes(false);
+        return;
       }
     } catch (error) {
       console.error("Failed to load quizzes", error);
-    } finally {
-      setLoadingQuizzes(false);
     }
+    const cached = getCachedQuizzes();
+    if (cached.length > 0) {
+      setQuizzes(cached);
+      setUsingCachedQuizzes(true);
+      setSelectedQuiz(prev => prev ?? cached[0]);
+    }
+    setLoadingQuizzes(false);
   }, []);
 
   useFocusEffect(
@@ -144,6 +165,13 @@ export default function GameCenterScreen() {
 
   // 2. Handle Invite Press -> Create Room (if needed) & Show Code Modal
   const handleInvitePress = async () => {
+    if (isOffline || usingCachedQuizzes) {
+      Alert.alert(
+        "You're Offline",
+        "Inviting needs internet. Tap START to play solo from a saved quiz instead."
+      );
+      return;
+    }
     // If room already exists, just show the modal
     if (roomCode) {
       setShowInviteModal(true);
@@ -190,6 +218,11 @@ export default function GameCenterScreen() {
 
   // 3. Handle Start Press -> Start Game & Countdown
   const handleStartPress = async () => {
+    if (isOffline || usingCachedQuizzes) {
+      startOfflineGame();
+      return;
+    }
+
     if (!roomCode) {
        // If no room exists, create one first silently
        if (!selectedQuiz) {
@@ -260,7 +293,7 @@ export default function GameCenterScreen() {
     }
   };
 
-  const runCountdown = (code: string) => {
+  const runCountdown = (code: string, extraParams: Record<string, string> = {}) => {
     setShowCountdown(true);
     setCountdownValue(3);
     
@@ -276,11 +309,26 @@ export default function GameCenterScreen() {
           setShowCountdown(false);
           router.replace({ 
             pathname: '/game/question', 
-            params: { roomCode: code, isHost: 'true' } 
+            params: { roomCode: code, isHost: 'true', ...extraParams } 
           });
         });
       });
     });
+  };
+
+  const startOfflineGame = () => {
+    if (!selectedQuiz) {
+      Alert.alert("Missing Quiz", "Please select a quiz first.");
+      return;
+    }
+    const time = parseInt(timePerQuestion, 10) || 15;
+    try {
+      createOfflineGame(selectedQuiz, time);
+    } catch (error: any) {
+      Alert.alert("Can't Play Offline", error.message);
+      return;
+    }
+    runCountdown('OFFLINE', { offline: 'true', quizTitle: selectedQuiz.title });
   };
 
   const animateNumber = (callback: () => void) => {
@@ -303,6 +351,10 @@ export default function GameCenterScreen() {
   };
 
   const handleJoin = async () => {
+    if (isOffline || usingCachedQuizzes) {
+      Alert.alert("You're Offline", "Joining a room needs internet.");
+      return;
+    }
     const code = joinCode.trim().toUpperCase();
     if (!code) {
       Alert.alert('Error', 'Please enter a room code');
@@ -444,6 +496,15 @@ export default function GameCenterScreen() {
                     <Text numberOfLines={1} adjustsFontSizeToFit style={activeTab === 'custom' ? styles.tabTextActive : styles.tabTextInactive}>CUSTOM SETTINGS</Text>
                 </TouchableOpacity>
             </View>
+
+            {(isOffline || usingCachedQuizzes) && (
+                <View style={styles.offlineBanner}>
+                    <Ionicons name="cloud-offline-outline" size={14} color={COLORS.warning} style={{ marginRight: 6 }} />
+                    <Text style={styles.offlineBannerText}>
+                        OFFLINE MODE — playing solo from saved quizzes
+                    </Text>
+                </View>
+            )}
 
             {activeTab === 'presets' ? (
             <ScrollView 
@@ -891,6 +952,25 @@ const styles = StyleSheet.create({
     color: 'white',
     fontFamily: FONTS.bold,
     fontSize: 14,
+  },
+  offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 12,
+    marginTop: 10,
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.4)',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  offlineBannerText: {
+    flex: 1,
+    color: '#FDE68A',
+    fontFamily: FONTS.bold,
+    fontSize: 11,
+    letterSpacing: 0.3,
   },
 
   // Modes List
