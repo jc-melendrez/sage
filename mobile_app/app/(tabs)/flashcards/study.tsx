@@ -16,7 +16,8 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { COLORS, FONTS } from '@/constants/gameTheme';
+import { LinearGradient } from 'expo-linear-gradient';
+import { COLORS, FONTS, GRADIENT_COLORS } from '@/constants/gameTheme';
 import FlashBanner, { BannerType } from '@/components/FlashBanner';
 import { Rating, RATINGS, CardState, intervalLabel, RATING_LABELS } from '@/services/srs';
 import {
@@ -46,10 +47,10 @@ interface UndoEntry {
 }
 
 const RATING_STYLE: Record<Rating, { bg: string; border: string; color: string; icon: keyof typeof Ionicons.glyphMap }> = {
-  again: { bg: 'rgba(239,68,68,0.12)', border: 'rgba(239,68,68,0.5)', color: '#F87171', icon: 'refresh' },
-  hard: { bg: 'rgba(245,158,11,0.12)', border: 'rgba(245,158,11,0.5)', color: '#FBBF24', icon: 'trending-down' },
-  good: { bg: 'rgba(16,185,129,0.12)', border: 'rgba(16,185,129,0.5)', color: '#34D399', icon: 'checkmark' },
-  easy: { bg: 'rgba(34,211,238,0.12)', border: 'rgba(34,211,238,0.5)', color: '#22D3EE', icon: 'trending-up' },
+  again: { bg: 'rgba(239,68,68,0.15)', border: 'rgba(239,68,68,0.5)', color: '#F87171', icon: 'refresh' },
+  hard: { bg: 'rgba(245,158,11,0.15)', border: 'rgba(245,158,11,0.5)', color: '#FBBF24', icon: 'trending-down' },
+  good: { bg: 'rgba(16,185,129,0.15)', border: 'rgba(16,185,129,0.5)', color: '#34D399', icon: 'checkmark' },
+  easy: { bg: 'rgba(34,211,238,0.15)', border: 'rgba(34,211,238,0.5)', color: '#22D3EE', icon: 'trending-up' },
 };
 
 export default function StudyScreen() {
@@ -197,11 +198,13 @@ export default function StudyScreen() {
 
   const frontRotate = flipAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] });
   const backRotate = flipAnim.interpolate({ inputRange: [0, 1], outputRange: ['180deg', '360deg'] });
+  const backOpacity = flipAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
 
   const totalReviewed = Object.values(counts).reduce((a, b) => a + b, 0);
   const accuracy = totalReviewed > 0 ? Math.round(((counts.good + counts.easy) / totalReviewed) * 100) : 0;
 
   return (
+    <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
     <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} translucent={false} />
 
@@ -319,7 +322,11 @@ export default function StudyScreen() {
               </Animated.View>
 
               <Animated.View
-                style={[styles.flashCard, styles.faceBack, { transform: [{ perspective: 1200 }, { rotateY: backRotate }] }]}
+                style={[
+                  styles.flashCard,
+                  styles.faceBack,
+                  { opacity: backOpacity, transform: [{ perspective: 1200 }, { rotateY: backRotate }] },
+                ]}
               >
                 <View style={styles.cardHighlight} />
                 <View style={[styles.qTab, styles.answerTab]}>
@@ -471,11 +478,13 @@ export default function StudyScreen() {
         </KeyboardAvoidingView>
       </Modal>
     </View>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg, paddingHorizontal: 20 },
+  gradient: { flex: 1 },
+  container: { flex: 1, paddingHorizontal: 20 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -486,11 +495,11 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(127,119,221,0.15)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(127,119,221,0.25)',
+    borderColor: 'rgba(255,255,255,0.2)',
   },
   headerBtnPlaceholder: { width: 40 },
   headerTitleWrap: { flex: 1, alignItems: 'center', paddingHorizontal: 8 },
@@ -533,7 +542,7 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 20,
   },
-  cramToggleOn: { borderColor: 'rgba(245,158,11,0.5)', backgroundColor: 'rgba(245,158,11,0.06)' },
+  cramToggleOn: { borderColor: 'rgba(245,158,11,0.5)', backgroundColor: 'rgba(245,158,11,0.1)' },
   cramLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
   cramTitle: { color: COLORS.textPrimary, fontSize: 14, fontFamily: FONTS.bold },
   cramSub: { color: COLORS.textMuted, fontSize: 11, fontFamily: FONTS.medium, marginTop: 2 },
@@ -541,7 +550,7 @@ const styles = StyleSheet.create({
     width: 46,
     height: 26,
     borderRadius: 13,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(255,255,255,0.15)',
     justifyContent: 'center',
     paddingHorizontal: 3,
   },
@@ -574,7 +583,7 @@ const styles = StyleSheet.create({
     flex: 1,
     height: 6,
     borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.15)',
     overflow: 'hidden',
   },
   progressFill: { height: '100%', borderRadius: 3, backgroundColor: COLORS.purpleVibrant },
@@ -597,14 +606,14 @@ const styles = StyleSheet.create({
     elevation: 16,
   },
   faceFront: { backfaceVisibility: 'hidden' },
-  faceBack: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+  faceBack: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backfaceVisibility: 'hidden' },
   cardHighlight: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
     height: 3,
-    backgroundColor: 'rgba(255,255,255,0.4)',
+    backgroundColor: 'rgba(255,255,255,0.5)',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
   },
@@ -628,7 +637,7 @@ const styles = StyleSheet.create({
   answerText: { color: COLORS.accentBright, fontSize: 24, fontFamily: FONTS.extraBold, lineHeight: 33 },
   explanationBox: {
     marginTop: 20,
-    backgroundColor: 'rgba(127,119,221,0.12)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
     borderRadius: 12,
     padding: 14,
     borderWidth: 1,
@@ -687,9 +696,9 @@ const styles = StyleSheet.create({
     width: 96,
     height: 96,
     borderRadius: 48,
-    backgroundColor: 'rgba(245,158,11,0.12)',
+    backgroundColor: 'rgba(245,158,11,0.15)',
     borderWidth: 1,
-    borderColor: 'rgba(245,158,11,0.35)',
+    borderColor: 'rgba(245,158,11,0.4)',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 16,
@@ -709,10 +718,10 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 22, fontFamily: FONTS.black, marginBottom: 4 },
   statLabel: { color: COLORS.textMuted, fontSize: 9, fontFamily: FONTS.bold, letterSpacing: 1 },
   accuracyCard: {
-    backgroundColor: 'rgba(16,185,129,0.1)',
+    backgroundColor: 'rgba(16,185,129,0.15)',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: 'rgba(16,185,129,0.4)',
+    borderColor: 'rgba(16,185,129,0.45)',
     paddingVertical: 16,
     alignItems: 'center',
     marginBottom: 16,
@@ -739,8 +748,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   reviewAgainBtn: {
-    backgroundColor: 'rgba(245,158,11,0.1)',
-    borderColor: 'rgba(245,158,11,0.4)',
+    backgroundColor: 'rgba(245,158,11,0.15)',
+    borderColor: 'rgba(245,158,11,0.45)',
   },
   doneBtn: { backgroundColor: COLORS.success, borderColor: COLORS.success },
   actionBtnText: { fontSize: 15, fontFamily: FONTS.bold },
@@ -754,7 +763,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
   modalCard: {
-    backgroundColor: COLORS.surface,
+    backgroundColor: COLORS.surfaceLight,
     borderRadius: 20,
     padding: 20,
     borderWidth: 1,
@@ -793,7 +802,7 @@ const styles = StyleSheet.create({
     gap: 6,
     borderWidth: 1,
   },
-  deleteBtn: { backgroundColor: 'rgba(239,68,68,0.08)', borderColor: 'rgba(239,68,68,0.4)' },
+  deleteBtn: { backgroundColor: 'rgba(239,68,68,0.1)', borderColor: 'rgba(239,68,68,0.4)' },
   saveBtn: { backgroundColor: COLORS.purpleVibrant, borderColor: COLORS.purpleVibrant },
   modalBtnText: { color: '#fff', fontSize: 14, fontFamily: FONTS.bold },
 });

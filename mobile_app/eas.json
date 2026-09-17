@@ -1,0 +1,33 @@
+{
+  "cli": {
+    "version": ">= 23.2.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://sage-bozz.onrender.com/api"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://sage-bozz.onrender.com/api"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://sage-bozz.onrender.com/api"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

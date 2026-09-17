@@ -99,10 +99,12 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <IconUser size={24} color={color} />,
         }}
       />
+      <Tabs.Screen name="leaderboard" options={{ href: null }} />
+      {/* Solo mode (flashcards) lives as a tab so the bottom tab bar stays visible & interactive */}
+      <Tabs.Screen name="flashcards" options={{ href: null }} />
       {/* Explicitly hide unwanted tabs that exist as files in the directory */}
       <Tabs.Screen name="explore" options={{ href: null }} />
       <Tabs.Screen name="dashboard" options={{ href: null }} />
-      <Tabs.Screen name="leaderboard" options={{ href: null }} />
     </Tabs>
   );
 }

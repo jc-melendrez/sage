@@ -136,7 +136,7 @@ export default function GameCenterScreen() {
       setSelectedMode(modeId);
       setActiveTab('custom');
     } else if (modeId === 'flashcards') {
-      router.push('/game/flashcards');
+      router.push('/flashcards');
     } else {
       Alert.alert("Coming Soon", "This mode is under development!");
     }
