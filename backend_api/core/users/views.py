@@ -84,8 +84,11 @@ class FirebaseLoginView(APIView):
             first_name = request.data.get('first_name', '')
             last_name = request.data.get('last_name', '')
 
-            # SECURITY: role is NEVER taken from the client. New users always start as 'student'
-            # and are promoted via authorized superadmin endpoints only.
+            # Self-signup may choose 'student' or 'educator'. 'superadmin' is never
+            # accepted from the client and can only be granted by a superadmin.
+            requested_role = request.data.get('role')
+            if requested_role not in ('student', 'educator'):
+                requested_role = 'educator' if request.data.get('is_educator') else 'student'
 
             # Ensure username is unique; if taken, append a random string from the UID
             if User.objects.filter(username=username).exists():
@@ -97,7 +100,7 @@ class FirebaseLoginView(APIView):
                 firebase_uid=firebase_uid,
                 first_name=first_name,
                 last_name=last_name,
-                role='student',
+                role=requested_role,
                 password=None # Password is managed by Firebase now
             )
             # Sync the new user to Firestore immediately
