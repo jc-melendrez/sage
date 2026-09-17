@@ -39,9 +39,9 @@ const AUTO_SLIDE_INTERVAL = 4000; // Increased to 4 seconds for better readabili
 
 // 🎨 Colors
 const COLORS = {
-  bg: '#baaeda',
-  bgSecondary: '#dad6e7',
-  surface: '#cdc2dd',
+  bg: '#FFFFFF',
+  bgSecondary: '#F4F2FA',
+  surface: '#FFFFFF',
   surfaceLight: '#5A4F6C',
   purpleDeep: '#4C1D95',
   purpleDark: '#6D28D9',
@@ -56,7 +56,7 @@ const COLORS = {
   danger: '#EF4444',
   textPrimary: '#3a107a',
   textSecondary: '#CBD5E1',
-  textMuted: '#94A3B8',
+  textMuted: '#6B7280',
   border: 'rgba(44, 29, 0, 0.15)',
 };
 
@@ -486,7 +486,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
 
   return (
     <LinearGradient
-      colors={[COLORS.bgSecondary, COLORS.bg]}
+      colors={['#FFFFFF', '#FFFFFF']}
       start={{ x: 0, y: 0 }}
       end={{ x: 0, y: 1 }}
       style={styles.mainWrapper}
@@ -806,7 +806,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
                   { backgroundColor: 'rgba(156, 163, 175, 0.2)' },
                 ]}
               >
-                <Ionicons name="time" size={18} color={COLORS.textSecondary} />
+                <Ionicons name="time" size={18} color={COLORS.textMuted} />
               </View>
               <Text style={styles.sectionTitle}>Recent Activity</Text>
             </View>
@@ -1209,7 +1209,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   emptyStateText: {
-    color: COLORS.purpleLight,
+    color: COLORS.textMuted,
     fontSize: 14,
     fontFamily: FONTS.regular,
     textAlign: 'center',
@@ -1260,7 +1260,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   sessionDesc: {
-    color: COLORS.textSecondary,
+    color: COLORS.textMuted,
     fontSize: 13,
     lineHeight: 19,
     fontFamily: FONTS.regular,
@@ -1386,7 +1386,7 @@ const styles = StyleSheet.create({
     marginBottom: 3,
   },
   activityDesc: {
-    color: COLORS.textSecondary,
+    color: COLORS.textMuted,
     fontSize: 13,
     fontFamily: FONTS.regular,
   },
@@ -1412,7 +1412,7 @@ const styles = StyleSheet.create({
     fontSize: 32,
   },
   badgeName: {
-    color: COLORS.textSecondary,
+    color: COLORS.textMuted,
     fontSize: 11,
     fontFamily: FONTS.semiBold,
     textAlign: 'center',

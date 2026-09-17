@@ -8,9 +8,9 @@ import { getCurrentUser } from '@/services/authService';
 
 // 🎨 Exact same tokens as Dashboard for a unified Design System
 const COLORS = {
-  bg: '#baaeda',
-  bgSecondary: '#dad6e7',
-  surface: '#cdc2dd',
+  bg: '#FFFFFF',
+  bgSecondary: '#F4F2FA',
+  surface: '#FFFFFF',
   surfaceLight: '#5A4F6C',
   purpleDeep: '#4C1D95',
   purpleDark: '#6D28D9',
@@ -24,9 +24,9 @@ const COLORS = {
   warning: '#F59E0B',
   danger: '#EF4444',
   textPrimary: '#3a107a',
-  textSecondary: '#CBD5E1',
-  textMuted: '#94A3B8',
-  border: 'rgba(44, 29, 0, 0.15)',
+  textSecondary: '#4B5563',
+  textMuted: '#6B7280',
+  border: 'rgba(124, 58, 237, 0.12)',
 };
 
 const FONTS = {

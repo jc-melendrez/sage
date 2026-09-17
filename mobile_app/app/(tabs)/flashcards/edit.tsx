@@ -195,7 +195,7 @@ export default function EditDeckScreen() {
     <KeyboardAvoidingView style={styles.keyboardWrap} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
     <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
     <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
-      <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} translucent={false} />
+      <StatusBar barStyle="dark-content" backgroundColor={COLORS.bg} translucent={false} />
 
       <FlashBanner
         visible={!!banner}
@@ -427,11 +427,11 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(124,58,237,0.08)',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
+    borderColor: 'rgba(124,58,237,0.15)',
   },
   headerBtnPlaceholder: { width: 40 },
   headerTitleWrap: { alignItems: 'center' },
@@ -475,7 +475,7 @@ const styles = StyleSheet.create({
   },
   colorRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 4 },
   colorSwatch: { width: 32, height: 32, borderRadius: 16 },
-  colorSwatchActive: { borderWidth: 3, borderColor: '#fff' },
+  colorSwatchActive: { borderWidth: 3, borderColor: COLORS.purpleDark },
   saveBtn: {
     flexDirection: 'row',
     justifyContent: 'center',

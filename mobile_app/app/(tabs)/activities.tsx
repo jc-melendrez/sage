@@ -273,7 +273,7 @@ export default function ActivitiesScreen() {
   // --- MAIN TABS VIEW ---
   return (
     <LinearGradient
-      colors={[COLORS.bgSecondary, COLORS.bg]}
+      colors={['#FFFFFF', '#FFFFFF']}
       start={{ x: 0, y: 0 }}
       end={{ x: 0, y: 1 }}
       style={styles.mainWrapper}

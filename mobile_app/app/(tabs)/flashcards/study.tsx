@@ -206,7 +206,7 @@ export default function StudyScreen() {
   return (
     <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
     <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
-      <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} translucent={false} />
+      <StatusBar barStyle="dark-content" backgroundColor={COLORS.bg} translucent={false} />
 
       <FlashBanner
         visible={!!banner}
@@ -495,11 +495,11 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(124,58,237,0.08)',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
+    borderColor: 'rgba(124,58,237,0.15)',
   },
   headerBtnPlaceholder: { width: 40 },
   headerTitleWrap: { flex: 1, alignItems: 'center', paddingHorizontal: 8 },
@@ -550,7 +550,7 @@ const styles = StyleSheet.create({
     width: 46,
     height: 26,
     borderRadius: 13,
-    backgroundColor: 'rgba(255,255,255,0.15)',
+    backgroundColor: 'rgba(124,58,237,0.18)',
     justifyContent: 'center',
     paddingHorizontal: 3,
   },
@@ -583,7 +583,7 @@ const styles = StyleSheet.create({
     flex: 1,
     height: 6,
     borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.15)',
+    backgroundColor: 'rgba(124,58,237,0.12)',
     overflow: 'hidden',
   },
   progressFill: { height: '100%', borderRadius: 3, backgroundColor: COLORS.purpleVibrant },
@@ -613,7 +613,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     height: 3,
-    backgroundColor: 'rgba(255,255,255,0.5)',
+    backgroundColor: 'rgba(124,58,237,0.14)',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
   },
@@ -633,11 +633,11 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   cardScrollContent: { flexGrow: 1, justifyContent: 'center' },
-  questionText: { color: '#fff', fontSize: 21, fontFamily: FONTS.bold, lineHeight: 30 },
-  answerText: { color: COLORS.accentBright, fontSize: 24, fontFamily: FONTS.extraBold, lineHeight: 33 },
+  questionText: { color: COLORS.textPrimary, fontSize: 21, fontFamily: FONTS.bold, lineHeight: 30 },
+  answerText: { color: COLORS.purpleDark, fontSize: 24, fontFamily: FONTS.extraBold, lineHeight: 33 },
   explanationBox: {
     marginTop: 20,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(124,58,237,0.06)',
     borderRadius: 12,
     padding: 14,
     borderWidth: 1,

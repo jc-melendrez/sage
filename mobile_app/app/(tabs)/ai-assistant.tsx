@@ -14,9 +14,9 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 
 // 🎨 Unified Purple Palette
 const COLORS = {
-  bg: '#baaeda',
-  bgSecondary: '#dad6e7',
-  surface: '#cdc2dd',
+  bg: '#FFFFFF',
+  bgSecondary: '#F4F2FA',
+  surface: '#FFFFFF',
   surfaceLight: '#5A4F6C',
   
   purpleDeep: '#4C1D95',
@@ -34,8 +34,8 @@ const COLORS = {
   
   textPrimary: '#3a107a',
   textSecondary: '#CBD5E1',
-  textMuted: '#94A3B8',
-  border: 'rgba(44, 29, 0, 0.15)',
+  textMuted: '#6B7280',
+  border: 'rgba(124, 58, 237, 0.12)',
 };
 
 const FONTS = {
@@ -283,7 +283,7 @@ export default function AIAssistantScreen() {
       contentContainerStyle={{ flex: 1 }}
     >
     <LinearGradient
-      colors={[COLORS.bgSecondary, COLORS.bg]}
+      colors={['#FFFFFF', '#FFFFFF']}
       start={{ x: 0, y: 0 }}
       end={{ x: 0, y: 1 }}
       style={styles.container}
@@ -743,7 +743,7 @@ const styles = StyleSheet.create({
   },
   aiMessage: { 
     borderBottomLeftRadius: 6,
-    backgroundColor: COLORS.surface,
+    backgroundColor: COLORS.bgSecondary,
     borderWidth: 1,
     borderColor: COLORS.border,
   },
