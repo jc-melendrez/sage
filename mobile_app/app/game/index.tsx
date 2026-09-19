@@ -506,6 +506,25 @@ export default function GameCenterScreen() {
                 </View>
             )}
 
+            <View style={styles.lanActionsRow}>
+                <TouchableOpacity
+                    style={styles.lanActionBtn}
+                    onPress={() => router.push('/game/lan-host' as any)}
+                    activeOpacity={0.8}
+                >
+                    <Ionicons name="wifi" size={16} color={COLORS.purplePale} style={{ marginRight: 6 }} />
+                    <Text style={styles.offlineBannerText}>HOST over LAN</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                    style={styles.lanActionBtn}
+                    onPress={() => router.push('/game/lan-join' as any)}
+                    activeOpacity={0.8}
+                >
+                    <Ionicons name="enter-outline" size={16} color={COLORS.purplePale} style={{ marginRight: 6 }} />
+                    <Text style={styles.offlineBannerText}>JOIN over LAN</Text>
+                </TouchableOpacity>
+            </View>
+
             {activeTab === 'presets' ? (
             <ScrollView 
                 style={styles.modesScroll} 
@@ -971,6 +990,23 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.bold,
     fontSize: 11,
     letterSpacing: 0.3,
+  },
+  lanActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginHorizontal: 12,
+    marginTop: 10,
+  },
+  lanActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(139, 92, 246, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(139, 92, 246, 0.45)',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
   },
 
   // Modes List

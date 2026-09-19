@@ -10,14 +10,14 @@ interface DashboardStatsRowProps {
 
 export function DashboardStatsRow({ roster }: DashboardStatsRowProps) {
   const avgXp = Math.round(roster.reduce((sum, s) => sum + s.xp, 0) / roster.length);
-  const avgLevel = (roster.reduce((sum, s) => sum + s.level, 0) / roster.length).toFixed(1);
+  const activeToday = roster.filter((s) => s.lastActive === 'today').length;
   const atRisk = roster.filter((s) => s.status === 'atRisk' || s.status === 'needsAttention').length;
 
   return (
     <View style={styles.row}>
-      <StatCard icon="star" value={avgXp} label="Avg XP" color={COLORS.purpleVibrant} />
-      <StatCard icon="trending-up" value={`Lv ${avgLevel}`} label="Avg Level" color={COLORS.accent} />
       <StatCard icon="warning" value={atRisk} label="At Risk" color={COLORS.danger} />
+      <StatCard icon="pulse" value={activeToday} label="Active Today" color={COLORS.accent} />
+      <StatCard icon="star" value={avgXp} label="Avg XP" color={COLORS.purpleVibrant} />
     </View>
   );
 }

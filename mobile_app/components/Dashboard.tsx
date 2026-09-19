@@ -24,7 +24,6 @@ import Animated, {
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import firestore from '@react-native-firebase/firestore';
 import { API_BASE_URL } from '@/config/api';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
@@ -90,15 +89,6 @@ interface Recommendation {
   title: string;
   description: string;
 }
-// Live multiplayer rooms (Firestore gameRooms collection, read client-side)
-interface GameRoom {
-  code: string;
-  topic: string;
-  hostName?: string;
-  status: 'waiting' | 'active';
-  teamMode?: boolean;
-  playerCount: number;
-}
 interface Activity {
   id: number;
   title: string;
@@ -126,7 +116,6 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
   const [user, setUser] = useState<User | null>(null);
   const [badges, setBadges] = useState<Badge[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
-  const [gameRooms, setGameRooms] = useState<GameRoom[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -323,88 +312,6 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       }
       setError(errorMessage);
       setLoading(false);
-    }
-  };
-
-  /* ── Live game rooms: Firestore listeners (mirrors lobby.tsx read pattern) ── */
-  const playerCountsRef = useRef<Record<string, number>>({});
-  const playerUnsubsRef = useRef<(() => void)[]>([]);
-
-  const applyPlayerCounts = (rooms: GameRoom[]) =>
-    rooms.map(r => ({ ...r, playerCount: playerCountsRef.current[r.code] ?? 0 }));
-
-  useEffect(() => {
-    // Wait for the profile before subscribing — we need the user id and role
-    // for the player-count listeners below.
-    if (!user) return;
-
-    const roomsQuery = firestore()
-      .collection('gameRooms')
-      .where('status', 'in', ['waiting', 'active']);
-
-    const roomsUnsub = roomsQuery.onSnapshot(snapshot => {
-        const rooms: GameRoom[] = (snapshot?.docs ?? [])
-          .map(doc => {
-            const d = doc.data();
-            return {
-              code: doc.id,
-              topic: d?.topic || 'Study Quiz',
-              hostName: d?.hostName,
-              status: (d?.status === 'active' ? 'active' : 'waiting') as GameRoom['status'],
-              teamMode: !!d?.teamMode,
-              playerCount: 0,
-            };
-          })
-          .sort((a, b) => (a.status === b.status ? 0 : a.status === 'waiting' ? -1 : 1));
-
-        setGameRooms(applyPlayerCounts(rooms));
-
-        // Keep player counts live for the visible rooms (dashboard slice ~4).
-        playerUnsubsRef.current.forEach(unsub => unsub());
-        playerUnsubsRef.current = rooms.slice(0, 4).map(room => {
-          const code = room.code;
-          return firestore()
-            .collection('gameRooms')
-            .doc(code)
-            .collection('players')
-            .onSnapshot(snap => {
-              playerCountsRef.current[code] = snap?.size ?? 0;
-              setGameRooms(prev => applyPlayerCounts(prev));
-            });
-        });
-      }, error => {
-        console.error('Dashboard gameRooms listener error:', error);
-      });
-
-    return () => {
-      roomsUnsub();
-      playerUnsubsRef.current.forEach(unsub => unsub());
-      playerUnsubsRef.current = [];
-    };
-    // Deliberately keyed on the profile fields the query depends on, not the
-    // whole `user` object, so profile refreshes don't tear down the listener.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, user?.role]);
-
-  const [joiningRoom, setJoiningRoom] = useState<string | null>(null);
-
-  const handleJoinRoom = async (room: GameRoom) => {
-    if (room.status !== 'waiting' || joiningRoom) return;
-    setJoiningRoom(room.code);
-    try {
-      const token = await getToken();
-      const response = await fetch(`${API_BASE_URL}/game/join/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ roomCode: room.code }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to join room');
-      router.push({ pathname: '/game/lobby', params: { roomCode: room.code, isHost: 'false', topic: room.topic } } as any);
-    } catch (err) {
-      Alert.alert('Could Not Join', err instanceof Error ? err.message : 'Something went wrong.');
-    } finally {
-      setJoiningRoom(null);
     }
   };
 
@@ -636,98 +543,6 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
             <Text style={styles.statValue}>Lv {level}</Text>
             <Text style={styles.statLabel}>Level</Text>
           </LinearGradient>
-        </View>
-
-        {/* Active Sessions — live multiplayer rooms */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <View style={styles.sectionTitleContainer}>
-              <LinearGradient
-                colors={[COLORS.warning, '#FBBF24']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.sectionIconBox}
-              >
-                <Ionicons name="flame" size={18} color="white" />
-              </LinearGradient>
-              <Text style={styles.sectionTitle}>Active</Text>
-            </View>
-            <TouchableOpacity onPress={() => router.push('/(tabs)/games' as any)}>
-              <Text style={styles.viewAllText}>View all</Text>
-            </TouchableOpacity>
-          </View>
-
-          {gameRooms.length > 0 ? (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.scrollContent}
-              removeClippedSubviews={true}
-            >
-              {gameRooms.slice(0, 4).map((room) => (
-                <TouchableOpacity
-                  key={room.code}
-                  style={styles.sessionCard}
-                  activeOpacity={0.7}
-                  onPress={() => room.status === 'waiting' && handleJoinRoom(room)}
-                >
-                  <View style={styles.sessionCardHeader}>
-                    <Text style={styles.sessionTitle} numberOfLines={1}>
-                      {room.topic}
-                    </Text>
-                    <View style={[styles.liveBadge, room.status === 'waiting' && styles.waitingBadge]}>
-                      <View style={[styles.liveDot, room.status === 'waiting' && styles.waitingDot]} />
-                      <Text style={styles.liveText}>{room.status === 'active' ? 'LIVE' : 'WAITING'}</Text>
-                    </View>
-                  </View>
-                  <Text style={styles.sessionDesc} numberOfLines={2}>
-                    Host: {room.hostName || 'Room host'}
-                  </Text>
-                  <View style={styles.sessionFooter}>
-                    <Ionicons name="people" size={14} color={COLORS.textMuted} />
-                    <Text style={styles.sessionFooterText}>{room.playerCount} joined</Text>
-                    {room.teamMode && (
-                      <View style={styles.teamsPill}>
-                        <Text style={styles.teamsPillText}>TEAMS</Text>
-                      </View>
-                    )}
-                    {room.status === 'waiting' ? (
-                      <LinearGradient
-                        colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 0 }}
-                        style={styles.joinButton}
-                      >
-                        <Text style={styles.joinButtonText}>
-                          {joiningRoom === room.code ? 'Joining…' : 'Join'}
-                        </Text>
-                      </LinearGradient>
-                    ) : (
-                      <View style={[styles.joinButton, styles.joinButtonDisabled]}>
-                        <Text style={styles.joinButtonTextDisabled}>In Progress</Text>
-                      </View>
-                    )}
-                  </View>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          ) : (
-            <View style={styles.emptyStateCard}>
-              <View style={styles.emptyStateIconContainer}>
-                <Ionicons name="school-outline" size={48} color={COLORS.purpleVibrant} />
-              </View>
-              <Text style={styles.emptyStateTitle}>No live games right now</Text>
-              <Text style={styles.emptyStateText}>Live rooms will appear here</Text>
-              <TouchableOpacity
-                style={styles.emptyStatePrimaryBtn}
-                onPress={() => router.push('/(tabs)/games' as any)}
-                accessibilityLabel="Host a game"
-              >
-                <Ionicons name="add" size={16} color="white" />
-                <Text style={styles.emptyStatePrimaryBtnText}>Host a game</Text>
-              </TouchableOpacity>
-            </View>
-          )}
         </View>
 
         {/* For You */}
@@ -1214,123 +1029,6 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.regular,
     textAlign: 'center',
     lineHeight: 20,
-  },
-
-  sessionCard: {
-    width: 260,
-    backgroundColor: COLORS.surface,
-    borderRadius: 20,
-    padding: 20,
-    marginRight: 12,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  sessionCardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  sessionTitle: {
-    color: COLORS.textPrimary,
-    fontSize: 16,
-    fontFamily: FONTS.bold,
-    flex: 1,
-    marginRight: 8,
-  },
-  liveBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(239, 68, 68, 0.15)',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-  },
-  liveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: COLORS.danger,
-    marginRight: 5,
-  },
-  liveText: {
-    color: COLORS.danger,
-    fontSize: 10,
-    fontFamily: FONTS.black,
-    letterSpacing: 0.5,
-  },
-  sessionDesc: {
-    color: COLORS.textMuted,
-    fontSize: 13,
-    lineHeight: 19,
-    fontFamily: FONTS.regular,
-    marginBottom: 14,
-  },
-  sessionFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
-  },
-  sessionFooterText: {
-    color: COLORS.textMuted,
-    fontSize: 12,
-    fontFamily: FONTS.regular,
-    flex: 1,
-    marginLeft: 6,
-  },
-  joinButton: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 10,
-  },
-  joinButtonText: {
-    color: 'white',
-    fontSize: 12,
-    fontFamily: FONTS.semiBold,
-  },
-  joinButtonDisabled: {
-    backgroundColor: 'rgba(76, 29, 149, 0.12)',
-  },
-  joinButtonTextDisabled: {
-    color: COLORS.purpleDeep,
-    fontSize: 12,
-    fontFamily: FONTS.semiBold,
-  },
-  waitingBadge: {
-    backgroundColor: 'rgba(245, 158, 11, 0.15)',
-  },
-  waitingDot: {
-    backgroundColor: COLORS.warning,
-  },
-  teamsPill: {
-    backgroundColor: 'rgba(139, 92, 246, 0.15)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    marginRight: 8,
-  },
-  teamsPillText: {
-    color: COLORS.purpleVibrant,
-    fontSize: 9,
-    fontFamily: FONTS.bold,
-    letterSpacing: 0.5,
-  },
-  emptyStatePrimaryBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: COLORS.purplePrimary,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    borderRadius: 12,
-    marginTop: 18,
-  },
-  emptyStatePrimaryBtnText: {
-    color: 'white',
-    fontFamily: FONTS.bold,
-    fontSize: 13,
   },
 
   recommendationCard: {

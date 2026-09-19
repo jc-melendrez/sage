@@ -1,5 +1,5 @@
 import * as SQLite from 'expo-sqlite';
-import { OfflineGame, QuizPayload } from './offlineEngine';
+import { OfflineGame, QuizPayload, OfflineGameOptions } from './offlineEngine';
 
 const db = SQLite.openDatabaseSync('sage_offline.db');
 
@@ -92,8 +92,8 @@ export function clearCachedQuizzes() {
   db.runSync('DELETE FROM cached_quizzes');
 }
 
-export function createOfflineGame(quiz: QuizPayload, timePerQuestion: number): OfflineGame {
-  const game = new OfflineGame(quiz, timePerQuestion);
+export function createOfflineGame(quiz: QuizPayload, timePerQuestion: number, opts?: OfflineGameOptions): OfflineGame {
+  const game = new OfflineGame(quiz, timePerQuestion, opts);
   currentOfflineGame = game;
   return game;
 }

@@ -75,6 +75,20 @@ function shuffleRange(count: number): number[] {
   return order;
 }
 
+function validOrder(order: number[] | undefined, count: number): boolean {
+  if (!Array.isArray(order) || order.length !== count) return false;
+  const seen = new Set<number>();
+  for (const idx of order) {
+    if (!Number.isInteger(idx) || idx < 0 || idx >= count || seen.has(idx)) return false;
+    seen.add(idx);
+  }
+  return seen.size === count;
+}
+
+export interface OfflineGameOptions {
+  order?: number[];
+}
+
 export class OfflineGame {
   readonly quizId: number;
   readonly quizTitle: string;
@@ -90,7 +104,7 @@ export class OfflineGame {
   answeredCount = 0;
   private lastResults: Record<number, AnswerOutcome> = {};
 
-  constructor(quiz: QuizPayload, timePerQuestion: number) {
+  constructor(quiz: QuizPayload, timePerQuestion: number, opts: OfflineGameOptions = {}) {
     const questions = buildQuestions(quiz);
     if (questions.length === 0) throw new Error('Quiz has no valid questions');
     this.quizId = quiz.id;
@@ -98,7 +112,7 @@ export class OfflineGame {
     this.quizType = quiz.quiz_type || '';
     this.timePerQuestion = Math.max(5, Math.round(timePerQuestion) || 15);
     this.questions = questions;
-    this.questionOrder = shuffleRange(questions.length);
+    this.questionOrder = validOrder(opts.order, questions.length) ? [...opts.order!] : shuffleRange(questions.length);
     this.startedAt = new Date().toISOString();
     this.powerups = { freeze: 0, hint: 0, doublePoints: 0, shield: 0 };
   }
