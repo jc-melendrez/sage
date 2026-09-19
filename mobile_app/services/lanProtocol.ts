@@ -4,7 +4,7 @@ export const LAN_PORT = 5050;
 export const MAX_CHUNK = 24000;
 
 export function generateRoomCode(): string {
-  return String(Math.floor(1000 + Math.random() * 9000));
+  return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 export interface GameQuestionPick {

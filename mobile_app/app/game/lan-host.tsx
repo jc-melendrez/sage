@@ -231,7 +231,7 @@ export default function LanHostScreen() {
           <View style={styles.codeBanner}>
             <Text style={styles.codeLabel}>ROOM CODE</Text>
             <Text style={styles.codeValue}>{code}</Text>
-            <Text style={styles.codeHelp}>Players connect to your hotspot, open LAN Join, and type this code — the room finds itself.</Text>
+            <Text style={styles.codeHelp}>Players connect to your hotspot, tap JOIN in Game Center, and type this code — the room finds itself.</Text>
           </View>
 
           <View style={styles.card}>

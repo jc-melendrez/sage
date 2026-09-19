@@ -19,10 +19,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_BASE_URL } from '@/config/api';
-import { getToken } from '@/services/authService';
+import { getToken, getCurrentUser } from '@/services/authService';
 import NetInfo from '@react-native-community/netinfo';
 import { cacheQuizzes, getCachedQuizzes, createOfflineGame } from '@/services/offlineGameService';
 import * as Clipboard from 'expo-clipboard';
+import { LanClientSession } from '@/services/lanClient';
+import { lanGame, setLanClient, resetLanState } from '@/services/lanSession';
+import { LanMessage } from '@/services/lanProtocol';
+import { startScanning, stopScanning, DiscoveredRoom } from '@/services/lanDiscovery';
 
 // 🎨 SAGE Design System Colors
 const COLORS = {
@@ -88,6 +92,26 @@ export default function GameCenterScreen() {
   const [joining, setJoining] = useState(false);
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [roomTopic, setRoomTopic] = useState<string>('');
+  const [lanName, setLanName] = useState('Player');
+  const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
+
+  // When the JOIN modal opens, listen for LAN rooms on the hotspot so a
+  // typed code can join an offline game the same way an online one does.
+  useEffect(() => {
+    if (!showJoinModal) return;
+    const ok = startScanning(rooms => {
+      lanRoomsRef.current = rooms;
+    });
+    if (!ok) lanRoomsRef.current = [];
+    (async () => {
+      const user = await getCurrentUser();
+      if (user?.first_name) setLanName(user.first_name);
+    })();
+    return () => {
+      stopScanning();
+      lanRoomsRef.current = [];
+    };
+  }, [showJoinModal]);
 
   // Countdown State
   const [showCountdown, setShowCountdown] = useState(false);
@@ -166,10 +190,7 @@ export default function GameCenterScreen() {
   // 2. Handle Invite Press -> Create Room (if needed) & Show Code Modal
   const handleInvitePress = async () => {
     if (isOffline || usingCachedQuizzes) {
-      Alert.alert(
-        "You're Offline",
-        "Inviting needs internet. Tap START to play solo from a saved quiz instead."
-      );
+      router.push('/game/lan-host' as any);
       return;
     }
     // If room already exists, just show the modal
@@ -350,11 +371,40 @@ export default function GameCenterScreen() {
     }
   };
 
+  const tryJoinLan = (code: string): Promise<boolean> =>
+    new Promise<boolean>(async resolve => {
+      const room = lanRoomsRef.current.find(r => r.code === code && !r.started);
+      if (!room) {
+        resolve(false);
+        return;
+      }
+      try {
+        resetLanState();
+        const client = new LanClientSession((msg: LanMessage) => {
+          if (msg.t === 'quiz') {
+            lanGame.quiz = msg.quiz;
+            lanGame.order = msg.order;
+            lanGame.timePerQuestion = msg.timePerQuestion;
+          }
+        });
+        setLanClient(client);
+        await client.connect(room.hostIp);
+        client.join(code, lanName);
+        lanGame.playerName = lanName;
+        lanGame.hostIp = room.hostIp;
+        lanGame.roomCode = code;
+        lanGame.role = 'player';
+        setShowJoinModal(false);
+        setJoinCode('');
+        router.push('/game/lan-play' as any);
+        resolve(true);
+      } catch {
+        setLanClient(null);
+        resolve(false);
+      }
+    });
+
   const handleJoin = async () => {
-    if (isOffline || usingCachedQuizzes) {
-      Alert.alert("You're Offline", "Joining a room needs internet.");
-      return;
-    }
     const code = joinCode.trim().toUpperCase();
     if (!code) {
       Alert.alert('Error', 'Please enter a room code');
@@ -362,6 +412,16 @@ export default function GameCenterScreen() {
     }
     setJoining(true);
     try {
+      if (isOffline || usingCachedQuizzes) {
+        const joined = await tryJoinLan(code);
+        if (!joined) {
+          Alert.alert(
+            'No Room Nearby',
+            `Room ${code} wasn't found near you. Join the host's hotspot/Wi-Fi and make sure the host screen is open.`
+          );
+        }
+        return;
+      }
       const token = await getToken();
       const response = await fetch(`${API_BASE_URL}/game/join/`, {
         method: 'POST',
@@ -377,7 +437,8 @@ export default function GameCenterScreen() {
       setJoinCode('');
       router.push({ pathname: '/game/lobby', params: { roomCode: code, isHost: 'false', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
     } catch (error: any) {
-      Alert.alert('Error', error.message);
+      const joined = await tryJoinLan(code);
+      if (!joined) Alert.alert('Error', error.message || 'Failed to join room');
     } finally {
       setJoining(false);
     }
@@ -506,24 +567,14 @@ export default function GameCenterScreen() {
                 </View>
             )}
 
-            <View style={styles.lanActionsRow}>
-                <TouchableOpacity
-                    style={styles.lanActionBtn}
-                    onPress={() => router.push('/game/lan-host' as any)}
-                    activeOpacity={0.8}
-                >
-                    <Ionicons name="wifi" size={16} color={COLORS.purplePale} style={{ marginRight: 6 }} />
-                    <Text style={styles.offlineBannerText}>HOST over LAN</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                    style={styles.lanActionBtn}
-                    onPress={() => router.push('/game/lan-join' as any)}
-                    activeOpacity={0.8}
-                >
-                    <Ionicons name="enter-outline" size={16} color={COLORS.purplePale} style={{ marginRight: 6 }} />
-                    <Text style={styles.offlineBannerText}>JOIN over LAN</Text>
-                </TouchableOpacity>
-            </View>
+            <TouchableOpacity
+                style={styles.offlineBanner}
+                onPress={() => router.push('/game/discovery-test' as any)}
+                activeOpacity={0.7}
+            >
+                <Ionicons name="pulse-outline" size={14} color={COLORS.purplePale} style={{ marginRight: 6 }} />
+                <Text style={styles.offlineBannerText}>DISCOVERY TEST (temp) — UDP beacon spike</Text>
+            </TouchableOpacity>
 
             {activeTab === 'presets' ? (
             <ScrollView 
@@ -796,7 +847,7 @@ export default function GameCenterScreen() {
                     </TouchableOpacity>
 
                     <Text style={styles.modalTitle}>JOIN ROOM</Text>
-                    <Text style={styles.modalSub}>Enter the room code to join a game</Text>
+                    <Text style={styles.modalSub}>Enter the room code — finds LAN games on your hotspot too</Text>
 
                     <View style={styles.codeBoxes}>
                         {Array.from({ length: 6 }).map((_, i) => (
