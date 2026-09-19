@@ -161,7 +161,7 @@ export default function Dashboard() {
       title: 'Play a Quiz',
       description: 'Join or create a quiz room and challenge friends in real‑time.',
       color: '#F59E0B',
-      route: '/game/classic-setup',
+      route: '/games',
     },
     {
       id: 'assistant',
@@ -169,7 +169,7 @@ export default function Dashboard() {
       title: 'AI Assistant',
       description: 'Ask SAGE anything – get instant help and explanations.',
       color: '#22D3EE',
-      route: '/assistant',
+      route: '/ai-assistant',
     },
     {
       id: 'groups',
@@ -177,7 +177,7 @@ export default function Dashboard() {
       title: 'Study Groups',
       description: 'Collaborate with friends, share materials, and learn together.',
       color: '#10B981',
-      route: '/groups',
+      route: '/activities',
     },
   ];
 
@@ -423,7 +423,7 @@ export default function Dashboard() {
                       {page.route ? (
                         <TouchableOpacity
                           style={styles.featureButton}
-                          onPress={() => router.push(page.route)}
+                          onPress={() => router.push(page.route as any)}
                           activeOpacity={0.8}
                         >
                           <LinearGradient
