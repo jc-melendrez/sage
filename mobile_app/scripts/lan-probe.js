@@ -1,9 +1,73 @@
 #!/usr/bin/env node
-// Dev probe: fakes a phone joining a LAN host over TCP (port 5050).
-// Run the host screen on a device, then:  node scripts/lan-probe.js <IP> [name]
+// Dev probe: fakes a phone joining a LAN host over TCP (port 5050),
+// and can also test UDP room discovery (port 5051).
+//
+// TCP:  node scripts/lan-probe.js <IP> [name]       (join a host running on a phone)
+// UDP:  node scripts/lan-probe.js host <code> [title]   (PC advertises a room, phone scans)
+//       node scripts/lan-probe.js scan                (PC listens for rooms, phone advertises)
+const dgram = require('dgram');
 const net = require('net');
 
-const ip = process.argv[2] || '127.0.0.1';
+const BEACON_PORT = 5051;
+const mode = process.argv[2];
+
+if (mode === 'host') {
+  const code = process.argv[3] || '1234';
+  const title = process.argv[4] || 'PC Spike Quiz';
+  const socket = dgram.createSocket('udp4');
+  const beacon = () => {
+    const line = JSON.stringify({ t: 'sage-beacon', v: 1, code, title, players: 0, started: false }) + '\n';
+    socket.setBroadcast(true);
+    socket.send(line, 0, line.length, BEACON_PORT, '255.255.255.255', err => {
+      if (err) console.error('[udp-host] broadcast error:', err.message);
+    });
+  };
+  socket.on('message', (msg, rinfo) => {
+    const text = msg.toString('utf8');
+    if (text.includes('sage-ping')) {
+      const line = JSON.stringify({ t: 'sage-beacon', v: 1, code, title, players: 0, started: false }) + '\n';
+      socket.send(line, 0, line.length, rinfo.port, rinfo.address);
+      console.log('[udp-host] ping from', rinfo.address, `-> replied with room ${code}`);
+    }
+  });
+  socket.on('error', e => console.error('[udp-host] error:', e.message));
+  socket.bind(BEACON_PORT, () => {
+    setInterval(beacon, 2000);
+    setTimeout(beacon, 100);
+    console.log(`[udp-host] advertising room ${code} ("${title}") on port ${BEACON_PORT} (Ctrl+C to stop)`);
+  });
+  process.on('SIGINT', () => { socket.close(); process.exit(0); });
+  return;
+}
+
+if (mode === 'scan') {
+  const socket = dgram.createSocket('udp4');
+  const rooms = new Map();
+  socket.on('message', (msg, rinfo) => {
+    const text = msg.toString('utf8');
+    if (!text.includes('sage-beacon')) return;
+    let m;
+    try { m = JSON.parse(text.split('\n')[0]); } catch { return; }
+    if (!m.code) return;
+    rooms.set(m.code, { code: m.code, title: m.title, players: m.players, hostIp: rinfo.address, at: Date.now() });
+    console.log('[udp-scan]', [...rooms.values()].map(r => `${r.hostIp} room ${r.code} "${r.title}" (${r.players}p)`).join('\n[udp-scan] '));
+  });
+  socket.on('error', e => console.error('[udp-scan] error:', e.message));
+  socket.bind(BEACON_PORT, () => {
+    console.log(`[udp-scan] listening on port ${BEACON_PORT} for room beacons…`);
+    const ping = () => {
+      const line = JSON.stringify({ t: 'sage-ping', v: 1 }) + '\n';
+      socket.setBroadcast(true);
+      socket.send(line, 0, line.length, BEACON_PORT, '255.255.255.255');
+    };
+    setInterval(ping, 1500);
+    setTimeout(ping, 100);
+  });
+  process.on('SIGINT', () => { socket.close(); process.exit(0); });
+  return;
+}
+
+const ip = mode || process.argv[2] || '127.0.0.1';
 const name = process.argv[3] || 'PROBE';
 const port = 5050;
 

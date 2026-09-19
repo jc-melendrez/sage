@@ -23,6 +23,7 @@ import { getCachedQuizzes } from '@/services/offlineGameService';
 import { getCurrentUser } from '@/services/authService';
 import { generateRoomCode, LanMessage, LanPlayer } from '@/services/lanProtocol';
 import { lanGame, setLanHost, setLanClient, resetLanState } from '@/services/lanSession';
+import { startAdvertising, stopAdvertising } from '@/services/lanDiscovery';
 
 const COLORS = {
   bg: '#0f0c29',
@@ -56,8 +57,11 @@ export default function LanHostScreen() {
   const [started, setStarted] = useState(false);
   const [players, setPlayers] = useState<LanPlayer[]>([]);
   const [board, setBoard] = useState<LanPlayer[]>([]);
+  const [advertising, setAdvertising] = useState(false);
+  const [showIp, setShowIp] = useState(false);
   const hostRef = useRef<LanHostServer | null>(null);
   const selfRef = useRef(false);
+  const playersCountRef = useRef(0);
 
   useEffect(() => {
     setQuizzes(getCachedQuizzes());
@@ -87,8 +91,21 @@ export default function LanHostScreen() {
       resetLanState();
       setLanHost(null);
       setLanClient(null);
+      stopAdvertising();
     };
   }, []);
+
+  useEffect(() => {
+    if (!selectedId || started) {
+      stopAdvertising();
+      setAdvertising(false);
+      return;
+    }
+    const quiz = quizzes.find(q => q.id === selectedId);
+    const ok = startAdvertising(code, quiz?.title || '', () => playersCountRef.current);
+    setAdvertising(ok);
+    return () => stopAdvertising();
+  }, [selectedId, started, code, quizzes]);
 
   const candidateIps = (() => {
     const list: string[] = [];
@@ -111,6 +128,7 @@ export default function LanHostScreen() {
       hostRef.current.stop();
       hostRef.current = null;
     }
+    stopAdvertising();
     resetLanState();
     setLanHost(null);
     setLanClient(null);
@@ -121,6 +139,7 @@ export default function LanHostScreen() {
     (msg: LanMessage) => {
       if (msg.t === 'roster') {
         setPlayers(msg.players);
+        playersCountRef.current = msg.players.filter(p => p.connected).length;
         if (started) setBoard([...msg.players].sort((a, b) => b.score - a.score));
       } else if (msg.t === 'leaderboard') {
         setStarted(true);
@@ -149,6 +168,8 @@ export default function LanHostScreen() {
     }
 
     setStarting(true);
+    stopAdvertising();
+    setAdvertising(false);
     const order = makeOrder(count);
     const host = new LanHostServer(code);
     hostRef.current = host;
@@ -210,41 +231,63 @@ export default function LanHostScreen() {
           <View style={styles.codeBanner}>
             <Text style={styles.codeLabel}>ROOM CODE</Text>
             <Text style={styles.codeValue}>{code}</Text>
-            <Text style={styles.codeHelp}>Tell players to type this 4-digit code when joining.</Text>
+            <Text style={styles.codeHelp}>Players connect to your hotspot, open LAN Join, and type this code — the room finds itself.</Text>
           </View>
 
           <View style={styles.card}>
-            <Text style={styles.cardLabel}>IP ADDRESS TO SHARE</Text>
-            <View style={styles.inputRow}>
-              <TextInput
-                style={[styles.input, styles.inputFlex]}
-                value={ipManual}
-                onChangeText={setIpManual}
-                placeholder="Your hotspot address"
-                placeholderTextColor={COLORS.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="numbers-and-punctuation"
-              />
-              <TouchableOpacity style={styles.pasteBtn} onPress={copyIp} activeOpacity={0.7}>
-                <Ionicons name="copy-outline" size={18} color={COLORS.purpleVibrant} />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.hint}>
-              When you host a hotspot this phone can&apos;t read its own address, so pick your network&apos;s Gateway below (or copy it from Wi-Fi settings).
-            </Text>
-            <View style={styles.ipsRow}>
-              {candidateIps.map(ip => (
-                <TouchableOpacity
-                  key={ip}
-                  style={[styles.ipChip, ipManual === ip && styles.ipChipActive]}
-                  onPress={() => setIpManual(ip)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={[styles.ipChipText, ipManual === ip && styles.ipChipTextActive]}>{ip}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+            {advertising ? (
+              <View style={styles.broadcastBanner}>
+                <View style={styles.broadcastRow}>
+                  <Ionicons name="radio" size={18} color={COLORS.success} />
+                  <Text style={styles.broadcastText}>Broadcasting</Text>
+                </View>
+                <Text style={styles.broadcastSub}>
+                  Players on your hotspot can find this game automatically. They only type the code above — no IP needed.
+                </Text>
+              </View>
+            ) : (
+              <Text style={styles.cardLabel}>GETTING READY…</Text>
+            )}
+
+            <TouchableOpacity style={styles.advancedToggle} onPress={() => setShowIp(o => !o)} activeOpacity={0.8}>
+              <Ionicons name={showIp ? 'chevron-up' : 'chevron-down'} size={16} color={COLORS.textMuted} />
+              <Text style={styles.advancedToggleText}>Troubleshooting — manually share IP</Text>
+            </TouchableOpacity>
+            {showIp && (
+              <View style={styles.advancedBody}>
+                <Text style={styles.cardLabel}>IP ADDRESS</Text>
+                <View style={styles.inputRow}>
+                  <TextInput
+                    style={[styles.input, styles.inputFlex]}
+                    value={ipManual}
+                    onChangeText={setIpManual}
+                    placeholder="Your hotspot address"
+                    placeholderTextColor={COLORS.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="numbers-and-punctuation"
+                  />
+                  <TouchableOpacity style={styles.pasteBtn} onPress={copyIp} activeOpacity={0.7}>
+                    <Ionicons name="copy-outline" size={18} color={COLORS.purpleVibrant} />
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.hint}>
+                  Only needed if a player can&apos;t find the room automatically. When you host a hotspot this phone can&apos;t read its own address, so pick your network&apos;s Gateway below (or copy it from Wi-Fi settings).
+                </Text>
+                <View style={styles.ipsRow}>
+                  {candidateIps.map(ip => (
+                    <TouchableOpacity
+                      key={ip}
+                      style={[styles.ipChip, ipManual === ip && styles.ipChipActive]}
+                      onPress={() => setIpManual(ip)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={[styles.ipChipText, ipManual === ip && styles.ipChipTextActive]}>{ip}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            )}
 
             <Text style={[styles.cardLabel, styles.labelGap]}>SELECT QUIZ</Text>
             {quizzes.length === 0 ? (
@@ -397,6 +440,21 @@ const styles = StyleSheet.create({
   },
   cardLabel: { color: COLORS.textSecondary, fontFamily: 'Montserrat-SemiBold', fontSize: 12, letterSpacing: 0.5, marginBottom: 10 },
   labelGap: { marginTop: 20 },
+  broadcastBanner: {
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 14,
+  },
+  broadcastRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  broadcastText: { color: COLORS.success, fontFamily: 'Montserrat-Bold', fontSize: 14 },
+  broadcastSub: { color: COLORS.textSecondary, fontFamily: 'Montserrat-Medium', fontSize: 11, marginTop: 6, lineHeight: 16 },
+  advancedToggle: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
+  advancedToggleText: { color: COLORS.textMuted, fontFamily: 'Montserrat-Medium', fontSize: 12 },
+  advancedBody: { marginTop: 2 },
   input: {
     backgroundColor: COLORS.surface,
     borderWidth: 1,
