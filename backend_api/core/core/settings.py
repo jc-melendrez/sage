@@ -113,6 +113,12 @@ DATABASES = {
     }
 }
 
+# When DATABASE_URL is provided (e.g. AWS RDS Postgres on Render), use it as the
+# primary database; otherwise keep SQLite so local dev works unchanged.
+if os.environ.get('DATABASE_URL'):
+    import dj_database_url
+    DATABASES = {'default': dj_database_url.config(conn_max_age=600, ssl_require=True)}
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators

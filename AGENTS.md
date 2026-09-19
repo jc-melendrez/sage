@@ -3,7 +3,7 @@
 ## Project structure
 
 - **`mobile_app/`** — Expo 55 + React Native 0.83 TS app (file-based routing via expo-router)
-- **`backend_api/core/`** — Django 6.0.4 + DRF backend with SQLite
+- **`backend_api/core/`** — Django 6.0.4 + DRF backend. SQLite locally, **Postgres (AWS RDS)** in production when `DATABASE_URL` is set
 - **`env/`** — Python virtual env (git-ignored but present locally)
 - **`games.tsx`** (root) — stale copy; ignore it. Real game screens live in `mobile_app/app/game/`
 
@@ -61,7 +61,8 @@ python manage.py test            # runs Django tests
   - `/api/ai/ask/`, `/api/ai/sessions/`, `/api/ai/sessions/<id>/history/`
   - `/api/ai/generate-quiz/`, `/api/ai/quizzes/`
   - `/api/game/create/`, `/api/game/join/`, `/api/game/start/`, `/api/game/answer/`, `/api/game/finish/`
-- **Secrets**: loaded from `/mnt/c/dev/sage/.env` (tracks in git — contains `DJANGO_SECRET_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`)
+- **Database / `DATABASE_URL`**: `settings.py` reads `DATABASE_URL` → AWS RDS Postgres (`dj_database_url`, `sslmode=require`); when unset it falls back to SQLite so **local dev needs no config**. RDS instance is reachable only from Render egress IPs; credentials live in Render env (secret), never in the repo. `Procfile` runs `python manage.py migrate --noinput` before gunicorn
+- **Secrets**: loaded from repo-root `.env` (git-ignored, NOT tracked — contains `DJANGO_SECRET_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`)
 - **AI provider**: Groq, model `llama-3.3-70b-versatile` via `https://api.groq.com/openai/v1/chat/completions`. Override with env var `GROQ_MODEL_NAME`
 - **Real-time**: game rooms and group chats use Firestore as real-time layer (server writes, mobile reads). Game rooms in `gameRooms` collection, group messages in `groups/<id>/messages`
 - **CORS**: custom middleware at `core.cors.CORSMiddleware` — allows all origins, methods, and `Content-Type, Authorization` headers
@@ -69,8 +70,9 @@ python manage.py test            # runs Django tests
 
 ## Gotchas
 
-- `.env` with API keys is committed to git — **do not push to public repos** without scrubbing
+- `.env` with API keys is git-ignored and untracked — **still never push real secrets** (Render uses env vars / masked secrets)
 - Django settings require `DJANGO_SECRET_KEY` in `.env` or server won't start
+- `backend_api/core/db.sqlite3` is git-ignored (untracked). Prod data lives in AWS RDS via `DATABASE_URL`; local dev builds a fresh SQLite with `migrate`
 - `Android` build command runs `scripts/patch-gradle.js` before `expo run:android` — patches wrapper to Gradle 8.13
 - Root `games.tsx` is dead code; modify `mobile_app/app/game/` instead
 - No test framework exists for the mobile app (no Jest config found)
