@@ -79,6 +79,12 @@ export default function LanHostScreen() {
         }
       });
     } catch {}
+    const host = new LanHostServer(code);
+    hostRef.current = host;
+    host.onMessage(msg => onMessageRef.current(msg));
+    try {
+      host.start();
+    } catch {}
     return () => {
       if (hostRef.current) {
         hostRef.current.stop();
@@ -93,7 +99,7 @@ export default function LanHostScreen() {
       setLanClient(null);
       stopAdvertising();
     };
-  }, []);
+  }, [code]);
 
   useEffect(() => {
     if (started) {
@@ -150,6 +156,8 @@ export default function LanHostScreen() {
     },
     [started]
   );
+  const onMessageRef = useRef<(msg: LanMessage) => void>(() => {});
+  onMessageRef.current = onHostMessage;
 
   const startGame = async () => {
     const quiz = quizzes.find(q => q.id === selectedId);
@@ -171,11 +179,15 @@ export default function LanHostScreen() {
     stopAdvertising();
     setAdvertising(false);
     const order = makeOrder(count);
-    const host = new LanHostServer(code);
-    hostRef.current = host;
-    host.onMessage(onHostMessage);
+    const host = hostRef.current ?? new LanHostServer(code);
+    if (!hostRef.current) {
+      hostRef.current = host;
+      host.onMessage(msg => onMessageRef.current(msg));
+      try {
+        host.start();
+      } catch {}
+    }
     host.setQuiz(quiz, order, 30);
-    host.start();
     setLanHost(host);
 
     lanGame.quiz = quiz;

@@ -121,7 +121,7 @@ export default function GameCenterScreen() {
 
   useEffect(() => {
     const unsub = NetInfo.addEventListener(state => {
-      setIsOffline(state.isConnected === false);
+      setIsOffline(state.isConnected === false || state.isInternetReachable === false);
     });
     return () => unsub();
   }, []);
@@ -437,8 +437,14 @@ export default function GameCenterScreen() {
       setJoinCode('');
       router.push({ pathname: '/game/lobby', params: { roomCode: code, isHost: 'false', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
     } catch (error: any) {
+      console.warn('Join fell back to LAN after server error', error);
       const joined = await tryJoinLan(code);
-      if (!joined) Alert.alert('Error', error.message || 'Failed to join room');
+      if (!joined) {
+        Alert.alert(
+          "Couldn't Join",
+          `The online server couldn't be reached and no nearby room "${code}" was found. Open the host screen on the other phone - Game Center, then INVITE - and keep it on screen, then try again.`
+        );
+      }
     } finally {
       setJoining(false);
     }
