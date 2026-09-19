@@ -475,6 +475,69 @@ class FirebaseLoginOtpTests(APITestCase):
         self.assertEqual(res.status_code, 400)
 
 
+class FirebaseSignupRoleTests(APITestCase):
+    """
+    Self-signup via FirebaseLoginView may choose student/educator,
+    but can never self-assign superadmin.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _signup(self, email, extra=None):
+        decoded = {
+            'uid': f'uid-{email.split("@")[0]}',
+            'email': email,
+            'firebase': {'sign_in_provider': 'password'},
+        }
+        payload = {'id_token': 'fake-token', 'username': email.split('@')[0], **(extra or {})}
+        with patch.object(users_views, 'verify_firebase_token', return_value=decoded), \
+             patch.object(users_views, 'sync_user_to_firestore'):
+            return self.client.post(reverse('firebase_login'), payload, format='json')
+
+    def test_is_educator_flag_creates_educator(self):
+        res = self._signup('edu.flag@example.com', {'is_educator': True})
+        self.assertEqual(res.status_code, 200)
+        user = User.objects.get(email='edu.flag@example.com')
+        self.assertEqual(user.role, 'educator')
+        self.assertTrue(user.is_educator)
+
+    def test_role_educator_creates_educator(self):
+        res = self._signup('edu.role@example.com', {'role': 'educator'})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(User.objects.get(email='edu.role@example.com').role, 'educator')
+
+    def test_superadmin_cannot_be_self_assigned(self):
+        res = self._signup('bad.actor@example.com', {'role': 'superadmin'})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(User.objects.get(email='bad.actor@example.com').role, 'student')
+
+    def test_defaults_to_student(self):
+        res = self._signup('plain.student@example.com')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(User.objects.get(email='plain.student@example.com').role, 'student')
+
+    def test_existing_user_role_unchanged_on_login(self):
+        User.objects.create_user(
+            username='existing', email='existing@example.com',
+            role='student', firebase_uid='uid-existing',
+        )
+        decoded = {
+            'uid': 'uid-existing',
+            'email': 'existing@example.com',
+            'firebase': {'sign_in_provider': 'password'},
+        }
+        with patch.object(users_views, 'verify_firebase_token', return_value=decoded), \
+             patch.object(users_views, 'sync_user_to_firestore'):
+            res = self.client.post(
+                reverse('firebase_login'),
+                {'id_token': 'fake-token', 'role': 'educator'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(User.objects.get(username='existing').role, 'student')
+
+
 class GroupChatMessageTests(APITestCase):
     """
     POST /groups/<id>/chat/ must return the full message payload

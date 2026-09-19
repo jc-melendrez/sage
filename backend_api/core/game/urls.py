@@ -7,4 +7,5 @@ urlpatterns = [
     path('start/', views.StartGameView.as_view(), name='start-game'),
     path('answer/', views.AnswerQuestionView.as_view(), name='answer-question'),
     path('finish/', views.FinishGameView.as_view(), name='finish-game'),
+    path('offline-results/', views.OfflineResultsView.as_view(), name='offline-results'),
 ]

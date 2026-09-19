@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { 
   View, 
   Text, 
@@ -19,8 +19,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_BASE_URL } from '@/config/api';
-import { getToken } from '@/services/authService';
+import { getToken, getCurrentUser } from '@/services/authService';
+import NetInfo from '@react-native-community/netinfo';
+import { cacheQuizzes, getCachedQuizzes, createOfflineGame } from '@/services/offlineGameService';
 import * as Clipboard from 'expo-clipboard';
+import { LanClientSession } from '@/services/lanClient';
+import { lanGame, setLanClient, resetLanState } from '@/services/lanSession';
+import { LanMessage } from '@/services/lanProtocol';
+import { startScanning, stopScanning, DiscoveredRoom } from '@/services/lanDiscovery';
 
 // 🎨 SAGE Design System Colors
 const COLORS = {
@@ -56,8 +62,8 @@ const FONTS = {
 interface Quiz {
   id: number;
   title: string;
-  quiz_type: string;
-  questions: any[];
+  quiz_type?: string;
+  questions?: any[];
 }
 
 export default function GameCenterScreen() {
@@ -72,6 +78,8 @@ export default function GameCenterScreen() {
   const [loadingQuizzes, setLoadingQuizzes] = useState(false);
   const [isCreatingRoom, setIsCreatingRoom] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [isOffline, setIsOffline] = useState(false);
+  const [usingCachedQuizzes, setUsingCachedQuizzes] = useState(false);
   
   // Modal States
   const [activeTab, setActiveTab] = useState<'presets' | 'custom'>('presets');
@@ -84,12 +92,39 @@ export default function GameCenterScreen() {
   const [joining, setJoining] = useState(false);
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [roomTopic, setRoomTopic] = useState<string>('');
+  const [lanName, setLanName] = useState('Player');
+  const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
+
+  // When the JOIN modal opens, listen for LAN rooms on the hotspot so a
+  // typed code can join an offline game the same way an online one does.
+  useEffect(() => {
+    if (!showJoinModal) return;
+    const ok = startScanning(rooms => {
+      lanRoomsRef.current = rooms;
+    });
+    if (!ok) lanRoomsRef.current = [];
+    (async () => {
+      const user = await getCurrentUser();
+      if (user?.first_name) setLanName(user.first_name);
+    })();
+    return () => {
+      stopScanning();
+      lanRoomsRef.current = [];
+    };
+  }, [showJoinModal]);
 
   // Countdown State
   const [showCountdown, setShowCountdown] = useState(false);
   const [countdownValue, setCountdownValue] = useState(3);
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener(state => {
+      setIsOffline(state.isConnected === false);
+    });
+    return () => unsub();
+  }, []);
 
   const fetchQuizzes = useCallback(async () => {
     setLoadingQuizzes(true);
@@ -100,14 +135,24 @@ export default function GameCenterScreen() {
       });
       if (res.ok) {
         const data = await res.json();
-        setQuizzes(data);
-        if (data.length > 0) setSelectedQuiz(data[0]);
+        const list = Array.isArray(data) ? data : [];
+        setQuizzes(list);
+        setUsingCachedQuizzes(false);
+        cacheQuizzes(list);
+        if (list.length > 0) setSelectedQuiz(list[0]);
+        setLoadingQuizzes(false);
+        return;
       }
     } catch (error) {
       console.error("Failed to load quizzes", error);
-    } finally {
-      setLoadingQuizzes(false);
     }
+    const cached = getCachedQuizzes();
+    if (cached.length > 0) {
+      setQuizzes(cached);
+      setUsingCachedQuizzes(true);
+      setSelectedQuiz(prev => prev ?? cached[0]);
+    }
+    setLoadingQuizzes(false);
   }, []);
 
   useFocusEffect(
@@ -144,6 +189,10 @@ export default function GameCenterScreen() {
 
   // 2. Handle Invite Press -> Create Room (if needed) & Show Code Modal
   const handleInvitePress = async () => {
+    if (isOffline || usingCachedQuizzes) {
+      router.push('/game/lan-host' as any);
+      return;
+    }
     // If room already exists, just show the modal
     if (roomCode) {
       setShowInviteModal(true);
@@ -190,6 +239,11 @@ export default function GameCenterScreen() {
 
   // 3. Handle Start Press -> Start Game & Countdown
   const handleStartPress = async () => {
+    if (isOffline || usingCachedQuizzes) {
+      startOfflineGame();
+      return;
+    }
+
     if (!roomCode) {
        // If no room exists, create one first silently
        if (!selectedQuiz) {
@@ -260,7 +314,7 @@ export default function GameCenterScreen() {
     }
   };
 
-  const runCountdown = (code: string) => {
+  const runCountdown = (code: string, extraParams: Record<string, string> = {}, targetPath = '/game/question' as any) => {
     setShowCountdown(true);
     setCountdownValue(3);
     
@@ -275,12 +329,27 @@ export default function GameCenterScreen() {
           // Go!
           setShowCountdown(false);
           router.replace({ 
-            pathname: '/game/question', 
-            params: { roomCode: code, isHost: 'true' } 
+            pathname: targetPath, 
+            params: { roomCode: code, isHost: 'true', ...extraParams } 
           });
         });
       });
     });
+  };
+
+  const startOfflineGame = () => {
+    if (!selectedQuiz) {
+      Alert.alert("Missing Quiz", "Please select a quiz first.");
+      return;
+    }
+    const time = parseInt(timePerQuestion, 10) || 15;
+    try {
+      createOfflineGame(selectedQuiz, time);
+    } catch (error: any) {
+      Alert.alert("Can't Play Offline", error.message);
+      return;
+    }
+    runCountdown('OFFLINE', { offline: 'true', quizTitle: selectedQuiz.title }, '/game/offline-play' as any);
   };
 
   const animateNumber = (callback: () => void) => {
@@ -302,6 +371,39 @@ export default function GameCenterScreen() {
     }
   };
 
+  const tryJoinLan = (code: string): Promise<boolean> =>
+    new Promise<boolean>(async resolve => {
+      const room = lanRoomsRef.current.find(r => r.code === code && !r.started);
+      if (!room) {
+        resolve(false);
+        return;
+      }
+      try {
+        resetLanState();
+        const client = new LanClientSession((msg: LanMessage) => {
+          if (msg.t === 'quiz') {
+            lanGame.quiz = msg.quiz;
+            lanGame.order = msg.order;
+            lanGame.timePerQuestion = msg.timePerQuestion;
+          }
+        });
+        setLanClient(client);
+        await client.connect(room.hostIp);
+        client.join(code, lanName);
+        lanGame.playerName = lanName;
+        lanGame.hostIp = room.hostIp;
+        lanGame.roomCode = code;
+        lanGame.role = 'player';
+        setShowJoinModal(false);
+        setJoinCode('');
+        router.push('/game/lan-play' as any);
+        resolve(true);
+      } catch {
+        setLanClient(null);
+        resolve(false);
+      }
+    });
+
   const handleJoin = async () => {
     const code = joinCode.trim().toUpperCase();
     if (!code) {
@@ -310,6 +412,16 @@ export default function GameCenterScreen() {
     }
     setJoining(true);
     try {
+      if (isOffline || usingCachedQuizzes) {
+        const joined = await tryJoinLan(code);
+        if (!joined) {
+          Alert.alert(
+            'No Room Nearby',
+            `Room ${code} wasn't found near you. Join the host's hotspot/Wi-Fi and make sure the host screen is open.`
+          );
+        }
+        return;
+      }
       const token = await getToken();
       const response = await fetch(`${API_BASE_URL}/game/join/`, {
         method: 'POST',
@@ -325,7 +437,8 @@ export default function GameCenterScreen() {
       setJoinCode('');
       router.push({ pathname: '/game/lobby', params: { roomCode: code, isHost: 'false', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
     } catch (error: any) {
-      Alert.alert('Error', error.message);
+      const joined = await tryJoinLan(code);
+      if (!joined) Alert.alert('Error', error.message || 'Failed to join room');
     } finally {
       setJoining(false);
     }
@@ -444,6 +557,24 @@ export default function GameCenterScreen() {
                     <Text numberOfLines={1} adjustsFontSizeToFit style={activeTab === 'custom' ? styles.tabTextActive : styles.tabTextInactive}>CUSTOM SETTINGS</Text>
                 </TouchableOpacity>
             </View>
+
+            {(isOffline || usingCachedQuizzes) && (
+                <View style={styles.offlineBanner}>
+                    <Ionicons name="cloud-offline-outline" size={14} color={COLORS.warning} style={{ marginRight: 6 }} />
+                    <Text style={styles.offlineBannerText}>
+                        OFFLINE MODE — playing solo from saved quizzes
+                    </Text>
+                </View>
+            )}
+
+            <TouchableOpacity
+                style={styles.offlineBanner}
+                onPress={() => router.push('/game/discovery-test' as any)}
+                activeOpacity={0.7}
+            >
+                <Ionicons name="pulse-outline" size={14} color={COLORS.purplePale} style={{ marginRight: 6 }} />
+                <Text style={styles.offlineBannerText}>DISCOVERY TEST (temp) — UDP beacon spike</Text>
+            </TouchableOpacity>
 
             {activeTab === 'presets' ? (
             <ScrollView 
@@ -716,7 +847,7 @@ export default function GameCenterScreen() {
                     </TouchableOpacity>
 
                     <Text style={styles.modalTitle}>JOIN ROOM</Text>
-                    <Text style={styles.modalSub}>Enter the room code to join a game</Text>
+                    <Text style={styles.modalSub}>Enter the room code — finds LAN games on your hotspot too</Text>
 
                     <View style={styles.codeBoxes}>
                         {Array.from({ length: 6 }).map((_, i) => (
@@ -891,6 +1022,42 @@ const styles = StyleSheet.create({
     color: 'white',
     fontFamily: FONTS.bold,
     fontSize: 14,
+  },
+  offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 12,
+    marginTop: 10,
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.4)',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  offlineBannerText: {
+    flex: 1,
+    color: '#FDE68A',
+    fontFamily: FONTS.bold,
+    fontSize: 11,
+    letterSpacing: 0.3,
+  },
+  lanActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginHorizontal: 12,
+    marginTop: 10,
+  },
+  lanActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(139, 92, 246, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(139, 92, 246, 0.45)',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
   },
 
   // Modes List

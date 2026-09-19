@@ -12,7 +12,9 @@ function placementXpFor(rank: number) {
 
 export default function FinalScreen() {
   const router = useRouter();
-  const { roomCode } = useLocalSearchParams<{ roomCode: string }>();
+  const params = useLocalSearchParams<{ roomCode: string; offline?: string; quizTitle?: string; score?: string; correctCount?: string; totalQuestions?: string }>();
+  const roomCode = params.roomCode;
+  const isOffline = params.offline === 'true';
   const [players, setPlayers] = useState<any[]>([]);
   const [myRank, setMyRank] = useState<number | null>(null);
   const [teams, setTeams] = useState<any[]>([]);
@@ -20,6 +22,7 @@ export default function FinalScreen() {
   const podiumAnim = useState(new Animated.Value(0))[0];
 
   useEffect(() => {
+    if (isOffline) return;
     let mounted = true;
     getCurrentUser()
       .then(user => {
@@ -43,6 +46,7 @@ export default function FinalScreen() {
   }, []);
 
   useEffect(() => {
+    if (isOffline) return;
     const unsub = firestore()
       .collection('gameRooms').doc(roomCode)
       .collection('players')
@@ -74,31 +78,41 @@ export default function FinalScreen() {
     return () => unsub();
   }, [teamMode]);
 
-  useEffect(() => {
-    if (teamMode ? teams.length === 0 : players.length === 0) return;
-    Animated.spring(podiumAnim, { toValue: 1, friction: 6, tension: 60, useNativeDriver: true }).start();
-  }, [teamMode, players.length > 0, teams.length > 0]);
+  const offlinePlayers = isOffline
+    ? [{ id: 'me', displayName: 'You', score: Number(params.score ?? 0) }]
+    : null;
+  const playersList = isOffline ? offlinePlayers! : players;
 
-  const showPodium = teamMode ? teams.length >= 3 : players.length >= 3;
-  const podiumSecond = teamMode ? teams[1] : players[1];
-  const podiumFirst = teamMode ? teams[0] : players[0];
-  const podiumThird = teamMode ? teams[2] : players[2];
+  useEffect(() => {
+    if (teamMode ? teams.length === 0 : playersList.length === 0) return;
+    Animated.spring(podiumAnim, { toValue: 1, friction: 6, tension: 60, useNativeDriver: true }).start();
+  }, [teamMode, playersList.length > 0, teams.length > 0]);
+
+  const finalRank = isOffline ? 1 : myRank;
+  const showPodium = teamMode ? teams.length >= 3 : playersList.length >= 3;
+  const podiumSecond = teamMode ? teams[1] : playersList[1];
+  const podiumFirst = teamMode ? teams[0] : playersList[0];
+  const podiumThird = teamMode ? teams[2] : playersList[2];
   const podiumName = (t: any) => t?.displayName ?? t?.name ?? '?';
   const podiumScore = (t: any) => t?.score ?? 0;
   const podiumColor = (t: any) => (teamMode && t?.color) || '#2d2a6e';
 
   const teamOf = (player: any) => (teamMode ? teams.find(t => t.id === player.teamId) ?? null : null);
 
-  const listData = teamMode ? players : showPodium ? players.slice(3) : players;
+  const listData = teamMode ? playersList : showPodium ? playersList.slice(3) : playersList;
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Game Over!</Text>
-      <Text style={styles.subtitle}>{teamMode ? 'Team Battle Results' : 'Final Leaderboard'}</Text>
-      {myRank !== null && (
+      <Text style={styles.subtitle}>{teamMode ? 'Team Battle Results' : isOffline ? 'Offline Practice Complete' : 'Final Leaderboard'}</Text>
+      {finalRank !== null && (
         <View style={styles.youBanner}>
           <Text style={styles.youBannerText}>
-            You finished <Text style={styles.youBannerRank}>#{myRank}</Text> · +{placementXpFor(myRank)} XP
+            {isOffline ? (
+              <>You scored <Text style={styles.youBannerRank}>{Number(params.score ?? 0).toLocaleString()}</Text> pts · saved locally</>
+            ) : (
+              <>You finished <Text style={styles.youBannerRank}>#{finalRank}</Text> · +{placementXpFor(finalRank)} XP</>
+            )}
           </Text>
         </View>
       )}

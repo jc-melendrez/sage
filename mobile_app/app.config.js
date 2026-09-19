@@ -14,7 +14,10 @@ module.exports = {
     primaryColor: "#7C3AED",
     ios: {
       supportsTablet: true,
-      bundleIdentifier: "com.sage.learning"
+      bundleIdentifier: "com.sage.learning",
+      infoPlist: {
+        NSLocalNetworkUsageDescription: "SAGE Learning uses your local network so nearby phones can join offline multiplayer games."
+      }
     },
     android: {
       adaptiveIcon: {

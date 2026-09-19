@@ -151,34 +151,3 @@ export function getStudentDetail(id: string) {
   const detail = STUDENT_DETAILS[summary.id] ?? STUDENT_DETAILS[ROSTER[0].id];
   return { ...summary, ...detail };
 }
-
-/* ── Dashboard-specific mock data ── */
-
-export const ANNOUNCEMENTS = [
-  { id: 'a1', title: 'Quiz on Fractions moved to Friday', time: '2h ago' },
-  { id: 'a2', title: 'New study group: Algebra Basics', time: '1d ago' },
-];
-
-export const ACTIVITY: {
-  id: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  text: string;
-  time: string;
-  color: string;
-}[] = [
-  { id: 'e1', icon: 'trophy', text: 'Priya Nair earned the "Streak Master" badge', time: '10m ago', color: COLORS.purpleVibrant },
-  { id: 'e2', icon: 'checkmark-done', text: 'Amara Chen completed "Fractions Quiz" — 92%', time: '38m ago', color: COLORS.success },
-  { id: 'e3', icon: 'alert-circle', text: 'Diego Ramos missed 3 days of activity', time: '1h ago', color: COLORS.danger },
-];
-
-export const QUICK_ACTIONS: {
-  id: string;
-  label: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  route: string;
-}[] = [
-  { id: 'courses', label: 'My Courses', icon: 'book', route: '/educator/courses' },
-  { id: 'quiz', label: 'Create Quiz', icon: 'add-circle', route: '/educator/quiz-manager' },
-  { id: 'assign', label: 'Create Assignment', icon: 'document-text', route: '/educator/assignments' },
-  { id: 'analytics', label: 'View Analytics', icon: 'stats-chart', route: '/educator/analytics' },
-];
