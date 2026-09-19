@@ -96,13 +96,13 @@ export default function LanHostScreen() {
   }, []);
 
   useEffect(() => {
-    if (!selectedId || started) {
+    if (started) {
       stopAdvertising();
       setAdvertising(false);
       return;
     }
     const quiz = quizzes.find(q => q.id === selectedId);
-    const ok = startAdvertising(code, quiz?.title || '', () => playersCountRef.current);
+    const ok = startAdvertising(code, quiz?.title || 'LAN Quiz', () => playersCountRef.current);
     setAdvertising(ok);
     return () => stopAdvertising();
   }, [selectedId, started, code, quizzes]);

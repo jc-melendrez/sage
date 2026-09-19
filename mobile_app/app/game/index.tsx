@@ -293,7 +293,7 @@ export default function GameCenterScreen() {
     }
   };
 
-  const runCountdown = (code: string, extraParams: Record<string, string> = {}) => {
+  const runCountdown = (code: string, extraParams: Record<string, string> = {}, targetPath = '/game/question' as any) => {
     setShowCountdown(true);
     setCountdownValue(3);
     
@@ -308,7 +308,7 @@ export default function GameCenterScreen() {
           // Go!
           setShowCountdown(false);
           router.replace({ 
-            pathname: '/game/question', 
+            pathname: targetPath, 
             params: { roomCode: code, isHost: 'true', ...extraParams } 
           });
         });
@@ -328,7 +328,7 @@ export default function GameCenterScreen() {
       Alert.alert("Can't Play Offline", error.message);
       return;
     }
-    runCountdown('OFFLINE', { offline: 'true', quizTitle: selectedQuiz.title });
+    runCountdown('OFFLINE', { offline: 'true', quizTitle: selectedQuiz.title }, '/game/offline-play' as any);
   };
 
   const animateNumber = (callback: () => void) => {
