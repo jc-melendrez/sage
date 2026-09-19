@@ -58,6 +58,8 @@ repomix-output.xml
 #BackEnd
 
 .env
+db.sqlite3
+*.sqlite3
 __pycache__/
 pycache/
 __pycache__/

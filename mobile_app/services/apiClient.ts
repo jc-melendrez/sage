@@ -18,11 +18,13 @@ export async function apiCall<T>(
   let response = await doFetch(token);
 
   if (response.status === 401) {
-    const newToken = await refreshAccessToken();
-    if (newToken) {
-      response = await doFetch(newToken);
-    } else {
+    const result = await refreshAccessToken();
+    if (result.ok) {
+      response = await doFetch(result.access);
+    } else if (result.reason === 'expired') {
       throw new Error('Session expired. Please log in again.');
+    } else {
+      throw new Error('Backend is still waking up — please pull to retry.');
     }
   }
 

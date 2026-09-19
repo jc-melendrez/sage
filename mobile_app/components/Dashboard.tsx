@@ -27,7 +27,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { API_BASE_URL } from '@/config/api';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
-import { getCurrentUser, getToken, logout } from '@/services/authService';
+import { getCurrentUser, getToken } from '@/services/authService';
 import { dailyCheckIn } from '@/services/gamificationService';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -301,15 +301,6 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
     }  catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'An error occurred';
       console.error('Error fetching data:', errorMessage);
-      if (
-        errorMessage.toLowerCase().includes('token') ||
-        errorMessage.toLowerCase().includes('session expired') ||
-        errorMessage.toLowerCase().includes('unauthorized')
-      ) {
-        await logout();
-        router.replace('/login');
-        return;
-      }
       setError(errorMessage);
       setLoading(false);
     }

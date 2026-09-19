@@ -8,6 +8,7 @@ cryptography==49.0.0
 Django==6.0.6
 django-js-asset==4.0.1
 django-mptt==0.17.0
+dj-database-url==2.3.0
 djangorestframework==3.17.1
 djangorestframework_simplejwt==5.5.1
 firebase_admin==7.4.0
@@ -35,6 +36,7 @@ pdfplumber==0.11.10
 pillow==12.2.0
 proto-plus==1.28.0
 protobuf==7.35.1
+psycopg[binary]==3.2.10
 pyasn1==0.6.3
 pyasn1_modules==0.4.2
 pycparser==3.0
