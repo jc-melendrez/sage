@@ -149,6 +149,9 @@ SIMPLE_JWT = {
 
     # Embed role / token_version in our JWTs
     'TOKEN_OBTAIN_SERIALIZER': 'users.authentication.SAGETokenObtainPairSerializer',
+
+    # Pin the JWT signing key to the Django SECRET_KEY
+    'SIGNING_KEY': SECRET_KEY,
 }
 
 

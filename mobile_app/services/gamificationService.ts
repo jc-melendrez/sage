@@ -18,8 +18,8 @@ async function authFetch(path: string, options: RequestInit = {}) {
   let token = await getToken();
   let response = await doFetch(token);
   if (response.status === 401) {
-    const newToken = await refreshAccessToken();
-    if (newToken) response = await doFetch(newToken);
+    const result = await refreshAccessToken();
+    if (result.ok) response = await doFetch(result.access);
   }
   return response;
 }

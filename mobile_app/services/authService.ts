@@ -65,18 +65,99 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 6
   }
 }
 
-export async function refreshAccessToken(): Promise<string | null> {
-  const refresh = await getRefreshToken();
-  if (!refresh) return null;
+export type RefreshResult =
+  | { ok: true; access: string }
+  | { ok: false; reason: 'expired' | 'transient' };
+
+const REFRESH_TIMEOUT_MS = 10000;
+const REFRESH_RETRY_DELAY_MS = 1500;
+
+let refreshInFlight: Promise<RefreshResult> | null = null;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function classifyRefreshResponse(status: number, body: unknown): 'ok' | 'expired' | 'transient' {
+  if (status >= 200 && status < 300) return 'ok';
+  if (status === 401 || status === 403) return 'expired';
+  const text = typeof body === 'string'
+    ? body.toLowerCase()
+    : JSON.stringify(body ?? '').toLowerCase();
+  if (
+    status >= 400 &&
+    status < 500 &&
+    /token_not_valid|invalid or expired|revoked|user not found/.test(text)
+  ) {
+    return 'expired';
+  }
+  return 'transient';
+}
+
+async function attemptRefresh(refresh: string, signal: AbortSignal): Promise<{ status: number; body: unknown }> {
   const response = await fetch(`${API_BASE_URL}/users/token/refresh/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh }),
+    signal,
   });
-  if (!response.ok) { await logout(); return null; }
-  const data = await response.json();
-  await SecureStore.setItemAsync(TOKEN_KEY, data.access);
-  return data.access;
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  return { status: response.status, body };
+}
+
+async function doRefresh(): Promise<RefreshResult> {
+  const refresh = await getRefreshToken();
+  if (!refresh) return { ok: false, reason: 'expired' };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
+    let status = 0;
+    let body: unknown = null;
+    try {
+      const result = await attemptRefresh(refresh, controller.signal);
+      status = result.status;
+      body = result.body;
+    } catch {
+      status = 0;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const verdict = classifyRefreshResponse(status, body);
+    if (verdict === 'ok') {
+      const access = (body as { access?: string })?.access;
+      if (access) {
+        await SecureStore.setItemAsync(TOKEN_KEY, access);
+        return { ok: true, access };
+      }
+      return { ok: false, reason: 'transient' };
+    }
+    if (verdict === 'expired') {
+      await logout();
+      return { ok: false, reason: 'expired' };
+    }
+    if (attempt === 0) await sleep(REFRESH_RETRY_DELAY_MS);
+  }
+  return { ok: false, reason: 'transient' };
+}
+
+/**
+ * Refresh the access token, riding through transient backend restarts/wake-ups
+ * (e.g. Render free-tier waking up). The session is only logged out when the
+ * server definitively rejects the token (401/403 or token_not_valid); on any
+ * transient failure (5xx, timeout, network) the stored tokens are kept intact
+ * so callers can retry instead of force-logging the user out.
+ */
+export function refreshAccessToken(): Promise<RefreshResult> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = doRefresh().finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
 }
 
 async function safeJson(response: Response): Promise<any> {
@@ -230,8 +311,12 @@ export async function getCurrentUser() {
   };
   let response = await doFetch(token);
   if (response.status === 401) {
-    const newToken = await refreshAccessToken();
-    if (newToken) response = await doFetch(newToken);
+    const result = await refreshAccessToken();
+    if (result.ok) {
+      response = await doFetch(result.access);
+    } else if (result.reason === 'transient') {
+      throw new Error('Backend is still waking up — please retry.');
+    }
   }
   if (!response.ok) {
     const error = await safeJson(response);
