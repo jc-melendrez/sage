@@ -658,3 +658,50 @@ class GroupChatReactionTests(APITestCase):
             format='json',
         )
         self.assertEqual(res.status_code, 401)
+
+
+class ProfileUpdateTests(APITestCase):
+    """PATCH /users/me/ updates the caller's own editable name fields."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='editor', password='pass12345', role='student',
+            first_name='Old', last_name='Name',
+            firebase_uid='fb-uid-edit',
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_patch_updates_names(self):
+        with patch.object(users_views, 'sync_user_to_firestore'):
+            res = self.client.patch(
+                reverse('current_user_profile'),
+                {'first_name': 'New', 'last_name': 'Label'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, 'New')
+        self.assertEqual(self.user.last_name, 'Label')
+        self.assertEqual(res.data['first_name'], 'New')
+
+    def test_patch_cannot_change_role_or_email(self):
+        with patch.object(users_views, 'sync_user_to_firestore'):
+            res = self.client.patch(
+                reverse('current_user_profile'),
+                {'role': 'superadmin', 'email': 'hacker@example.com'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.role, 'student')
+        self.assertNotEqual(self.user.email, 'hacker@example.com')
+
+    def test_patch_requires_auth(self):
+        self.client.force_authenticate(user=None)
+        res = self.client.patch(
+            reverse('current_user_profile'),
+            {'first_name': 'X'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 401)

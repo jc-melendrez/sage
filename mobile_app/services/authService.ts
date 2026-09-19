@@ -325,6 +325,38 @@ export async function getCurrentUser() {
   return await response.json();
 }
 
+/**
+ * Update the current user's editable profile fields (first_name, last_name).
+ * Returns the updated profile.
+ */
+export async function updateProfile(fields: {
+  first_name?: string;
+  last_name?: string;
+}) {
+  let token = await getToken();
+  if (!token) throw new Error('Not authenticated');
+  const doFetch = async (tok: string) =>
+    fetch(`${API_BASE_URL}/users/me/`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tok}` },
+      body: JSON.stringify(fields),
+    });
+  let response = await doFetch(token);
+  if (response.status === 401) {
+    const result = await refreshAccessToken();
+    if (result.ok) {
+      response = await doFetch(result.access);
+    } else if (result.reason === 'transient') {
+      throw new Error('Backend is still waking up — please retry.');
+    }
+  }
+  if (!response.ok) {
+    const error = await safeJson(response);
+    throw new Error(extractErrorMessage(error, 'Failed to update profile'));
+  }
+  return await response.json();
+}
+
 export async function getToken(): Promise<string | null> {
   return await SecureStore.getItemAsync(TOKEN_KEY);
 }

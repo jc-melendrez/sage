@@ -71,6 +71,7 @@ export default function AIAssistantScreen() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
   const [attachedFile, setAttachedFile] = useState<any>(null);
 
@@ -142,7 +143,7 @@ export default function AIAssistantScreen() {
   // 4. Send Message
   const handleSend = async (overrideText?: string) => {
     const textToSend = overrideText || inputValue;
-    if (!textToSend.trim() || isLoading) return;
+    if (!textToSend.trim() || isLoading || isTyping) return;
 
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
 
@@ -176,6 +177,8 @@ export default function AIAssistantScreen() {
       }
     }
 
+    const THINKING_MIN_MS = 650;
+    const thinkingStartedAt = Date.now();
     try {
       const token = await getToken();
       const response = await fetch(`${API_BASE_URL}/ai/ask/`, {
@@ -206,7 +209,18 @@ export default function AIAssistantScreen() {
 
       // --- Simulated Typing Animation ---
       const aiMessageId = Date.now() + 1;
-      const fullReply = data.reply;
+      const fullReply = data.reply || '';
+
+      // Keep the "thinking" indicator visible long enough to be noticed,
+      // even when the backend answers almost instantly.
+      const elapsed = Date.now() - thinkingStartedAt;
+      if (elapsed < THINKING_MIN_MS) {
+        await new Promise((resolve) => setTimeout(resolve, THINKING_MIN_MS - elapsed));
+      }
+
+      // Switch from "thinking" to streaming the reply so the indicator hides.
+      setIsLoading(false);
+      setIsTyping(true);
 
       // 1. Add an empty AI message bubble first
       setMessages((prev) => [...prev, {
@@ -217,20 +231,30 @@ export default function AIAssistantScreen() {
       }]);
 
       // 2. Animate the text filling in
-      let charIndex = 0;
-      const typingInterval = setInterval(() => {
-        setMessages((prev) => prev.map(m => 
-          m.id === aiMessageId ? { ...m, text: fullReply.substring(0, charIndex + 1) } : m
+      if (fullReply) {
+        await new Promise<void>((resolve) => {
+          let charIndex = 0;
+          const typingInterval = setInterval(() => {
+            charIndex++;
+            const slice = fullReply.substring(0, charIndex);
+            setMessages((prev) => prev.map(m => 
+              m.id === aiMessageId ? { ...m, text: slice } : m
+            ));
+            
+            // Auto-scroll as the text grows to keep the latest lines visible
+            scrollViewRef.current?.scrollToEnd({ animated: false });
+
+            if (charIndex >= fullReply.length) {
+              clearInterval(typingInterval);
+              resolve();
+            }
+          }, 15); // 15ms per character creates a smooth typing feel
+        });
+      } else {
+        setMessages((prev) => prev.map(m =>
+          m.id === aiMessageId ? { ...m, text: "Sorry, I didn't get a response. Please try again." } : m
         ));
-        charIndex++;
-        
-        if (charIndex >= fullReply.length) {
-          clearInterval(typingInterval);
-        }
-        
-        // Auto-scroll as the text grows to keep the latest lines visible
-        scrollViewRef.current?.scrollToEnd({ animated: false });
-      }, 15); // 15ms per character creates a smooth typing feel
+      }
 
     } catch (error) {
       console.error("AI Chat Error:", error);
@@ -242,6 +266,7 @@ export default function AIAssistantScreen() {
       }]);
     } finally {
       setIsLoading(false);
+      setIsTyping(false);
       setAttachedFileName(null);
       setAttachedFile(null); // Clear the attachment after sending
       setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
@@ -464,7 +489,7 @@ export default function AIAssistantScreen() {
           </View>
         )}
 
-        {messages.length === 1 && !isLoading && (
+        {messages.length === 1 && !isLoading && !isTyping && (
           <View style={styles.quickActionsContainer}>
             <Text style={styles.quickActionsTitle}>Suggested Topics</Text>
             <View style={styles.quickActionsGrid}>
@@ -527,23 +552,23 @@ export default function AIAssistantScreen() {
               value={inputValue} 
               onChangeText={setInputValue} 
               onSubmitEditing={() => handleSend()} 
-              editable={!isLoading}
+              editable={!isLoading && !isTyping}
               multiline
             />
           </View>
           <TouchableOpacity 
             style={[
               styles.sendButton, 
-              { backgroundColor: isLoading || !inputValue.trim() ? COLORS.surface : COLORS.purplePrimary }
+              { backgroundColor: isLoading || isTyping || !inputValue.trim() ? COLORS.surface : COLORS.purplePrimary }
             ]} 
             onPress={() => handleSend()} 
-            disabled={isLoading || !inputValue.trim()}
+            disabled={isLoading || isTyping || !inputValue.trim()}
             activeOpacity={0.8}
           >
             <Ionicons 
               name="send" 
               size={18} 
-              color={isLoading || !inputValue.trim() ? COLORS.textMuted : 'white'} 
+              color={isLoading || isTyping || !inputValue.trim() ? COLORS.textMuted : 'white'} 
             />
           </TouchableOpacity>
         </View>

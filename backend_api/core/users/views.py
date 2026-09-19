@@ -269,6 +269,23 @@ class CurrentUserProfileView(APIView):
         serializer = UserProfileSerializer(user)
         return Response(serializer.data)
 
+    def patch(self, request):
+        """Update the caller's own editable profile fields.
+
+        Only fields the serializer exposes as writable (first_name, last_name)
+        are accepted; username/email/role are read-only.
+        """
+        user = request.user
+        serializer = UserProfileSerializer(user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            try:
+                sync_user_to_firestore(user)
+            except Exception as e:
+                print(f'[Profile Update Warning] Firebase sync failed: {e}')
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 # ---------- Gamification Endpoints ----------
 
