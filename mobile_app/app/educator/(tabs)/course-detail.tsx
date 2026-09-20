@@ -37,11 +37,20 @@ const ACTIVITY_META: Record<ActivityKind, { label: string; icon: any }> = {
 
 type GeneratedNode = GenerateTopicResponse['nodes'][number];
 
+type SectionKey = 'topics' | 'quizzes' | 'activities';
+
+const SECTIONS: { key: SectionKey; label: string }[] = [
+  { key: 'topics', label: 'Topics' },
+  { key: 'quizzes', label: 'Quizzes' },
+  { key: 'activities', label: 'Activities' },
+];
+
 export default function CourseDetailScreen() {
   const router = useRouter();
   const { courseId, courseName } = useLocalSearchParams<{ courseId: string; courseName: string }>();
   const cid = Number(courseId);
 
+  const [section, setSection] = useState<SectionKey>('topics');
   const [topics, setTopics] = useState<CoursePathTopic[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -314,7 +323,11 @@ export default function CourseDetailScreen() {
         subtitle={`${topics.length} topic${topics.length === 1 ? '' : 's'} · ${totalNodes} node${totalNodes === 1 ? '' : 's'}`}
         showBack
         rightIcon="add"
-        onRightPress={() => setModalVisible(true)}
+        onRightPress={() => {
+          if (section === 'quizzes') openQuizManager(true);
+          else if (section === 'activities') setActVisible(true);
+          else setModalVisible(true);
+        }}
       />
 
       <ScrollView
@@ -322,177 +335,200 @@ export default function CourseDetailScreen() {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 40 }}
       >
-        <SectionHeader title="Topics" actionLabel="Add" onAction={() => setModalVisible(true)} />
-
-        {loading ? (
-          <View style={styles.loadingBox}>
-            <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
-          </View>
-        ) : topics.length > 0 ? (
-          <View style={{ gap: 14 }}>
-            {topics.map((topic) => (
+        <View style={styles.tabsContainer}>
+          {SECTIONS.map((s) => {
+            const isActive = section === s.key;
+            return (
               <TouchableOpacity
-                key={topic.id}
+                key={s.key}
+                style={styles.tab}
+                onPress={() => setSection(s.key)}
                 activeOpacity={0.7}
-                style={styles.topicCard}
-                onPress={() => router.push({
-                  pathname: '/educator/(tabs)/topic-detail',
-                  params: { topicId: topic.id, topicName: topic.title, courseId: cid },
-                })}
               >
-                <View style={styles.topicHeader}>
-                  <View style={styles.topicIconBg}>
-                    <Ionicons name="layers" size={20} color={COLORS.purpleVibrant} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.topicName}>{topic.title}</Text>
-                    {topic.description ? (
-                      <Text style={styles.topicDesc} numberOfLines={1}>{topic.description}</Text>
-                    ) : null}
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-                </View>
-
-                {topic.nodes.length > 0 ? (
-                  <View style={styles.nodeRow}>
-                    {topic.nodes.map((node: LearningNode) => {
-                      const cfg = NODE_TYPE_CONFIG[node.node_type] || NODE_TYPE_CONFIG.learn;
-                      return (
-                        <Pill
-                          key={node.id}
-                          label={cfg.label}
-                          color={cfg.color}
-                          icon={cfg.icon as any}
-                        />
-                      );
-                    })}
-                  </View>
-                ) : (
-                  <Text style={styles.noNodes}>No nodes yet — tap to add content</Text>
-                )}
+                <Text style={[styles.tabText, isActive && styles.tabTextActive]}>{s.label}</Text>
+                <View style={[styles.activeTabIndicator, !isActive && styles.activeTabIndicatorInactive]} />
               </TouchableOpacity>
-            ))}
-          </View>
-        ) : (
-          <EmptyState
-            icon="layers-outline"
-            title="No topics yet"
-            text="Create your first topic to start adding lessons and quizzes."
-          />
-        )}
-
-        {/* Quizzes */}
-        <View style={styles.sectionGap}>
-          <SectionHeader title="Quizzes" actionLabel="Generate" onAction={() => openQuizManager(true)} />
-          {quizzes.length > 0 ? (
-            <View style={{ gap: 12 }}>
-              {quizzes.map((quiz) => (
-                <TouchableOpacity
-                  key={quiz.id}
-                  activeOpacity={0.75}
-                  style={styles.topicCard}
-                  onPress={() => openQuizManager(false)}
-                >
-                  <View style={styles.topicHeader}>
-                    <View style={styles.topicIconBg}>
-                      <Ionicons name="help-circle" size={20} color={COLORS.purpleVibrant} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.topicName}>{quiz.title}</Text>
-                      <Text style={styles.topicDesc}>
-                        {quiz.questions.length} question{quiz.questions.length === 1 ? '' : 's'}
-                      </Text>
-                    </View>
-                    <Pill
-                      label={QUIZ_TYPE_LABELS[quiz.quiz_type] || quiz.quiz_type}
-                      color={COLORS.purpleVibrant}
-                    />
-                  </View>
-                </TouchableOpacity>
-              ))}
-            </View>
-          ) : (
-            !loading && (
-              <EmptyState
-                icon="help-circle-outline"
-                title="No quizzes yet"
-                text="Generate a quiz from study material for this class."
-              />
-            )
-          )}
+            );
+          })}
         </View>
 
-        {/* Activities */}
-        <View style={styles.sectionGap}>
-          <SectionHeader title="Activities" actionLabel="Add" onAction={() => setActVisible(true)} />
-          {activities.length > 0 ? (
-            <View style={{ gap: 12 }}>
-              {activities.map((activity) => {
-                const meta = ACTIVITY_META[activity.kind] || ACTIVITY_META.quiz;
-                return (
-                  <View key={activity.id} style={styles.activityCard}>
-                    <View style={styles.activityTop}>
-                      <View style={[styles.activityIconBg, { backgroundColor: tint(activity.status === 'published' ? COLORS.success : COLORS.purpleVibrant) }]}>
-                        <Ionicons name={meta.icon} size={18} color={activity.status === 'published' ? COLORS.success : COLORS.purpleVibrant} />
+        {section === 'topics' && (
+          <>
+            <SectionHeader title="Topics" actionLabel="Add" onAction={() => setModalVisible(true)} />
+
+            {loading ? (
+              <View style={styles.loadingBox}>
+                <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
+              </View>
+            ) : topics.length > 0 ? (
+              <View style={{ gap: 14 }}>
+                {topics.map((topic) => (
+                  <TouchableOpacity
+                    key={topic.id}
+                    activeOpacity={0.7}
+                    style={styles.topicCard}
+                    onPress={() => router.push({
+                      pathname: '/educator/(tabs)/topic-detail',
+                      params: { topicId: topic.id, topicName: topic.title, courseId: cid },
+                    })}
+                  >
+                    <View style={styles.topicHeader}>
+                      <View style={styles.topicIconBg}>
+                        <Ionicons name="layers" size={20} color={COLORS.purpleVibrant} />
                       </View>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.activityTitle}>{activity.title}</Text>
-                        <Text style={styles.activityMeta}>
-                          {meta.label}
-                          {activity.due_date ? ` · Due ${formatDue(activity.due_date)}` : ''}
-                        </Text>
+                        <Text style={styles.topicName}>{topic.title}</Text>
+                        {topic.description ? (
+                          <Text style={styles.topicDesc} numberOfLines={1}>{topic.description}</Text>
+                        ) : null}
                       </View>
-                      <TouchableOpacity
-                        onPress={() => handleDeleteActivity(activity)}
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                      >
-                        <Ionicons name="trash-outline" size={18} color={COLORS.textMuted} />
-                      </TouchableOpacity>
+                      <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
                     </View>
-                    {activity.note ? (
-                      <Text style={styles.activityNote} numberOfLines={2}>{activity.note}</Text>
-                    ) : null}
-                    <TouchableOpacity
-                      onPress={() => handleToggleActivityStatus(activity)}
-                      activeOpacity={0.8}
-                      style={styles.activityStatusRow}
-                    >
-                      <Ionicons
-                        name={activity.status === 'published' ? 'eye' : 'eye-off'}
-                        size={13}
-                        color={activity.status === 'published' ? COLORS.success : COLORS.warning}
-                      />
-                      <Text
-                        style={[styles.activityStatusText, { color: activity.status === 'published' ? COLORS.success : COLORS.warning }]}
-                      >
-                        {activity.status === 'published' ? 'Published · tap to hide' : 'Draft · tap to publish'}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                );
-              })}
-            </View>
-          ) : (
-            !loading && (
+
+                    {topic.nodes.length > 0 ? (
+                      <View style={styles.nodeRow}>
+                        {topic.nodes.map((node: LearningNode) => {
+                          const cfg = NODE_TYPE_CONFIG[node.node_type] || NODE_TYPE_CONFIG.learn;
+                          return (
+                            <Pill
+                              key={node.id}
+                              label={cfg.label}
+                              color={cfg.color}
+                              icon={cfg.icon as any}
+                            />
+                          );
+                        })}
+                      </View>
+                    ) : (
+                      <Text style={styles.noNodes}>No nodes yet — tap to add content</Text>
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : (
               <EmptyState
                 icon="layers-outline"
-                title="No activities yet"
-                text="Add a quiz, lesson, or game activity for this class."
+                title="No topics yet"
+                text="Create your first topic to start adding lessons and quizzes."
               />
-            )
-          )}
-        </View>
+            )}
 
-        {/* AI Generate button */}
-        {!loading && (
-          <TouchableOpacity
-            style={styles.aiBtn}
-            activeOpacity={0.85}
-            onPress={() => setAiModalVisible(true)}
-          >
-            <Ionicons name="sparkles" size={18} color={COLORS.purplePrimary} />
-            <Text style={styles.aiBtnText}>Generate Topic with AI</Text>
-          </TouchableOpacity>
+            {/* AI Generate button */}
+            {!loading && (
+              <TouchableOpacity
+                style={styles.aiBtn}
+                activeOpacity={0.85}
+                onPress={() => setAiModalVisible(true)}
+              >
+                <Ionicons name="sparkles" size={18} color={COLORS.purplePrimary} />
+                <Text style={styles.aiBtnText}>Generate Topic with AI</Text>
+              </TouchableOpacity>
+            )}
+          </>
+        )}
+
+        {section === 'quizzes' && (
+          <>
+            <SectionHeader title="Quizzes" actionLabel="Generate" onAction={() => openQuizManager(true)} />
+            {quizzes.length > 0 ? (
+              <View style={{ gap: 12 }}>
+                {quizzes.map((quiz) => (
+                  <TouchableOpacity
+                    key={quiz.id}
+                    activeOpacity={0.75}
+                    style={styles.topicCard}
+                    onPress={() => openQuizManager(false)}
+                  >
+                    <View style={styles.topicHeader}>
+                      <View style={styles.topicIconBg}>
+                        <Ionicons name="help-circle" size={20} color={COLORS.purpleVibrant} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.topicName}>{quiz.title}</Text>
+                        <Text style={styles.topicDesc}>
+                          {quiz.questions.length} question{quiz.questions.length === 1 ? '' : 's'}
+                        </Text>
+                      </View>
+                      <Pill
+                        label={QUIZ_TYPE_LABELS[quiz.quiz_type] || quiz.quiz_type}
+                        color={COLORS.purpleVibrant}
+                      />
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : (
+              !loading && (
+                <EmptyState
+                  icon="help-circle-outline"
+                  title="No quizzes yet"
+                  text="Generate a quiz from study material for this class."
+                />
+              )
+            )}
+          </>
+        )}
+
+        {section === 'activities' && (
+          <>
+            <SectionHeader title="Activities" actionLabel="Add" onAction={() => setActVisible(true)} />
+            {activities.length > 0 ? (
+              <View style={{ gap: 12 }}>
+                {activities.map((activity) => {
+                  const meta = ACTIVITY_META[activity.kind] || ACTIVITY_META.quiz;
+                  return (
+                    <View key={activity.id} style={styles.activityCard}>
+                      <View style={styles.activityTop}>
+                        <View style={[styles.activityIconBg, { backgroundColor: tint(activity.status === 'published' ? COLORS.success : COLORS.purpleVibrant) }]}>
+                          <Ionicons name={meta.icon} size={18} color={activity.status === 'published' ? COLORS.success : COLORS.purpleVibrant} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.activityTitle}>{activity.title}</Text>
+                          <Text style={styles.activityMeta}>
+                            {meta.label}
+                            {activity.due_date ? ` · Due ${formatDue(activity.due_date)}` : ''}
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => handleDeleteActivity(activity)}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        >
+                          <Ionicons name="trash-outline" size={18} color={COLORS.textMuted} />
+                        </TouchableOpacity>
+                      </View>
+                      {activity.note ? (
+                        <Text style={styles.activityNote} numberOfLines={2}>{activity.note}</Text>
+                      ) : null}
+                      <TouchableOpacity
+                        onPress={() => handleToggleActivityStatus(activity)}
+                        activeOpacity={0.8}
+                        style={styles.activityStatusRow}
+                      >
+                        <Ionicons
+                          name={activity.status === 'published' ? 'eye' : 'eye-off'}
+                          size={13}
+                          color={activity.status === 'published' ? COLORS.success : COLORS.warning}
+                        />
+                        <Text
+                          style={[styles.activityStatusText, { color: activity.status === 'published' ? COLORS.success : COLORS.warning }]}
+                        >
+                          {activity.status === 'published' ? 'Published · tap to hide' : 'Draft · tap to publish'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
+              </View>
+            ) : (
+              !loading && (
+                <EmptyState
+                  icon="layers-outline"
+                  title="No activities yet"
+                  text="Add a quiz, lesson, or game activity for this class."
+                />
+              )
+            )}
+          </>
         )}
       </ScrollView>
 
@@ -811,7 +847,35 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   content: { flex: 1, paddingHorizontal: 24, paddingTop: 24 },
   loadingBox: { paddingVertical: 60, alignItems: 'center' },
-  sectionGap: { marginTop: 32 },
+
+  tabsContainer: { flexDirection: 'row', marginBottom: 8 },
+  tab: {
+    flex: 1,
+    paddingVertical: 12,
+    alignItems: 'center',
+    gap: 6,
+  },
+  activeTabIndicator: {
+    width: '60%',
+    maxWidth: 40,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: COLORS.purplePrimary,
+  },
+  activeTabIndicatorInactive: {
+    backgroundColor: 'transparent',
+  },
+  tabText: {
+    fontSize: 15,
+    color: COLORS.textMuted,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+  },
+  tabTextActive: {
+    color: COLORS.purpleDeep,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+  },
 
   activityCard: {
     backgroundColor: COLORS.surface,
