@@ -44,6 +44,7 @@ export default function LanPlayScreen() {
   const [qIndex, setQIndex] = useState(0);
   const [pending, setPending] = useState<Record<PowerupKey, boolean>>(BASE_PENDING);
   const [standings, setStandings] = useState<LanPlayer[]>([]);
+  const [, setQuizTick] = useState(0);
   const engineRef = useRef<OfflineGame | null>(null);
   const submittedRef = useRef(false);
   const savedRef = useRef(false);
@@ -51,6 +52,14 @@ export default function LanPlayScreen() {
 
   const engine = engineRef.current;
   const quiz = lanGame.quiz;
+
+  if (!engine && quiz) {
+    try {
+      engineRef.current = new OfflineGame(quiz, lanGame.timePerQuestion, { order: lanGame.order });
+    } catch (e) {
+      console.warn('OfflineGame build failed', e);
+    }
+  }
 
   const finish = useCallback((reason?: string) => {
     if (finishCalledRef.current) return;
@@ -81,6 +90,13 @@ export default function LanPlayScreen() {
 
   const onMessage = useCallback(
     (msg: LanMessage) => {
+      if (msg.t === 'quiz') {
+        lanGame.quiz = msg.quiz;
+        lanGame.order = msg.order ?? lanGame.order;
+        if (msg.timePerQuestion) lanGame.timePerQuestion = msg.timePerQuestion;
+        setQuizTick(t => t + 1);
+        return;
+      }
       if (msg.t === 'leaderboard') {
         setStandings(msg.players);
         return;
@@ -98,14 +114,6 @@ export default function LanPlayScreen() {
       if (lanClient) lanClient.onEvent = () => {};
     };
   }, [onMessage]);
-
-  useEffect(() => {
-    if (quiz && !engineRef.current) {
-      try {
-        engineRef.current = new OfflineGame(quiz, lanGame.timePerQuestion, { order: lanGame.order });
-      } catch {}
-    }
-  }, [quiz]);
 
   if (!engine) {
     return (
