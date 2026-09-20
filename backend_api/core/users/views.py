@@ -34,7 +34,7 @@ from rest_framework.decorators import api_view, permission_classes, parser_class
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework_simplejwt.tokens import RefreshToken  # noqa: F401 (kept for imports elsewhere)
 from .authentication import SAGERefreshToken
-from core.firebase import verify_firebase_token, create_firebase_user
+from core.firebase import verify_firebase_token, create_firebase_user, set_role_claim, get_role_claim
 from .models import User
 from .otp import create_otp_challenge, otp_matches
 from core.firestore_service import (
@@ -88,7 +88,15 @@ class FirebaseLoginView(APIView):
             # accepted from the client and can only be granted by a superadmin.
             requested_role = request.data.get('role')
             if requested_role not in ('student', 'educator'):
-                requested_role = 'educator' if request.data.get('is_educator') else 'student'
+                requested_role = 'educator' if request.data.get('is_educator') else None
+
+            # Plain logins (just an id_token) don't carry a role. Restore it from
+            # the Firebase custom claim (set at signup / role change) so an educator
+            # whose Django row was lost isn't silently recreated as a student.
+            if not requested_role:
+                requested_role = get_role_claim(firebase_uid)
+            if requested_role not in ('student', 'educator'):
+                requested_role = 'student'
 
             # Ensure username is unique; if taken, append a random string from the UID
             if User.objects.filter(username=username).exists():
@@ -103,6 +111,8 @@ class FirebaseLoginView(APIView):
                 role=requested_role,
                 password=None # Password is managed by Firebase now
             )
+            # Persist the role as a Firebase custom claim so it survives DB resets
+            set_role_claim(firebase_uid, requested_role)
             # Sync the new user to Firestore immediately
             sync_user_to_firestore(user)
 
@@ -916,6 +926,8 @@ def apply_role_change(actor, target_user, new_role):
     target_user.role = new_role
     target_user.token_version += 1
     target_user.save(update_fields=['role', 'token_version', 'is_student', 'is_educator'])
+    if target_user.firebase_uid:
+        set_role_claim(target_user.firebase_uid, new_role)
     RoleChangeLog.objects.create(
         changed_by=actor,
         target_user=target_user,
@@ -962,6 +974,7 @@ class SuperadminUserListView(APIView):
             if uid:
                 user.firebase_uid = uid
                 user.save(update_fields=['firebase_uid'])
+                set_role_claim(uid, user.role)
         sync_user_to_firestore(user)
         RoleChangeLog.objects.create(
             changed_by=request.user,

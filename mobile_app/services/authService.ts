@@ -398,10 +398,26 @@ export async function getCachedUserId(): Promise<number | null> {
   return Number.isFinite(id) ? id : null;
 }
 
+/**
+ * Read the `role` claim straight from the stored access token.
+ * Backend tokens embed the role (users/authentication.py); this is used as
+ * a fallback when /api/users/me/ fails (offline, transient error) so an
+ * educator isn't silently sent to the student dashboard.
+ */
+export async function getRoleFromToken(): Promise<string | null> {
+  const token = await getToken();
+  if (!token) return null;
+  const payload = decodeJwt(token);
+  if (!payload || typeof payload.role !== 'string') return null;
+  return payload.role;
+}
+
 export function roleHomePath(
-  user?: { role?: string; is_educator?: boolean } | null
+  user?: { role?: string; is_educator?: boolean } | null,
+  tokenRole?: string | null
 ): Href {
-  if (user?.role === 'superadmin') return '/superadmin';
-  if (user?.role === 'educator' || user?.is_educator) return '/educator';
+  const role = user?.role || tokenRole || undefined;
+  if (role === 'superadmin') return '/superadmin';
+  if (role === 'educator' || user?.is_educator) return '/educator/dashboard';
   return '/(tabs)';
 }

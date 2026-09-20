@@ -492,7 +492,9 @@ class FirebaseSignupRoleTests(APITestCase):
         }
         payload = {'id_token': 'fake-token', 'username': email.split('@')[0], **(extra or {})}
         with patch.object(users_views, 'verify_firebase_token', return_value=decoded), \
-             patch.object(users_views, 'sync_user_to_firestore'):
+             patch.object(users_views, 'sync_user_to_firestore'), \
+             patch.object(users_views, 'get_role_claim', return_value=None), \
+             patch.object(users_views, 'set_role_claim', return_value=True):
             return self.client.post(reverse('firebase_login'), payload, format='json')
 
     def test_is_educator_flag_creates_educator(self):
@@ -516,6 +518,48 @@ class FirebaseSignupRoleTests(APITestCase):
         res = self._signup('plain.student@example.com')
         self.assertEqual(res.status_code, 200)
         self.assertEqual(User.objects.get(email='plain.student@example.com').role, 'student')
+
+    def test_login_restores_educator_role_from_claim(self):
+        # A DB reset wiped the Django row, but the Firebase custom claim still says
+        # this identity is an educator. A bare login (no role in the request) must
+        # recreate the user as an educator, not default to student.
+        decoded = {
+            'uid': 'uid-restored',
+            'email': 'restored@example.com',
+            'firebase': {'sign_in_provider': 'password'},
+        }
+        with patch.object(users_views, 'verify_firebase_token', return_value=decoded), \
+             patch.object(users_views, 'sync_user_to_firestore'), \
+             patch.object(users_views, 'get_role_claim', return_value='educator'), \
+             patch.object(users_views, 'set_role_claim'):
+            res = self.client.post(
+                reverse('firebase_login'),
+                {'id_token': 'fake-token'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        user = User.objects.get(email='restored@example.com')
+        self.assertEqual(user.role, 'educator')
+        self.assertTrue(user.is_educator)
+
+    def test_signup_persists_role_claim(self):
+        # Signing up as an educator must store the role as a Firebase custom claim
+        # so it can be restored if the Django DB is ever reset.
+        decoded = {
+            'uid': 'uid-claim-set',
+            'email': 'claim.set@example.com',
+            'firebase': {'sign_in_provider': 'password'},
+        }
+        with patch.object(users_views, 'verify_firebase_token', return_value=decoded), \
+             patch.object(users_views, 'sync_user_to_firestore'), \
+             patch.object(users_views, 'set_role_claim', return_value=True) as mock_set:
+            res = self.client.post(
+                reverse('firebase_login'),
+                {'id_token': 'fake-token', 'username': 'claimset', 'is_educator': True},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        mock_set.assert_called_once_with('uid-claim-set', 'educator')
 
     def test_existing_user_role_unchanged_on_login(self):
         User.objects.create_user(

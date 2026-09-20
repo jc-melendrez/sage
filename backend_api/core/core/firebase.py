@@ -92,3 +92,36 @@ def create_firebase_user(email, password):
     except Exception as e:
         print(f"[Firebase] Failed to create Auth user {email}: {e}")
         return None
+
+
+def set_role_claim(uid, role):
+    """
+    Persist the user's role as a Firebase custom claim so it survives a
+    Django DB reset/rebuild. Best-effort — failures (offline, duplicate, etc.)
+    are swallowed so login/auth is never blocked by this.
+    """
+    try:
+        initialize_firebase()
+        auth.set_custom_user_claims(uid, {'role': role})
+        return True
+    except Exception as e:
+        print(f"[Firebase] Failed to set role claim for {uid}: {e}")
+        return False
+
+
+def get_role_claim(uid):
+    """
+    Read the role back from the user's Firebase custom claims.
+
+    Fetches server-side via get_user() (not from the ID token payload) so
+    there is no custom-claims propagation delay. Returns the role string or
+    None if the user has no claim / Firebase is unreachable.
+    """
+    try:
+        initialize_firebase()
+        claims = auth.get_user(uid).custom_claims or {}
+        role = claims.get('role')
+        return role if isinstance(role, str) else None
+    except Exception as e:
+        print(f"[Firebase] Failed to read role claim for {uid}: {e}")
+        return None
