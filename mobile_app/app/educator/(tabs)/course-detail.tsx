@@ -382,6 +382,22 @@ export default function CourseDetailScreen() {
                           <Text style={styles.topicDesc} numberOfLines={1}>{topic.description}</Text>
                         ) : null}
                       </View>
+                      <TouchableOpacity
+                        style={styles.previewBtn}
+                        activeOpacity={0.7}
+                        onPress={() => router.push({
+                          pathname: '/course/topic/[topicId]',
+                          params: {
+                            topicId: topic.id,
+                            courseId: cid,
+                            title: topic.title,
+                            preview: '1',
+                          },
+                        })}
+                      >
+                        <Ionicons name="eye" size={14} color={COLORS.purpleVibrant} />
+                        <Text style={styles.previewBtnText}>Preview</Text>
+                      </TouchableOpacity>
                       <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
                     </View>
 
@@ -932,6 +948,17 @@ const styles = StyleSheet.create({
   },
   topicName: { fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary, marginBottom: 2 },
   topicDesc: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted },
+
+  previewBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: RADIUS.pill,
+    backgroundColor: tint(COLORS.purpleVibrant),
+  },
+  previewBtnText: { fontSize: 11, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.purpleVibrant },
 
   nodeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 12 },
   noNodes: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 10, fontStyle: 'italic' },

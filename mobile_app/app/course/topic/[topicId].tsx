@@ -286,7 +286,8 @@ function NodeButton({ node, status, selected, x, y, onPress, onMeasure }: NodeBu
 }
 
 export default function TopicPathScreen() {
-  const { topicId, courseId, title } = useLocalSearchParams<{ topicId: string; courseId: string; title: string }>();
+  const { topicId, courseId, title, preview } = useLocalSearchParams<{ topicId: string; courseId: string; title: string; preview?: string }>();
+  const isPreview = preview === '1';
   const router = useRouter();
   const [nodes, setNodes] = useState<LearningNode[]>([]);
   const [topicTitle, setTopicTitle] = useState(title || 'Topic');
@@ -323,7 +324,7 @@ export default function TopicPathScreen() {
 
   const handleStartActivity = (nodeId: number) => {
     setSelectedNodeIndex(null);
-    router.push(`/course/node/${nodeId}` as any);
+    router.push(`/course/node/${nodeId}${isPreview ? '?preview=1' : ''}` as any);
   };
 
   const statuses = nodes.map((n, i) => getNodeStatus(n, i, nodes));
@@ -352,7 +353,14 @@ export default function TopicPathScreen() {
           </TouchableOpacity>
           <View style={styles.headerCenter}>
             <Text style={styles.headerTitle} numberOfLines={1}>{topicTitle}</Text>
-            <Text style={styles.headerSub}>{completedCount} of {nodes.length} activities</Text>
+            {isPreview ? (
+              <View style={styles.previewBadge}>
+                <Ionicons name="eye" size={11} color="#FBBF24" />
+                <Text style={styles.previewBadgeText}>Student preview — no progress saved</Text>
+              </View>
+            ) : (
+              <Text style={styles.headerSub}>{completedCount} of {nodes.length} activities</Text>
+            )}
           </View>
           <View style={{ width: 34 }} />
         </View>
@@ -564,6 +572,17 @@ const styles = StyleSheet.create({
   headerCenter: { alignItems: 'center', flex: 1 },
   headerTitle: { color: COLORS.textOnDark, fontSize: 17, fontFamily: FONTS.extraBold, fontWeight: '800' },
   headerSub: { color: COLORS.textOnDarkMuted, fontSize: 12, fontFamily: FONTS.medium, marginTop: 3 },
+  previewBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    backgroundColor: 'rgba(251,191,36,0.16)',
+  },
+  previewBadgeText: { color: '#FCD34D', fontSize: 10, fontFamily: FONTS.semiBold },
   progressTrack: {
     height: 8,
     borderRadius: 4,
