@@ -265,8 +265,11 @@ class GenerateQuizView(APIView):
         except json.JSONDecodeError:
             return Response({"error": "AI returned invalid JSON formatting."}, status=500)
         except Exception as e:
+            err_detail = str(e)
+            if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+                err_detail = f"{err_detail} | {e.response.text[:300]}"
             print(f"Quiz Gen Error: {e}")
-            return Response({"error": str(e)}, status=500)
+            return Response({"error": err_detail}, status=500)
 
 class QuizListView(APIView):
     permission_classes = [IsAuthenticated]
