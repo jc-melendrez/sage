@@ -49,6 +49,7 @@ urlpatterns = [
     path('courses/<int:course_id>/topics/create/', views.TopicCreateView.as_view(), name='topic_create'),
     path('courses/<int:course_id>/generate-topic/', views.GenerateTopicView.as_view(), name='generate_topic'),
     path('topics/<int:topic_id>/nodes/create/', views.NodeCreateView.as_view(), name='node_create'),
+    path('topics/<int:topic_id>/', views.TopicUpdateView.as_view(), name='topic_update'),
     path('topics/<int:topic_id>/mistakes/', views.TopicMistakesView.as_view(), name='topic_mistakes'),
     path('nodes/<int:node_id>/', views.NodeDetailView.as_view(), name='node_detail'),
     path('nodes/<int:node_id>/complete/', views.CompleteNodeView.as_view(), name='node_complete'),

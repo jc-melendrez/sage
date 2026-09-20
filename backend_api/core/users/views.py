@@ -846,6 +846,36 @@ class NodeDetailView(APIView):
 
         return Response(data)
 
+    def patch(self, request, node_id):
+        """Update a node (educator only)."""
+        try:
+            node = LearningNode.objects.select_related('topic__course').get(id=node_id)
+        except LearningNode.DoesNotExist:
+            return Response({'error': 'Node not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user != node.topic.course.educator:
+            return Response({'error': 'Only the educator can edit nodes'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = LearningNodeSerializer(node, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+        return Response(serializer.data)
+
+    def delete(self, request, node_id):
+        """Delete a node (educator only)."""
+        try:
+            node = LearningNode.objects.select_related('topic__course').get(id=node_id)
+        except LearningNode.DoesNotExist:
+            return Response({'error': 'Node not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user != node.topic.course.educator:
+            return Response({'error': 'Only the educator can delete nodes'}, status=status.HTTP_403_FORBIDDEN)
+
+        node.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class CompleteNodeView(APIView):
     """Mark a node as complete, award XP, return gamification results."""
@@ -936,6 +966,42 @@ class NodeCreateView(APIView):
 
         serializer.save(topic=topic)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class TopicUpdateView(APIView):
+    """Update or delete a topic (educator only)."""
+    permission_classes = [IsAuthenticated]
+
+    def _get_topic(self, request, topic_id):
+        try:
+            topic = Topic.objects.select_related('course').get(id=topic_id)
+        except Topic.DoesNotExist:
+            return None, Response({'error': 'Topic not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user != topic.course.educator:
+            return None, Response({'error': 'Only the educator can edit topics'}, status=status.HTTP_403_FORBIDDEN)
+
+        return topic, None
+
+    def patch(self, request, topic_id):
+        topic, error = self._get_topic(request, topic_id)
+        if error:
+            return error
+
+        serializer = TopicSerializer(topic, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+        return Response(serializer.data)
+
+    def delete(self, request, topic_id):
+        topic, error = self._get_topic(request, topic_id)
+        if error:
+            return error
+
+        topic.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class TopicMistakesView(APIView):

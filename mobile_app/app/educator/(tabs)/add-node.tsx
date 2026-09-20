@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -15,7 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
-import { createNode } from '@/services/courseService';
+import { createNode, updateNode, deleteNode, getNode } from '@/services/courseService';
 import {
   NodeType,
   LearnContent,
@@ -25,6 +25,8 @@ import {
   InteractionBlock,
   SummaryBlock,
   QuizQuestion,
+  isLearnContent,
+  isPracticeContent,
 } from '@/types/learning';
 
 const NODE_TYPES: { type: NodeType; label: string; icon: string; color: string }[] = [
@@ -42,10 +44,13 @@ const BLOCK_TYPES: { type: string; label: string; icon: string }[] = [
 
 export default function AddNodeScreen() {
   const router = useRouter();
-  const { topicId, order } = useLocalSearchParams<{ topicId: string; order: string }>();
+  const { topicId, order, nodeId } = useLocalSearchParams<{ topicId: string; order: string; nodeId: string }>();
   const tid = Number(topicId);
   const nodeOrder = Number(order) || 0;
+  const editing = Boolean(nodeId);
+  const nid = Number(nodeId);
 
+  const [loading, setLoading] = useState(editing);
   const [nodeType, setNodeType] = useState<NodeType>('learn');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -53,6 +58,8 @@ export default function AddNodeScreen() {
   const [requiredScore, setRequiredScore] = useState('70');
   const [estimatedMinutes, setEstimatedMinutes] = useState('5');
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [editOrder, setEditOrder] = useState(nodeOrder);
 
   // Learn blocks
   const [blocks, setBlocks] = useState<any[]>([]);
@@ -62,6 +69,39 @@ export default function AddNodeScreen() {
 
   // Block editor state
   const [expandedBlock, setExpandedBlock] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!editing) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const node = await getNode(nid);
+        if (cancelled) return;
+        setNodeType(node.node_type);
+        setTitle(node.title);
+        setDescription(node.description || '');
+        setXpReward(String(node.xp_reward ?? 25));
+        setRequiredScore(String(node.required_score ?? 70));
+        setEstimatedMinutes(String(node.estimated_minutes ?? 5));
+        setEditOrder(node.order);
+        if (isLearnContent(node.content_json)) {
+          setBlocks(node.content_json.blocks || []);
+        } else if (isPracticeContent(node.content_json)) {
+          setQuestions(node.content_json.questions || []);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        Alert.alert(
+          'Failed to load node',
+          err instanceof Error ? err.message : 'Something went wrong.',
+          [{ text: 'OK', onPress: () => router.back() }],
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [editing, nid, router]);
 
   const handleSave = async () => {
     if (!title.trim()) {
@@ -87,22 +127,47 @@ export default function AddNodeScreen() {
 
     setSaving(true);
     try {
-      await createNode(tid, {
+      const payload = {
         node_type: nodeType,
         title: title.trim(),
         description: description.trim(),
         content_json: contentJson,
-        order: nodeOrder,
+        order: editOrder,
         xp_reward: Number(xpReward) || 25,
         required_score: Number(requiredScore) || 70,
         estimated_minutes: Number(estimatedMinutes) || 5,
-      });
+      };
+      if (editing) {
+        await updateNode(nid, payload);
+      } else {
+        await createNode(tid, payload);
+      }
       router.back();
     } catch (err) {
-      Alert.alert('Failed to create node', err instanceof Error ? err.message : 'Something went wrong.');
+      Alert.alert(editing ? 'Failed to save node' : 'Failed to create node', err instanceof Error ? err.message : 'Something went wrong.');
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleDelete = () => {
+    Alert.alert('Delete node?', `"${title.trim() || 'Untitled'}" and its content will be removed from this topic.`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          setDeleting(true);
+          try {
+            await deleteNode(nid);
+            router.back();
+          } catch (err) {
+            Alert.alert('Failed to delete node', err instanceof Error ? err.message : 'Something went wrong.');
+            setDeleting(false);
+          }
+        },
+      },
+    ]);
   };
 
   // --- Block helpers (Learn) ---
@@ -405,10 +470,21 @@ export default function AddNodeScreen() {
     </View>
   );
 
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <EducatorHeader title="Edit Node" showBack />
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <ActivityIndicator size="large" color={COLORS.purplePrimary} />
+        </View>
+      </View>
+    );
+  }
+
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
     <View style={styles.container}>
-      <EducatorHeader title="Add Node" showBack />
+      <EducatorHeader title={editing ? 'Edit Node' : 'Add Node'} showBack />
 
       <ScrollView
         style={styles.scroll}
@@ -520,7 +596,7 @@ export default function AddNodeScreen() {
           </>
         )}
 
-        {(nodeType === 'practice' || nodeType === 'mastery') && (
+        {(nodeType !== 'learn') && (
           <>
             <Text style={styles.sectionTitle}>Questions</Text>
             {questions.map((q, i) => renderQuestionCard(q, i))}
@@ -535,6 +611,23 @@ export default function AddNodeScreen() {
 
       {/* Save button — fixed at bottom */}
       <View style={styles.saveBar}>
+        {editing && (
+          <TouchableOpacity
+            style={styles.deleteBtn}
+            activeOpacity={0.85}
+            onPress={handleDelete}
+            disabled={deleting}
+          >
+            {deleting ? (
+              <ActivityIndicator color={COLORS.danger} />
+            ) : (
+              <>
+                <Ionicons name="trash" size={18} color={COLORS.danger} />
+                <Text style={styles.deleteBtnText}>Delete</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           style={[styles.saveBtn, saving && { opacity: 0.7 }]}
           activeOpacity={0.85}
@@ -546,7 +639,7 @@ export default function AddNodeScreen() {
           ) : (
             <>
               <Ionicons name="checkmark-circle" size={18} color="white" />
-              <Text style={styles.saveBtnText}>Save Node</Text>
+              <Text style={styles.saveBtnText}>{editing ? 'Save Changes' : 'Save Node'}</Text>
             </>
           )}
         </TouchableOpacity>
@@ -698,6 +791,21 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.purplePrimary,
     paddingVertical: 16,
     borderRadius: RADIUS.md,
+    flex: 1,
   },
+  deleteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 16,
+    paddingHorizontal: 18,
+    borderRadius: RADIUS.md,
+    borderWidth: 1.5,
+    borderColor: COLORS.danger,
+    backgroundColor: tint(COLORS.danger, 0.08),
+    marginRight: 10,
+  },
+  deleteBtnText: { color: COLORS.danger, fontFamily: FONTS.bold, fontWeight: '700', fontSize: 14 },
   saveBtnText: { color: 'white', fontFamily: FONTS.bold, fontWeight: '700', fontSize: 16 },
 });
