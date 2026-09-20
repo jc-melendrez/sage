@@ -10,7 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Badge, Course, LessonProgress, LoginOtpChallenge, User
+from .models import Badge, ClassActivity, Course, LessonProgress, LoginOtpChallenge, User
 from . import gamification
 from . import views as users_views
 
@@ -749,3 +749,116 @@ class ProfileUpdateTests(APITestCase):
             format='json',
         )
         self.assertEqual(res.status_code, 401)
+
+
+class ClassActivityAPITests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='act-teacher', password='pass123', role='educator',
+        )
+        self.student = User.objects.create_user(
+            username='act-student', password='pass123', role='student',
+        )
+        self.course = Course.objects.create(name='Physics', educator=self.educator)
+        self.client.force_authenticate(user=self.educator)
+
+    def test_educator_creates_activity(self):
+        resp = self.client.post(
+            reverse('course_activities', args=[self.course.id]),
+            {
+                'kind': 'quiz',
+                'title': 'Forces Quiz',
+                'note': 'Chapters 1-3',
+                'due_date': '2026-10-01',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        activity = ClassActivity.objects.get()
+        self.assertEqual(activity.course, self.course)
+        self.assertEqual(activity.kind, 'quiz')
+        self.assertEqual(activity.status, 'draft')
+        self.assertEqual(resp.data['course_name'], 'Physics')
+
+    def test_educator_creates_published_activity(self):
+        resp = self.client.post(
+            reverse('course_activities', args=[self.course.id]),
+            {'kind': 'lesson', 'title': 'Waves', 'status': 'published'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'published')
+
+    def test_non_educator_cannot_create(self):
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.post(
+            reverse('course_activities', args=[self.course.id]),
+            {'kind': 'game', 'title': 'Hack'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(ClassActivity.objects.count(), 0)
+
+    def test_student_member_can_read_activities(self):
+        self.course.students.add(self.student)
+        ClassActivity.objects.create(
+            course=self.course, kind='quiz', title='Forces Quiz', status='published',
+        )
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.get(reverse('course_activities', args=[self.course.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data[0]['title'], 'Forces Quiz')
+
+    def test_non_member_cannot_read_activities(self):
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.get(reverse('course_activities', args=[self.course.id]))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_educator_updates_activity(self):
+        activity = ClassActivity.objects.create(course=self.course, kind='quiz', title='Q')
+        resp = self.client.patch(
+            reverse('activity_detail', args=[activity.id]),
+            {'status': 'published'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        activity.refresh_from_db()
+        self.assertEqual(activity.status, 'published')
+
+    def test_non_educator_cannot_update_activity(self):
+        activity = ClassActivity.objects.create(course=self.course, kind='quiz', title='Q')
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.patch(
+            reverse('activity_detail', args=[activity.id]),
+            {'status': 'published'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_educator_deletes_activity(self):
+        activity = ClassActivity.objects.create(course=self.course, kind='quiz', title='Q')
+        resp = self.client.delete(reverse('activity_detail', args=[activity.id]))
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(ClassActivity.objects.count(), 0)
+
+    def test_my_activities_cross_class(self):
+        other = Course.objects.create(name='Chemistry', educator=self.educator)
+        ClassActivity.objects.create(course=self.course, kind='quiz', title='FQ')
+        ClassActivity.objects.create(course=other, kind='game', title='Battle')
+        resp = self.client.get(reverse('my_activities'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 2)
+        names = {a['course_name'] for a in resp.data}
+        self.assertEqual(names, {'Physics', 'Chemistry'})
+
+    def test_my_activities_scoped_to_own_courses(self):
+        other_educator = User.objects.create_user(
+            username='act-teacher2', password='pass123', role='educator',
+        )
+        foreign = Course.objects.create(name='History', educator=other_educator)
+        ClassActivity.objects.create(course=foreign, kind='quiz', title='HQ')
+        resp = self.client.get(reverse('my_activities'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data, [])

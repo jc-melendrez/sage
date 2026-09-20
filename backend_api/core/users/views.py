@@ -10,7 +10,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
@@ -27,6 +27,7 @@ from .serializers import (
     CourseSerializer, CourseRosterSerializer,
     SuperadminUserUpdateSerializer, SuperadminCreateUserSerializer, RoleChangeLogSerializer,
     TopicSerializer, LearningNodeSerializer, NodeProgressSerializer, CoursePathTopicSerializer,
+    ClassActivitySerializer,
 )
 from .permissions import IsSuperadmin
 from .utils.file_parser import extract_text_from_file
@@ -705,6 +706,85 @@ class RemoveStudentFromCourseView(APIView):
         course.students.remove(user_id)
 
         return Response(CourseRosterSerializer(course).data)
+
+
+# --- Class Activities (paper-aligned academic tasks, no grading) ---
+
+def _get_course_for_activity(request, course_id):
+    try:
+        course = Course.objects.get(id=course_id)
+    except Course.DoesNotExist:
+        return None, Response({"error": "Course not found"}, status=404)
+    return course, None
+
+
+class CourseActivitiesView(APIView):
+    """List / create activities for a single course (class)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, course_id):
+        course, err = _get_course_for_activity(request, course_id)
+        if err:
+            return err
+        if request.user != course.educator and not course.students.filter(id=request.user.id).exists():
+            return Response({"error": "You are not a member of this course"}, status=403)
+
+        activities = course.activities.all()
+        return Response(ClassActivitySerializer(activities, many=True).data)
+
+    def post(self, request, course_id):
+        course, err = _get_course_for_activity(request, course_id)
+        if err:
+            return err
+        if request.user != course.educator:
+            return Response({"error": "Only the course educator can create activities"}, status=403)
+
+        serializer = ClassActivitySerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+
+        activity = serializer.save(course=course, status=request.data.get('status', 'draft'))
+        return Response(ClassActivitySerializer(activity).data, status=201)
+
+
+class ClassActivityDetailView(APIView):
+    """Update / delete a single class activity (educator only)."""
+    permission_classes = [IsAuthenticated]
+
+    def _get_owned(self, request, activity_id):
+        try:
+            activity = ClassActivity.objects.select_related('course').get(id=activity_id)
+        except ClassActivity.DoesNotExist:
+            return None, Response({"error": "Activity not found"}, status=404)
+        if request.user != activity.course.educator:
+            return None, Response({"error": "Only the course educator can manage this activity"}, status=403)
+        return activity, None
+
+    def patch(self, request, activity_id):
+        activity, err = self._get_owned(request, activity_id)
+        if err:
+            return err
+        serializer = ClassActivitySerializer(activity, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+        activity = serializer.save()
+        return Response(ClassActivitySerializer(activity).data)
+
+    def delete(self, request, activity_id):
+        activity, err = self._get_owned(request, activity_id)
+        if err:
+            return err
+        activity.delete()
+        return Response(status=204)
+
+
+class MyClassActivitiesView(APIView):
+    """Cross-class activities feed for the educator (Activities tab + dashboard)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        activities = ClassActivity.objects.filter(course__educator=request.user)
+        return Response(ClassActivitySerializer(activities, many=True).data)
 
 
 # --- Learning Path Views ---

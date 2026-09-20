@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress
+from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity
 # --- Your Related Serializers (Unchanged, these are great!) ---
 from django.contrib.auth import get_user_model
 
@@ -109,6 +109,24 @@ class CourseSerializer(serializers.ModelSerializer):
 
 class CourseRosterSerializer(CourseSerializer):
     students = UserSerializer(many=True, read_only=True)
+
+
+# --- Class Activities (teacher-set academic tasks, no grading) ---
+
+class ClassActivitySerializer(serializers.ModelSerializer):
+    course = serializers.IntegerField(source='course_id', read_only=True)
+    course_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClassActivity
+        fields = [
+            'id', 'course', 'course_name', 'kind', 'title',
+            'ref_id', 'note', 'due_date', 'status', 'created_at',
+        ]
+        read_only_fields = ['id', 'course', 'course_name', 'created_at']
+
+    def get_course_name(self, obj):
+        return obj.course.name
 
 
 # --- Superadmin Serializers ---

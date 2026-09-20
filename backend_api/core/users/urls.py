@@ -38,6 +38,11 @@ urlpatterns = [
     path('courses/<int:course_id>/add-student/', views.AddStudentToCourseView.as_view(), name='course_add_student'),
     path('courses/<int:course_id>/remove-student/', views.RemoveStudentFromCourseView.as_view(), name='course_remove_student'),
 
+    # --- Class Activities ---
+    path('courses/<int:course_id>/activities/', views.CourseActivitiesView.as_view(), name='course_activities'),
+    path('activities/', views.MyClassActivitiesView.as_view(), name='my_activities'),
+    path('activities/<int:activity_id>/', views.ClassActivityDetailView.as_view(), name='activity_detail'),
+
     # --- Learning Path ---
     path('courses/<int:course_id>/topics/', views.CourseTopicsView.as_view(), name='course_topics'),
     path('courses/<int:course_id>/path/', views.CoursePathView.as_view(), name='course_path'),

@@ -19,7 +19,21 @@ import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, EmptyState, Pill } from '@/components/educator/EducatorPrimitives';
 import { getCoursePath, createTopic, createNode, generateTopic, GenerateTopicResponse } from '@/services/courseService';
+import { getQuizzes, Quiz } from '@/services/quizService';
+import { getCourseActivities, createActivity, deleteActivity, updateActivity, ClassActivity, ActivityKind } from '@/services/activityService';
 import { CoursePathTopic, LearningNode, NODE_TYPE_CONFIG } from '@/types/learning';
+
+const QUIZ_TYPE_LABELS: Record<string, string> = {
+  multiple_choice: 'Multiple Choice',
+  exam: 'Exam',
+  flashcard: 'Flashcards',
+};
+
+const ACTIVITY_META: Record<ActivityKind, { label: string; icon: any }> = {
+  quiz: { label: 'Quiz', icon: 'help-circle' },
+  lesson: { label: 'Lesson', icon: 'book' },
+  game: { label: 'Game', icon: 'game-controller' },
+};
 
 type GeneratedNode = GenerateTopicResponse['nodes'][number];
 
@@ -30,6 +44,19 @@ export default function CourseDetailScreen() {
 
   const [topics, setTopics] = useState<CoursePathTopic[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Class quizzes + activities
+  const [quizzes, setQuizzes] = useState<Quiz[]>([]);
+  const [activities, setActivities] = useState<ClassActivity[]>([]);
+
+  // Add activity modal
+  const [actVisible, setActVisible] = useState(false);
+  const [creatingActivity, setCreatingActivity] = useState(false);
+  const [actKind, setActKind] = useState<ActivityKind>('quiz');
+  const [actTitle, setActTitle] = useState('');
+  const [actNote, setActNote] = useState('');
+  const [actDue, setActDue] = useState<'none' | 'today' | '1d' | '1w'>('none');
+  const [actStatus, setActStatus] = useState<'draft' | 'published'>('draft');
 
   // Add topic modal
   const [modalVisible, setModalVisible] = useState(false);
@@ -61,7 +88,110 @@ export default function CourseDetailScreen() {
     }
   }, [cid]);
 
-  useFocusEffect(useCallback(() => { loadTopics(); }, [loadTopics]));
+  const loadQuizzes = useCallback(async () => {
+    try {
+      const data = await getQuizzes(cid);
+      setQuizzes(data);
+    } catch {
+      // non-fatal — quizzes section shows empty
+    }
+  }, [cid]);
+
+  const loadActivities = useCallback(async () => {
+    try {
+      const data = await getCourseActivities(cid);
+      setActivities(data);
+    } catch {
+      // non-fatal
+    }
+  }, [cid]);
+
+  const loadAll = useCallback(() => {
+    loadTopics();
+    loadQuizzes();
+    loadActivities();
+  }, [loadTopics, loadQuizzes, loadActivities]);
+
+  useFocusEffect(useCallback(() => { loadAll(); }, [loadAll]));
+
+  const openQuizManager = (generate: boolean) => {
+    router.push({
+      pathname: '/educator/(tabs)/quiz-manager',
+      params: { course: String(cid), ...(generate ? { generate: '1' } : {}) },
+    });
+  };
+
+  const dueToISO = (): string | null => {
+    const now = new Date();
+    if (actDue === 'today') return now.toISOString().slice(0, 10);
+    if (actDue === '1d') return new Date(now.getTime() + 86400000).toISOString().slice(0, 10);
+    if (actDue === '1w') return new Date(now.getTime() + 604800000).toISOString().slice(0, 10);
+    return null;
+  };
+
+  const handleCreateActivity = async () => {
+    if (!actTitle.trim()) {
+      Alert.alert('Title required', 'Please name the activity.');
+      return;
+    }
+    setCreatingActivity(true);
+    try {
+      await createActivity(cid, {
+        kind: actKind,
+        title: actTitle.trim(),
+        note: actNote.trim(),
+        due_date: dueToISO(),
+        status: actStatus,
+      });
+      setActVisible(false);
+      setActTitle('');
+      setActNote('');
+      setActDue('none');
+      setActKind('quiz');
+      setActStatus('draft');
+      await loadActivities();
+    } catch (err) {
+      Alert.alert('Failed to create activity', err instanceof Error ? err.message : 'Something went wrong.');
+    } finally {
+      setCreatingActivity(false);
+    }
+  };
+
+  const handleToggleActivityStatus = async (activity: ClassActivity) => {
+    try {
+      await updateActivity(activity.id, { status: activity.status === 'published' ? 'draft' : 'published' });
+      await loadActivities();
+    } catch {
+      Alert.alert('Update failed', 'Could not update the activity.');
+    }
+  };
+
+  const handleDeleteActivity = (activity: ClassActivity) => {
+    Alert.alert(
+      'Delete activity',
+      `"${activity.title}" will be removed from this class.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteActivity(activity.id);
+              await loadActivities();
+            } catch {
+              Alert.alert('Delete failed', 'Could not delete the activity.');
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const formatDue = (iso: string | null): string | null => {
+    if (!iso) return null;
+    return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  };
 
   const handleCreate = async () => {
     if (!title.trim()) {
@@ -236,6 +366,108 @@ export default function CourseDetailScreen() {
           />
         )}
 
+        {/* Quizzes */}
+        <View style={styles.sectionGap}>
+          <SectionHeader title="Quizzes" actionLabel="Generate" onAction={() => openQuizManager(true)} />
+          {quizzes.length > 0 ? (
+            <View style={{ gap: 12 }}>
+              {quizzes.map((quiz) => (
+                <TouchableOpacity
+                  key={quiz.id}
+                  activeOpacity={0.75}
+                  style={styles.topicCard}
+                  onPress={() => openQuizManager(false)}
+                >
+                  <View style={styles.topicHeader}>
+                    <View style={styles.topicIconBg}>
+                      <Ionicons name="help-circle" size={20} color={COLORS.purpleVibrant} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.topicName}>{quiz.title}</Text>
+                      <Text style={styles.topicDesc}>
+                        {quiz.questions.length} question{quiz.questions.length === 1 ? '' : 's'}
+                      </Text>
+                    </View>
+                    <Pill
+                      label={QUIZ_TYPE_LABELS[quiz.quiz_type] || quiz.quiz_type}
+                      color={COLORS.purpleVibrant}
+                    />
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </View>
+          ) : (
+            !loading && (
+              <EmptyState
+                icon="help-circle-outline"
+                title="No quizzes yet"
+                text="Generate a quiz from study material for this class."
+              />
+            )
+          )}
+        </View>
+
+        {/* Activities */}
+        <View style={styles.sectionGap}>
+          <SectionHeader title="Activities" actionLabel="Add" onAction={() => setActVisible(true)} />
+          {activities.length > 0 ? (
+            <View style={{ gap: 12 }}>
+              {activities.map((activity) => {
+                const meta = ACTIVITY_META[activity.kind] || ACTIVITY_META.quiz;
+                return (
+                  <View key={activity.id} style={styles.activityCard}>
+                    <View style={styles.activityTop}>
+                      <View style={[styles.activityIconBg, { backgroundColor: tint(activity.status === 'published' ? COLORS.success : COLORS.purpleVibrant) }]}>
+                        <Ionicons name={meta.icon} size={18} color={activity.status === 'published' ? COLORS.success : COLORS.purpleVibrant} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.activityTitle}>{activity.title}</Text>
+                        <Text style={styles.activityMeta}>
+                          {meta.label}
+                          {activity.due_date ? ` · Due ${formatDue(activity.due_date)}` : ''}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => handleDeleteActivity(activity)}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      >
+                        <Ionicons name="trash-outline" size={18} color={COLORS.textMuted} />
+                      </TouchableOpacity>
+                    </View>
+                    {activity.note ? (
+                      <Text style={styles.activityNote} numberOfLines={2}>{activity.note}</Text>
+                    ) : null}
+                    <TouchableOpacity
+                      onPress={() => handleToggleActivityStatus(activity)}
+                      activeOpacity={0.8}
+                      style={styles.activityStatusRow}
+                    >
+                      <Ionicons
+                        name={activity.status === 'published' ? 'eye' : 'eye-off'}
+                        size={13}
+                        color={activity.status === 'published' ? COLORS.success : COLORS.warning}
+                      />
+                      <Text
+                        style={[styles.activityStatusText, { color: activity.status === 'published' ? COLORS.success : COLORS.warning }]}
+                      >
+                        {activity.status === 'published' ? 'Published · tap to hide' : 'Draft · tap to publish'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            !loading && (
+              <EmptyState
+                icon="layers-outline"
+                title="No activities yet"
+                text="Add a quiz, lesson, or game activity for this class."
+              />
+            )
+          )}
+        </View>
+
         {/* AI Generate button */}
         {!loading && (
           <TouchableOpacity
@@ -293,6 +525,121 @@ export default function CourseDetailScreen() {
                 <>
                   <Ionicons name="add-circle" size={18} color="white" />
                   <Text style={styles.createBtnText}>Create Topic</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Add activity modal */}
+      <Modal animationType="slide" transparent visible={actVisible} onRequestClose={() => !creatingActivity && setActVisible(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Add Activity</Text>
+              <TouchableOpacity onPress={() => setActVisible(false)} activeOpacity={0.7} disabled={creatingActivity}>
+                <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.label}>Type</Text>
+            <View style={styles.kindRow}>
+              {(Object.keys(ACTIVITY_META) as ActivityKind[]).map((kind) => {
+                const meta = ACTIVITY_META[kind];
+                const active = actKind === kind;
+                return (
+                  <TouchableOpacity
+                    key={kind}
+                    style={[styles.kindChip, active && styles.kindChipActive]}
+                    activeOpacity={0.8}
+                    onPress={() => setActKind(kind)}
+                    disabled={creatingActivity}
+                  >
+                    <Ionicons name={meta.icon} size={15} color={active ? 'white' : COLORS.purpleVibrant} />
+                    <Text style={[styles.kindText, active && styles.kindTextActive]}>{meta.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={styles.label}>Title</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. Forces Quiz in class"
+              placeholderTextColor={COLORS.textMuted}
+              value={actTitle}
+              onChangeText={setActTitle}
+              editable={!creatingActivity}
+            />
+
+            <Text style={styles.label}>Note (optional)</Text>
+            <TextInput
+              style={[styles.input, styles.textArea]}
+              placeholder="Instructions or context for students"
+              placeholderTextColor={COLORS.textMuted}
+              value={actNote}
+              onChangeText={setActNote}
+              multiline
+              numberOfLines={3}
+              editable={!creatingActivity}
+            />
+
+            <Text style={styles.label}>Due date</Text>
+            <View style={styles.kindRow}>
+              {([
+                ['none', 'No due date'],
+                ['today', 'Today'],
+                ['1d', 'Tomorrow'],
+                ['1w', 'In 1 week'],
+              ] as const).map(([value, label]) => {
+                const active = actDue === value;
+                return (
+                  <TouchableOpacity
+                    key={value}
+                    style={[styles.kindChip, active && styles.kindChipActive]}
+                    activeOpacity={0.8}
+                    onPress={() => setActDue(value as typeof actDue)}
+                    disabled={creatingActivity}
+                  >
+                    <Text style={[styles.kindText, active && styles.kindTextActive]}>{label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={styles.label}>Status</Text>
+            <View style={styles.kindRow}>
+              {(['draft', 'published'] as const).map((status) => {
+                const active = actStatus === status;
+                return (
+                  <TouchableOpacity
+                    key={status}
+                    style={[styles.kindChip, active && styles.kindChipActive]}
+                    activeOpacity={0.8}
+                    onPress={() => setActStatus(status)}
+                    disabled={creatingActivity}
+                  >
+                    <Text style={[styles.kindText, active && styles.kindTextActive]}>
+                      {status === 'draft' ? 'Draft' : 'Published'}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <TouchableOpacity
+              style={[styles.createBtn, creatingActivity && { opacity: 0.7 }]}
+              activeOpacity={0.85}
+              onPress={handleCreateActivity}
+              disabled={creatingActivity}
+            >
+              {creatingActivity ? (
+                <ActivityIndicator color="white" />
+              ) : (
+                <>
+                  <Ionicons name="add-circle" size={18} color="white" />
+                  <Text style={styles.createBtnText}>Add Activity</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -449,6 +796,44 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   content: { flex: 1, paddingHorizontal: 24, paddingTop: 24 },
   loadingBox: { paddingVertical: 60, alignItems: 'center' },
+  sectionGap: { marginTop: 32 },
+
+  activityCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 16,
+  },
+  activityTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  activityIconBg: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  activityTitle: { fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary },
+  activityMeta: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 2 },
+  activityNote: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, lineHeight: 17, marginTop: 10 },
+  activityStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 12 },
+  activityStatusText: { fontSize: 12, fontFamily: FONTS.semiBold, fontWeight: '600' },
+
+  kindRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  kindChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 9,
+    paddingHorizontal: 14,
+    borderRadius: RADIUS.pill,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: 'white',
+  },
+  kindChipActive: { backgroundColor: COLORS.purplePrimary, borderColor: COLORS.purplePrimary },
+  kindText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textPrimary },
+  kindTextActive: { color: 'white' },
 
   topicCard: {
     backgroundColor: COLORS.surface,
