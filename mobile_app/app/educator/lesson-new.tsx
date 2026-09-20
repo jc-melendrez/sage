@@ -106,37 +106,53 @@ export default function CreateLessonScreen() {
   const handleSavePreview = async () => {
     if (!previewData || !selectedCourse) return;
     setSavingPreview(true);
+    let createdNodes = 0;
+    let failedNodes = 0;
+    let topicId: number | null = null;
     try {
-      const courseName = courses.find((c) => c.id === selectedCourse)?.name ?? '';
       const topic = await createTopic(selectedCourse, {
-        title: previewData.title,
+        title: String(previewData.title).slice(0, 255),
         description: previewData.description,
         order: 1000,
       });
+      topicId = topic.id;
       for (let i = 0; i < previewData.nodes.length; i++) {
         const n = previewData.nodes[i];
-        await createNode(topic.id, {
-          node_type: n.node_type,
-          title: n.title,
-          description: n.description,
-          content_json: n.content_json,
-          order: i,
-          xp_reward: n.xp_reward,
-          required_score: n.required_score,
-          estimated_minutes: n.estimated_minutes,
-        });
+        try {
+          await createNode(topicId, {
+            node_type: n.node_type,
+            title: n.title,
+            description: n.description,
+            content_json: n.content_json,
+            order: i,
+            xp_reward: Math.round(Number(n.xp_reward) || 25),
+            required_score: Math.round(Number(n.required_score) || 70),
+            estimated_minutes: Math.round(Number(n.estimated_minutes) || 5),
+          });
+          createdNodes++;
+        } catch {
+          failedNodes++;
+        }
       }
-      setPreviewVisible(false);
-      setPreviewData(null);
-      const course = courses.find((c) => c.id === selectedCourse);
-      router.replace({
-        pathname: '/educator/(tabs)/course-detail',
-        params: { courseId: String(selectedCourse), courseName: course?.name ?? courseName },
-      });
     } catch (err) {
       Alert.alert('Save failed', err instanceof Error ? err.message : 'Could not save generated content.');
     } finally {
+      setPreviewVisible(false);
+      setPreviewData(null);
       setSavingPreview(false);
+      if (failedNodes > 0) {
+        Alert.alert(
+          'Partially saved',
+          `Saved ${createdNodes} node${createdNodes === 1 ? '' : 's'}; ${failedNodes} could not be saved and were skipped.`,
+        );
+      }
+      if (topicId != null) {
+        const course = courses.find((c) => c.id === selectedCourse);
+        router.replace({
+          pathname: '/educator/(tabs)/course-detail',
+          params: { courseId: String(selectedCourse), courseName: course?.name ?? 'Course' },
+        });
+      }
     }
   };
 

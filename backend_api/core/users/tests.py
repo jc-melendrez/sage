@@ -10,7 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Badge, ClassActivity, Course, LessonProgress, LoginOtpChallenge, User
+from .models import Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, Topic, User
 from . import gamification
 from . import views as users_views
 
@@ -862,3 +862,52 @@ class ClassActivityAPITests(APITestCase):
         resp = self.client.get(reverse('my_activities'))
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data, [])
+
+
+class NodeCreateCoercionTests(APITestCase):
+    """AI-generated nodes can carry float numerics / off-schema types.
+    The serializer must coerce them instead of rejecting the whole save."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='node-teacher', password='pass123', role='educator',
+        )
+        self.course = Course.objects.create(name='Physics', educator=self.educator)
+        self.topic = Topic.objects.create(course=self.course, title='Waves', order=0)
+        self.client.force_authenticate(user=self.educator)
+
+    def test_node_create_coerces_float_and_bad_type(self):
+        resp = self.client.post(
+            reverse('node_create', args=[self.topic.id]),
+            {
+                'node_type': 'assessment',  # not a valid choice
+                'title': 'Basics',
+                'content_json': {},
+                'order': 0,
+                'xp_reward': 25.5,
+                'required_score': '70',
+                'estimated_minutes': 8.75,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        node = LearningNode.objects.get()
+        self.assertEqual(node.node_type, 'learn')
+        self.assertEqual(node.xp_reward, 25)
+        self.assertEqual(node.required_score, 70)
+        self.assertEqual(node.estimated_minutes, 8)
+
+    def test_node_title_truncated(self):
+        resp = self.client.post(
+            reverse('node_create', args=[self.topic.id]),
+            {
+                'node_type': 'learn',
+                'title': 't' * 500,
+                'content_json': {},
+                'order': 0,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(len(LearningNode.objects.get().title), 255)

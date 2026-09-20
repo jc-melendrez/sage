@@ -1457,6 +1457,14 @@ For "practice" and "mastery" nodes, content_json must have a "questions" array:
                 node.setdefault('xp_reward', 25)
                 node.setdefault('required_score', 70)
                 node.setdefault('estimated_minutes', 5)
+                if node['node_type'] not in {c[0] for c in LearningNode.NODE_TYPES}:
+                    node['node_type'] = 'learn'
+                node['title'] = str(node['title'])[:255]
+                for field in ('xp_reward', 'required_score', 'estimated_minutes'):
+                    try:
+                        node[field] = int(float(node[field]))
+                    except (TypeError, ValueError):
+                        node[field] = {'xp_reward': 25, 'required_score': 70, 'estimated_minutes': 5}[field]
 
             return Response(topic_data, status=status.HTTP_200_OK)
 

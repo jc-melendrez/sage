@@ -261,32 +261,47 @@ export default function CourseDetailScreen() {
   const handleSavePreview = async () => {
     if (!previewData) return;
     setSavingPreview(true);
+    let createdNodes = 0;
+    let failedNodes = 0;
     try {
       const topic = await createTopic(cid, {
-        title: previewData.title,
+        title: String(previewData.title).slice(0, 255),
         description: previewData.description,
         order: topics.length,
       });
       for (let i = 0; i < previewData.nodes.length; i++) {
         const n = previewData.nodes[i];
-        await createNode(topic.id, {
-          node_type: n.node_type,
-          title: n.title,
-          description: n.description,
-          content_json: n.content_json,
-          order: i,
-          xp_reward: n.xp_reward,
-          required_score: n.required_score,
-          estimated_minutes: n.estimated_minutes,
-        });
+        try {
+          await createNode(topic.id, {
+            node_type: n.node_type,
+            title: n.title,
+            description: n.description,
+            content_json: n.content_json,
+            order: i,
+            xp_reward: Math.round(Number(n.xp_reward) || 25),
+            required_score: Math.round(Number(n.required_score) || 70),
+            estimated_minutes: Math.round(Number(n.estimated_minutes) || 5),
+          });
+          createdNodes++;
+        } catch {
+          failedNodes++;
+        }
       }
-      setPreviewVisible(false);
-      setPreviewData(null);
-      await loadTopics();
+      if (failedNodes === 0) {
+        Alert.alert('Saved', `Topic saved with ${createdNodes} node${createdNodes === 1 ? '' : 's'}.`);
+      } else {
+        Alert.alert(
+          'Partially saved',
+          `Saved ${createdNodes} node${createdNodes === 1 ? '' : 's'}; ${failedNodes} could not be saved and were skipped.`,
+        );
+      }
     } catch (err) {
       Alert.alert('Save failed', err instanceof Error ? err.message : 'Could not save generated content.');
     } finally {
+      setPreviewVisible(false);
+      setPreviewData(null);
       setSavingPreview(false);
+      await loadTopics();
     }
   };
 

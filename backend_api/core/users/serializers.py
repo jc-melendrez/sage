@@ -210,6 +210,23 @@ class LearningNodeSerializer(serializers.ModelSerializer):
         fields = ['id', 'topic', 'node_type', 'title', 'description', 'content_json', 'order', 'xp_reward', 'required_score', 'estimated_minutes', 'created_at']
         read_only_fields = ['created_at', 'topic']
 
+    def to_internal_value(self, data):
+        data = dict(data)
+        valid_types = {choice[0] for choice in LearningNode.NODE_TYPES}
+        if data.get('node_type') not in valid_types:
+            data['node_type'] = 'learn'
+        for field in ('xp_reward', 'required_score', 'estimated_minutes'):
+            value = data.get(field)
+            if value is not None:
+                try:
+                    data[field] = int(float(value))
+                except (TypeError, ValueError):
+                    pass
+        title = data.get('title')
+        if title is not None:
+            data['title'] = str(title)[:255]
+        return super().to_internal_value(data)
+
 
 class NodeProgressSerializer(serializers.ModelSerializer):
     class Meta:
