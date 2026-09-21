@@ -207,7 +207,7 @@ export default function AIAssistantScreen() {
         loadSessions(); 
       }
 
-      // --- Simulated Typing Animation ---
+      // --- Show the full reply immediately (no typing animation) ---
       const aiMessageId = Date.now() + 1;
       const fullReply = data.reply || '';
 
@@ -218,43 +218,17 @@ export default function AIAssistantScreen() {
         await new Promise((resolve) => setTimeout(resolve, THINKING_MIN_MS - elapsed));
       }
 
-      // Switch from "thinking" to streaming the reply so the indicator hides.
+      // Switch from "thinking" to showing the reply so the indicator hides.
       setIsLoading(false);
-      setIsTyping(true);
 
-      // 1. Add an empty AI message bubble first
+      // Add the full AI reply in one go
       setMessages((prev) => [...prev, {
         id: aiMessageId,
         type: 'ai',
-        text: '',
+        text: fullReply || "Sorry, I didn't get a response. Please try again.",
         time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
       }]);
-
-      // 2. Animate the text filling in
-      if (fullReply) {
-        await new Promise<void>((resolve) => {
-          let charIndex = 0;
-          const typingInterval = setInterval(() => {
-            charIndex++;
-            const slice = fullReply.substring(0, charIndex);
-            setMessages((prev) => prev.map(m => 
-              m.id === aiMessageId ? { ...m, text: slice } : m
-            ));
-            
-            // Auto-scroll as the text grows to keep the latest lines visible
-            scrollViewRef.current?.scrollToEnd({ animated: false });
-
-            if (charIndex >= fullReply.length) {
-              clearInterval(typingInterval);
-              resolve();
-            }
-          }, 15); // 15ms per character creates a smooth typing feel
-        });
-      } else {
-        setMessages((prev) => prev.map(m =>
-          m.id === aiMessageId ? { ...m, text: "Sorry, I didn't get a response. Please try again." } : m
-        ));
-      }
+      setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: false }), 50);
 
     } catch (error) {
       console.error("AI Chat Error:", error);

@@ -86,7 +86,10 @@ class AskSAGEView(APIView):
         # Groq uses the exact same payload format as DeepSeek and OpenAI
         payload = {
             # 🌟 Using Llama 3.3 70B for high-quality reasoning and educational support
-            "model": "openai/gpt-oss-120b", 
+            "model": getattr(settings, 'GROQ_MODEL_NAME', 'openai/gpt-oss-120b'),
+            # This model spends tokens on hidden reasoning; without a generous
+            # budget the visible answer gets truncated to the first word.
+            "max_tokens": 2048,
             "messages": [
                 {
                     "role": "system", 
