@@ -1,6 +1,7 @@
 import { apiCall } from './apiClient';
 import { API_BASE_URL } from '../config/api';
 import { getToken } from './authService';
+import { invalidateCachePrefix } from './apiCache';
 
 export interface QuizQuestion {
   id: number;
@@ -54,6 +55,7 @@ export async function generateQuiz(input: GenerateQuizInput): Promise<Quiz> {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || 'Failed to generate quiz');
+  invalidateCachePrefix('/ai/quizzes');
   return data as Quiz;
 }
 
@@ -61,10 +63,12 @@ export async function updateQuiz(
   quizId: number,
   data: { title?: string; questions?: Partial<QuizQuestion>[] },
 ): Promise<Quiz> {
-  return apiCall<Quiz>(`/ai/quizzes/${quizId}/`, {
+  const quiz = await apiCall<Quiz>(`/ai/quizzes/${quizId}/`, {
     method: 'PATCH',
     body: JSON.stringify(data),
   });
+  invalidateCachePrefix('/ai/quizzes');
+  return quiz;
 }
 
 export async function deleteQuiz(quizId: number): Promise<void> {
@@ -77,4 +81,5 @@ export async function deleteQuiz(quizId: number): Promise<void> {
     const data = await response.json().catch(() => ({}));
     throw new Error(data.error || 'Failed to delete quiz');
   }
+  invalidateCachePrefix('/ai/quizzes');
 }

@@ -1,7 +1,14 @@
 import { apiCall } from './apiClient';
 import { API_BASE_URL } from '../config/api';
 import { getToken } from './authService';
+import { invalidateCachePrefix } from './apiCache';
 import { CoursePathTopic, LearningNode, NodeCompleteResponse, NodeType, ContentJson, Topic } from '@/types/learning';
+
+/** After any course-content write, drop cached course paths/nodes so edits show immediately. */
+function invalidateCourseContent() {
+  invalidateCachePrefix('/users/courses');
+  invalidateCachePrefix('/users/nodes');
+}
 
 export interface CourseStudent {
   id: number;
@@ -44,10 +51,12 @@ export interface CreateCourseInput {
 }
 
 export async function createCourse(input: CreateCourseInput): Promise<CourseSummary> {
-  return apiCall<CourseSummary>('/users/courses/create/', {
+  const course = await apiCall<CourseSummary>('/users/courses/create/', {
     method: 'POST',
     body: JSON.stringify(input),
   });
+  invalidateCourseContent();
+  return course;
 }
 
 export async function getMyCourses(): Promise<CourseRoster[]> {
@@ -63,24 +72,30 @@ export async function getCourse(courseId: number): Promise<CourseRoster> {
 }
 
 export async function joinCourseByCode(joinCode: string): Promise<CourseRoster> {
-  return apiCall<CourseRoster>('/users/courses/join/', {
+  const roster = await apiCall<CourseRoster>('/users/courses/join/', {
     method: 'POST',
     body: JSON.stringify({ join_code: joinCode }),
   });
+  invalidateCourseContent();
+  return roster;
 }
 
 export async function addStudentToCourse(courseId: number, userId: number): Promise<CourseRoster> {
-  return apiCall<CourseRoster>(`/users/courses/${courseId}/add-student/`, {
+  const roster = await apiCall<CourseRoster>(`/users/courses/${courseId}/add-student/`, {
     method: 'POST',
     body: JSON.stringify({ user_id: userId }),
   });
+  invalidateCourseContent();
+  return roster;
 }
 
 export async function removeStudentFromCourse(courseId: number, userId: number): Promise<CourseRoster> {
-  return apiCall<CourseRoster>(`/users/courses/${courseId}/remove-student/`, {
+  const roster = await apiCall<CourseRoster>(`/users/courses/${courseId}/remove-student/`, {
     method: 'POST',
     body: JSON.stringify({ user_id: userId }),
   });
+  invalidateCourseContent();
+  return roster;
 }
 
 // --- Learning Path ---
@@ -94,17 +109,21 @@ export async function getNode(nodeId: number): Promise<LearningNode> {
 }
 
 export async function completeNode(nodeId: number, score: number): Promise<NodeCompleteResponse> {
-  return apiCall<NodeCompleteResponse>(`/users/nodes/${nodeId}/complete/`, {
+  const result = await apiCall<NodeCompleteResponse>(`/users/nodes/${nodeId}/complete/`, {
     method: 'POST',
     body: JSON.stringify({ score }),
   });
+  invalidateCourseContent();
+  return result;
 }
 
 export async function createTopic(courseId: number, data: { title: string; description?: string; order: number }): Promise<Topic> {
-  return apiCall<Topic>(`/users/courses/${courseId}/topics/create/`, {
+  const topic = await apiCall<Topic>(`/users/courses/${courseId}/topics/create/`, {
     method: 'POST',
     body: JSON.stringify(data),
   });
+  invalidateCourseContent();
+  return topic;
 }
 
 export async function createNode(topicId: number, data: {
@@ -117,10 +136,12 @@ export async function createNode(topicId: number, data: {
   required_score?: number;
   estimated_minutes?: number;
 }): Promise<LearningNode> {
-  return apiCall<LearningNode>(`/users/topics/${topicId}/nodes/create/`, {
+  const node = await apiCall<LearningNode>(`/users/topics/${topicId}/nodes/create/`, {
     method: 'POST',
     body: JSON.stringify(data),
   });
+  invalidateCourseContent();
+  return node;
 }
 
 export async function updateNode(nodeId: number, data: Partial<{
@@ -133,28 +154,34 @@ export async function updateNode(nodeId: number, data: Partial<{
   required_score: number;
   estimated_minutes: number;
 }>): Promise<LearningNode> {
-  return apiCall<LearningNode>(`/users/nodes/${nodeId}/`, {
+  const node = await apiCall<LearningNode>(`/users/nodes/${nodeId}/`, {
     method: 'PATCH',
     body: JSON.stringify(data),
   });
+  invalidateCourseContent();
+  return node;
 }
 
 export async function deleteNode(nodeId: number): Promise<void> {
   await apiCall<void>(`/users/nodes/${nodeId}/`, { method: 'DELETE' });
+  invalidateCourseContent();
 }
 
 export async function updateTopic(
   topicId: number,
   data: Partial<{ title: string; description: string; order: number }>,
 ): Promise<Topic> {
-  return apiCall<Topic>(`/users/topics/${topicId}/`, {
+  const topic = await apiCall<Topic>(`/users/topics/${topicId}/`, {
     method: 'PATCH',
     body: JSON.stringify(data),
   });
+  invalidateCourseContent();
+  return topic;
 }
 
 export async function deleteTopic(topicId: number): Promise<void> {
   await apiCall<void>(`/users/topics/${topicId}/`, { method: 'DELETE' });
+  invalidateCourseContent();
 }
 
 export interface GenerateTopicResponse {
@@ -195,5 +222,6 @@ export async function generateTopic(
 
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Generation failed');
+  invalidateCourseContent();
   return data as GenerateTopicResponse;
 }

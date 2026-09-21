@@ -10,6 +10,7 @@ import { testFirebase } from "@/services/firebaseTest";
 import { startSyncManager } from '@/services/syncManager';
 import { initOfflineQueue } from '@/services/offlineQueue';
 import { initOfflineGameDb } from '@/services/offlineGameService';
+import { initApiCache } from '@/services/apiCache';
 
 import {
   useFonts,
@@ -57,6 +58,7 @@ export default function RootLayout() {
   useEffect(() => {
     initOfflineQueue();
     initOfflineGameDb();
+    initApiCache();
     const stop = startSyncManager();
     return () => stop();
   }, []);
