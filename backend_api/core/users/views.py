@@ -558,9 +558,9 @@ def _build_student_progress_snapshot(user):
                 if np is None:
                     status_text = 'not_started'
                 elif np.passed:
-                    status_text = f"passed (score {np.score}/{np.total}, tries {np.attempts})"
+                    status_text = f"passed (score {np.score}/{node.required_score}, tries {np.attempts})"
                 else:
-                    status_text = f"failed (score {np.score}/{np.total}, tries {np.attempts})"
+                    status_text = f"failed (score {np.score}/{node.required_score}, tries {np.attempts})"
                 lines.append(
                     f"- [{topic.course.name} > {topic.title}] {node.title} "
                     f"({node.node_type}): {status_text}"
@@ -605,7 +605,7 @@ def _generate_recommendations(user):
     )
 
     payload = {
-        "model": "openai/gpt-oss-120b",
+        "model": os.getenv('GROQ_MODEL_NAME', 'openai/gpt-oss-120b'),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -640,6 +640,8 @@ def _generate_recommendations(user):
                 Recommendation.objects.create(user=user, title=title, description=description)
         return Recommendation.objects.filter(user=user)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"[Recommendation Generation Error] {e}")
         return None
 
@@ -656,7 +658,12 @@ def user_recommendations(request, user_id):
 
     # POST forces a fresh AI regeneration; GET auto-generates when empty/stale.
     if request.method == 'POST' or _recommendations_are_stale(user):
-        _generate_recommendations(user)
+        try:
+            _generate_recommendations(user)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"[Recommendation Generation Critical Error] {e}")
 
     recommendations = Recommendation.objects.filter(user_id=user_id)
     serializer = RecommendationSerializer(recommendations, many=True)
