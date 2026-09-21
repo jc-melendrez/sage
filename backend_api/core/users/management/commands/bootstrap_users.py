@@ -35,6 +35,10 @@ class Command(BaseCommand):
                 defaults={'email': spec['email']},
             )
 
+            if not created:
+                self.stdout.write(self.style.WARNING(f'Exists {user.role}: {user.username} (skipping password reset)'))
+                continue
+
             user.email = spec['email']
             user.first_name = spec.get('first_name', '')
             user.last_name = spec.get('last_name', '')
@@ -47,10 +51,7 @@ class Command(BaseCommand):
             user.set_password(spec['password'])
             user.save()
 
-            if created:
-                self.stdout.write(self.style.SUCCESS(f'Created {user.role}: {user.username}'))
-            else:
-                self.stdout.write(self.style.WARNING(f'Updated {user.role}: {user.username}'))
+            self.stdout.write(self.style.SUCCESS(f'Created {user.role}: {user.username}'))
 
             if not user.firebase_uid:
                 uid = create_firebase_user(user.email, spec['password'])
