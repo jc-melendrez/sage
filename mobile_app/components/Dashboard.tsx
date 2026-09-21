@@ -20,7 +20,7 @@ import Animated, {
   type SharedValue,
 } from 'react-native-reanimated';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
@@ -235,27 +235,7 @@ export default function Dashboard() {
   }, [featurePages.length]);
 
   // --- Data fetching ---
-  useEffect(() => {
-    fetchUserData();
-  }, []);
-
-  // Daily check-in (once per session)
-  const checkInRanRef = useRef(false);
-  useEffect(() => {
-    if (checkInRanRef.current) return;
-    checkInRanRef.current = true;
-    dailyCheckIn()
-      .then((result) => {
-        if (result.checked_in) {
-          const streakText = result.streak > 1 ? `${result.streak} day streak!` : 'Your streak begins today!';
-          Alert.alert('Daily Check-In 🔥', `+${result.xp} XP · ${streakText}`);
-          fetchUserData();
-        }
-      })
-      .catch(() => {});
-  }, []);
-
-  const fetchUserData = async () => {
+  const fetchUserData = useCallback(async () => {
     try {
       setError(null);
       const userProfile = await getCurrentUser();
@@ -275,13 +255,39 @@ export default function Dashboard() {
       setRecommendations(await apiCall<Recommendation[]>(`/users/${realUserId}/recommendations/`));
       setActivities(await apiCall<Activity[]>(`/users/${realUserId}/activities/`));
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'An error occurred';
-      console.error('Error fetching data:', errorMessage);
-      setError(errorMessage);
+      const rawError = err instanceof Error ? err : new Error('An error occurred');
+      const isNetworkError =
+        rawError.name === 'TypeError' || /Network request failed/i.test(rawError.message);
+      console.error('Error fetching data:', rawError);
+      setError(isNetworkError ? "You're offline. Check your connection and try again." : rawError.message);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  // Daily check-in (once per session)
+  const checkInRanRef = useRef(false);
+  useEffect(() => {
+    if (checkInRanRef.current) return;
+    checkInRanRef.current = true;
+    dailyCheckIn()
+      .then((result) => {
+        if (result.checked_in) {
+          const streakText = result.streak > 1 ? `${result.streak} day streak!` : 'Your streak begins today!';
+          Alert.alert('Daily Check-In 🔥', `+${result.xp} XP · ${streakText}`);
+          fetchUserData();
+        }
+      })
+      .catch(() => {});
+  }, [fetchUserData]);
+
+  // Refetch when the Home tab gains focus so the dashboard self-heals
+  // (e.g. recovering from an offline load) like the other screens do.
+  useFocusEffect(
+    useCallback(() => {
+      fetchUserData();
+    }, [fetchUserData])
+  );
 
   const handleLessonGenerated = (generatedLesson: any) => {
     setLesson(generatedLesson);
@@ -301,8 +307,12 @@ export default function Dashboard() {
   if (error && !user) {
     return (
       <View style={styles.loadingContainer}>
-        <Ionicons name="alert-circle-outline" size={48} color={COLORS.danger} />
+        <Ionicons name="cloud-offline-outline" size={48} color={COLORS.danger} />
         <Text style={styles.errorText}>{error}</Text>
+        <TouchableOpacity style={styles.retryButton} activeOpacity={0.85} onPress={fetchUserData}>
+          <Ionicons name="refresh" size={16} color="#FFFFFF" />
+          <Text style={styles.retryButtonText}>Try Again</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -656,6 +666,21 @@ const styles = StyleSheet.create({
     fontSize: 15,
     textAlign: 'center',
     fontFamily: FONTS.medium,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 20,
+    backgroundColor: COLORS.purpleVibrant,
+    borderRadius: 24,
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+  },
+  retryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
   },
   refreshBanner: {
     flexDirection: 'row',
