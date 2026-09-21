@@ -157,11 +157,14 @@ export default function NodePlayerScreen() {
 
   // ── Results ──
   if (phase === 'results' && node) {
+    const finalScore = quizScore != null
+      ? quizScore
+      : (interactionsTotal > 0 ? Math.round((interactionsCorrect / interactionsTotal) * 100) : 100);
     return (
       <View style={styles.container}>
         <ResultsSummary
-          score={quizScore || (interactionsTotal > 0 ? Math.round((interactionsCorrect / interactionsTotal) * 100) : 100)}
-          passed={(quizScore || (interactionsTotal > 0 ? Math.round((interactionsCorrect / interactionsTotal) * 100) : 100)) >= node.required_score}
+          score={finalScore}
+          passed={finalScore >= node.required_score}
           passingScore={node.required_score}
           results={quizResults}
           xpEarned={isPreview ? 0 : node.xp_reward}
