@@ -1,6 +1,7 @@
 import { apiCall } from './apiClient';
 import { API_BASE_URL } from '../config/api';
 import { getToken } from './authService';
+import { invalidateCachePrefix } from './apiCache';
 
 export type ActivityKind = 'quiz' | 'lesson' | 'game';
 export type ActivityStatus = 'draft' | 'published';
@@ -44,6 +45,9 @@ export async function createActivity(
   return apiCall<ClassActivity>(`/users/courses/${courseId}/activities/`, {
     method: 'POST',
     body: JSON.stringify(input),
+  }).then((created) => {
+    invalidateCachePrefix('/activities');
+    return created;
   });
 }
 
@@ -54,6 +58,9 @@ export async function updateActivity(
   return apiCall<ClassActivity>(`/users/activities/${activityId}/`, {
     method: 'PATCH',
     body: JSON.stringify(input),
+  }).then((updated) => {
+    invalidateCachePrefix('/activities');
+    return updated;
   });
 }
 
@@ -63,6 +70,7 @@ export async function deleteActivity(activityId: number): Promise<void> {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${token}` },
   });
+  invalidateCachePrefix('/activities');
   if (!response.ok && response.status !== 204) {
     const data = await response.json().catch(() => ({}));
     throw new Error(data.error || 'Failed to delete activity');

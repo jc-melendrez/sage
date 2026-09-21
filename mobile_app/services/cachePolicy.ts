@@ -16,14 +16,18 @@ const POLICY_RULES: Array<{ matcher: RegExp; ttlSeconds: number }> = [
   { matcher: /\/api\/users\/me/, ttlSeconds: 300 },
   // Previously generated lesson content.
   { matcher: /\/api\/users\/\d+\/lessons/, ttlSeconds: 86400 },
+  // Dashboard reads — short SWR so recs/activities/badges paint instantly
+  // but still revalidate in the background. Covers both the student
+  // per-user endpoints and the educator cross-class feed.
+  { matcher: /\/api\/users\/\d+\/recommendations/, ttlSeconds: 180 },
+  { matcher: /\/api\/users\/\d+\/activities/, ttlSeconds: 180 },
+  { matcher: /\/api\/users\/activities/, ttlSeconds: 180 },
+  { matcher: /\/api\/users\/\d+\/badges/, ttlSeconds: 180 },
 ];
 
-// Volatile / user-scored data — never cache, even if it accidentally matches allowlist.
+// Truly volatile / user-scored data — never cache, even if it accidentally matches allowlist.
 const NEVER_CACHE: Array<RegExp> = [
   /\/leaderboard/,
-  /\/badges/,
-  /\/activities/,
-  /\/recommendations/,
   /\/groups/,
   /\/game\//,
   /\/sessions/,

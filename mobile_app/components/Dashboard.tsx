@@ -22,10 +22,10 @@ import Animated, {
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { API_BASE_URL } from '@/config/api';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
-import { getCurrentUser, getToken } from '@/services/authService';
+import { getCurrentUser } from '@/services/authService';
+import { apiCall } from '@/services/apiClient';
 import { dailyCheckIn } from '@/services/gamificationService';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -257,46 +257,28 @@ export default function Dashboard() {
 
   const fetchUserData = async () => {
     try {
-      setLoading(true);
       setError(null);
       const userProfile = await getCurrentUser();
       if (!userProfile || !userProfile.id) {
         setError('Session expired. Please log in again.');
-        setLoading(false);
         return;
       }
       setUser(userProfile);
       const realUserId = userProfile.id;
-      const token = await getToken();
-      const authHeaders = {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      };
 
       if (userProfile.badges) {
         setBadges(userProfile.badges);
       } else {
-        const badgesRes = await fetch(`${API_BASE_URL}/users/${realUserId}/badges/`, {
-          headers: authHeaders,
-        });
-        if (badgesRes.ok) setBadges(await badgesRes.json());
+        setBadges(await apiCall<Badge[]>(`/users/${realUserId}/badges/`));
       }
 
-      const recsRes = await fetch(`${API_BASE_URL}/users/${realUserId}/recommendations/`, {
-        headers: authHeaders,
-      });
-      if (recsRes.ok) setRecommendations(await recsRes.json());
-
-      const activitiesRes = await fetch(`${API_BASE_URL}/users/${realUserId}/activities/`, {
-        headers: authHeaders,
-      });
-      if (activitiesRes.ok) setActivities(await activitiesRes.json());
-
-      setLoading(false);
-    }  catch (err) {
+      setRecommendations(await apiCall<Recommendation[]>(`/users/${realUserId}/recommendations/`));
+      setActivities(await apiCall<Activity[]>(`/users/${realUserId}/activities/`));
+    } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'An error occurred';
       console.error('Error fetching data:', errorMessage);
       setError(errorMessage);
+    } finally {
       setLoading(false);
     }
   };
@@ -309,14 +291,14 @@ export default function Dashboard() {
     setLesson(null);
   };
 
-  if (loading) {
+  if (loading && !user) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
       </View>
     );
   }
-  if (error) {
+  if (error && !user) {
     return (
       <View style={styles.loadingContainer}>
         <Ionicons name="alert-circle-outline" size={48} color={COLORS.danger} />
@@ -355,6 +337,12 @@ export default function Dashboard() {
         removeClippedSubviews={true}
       >
         {/* HEADER */}
+        {error ? (
+          <View style={styles.refreshBanner}>
+            <Ionicons name="cloud-offline-outline" size={14} color={COLORS.danger} />
+            <Text style={styles.refreshBannerText}>{error}</Text>
+          </View>
+        ) : null}
         <LinearGradient
           colors={[COLORS.purpleDeep, COLORS.purpleDark]}
           start={{ x: 0, y: 0 }}
@@ -667,6 +655,23 @@ const styles = StyleSheet.create({
     color: COLORS.danger,
     fontSize: 15,
     textAlign: 'center',
+    fontFamily: FONTS.medium,
+  },
+  refreshBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginHorizontal: 20,
+    marginTop: 12,
+    borderRadius: 10,
+    backgroundColor: '#FEE2E2',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  refreshBannerText: {
+    flex: 1,
+    color: COLORS.danger,
+    fontSize: 12,
     fontFamily: FONTS.medium,
   },
   container: { flex: 1 },
