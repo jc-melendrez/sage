@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { getCoursePath } from '@/services/courseService';
+import { getCourse, getCoursePath, CourseRoster, CourseStudent } from '@/services/courseService';
+import { getCurrentUser } from '@/services/authService';
 import { CoursePathTopic, NODE_TYPE_CONFIG, LearningNode } from '@/types/learning';
 import ProgressRing from '@/components/courses/ProgressRing';
 import { getCourseActivities, ClassActivity } from '@/services/activityService';
@@ -51,12 +52,13 @@ const QUIZ_TYPE_LABELS: Record<string, string> = {
   flashcard: 'Flashcards',
 };
 
-type SectionKey = 'topics' | 'quizzes' | 'tasks';
+type SectionKey = 'topics' | 'quizzes' | 'tasks' | 'leaderboard';
 
 const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: 'topics', label: 'Topics' },
   { key: 'quizzes', label: 'Quizzes' },
   { key: 'tasks', label: 'Tasks' },
+  { key: 'leaderboard', label: 'Leaderboard' },
 ];
 
 export default function CourseDetailScreen() {
@@ -72,22 +74,35 @@ export default function CourseDetailScreen() {
   // Course quizzes (educator + student created)
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
 
+  // Course info / roster (info panel + class leaderboard)
+  const [course, setCourse] = useState<CourseRoster | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
+
+  // Task filter
+  const [taskFilter, setTaskFilter] = useState<'all' | 'upcoming' | 'overdue'>('all');
+
   // Active category tab
   const [section, setSection] = useState<SectionKey>('topics');
 
   const [openingQuiz, setOpeningQuiz] = useState(false);
 
   useEffect(() => {
+    getCurrentUser().then(u => setCurrentUserId(u?.id ?? null));
+  }, []);
+
+  useEffect(() => {
     const load = async () => {
       try {
-        const [topicsData, activitiesData, quizzesData] = await Promise.all([
+        const [topicsData, activitiesData, quizzesData, courseData] = await Promise.all([
           getCoursePath(Number(courseId)),
           getCourseActivities(Number(courseId)).catch(() => [] as ClassActivity[]),
           getQuizzes(Number(courseId)).catch(() => [] as Quiz[]),
+          getCourse(Number(courseId)).catch(() => null),
         ]);
         setTopics(topicsData);
         setActivities(activitiesData.filter((a) => a.status === 'published'));
         setQuizzes(quizzesData);
+        setCourse(courseData);
       } catch (e: any) {
         setError(e?.message || 'Failed to load course');
       }
@@ -141,6 +156,26 @@ export default function CourseDetailScreen() {
   const getTotalMinutes = (topic: CoursePathTopic) =>
     topic.nodes.reduce((sum, n) => sum + n.estimated_minutes, 0);
 
+  // Class leaderboard: enrolled students sorted by XP.
+  const rankedStudents = useMemo(() => {
+    const list = (course?.students ?? []) as CourseStudent[];
+    return [...list].sort((a, b) => (b.current_xp || 0) - (a.current_xp || 0));
+  }, [course]);
+
+  // Tasks filtered by due-date state.
+  const filteredActivities = useMemo(() => {
+    const now = Date.now();
+    return activities.filter((a) => {
+      if (taskFilter === 'all') return true;
+      if (!a.due_date) return taskFilter === 'upcoming';
+      const due = new Date(a.due_date).getTime();
+      if (taskFilter === 'overdue') return due < now;
+      return due >= now;
+    });
+  }, [activities, taskFilter]);
+
+  const hasDueDate = activities.some(a => a.due_date);
+
   if (loading) {
     return (
       <View style={styles.center}>
@@ -171,6 +206,32 @@ export default function CourseDetailScreen() {
         <View style={{ width: 32 }} />
       </LinearGradient>
 
+      {/* Course info panel */}
+      {course && (
+        <View style={styles.courseInfoCard}>
+          <View style={styles.courseInfoTop}>
+            <Text style={styles.courseInfoName} numberOfLines={1}>{course.name}</Text>
+            <View style={styles.courseInfoChip}>
+              <Ionicons name="people" size={13} color={COLORS.purpleVibrant} />
+              <Text style={styles.courseInfoChipText}>{course.student_count} students</Text>
+            </View>
+          </View>
+          {course.description ? (
+            <Text style={styles.courseInfoDesc} numberOfLines={2}>{course.description}</Text>
+          ) : null}
+          <View style={styles.courseInfoMeta}>
+            <View style={styles.courseInfoMetaItem}>
+              <Ionicons name="person-circle" size={14} color={COLORS.textMuted} />
+              <Text style={styles.courseInfoMetaText}>{course.educator?.display_name || course.educator?.username || 'Educator'}</Text>
+            </View>
+            <View style={styles.courseInfoMetaItem}>
+              <Ionicons name="key" size={13} color={COLORS.textMuted} />
+              <Text style={styles.courseInfoMetaText}>Join code: {course.join_code}</Text>
+            </View>
+          </View>
+        </View>
+      )}
+
       <View style={styles.tabsContainer}>
         {SECTIONS.map((s) => {
           const isActive = section === s.key;
@@ -191,7 +252,28 @@ export default function CourseDetailScreen() {
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         {section === 'tasks' && (
           <>
-            {activities.length === 0 ? (
+            {hasDueDate && (
+              <View style={styles.filterRow}>
+                {([
+                  { key: 'all' as const, label: 'All' },
+                  { key: 'upcoming' as const, label: 'Upcoming' },
+                  { key: 'overdue' as const, label: 'Overdue' },
+                ]).map((f) => {
+                  const isActive = taskFilter === f.key;
+                  return (
+                    <TouchableOpacity
+                      key={f.key}
+                      style={[styles.filterChip, isActive && styles.filterChipActive]}
+                      onPress={() => setTaskFilter(f.key)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>{f.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+            {filteredActivities.length === 0 ? (
               <View style={styles.emptyState}>
                 <Ionicons name="clipboard-outline" size={48} color={COLORS.textMuted} />
                 <Text style={styles.emptyTitle}>No class tasks</Text>
@@ -200,7 +282,7 @@ export default function CourseDetailScreen() {
             ) : (
               <View style={styles.activitiesSection}>
                 <Text style={styles.activitiesHeader}>Class Tasks</Text>
-                {activities.map((activity) => {
+                {filteredActivities.map((activity) => {
                   const meta = ACTIVITY_META[activity.kind] || ACTIVITY_META.quiz;
                   return (
                     <TouchableOpacity
@@ -269,6 +351,56 @@ export default function CourseDetailScreen() {
                     </View>
                   </TouchableOpacity>
                 ))}
+              </View>
+            )}
+          </>
+        )}
+
+        {section === 'leaderboard' && (
+          <>
+            {rankedStudents.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Ionicons name="trophy-outline" size={48} color={COLORS.textMuted} />
+                <Text style={styles.emptyTitle}>No students yet</Text>
+                <Text style={styles.emptySubtitle}>Students who join this class will appear here.</Text>
+              </View>
+            ) : (
+              <View style={styles.leaderboardSection}>
+                <Text style={styles.activitiesHeader}>Class Leaderboard</Text>
+                {rankedStudents.map((s, index) => {
+                  const isYou = currentUserId != null && s.id === currentUserId;
+                  const initials = `${s.first_name?.[0] || ''}${s.last_name?.[0] || ''}`.toUpperCase() || (s.username || '?').charAt(0).toUpperCase();
+                  const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}`;
+                  return (
+                    <View key={s.id} style={[styles.leaderRow, isYou && styles.leaderRowYou]}>
+                      <View style={styles.leaderRankBox}>
+                        <Text style={styles.leaderRankText}>{medal}</Text>
+                      </View>
+                      <View style={styles.leaderAvatar}>
+                        <Text style={styles.leaderAvatarText}>{initials}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <View style={styles.playerNameRow}>
+                          <Text style={styles.leaderName} numberOfLines={1}>
+                            {s.first_name || s.username}
+                            {isYou ? ' (You)' : ''}
+                          </Text>
+                          {s.streak > 0 && (
+                            <View style={styles.streakChip}>
+                              <Ionicons name="flame" size={11} color={COLORS.warning} />
+                              <Text style={styles.streakChipText}>{s.streak}</Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text style={styles.leaderSub}>Level {s.level} · {s.quizzes_taken} quizzes</Text>
+                      </View>
+                      <View style={styles.xpBox}>
+                        <Text style={styles.xpValue}>{s.current_xp || s.total_points || 0}</Text>
+                        <Text style={styles.xpLabel}>XP</Text>
+                      </View>
+                    </View>
+                  );
+                })}
               </View>
             )}
           </>
@@ -463,4 +595,63 @@ const styles = StyleSheet.create({
   activityKind: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.purpleVibrant },
   activityNote: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 3, lineHeight: 17 },
   activityMeta: { fontSize: 11, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 4 },
+
+  // Course info panel
+  courseInfoCard: {
+    marginHorizontal: 20,
+    marginTop: 14,
+    padding: 16,
+    backgroundColor: COLORS.surface,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    gap: 8,
+  },
+  courseInfoTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  courseInfoName: { fontSize: 17, fontFamily: FONTS.bold, fontWeight: '800', color: COLORS.textPrimary, flex: 1 },
+  courseInfoChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: COLORS.purpleGhost, borderRadius: 999,
+    paddingHorizontal: 10, paddingVertical: 5,
+  },
+  courseInfoChipText: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.purpleVibrant },
+  courseInfoDesc: { fontSize: 12.5, fontFamily: FONTS.medium, color: COLORS.textMuted, lineHeight: 18 },
+  courseInfoMeta: { flexDirection: 'row', flexWrap: 'wrap', gap: 14, marginTop: 2 },
+  courseInfoMetaItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  courseInfoMetaText: { fontSize: 11.5, fontFamily: FONTS.medium, color: COLORS.textMuted },
+
+  // Task filters
+  filterRow: { flexDirection: 'row', gap: 8 },
+  filterChip: {
+    backgroundColor: COLORS.surface, borderRadius: 999,
+    paddingHorizontal: 14, paddingVertical: 8,
+    borderWidth: 1, borderColor: COLORS.border,
+  },
+  filterChipActive: { backgroundColor: COLORS.purpleVibrant, borderColor: COLORS.purpleVibrant },
+  filterChipText: { fontSize: 12, fontFamily: FONTS.semiBold, color: COLORS.textMuted },
+  filterChipTextActive: { color: '#FFFFFF' },
+
+  // Leaderboard
+  leaderboardSection: { gap: 10 },
+  leaderRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: COLORS.surface, borderRadius: 16, padding: 12,
+    borderWidth: 1, borderColor: COLORS.border,
+  },
+  leaderRowYou: { borderColor: COLORS.purpleVibrant, borderWidth: 1.5 },
+  leaderRankBox: { width: 30, alignItems: 'center' },
+  leaderRankText: { fontSize: 16, fontFamily: FONTS.extraBold, color: COLORS.textPrimary },
+  leaderAvatar: {
+    width: 42, height: 42, borderRadius: 21,
+    backgroundColor: COLORS.purpleVibrant, justifyContent: 'center', alignItems: 'center',
+  },
+  leaderAvatarText: { fontSize: 15, fontFamily: FONTS.bold, color: 'white' },
+  playerNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  leaderName: { fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary, flexShrink: 1 },
+  streakChip: { flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: 'rgba(245,158,11,0.15)', borderRadius: 999, paddingHorizontal: 7, paddingVertical: 2 },
+  streakChipText: { fontSize: 11, fontFamily: FONTS.bold, color: COLORS.warning },
+  leaderSub: { fontSize: 11.5, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 2 },
+  xpBox: { alignItems: 'flex-end' },
+  xpValue: { fontSize: 16, fontFamily: FONTS.extraBold, color: COLORS.purpleVibrant },
+  xpLabel: { fontSize: 9, fontFamily: FONTS.extraBold, letterSpacing: 1, color: COLORS.textMuted, marginTop: 1 },
 });
