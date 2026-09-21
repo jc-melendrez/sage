@@ -288,6 +288,40 @@ def safe_json_parse(text):
                 pass
     return None
 
+
+def normalize_question_answers(content):
+    """Rewrite practice/mastery questions so 'correct_answer' holds the actual
+    option text. The model sometimes emits the answer as a letter ('A'/'B') or
+    a 0-based index while 'options' store the full strings, which previously
+    broke client-side grading."""
+    questions = content.get('questions') if isinstance(content, dict) else None
+    if not isinstance(questions, list):
+        return
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        options = q.get('options')
+        if not isinstance(options, list):
+            continue
+        options = [str(o) for o in options]
+        q['options'] = options
+        raw = str(q.get('correct_answer', '')).strip()
+        if not raw:
+            continue
+        if raw in options:
+            continue
+        resolved = None
+        if re.fullmatch(r'[A-Za-z]', raw):
+            idx = ord(raw.upper()) - 65
+            if 0 <= idx < len(options):
+                resolved = options[idx]
+        elif re.fullmatch(r'\d+', raw):
+            idx = int(raw)
+            if 0 <= idx < len(options):
+                resolved = options[idx]
+        if resolved is not None:
+            q['correct_answer'] = resolved
+
 def groq_chat_completion(payload, api_key, max_retries=3):
     """POST to Groq and retry transient failures (e.g. json_validate_failed)."""
     headers = {
@@ -1578,6 +1612,8 @@ For "practice" and "mastery" nodes, content_json must have a "questions" array:
                     parsed_content = safe_json_parse(str(node.get('content_json') or '')) \
                         if isinstance(node.get('content_json'), str) else None
                     node['content_json'] = parsed_content if isinstance(parsed_content, dict) else {}
+                if node['node_type'] in ('practice', 'mastery', 'challenge'):
+                    normalize_question_answers(node['content_json'])
                 for field in ('xp_reward', 'required_score', 'estimated_minutes'):
                     try:
                         node[field] = int(float(node[field]))
