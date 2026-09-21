@@ -49,6 +49,11 @@ export default function LobbyScreen() {
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [hostId, setHostId] = useState<number | string | null>(null);
 
+  // Joiner countdown shown when the host starts the game
+  const [showCountdown, setShowCountdown] = useState(false);
+  const [countdownValue, setCountdownValue] = useState(3);
+  const countdownAnim = useRef(new Animated.Value(1)).current;
+
   /* ── original effects (UNCHANGED) ── */
   useEffect(() => {
     getCurrentUser().then(u => setCurrentUserId(u?.id));
@@ -72,12 +77,33 @@ export default function LobbyScreen() {
         setRoomStatus(d?.status ?? 'waiting');
         setTeamMode(!!d?.teamMode);
         if (d?.status === 'active') {
-          router.replace({ pathname: '/game/question', params: { roomCode, isHost } });
+          startJoinerCountdown();
         }
       });
 
     return () => { unsub(); roomUnsub(); };
   }, [roomCode]);
+
+  const startJoinerCountdown = () => {
+    setShowCountdown(true);
+    setCountdownValue(3);
+    animateCountdownNumber(() => {
+      setCountdownValue(2);
+      animateCountdownNumber(() => {
+        setCountdownValue(1);
+        animateCountdownNumber(() => {
+          setShowCountdown(false);
+          router.replace({ pathname: '/game/question', params: { roomCode, isHost } });
+        });
+      });
+    });
+  };
+
+  const animateCountdownNumber = (callback: () => void) => {
+    countdownAnim.setValue(0.4);
+    Animated.spring(countdownAnim, { toValue: 1, friction: 5, tension: 45, useNativeDriver: true })
+      .start(() => setTimeout(callback, 250));
+  };
 
   /* ── teams subscription (team mode only) ── */
   useEffect(() => {
@@ -448,6 +474,15 @@ export default function LobbyScreen() {
           </View>
         )}
       </Animated.View>
+
+      {/* Joiner countdown overlay */}
+      {showCountdown && (
+        <View style={styles.countdownOverlay}>
+          <Animated.View style={{ opacity: countdownAnim, transform: [{ scale: countdownAnim }] }}>
+            <Text style={styles.countdownText}>{countdownValue}</Text>
+          </Animated.View>
+        </View>
+      )}
     </LinearGradient>
   );
 }
@@ -609,4 +644,13 @@ const styles = StyleSheet.create({
   },
   waitBarDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.warning },
   waitBarText: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.textSecondary },
+  countdownOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(15,12,41,0.95)',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  countdownText: {
+    fontSize: 120, fontFamily: FONTS.black, color: 'white',
+    textShadowColor: COLORS.purplePrimary, textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 20,
+  },
 });

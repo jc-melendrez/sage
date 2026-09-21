@@ -21,6 +21,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser } from '@/services/authService';
 import NetInfo from '@react-native-community/netinfo';
+import firestore from '@react-native-firebase/firestore';
 import { cacheQuizzes, getCachedQuizzes, createOfflineGame } from '@/services/offlineGameService';
 import * as Clipboard from 'expo-clipboard';
 import { LanClientSession } from '@/services/lanClient';
@@ -94,6 +95,8 @@ export default function GameCenterScreen() {
   const [joining, setJoining] = useState(false);
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [roomTopic, setRoomTopic] = useState<string>('');
+  const [roomPlayers, setRoomPlayers] = useState<any[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [lanName, setLanName] = useState('Player');
   const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
   const lanHostRef = useRef<LanHostServer | null>(null);
@@ -152,6 +155,26 @@ export default function GameCenterScreen() {
     });
     return () => unsub();
   }, []);
+
+  useEffect(() => {
+    getCurrentUser().then(u => setCurrentUserId(u?.id ?? null));
+  }, []);
+
+  // Listen for players joining the online room so the top avatar slots update live.
+  useEffect(() => {
+    if (!roomCode) {
+      setRoomPlayers([]);
+      return;
+    }
+    const unsub = firestore()
+      .collection('gameRooms')
+      .doc(roomCode)
+      .collection('players')
+      .onSnapshot(snap => {
+        setRoomPlayers(snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []);
+      });
+    return () => unsub();
+  }, [roomCode]);
 
   const fetchQuizzes = useCallback(async () => {
     setLoadingQuizzes(true);
@@ -610,9 +633,19 @@ export default function GameCenterScreen() {
                     <Text style={styles.avatarName}>YOU</Text>
                 </View>
 
+                {/* Joined Players */}
+                {roomPlayers.filter(p => String(p.id) !== String(currentUserId)).slice(0, 4).map((p) => (
+                    <View key={p.id} style={styles.avatarContainer}>
+                        <View style={styles.avatarCircleJoined}>
+                            <Text style={styles.avatarCircleJoinedText}>{(p.displayName || '?').charAt(0).toUpperCase()}</Text>
+                        </View>
+                        <Text style={styles.avatarName} numberOfLines={1}>{p.displayName || 'Player'}</Text>
+                    </View>
+                ))}
+
                 {/* Empty Slots */}
-                {[1, 2, 3, 4].map((i) => (
-                    <View key={i} style={styles.avatarContainer}>
+                {Array.from({ length: Math.max(0, 4 - roomPlayers.filter(p => String(p.id) !== String(currentUserId)).length) }).map((_, i) => (
+                    <View key={`empty-${i}`} style={styles.avatarContainer}>
                         <View style={styles.avatarCircleEmpty}>
                             <Ionicons name="person" size={24} color={COLORS.purpleLight} style={{opacity: 0.5}} />
                         </View>
@@ -1042,6 +1075,22 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: 'rgba(255,255,255,0.2)',
     marginBottom: 6,
+  },
+  avatarCircleJoined: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: COLORS.purpleVibrant,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 3,
+    borderColor: COLORS.success,
+    marginBottom: 6,
+  },
+  avatarCircleJoinedText: {
+    color: 'white',
+    fontSize: 22,
+    fontFamily: FONTS.black,
   },
   hostBadges: {
     position: 'absolute',
