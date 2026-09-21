@@ -7,9 +7,7 @@ import { getCoursePath } from '@/services/courseService';
 import { CoursePathTopic, NODE_TYPE_CONFIG, LearningNode } from '@/types/learning';
 import ProgressRing from '@/components/courses/ProgressRing';
 import { getCourseActivities, ClassActivity } from '@/services/activityService';
-import { getQuiz, getQuizzes, Quiz, QuizQuestion } from '@/services/quizService';
-import { completeQuiz } from '@/services/gamificationService';
-import TakeQuiz from '../../components/TakeQuiz';
+import { getQuiz, getQuizzes, Quiz } from '@/services/quizService';
 
 const COLORS = {
   bg: '#baaeda',
@@ -61,15 +59,6 @@ const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: 'tasks', label: 'Tasks' },
 ];
 
-const QUIZ_TO_QUESTIONS = (quiz: Quiz): { id: number; question: string; type: string; options: string[]; correct_answer: string }[] =>
-  quiz.questions.map((q: QuizQuestion) => ({
-    id: q.id,
-    question: q.question_text,
-    type: quiz.quiz_type || 'Multiple Choice',
-    options: q.options,
-    correct_answer: q.correct_answer,
-  }));
-
 export default function CourseDetailScreen() {
   const { courseId } = useLocalSearchParams<{ courseId: string }>();
   const router = useRouter();
@@ -86,8 +75,6 @@ export default function CourseDetailScreen() {
   // Active category tab
   const [section, setSection] = useState<SectionKey>('topics');
 
-  // Quiz player for a quiz-linked activity
-  const [quizToTake, setQuizToTake] = useState<{ title: string; questions: any[] } | null>(null);
   const [openingQuiz, setOpeningQuiz] = useState(false);
 
   useEffect(() => {
@@ -114,10 +101,7 @@ export default function CourseDetailScreen() {
       Alert.alert('No questions', 'This quiz has no questions yet.');
       return;
     }
-    setQuizToTake({
-      title: quiz.title,
-      questions: QUIZ_TO_QUESTIONS(quiz),
-    });
+    router.push(`/course/quiz/${quiz.id}?courseId=${courseId}` as any);
   };
 
   const openActivity = async (activity: ClassActivity) => {
@@ -370,23 +354,6 @@ export default function CourseDetailScreen() {
           </>
         )}
       </ScrollView>
-
-      {quizToTake && (
-        <TakeQuiz
-          quizTitle={quizToTake.title}
-          questions={quizToTake.questions}
-          onFinish={async (score) => {
-            try {
-              const total = quizToTake.questions.length;
-              const result = await completeQuiz(score, total);
-              return { xp: result.xp, badges: result.badges };
-            } catch {
-              return { xp: 0, badges: [] };
-            }
-          }}
-          onClose={() => setQuizToTake(null)}
-        />
-      )}
     </View>
   );
 }
