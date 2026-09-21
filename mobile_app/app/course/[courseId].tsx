@@ -309,7 +309,7 @@ export default function CourseDetailScreen() {
                 key={topic.id}
                 style={styles.topicCard}
                 activeOpacity={0.8}
-                onPress={() => router.push(`/course/topic/${topic.id}?courseId=${courseId}&title=${encodeURIComponent(topic.title)}` as any)}
+                onPress={() => router.push(`/course/path/${courseId}?topicId=${topic.id}` as any)}
               >
                 <View style={styles.topicTop}>
                   <View style={styles.topicInfo}>
