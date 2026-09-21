@@ -7,7 +7,7 @@ import { getCoursePath } from '@/services/courseService';
 import { CoursePathTopic, NODE_TYPE_CONFIG, LearningNode } from '@/types/learning';
 import ProgressRing from '@/components/courses/ProgressRing';
 import { getCourseActivities, ClassActivity } from '@/services/activityService';
-import { getQuiz, Quiz } from '@/services/quizService';
+import { getQuiz, getQuizzes, Quiz, QuizQuestion } from '@/services/quizService';
 import { completeQuiz } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
 
@@ -47,6 +47,29 @@ const ACTIVITY_META: Record<ClassActivity['kind'], { label: string; icon: any }>
   game: { label: 'Live Game', icon: 'game-controller' },
 };
 
+const QUIZ_TYPE_LABELS: Record<string, string> = {
+  multiple_choice: 'Multiple Choice',
+  exam: 'Exam',
+  flashcard: 'Flashcards',
+};
+
+type SectionKey = 'topics' | 'quizzes' | 'tasks';
+
+const SECTIONS: { key: SectionKey; label: string }[] = [
+  { key: 'topics', label: 'Topics' },
+  { key: 'quizzes', label: 'Quizzes' },
+  { key: 'tasks', label: 'Tasks' },
+];
+
+const QUIZ_TO_QUESTIONS = (quiz: Quiz): { id: number; question: string; type: string; options: string[]; correct_answer: string }[] =>
+  quiz.questions.map((q: QuizQuestion) => ({
+    id: q.id,
+    question: q.question_text,
+    type: quiz.quiz_type || 'Multiple Choice',
+    options: q.options,
+    correct_answer: q.correct_answer,
+  }));
+
 export default function CourseDetailScreen() {
   const { courseId } = useLocalSearchParams<{ courseId: string }>();
   const router = useRouter();
@@ -57,6 +80,12 @@ export default function CourseDetailScreen() {
   // Class-assigned tasks (published activities only)
   const [activities, setActivities] = useState<ClassActivity[]>([]);
 
+  // Course quizzes (educator + student created)
+  const [quizzes, setQuizzes] = useState<Quiz[]>([]);
+
+  // Active category tab
+  const [section, setSection] = useState<SectionKey>('topics');
+
   // Quiz player for a quiz-linked activity
   const [quizToTake, setQuizToTake] = useState<{ title: string; questions: any[] } | null>(null);
   const [openingQuiz, setOpeningQuiz] = useState(false);
@@ -64,12 +93,14 @@ export default function CourseDetailScreen() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [topicsData, activitiesData] = await Promise.all([
+        const [topicsData, activitiesData, quizzesData] = await Promise.all([
           getCoursePath(Number(courseId)),
           getCourseActivities(Number(courseId)).catch(() => [] as ClassActivity[]),
+          getQuizzes(Number(courseId)).catch(() => [] as Quiz[]),
         ]);
         setTopics(topicsData);
         setActivities(activitiesData.filter((a) => a.status === 'published'));
+        setQuizzes(quizzesData);
       } catch (e: any) {
         setError(e?.message || 'Failed to load course');
       }
@@ -77,6 +108,17 @@ export default function CourseDetailScreen() {
     setLoading(true);
     load().finally(() => setLoading(false));
   }, [courseId]);
+
+  const openQuiz = async (quiz: Quiz) => {
+    if (!quiz.questions || quiz.questions.length === 0) {
+      Alert.alert('No questions', 'This quiz has no questions yet.');
+      return;
+    }
+    setQuizToTake({
+      title: quiz.title,
+      questions: QUIZ_TO_QUESTIONS(quiz),
+    });
+  };
 
   const openActivity = async (activity: ClassActivity) => {
     if (activity.kind !== 'quiz' || activity.ref_id == null) {
@@ -86,20 +128,7 @@ export default function CourseDetailScreen() {
     setOpeningQuiz(true);
     try {
       const quiz: Quiz = await getQuiz(activity.ref_id);
-      if (!quiz.questions || quiz.questions.length === 0) {
-        Alert.alert('No questions', 'This quiz has no questions yet.');
-        return;
-      }
-      setQuizToTake({
-        title: quiz.title,
-        questions: quiz.questions.map((q) => ({
-          id: q.id,
-          question: q.question_text,
-          type: (quiz.quiz_type || 'Multiple Choice') as any,
-          options: q.options,
-          correct_answer: q.correct_answer,
-        })),
-      });
+      await openQuiz(quiz);
     } catch {
       Alert.alert('Failed to load quiz', 'Please try again.');
     } finally {
@@ -158,45 +187,112 @@ export default function CourseDetailScreen() {
         <View style={{ width: 32 }} />
       </LinearGradient>
 
+      <View style={styles.tabsContainer}>
+        {SECTIONS.map((s) => {
+          const isActive = section === s.key;
+          return (
+            <TouchableOpacity
+              key={s.key}
+              style={styles.tab}
+              onPress={() => setSection(s.key)}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.tabText, isActive && styles.tabTextActive]}>{s.label}</Text>
+              <View style={[styles.activeTabIndicator, !isActive && styles.activeTabIndicatorInactive]} />
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        {activities.length > 0 && (
-          <View style={styles.activitiesSection}>
-            <Text style={styles.activitiesHeader}>Class Tasks</Text>
-            {activities.map((activity) => {
-              const meta = ACTIVITY_META[activity.kind] || ACTIVITY_META.quiz;
-              return (
-                <TouchableOpacity
-                  key={activity.id}
-                  style={styles.activityCard}
-                  activeOpacity={0.8}
-                  onPress={() => openActivity(activity)}
-                  disabled={openingQuiz}
-                >
-                  <View style={styles.activityIconBox}>
-                    <Ionicons name={meta.icon} size={18} color="white" />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <View style={styles.activityTitleRow}>
-                      <Text style={styles.activityTitle} numberOfLines={1}>{activity.title}</Text>
-                      <Text style={styles.activityKind}>{meta.label}</Text>
-                    </View>
-                    {activity.note ? (
-                      <Text style={styles.activityNote} numberOfLines={2}>{activity.note}</Text>
-                    ) : null}
-                    {activity.due_date ? (
-                      <Text style={styles.activityMeta}>
-                        Due {new Date(activity.due_date).toLocaleDateString()}
-                      </Text>
-                    ) : null}
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+        {section === 'tasks' && (
+          <>
+            {activities.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Ionicons name="clipboard-outline" size={48} color={COLORS.textMuted} />
+                <Text style={styles.emptyTitle}>No class tasks</Text>
+                <Text style={styles.emptySubtitle}>The educator has not published any activities.</Text>
+              </View>
+            ) : (
+              <View style={styles.activitiesSection}>
+                <Text style={styles.activitiesHeader}>Class Tasks</Text>
+                {activities.map((activity) => {
+                  const meta = ACTIVITY_META[activity.kind] || ACTIVITY_META.quiz;
+                  return (
+                    <TouchableOpacity
+                      key={activity.id}
+                      style={styles.activityCard}
+                      activeOpacity={0.8}
+                      onPress={() => openActivity(activity)}
+                      disabled={openingQuiz}
+                    >
+                      <View style={styles.activityIconBox}>
+                        <Ionicons name={meta.icon} size={18} color="white" />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <View style={styles.activityTitleRow}>
+                          <Text style={styles.activityTitle} numberOfLines={1}>{activity.title}</Text>
+                          <Text style={styles.activityKind}>{meta.label}</Text>
+                        </View>
+                        {activity.note ? (
+                          <Text style={styles.activityNote} numberOfLines={2}>{activity.note}</Text>
+                        ) : null}
+                        {activity.due_date ? (
+                          <Text style={styles.activityMeta}>
+                            Due {new Date(activity.due_date).toLocaleDateString()}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+          </>
         )}
 
-        {topics.length === 0 ? (
+        {section === 'quizzes' && (
+          <>
+            {quizzes.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Ionicons name="help-circle-outline" size={48} color={COLORS.textMuted} />
+                <Text style={styles.emptyTitle}>No quizzes</Text>
+                <Text style={styles.emptySubtitle}>The educator has not created quizzes for this class.</Text>
+              </View>
+            ) : (
+              <View style={{ gap: 12 }}>
+                {quizzes.map((quiz) => (
+                  <TouchableOpacity
+                    key={quiz.id}
+                    style={styles.quizCard}
+                    activeOpacity={0.8}
+                    onPress={() => openQuiz(quiz)}
+                  >
+                    <View style={styles.quizHeader}>
+                      <View style={styles.quizIconBox}>
+                        <Ionicons name="help-circle" size={20} color={COLORS.purpleVibrant} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.quizTitle} numberOfLines={1}>{quiz.title}</Text>
+                        <Text style={styles.quizMeta}>
+                          {quiz.questions.length} question{quiz.questions.length === 1 ? '' : 's'}
+                        </Text>
+                      </View>
+                      <View style={styles.quizTypePill}>
+                        <Text style={styles.quizTypeText}>{QUIZ_TYPE_LABELS[quiz.quiz_type] || quiz.quiz_type}</Text>
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </>
+        )}
+
+        {section === 'topics' && (
+          <>
+            {topics.length === 0 ? (
           <View style={styles.emptyState}>
             <Ionicons name="book-outline" size={48} color={COLORS.textMuted} />
             <Text style={styles.emptyTitle}>No topics yet</Text>
@@ -271,6 +367,8 @@ export default function CourseDetailScreen() {
             );
           })
         )}
+          </>
+        )}
       </ScrollView>
 
       {quizToTake && (
@@ -315,6 +413,37 @@ const styles = StyleSheet.create({
   errorText: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.textMuted, textAlign: 'center' },
   retryBtn: { backgroundColor: COLORS.purpleDark, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 12, marginTop: 8 },
   retryText: { color: 'white', fontFamily: FONTS.semiBold, fontSize: 13 },
+  tabsContainer: { flexDirection: 'row', backgroundColor: COLORS.surface, marginHorizontal: 20, marginTop: -14, borderRadius: 16, paddingHorizontal: 4, borderWidth: 1, borderColor: COLORS.border },
+  tab: { flex: 1, paddingVertical: 12, alignItems: 'center', gap: 6 },
+  activeTabIndicator: { width: '60%', maxWidth: 40, height: 3, borderRadius: 1.5, backgroundColor: COLORS.purpleVibrant },
+  activeTabIndicatorInactive: { backgroundColor: 'transparent' },
+  tabText: { fontSize: 14, color: COLORS.textMuted, fontFamily: FONTS.semiBold, fontWeight: '600' },
+  tabTextActive: { color: '#3a107a', fontFamily: FONTS.bold, fontWeight: '800' },
+  quizCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  quizHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  quizIconBox: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: COLORS.purpleGhost,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quizTitle: { fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary },
+  quizMeta: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 3 },
+  quizTypePill: {
+    backgroundColor: COLORS.purpleGhost,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  quizTypeText: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.purpleVibrant },
   topicCard: {
     backgroundColor: COLORS.surface,
     borderRadius: 20,

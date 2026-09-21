@@ -306,7 +306,9 @@ class QuizListView(APIView):
                     {"error": "You are not a member of this course."},
                     status=403,
                 )
-            quizzes = quizzes.filter(course=course)
+            # Enrolled students see the whole class's quizzes (including the
+            # educator's), not just the ones they authored.
+            quizzes = Quiz.objects.filter(course=course)
 
         quizzes = quizzes.order_by('-created_at')
         serializer = QuizSerializer(quizzes, many=True)
@@ -315,14 +317,26 @@ class QuizListView(APIView):
 class QuizDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def _get_owned_quiz(self, request, quiz_id):
-        return Quiz.objects.filter(id=quiz_id, user=request.user).first()
+    def _get_readable_quiz(self, request, quiz_id):
+        quiz = Quiz.objects.filter(id=quiz_id).first()
+        if not quiz:
+            return None
+        if request.user == quiz.user:
+            return quiz
+        # Enrolled students may read (take) their educator's course quizzes.
+        course = quiz.course
+        if course and course.students.filter(id=request.user.id).exists():
+            return quiz
+        return None
 
     def get(self, request, quiz_id):
-        quiz = self._get_owned_quiz(request, quiz_id)
+        quiz = self._get_readable_quiz(request, quiz_id)
         if not quiz:
             return Response({"error": "Quiz not found."}, status=404)
         return Response(QuizSerializer(quiz).data)
+
+    def _get_owned_quiz(self, request, quiz_id):
+        return Quiz.objects.filter(id=quiz_id, user=request.user).first()
 
     def patch(self, request, quiz_id):
         quiz = self._get_owned_quiz(request, quiz_id)
