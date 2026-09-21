@@ -17,7 +17,7 @@ import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
-import { SectionHeader, EmptyState, Pill } from '@/components/educator/EducatorPrimitives';
+import { SectionHeader, EmptyState, Pill, FilterChip } from '@/components/educator/EducatorPrimitives';
 import { getCoursePath, createTopic, createNode, generateTopic, GenerateTopicResponse } from '@/services/courseService';
 import { getQuizzes, Quiz } from '@/services/quizService';
 import { getCourseActivities, createActivity, deleteActivity, updateActivity, ClassActivity, ActivityKind } from '@/services/activityService';
@@ -66,6 +66,7 @@ export default function CourseDetailScreen() {
   const [actNote, setActNote] = useState('');
   const [actDue, setActDue] = useState<'none' | 'today' | '1d' | '1w'>('none');
   const [actStatus, setActStatus] = useState<'draft' | 'published'>('draft');
+  const [actRefId, setActRefId] = useState<number | null>(null);
 
   // Add topic modal
   const [modalVisible, setModalVisible] = useState(false);
@@ -148,6 +149,7 @@ export default function CourseDetailScreen() {
       await createActivity(cid, {
         kind: actKind,
         title: actTitle.trim(),
+        ref_id: actKind === 'quiz' ? actRefId : null,
         note: actNote.trim(),
         due_date: dueToISO(),
         status: actStatus,
@@ -158,6 +160,7 @@ export default function CourseDetailScreen() {
       setActDue('none');
       setActKind('quiz');
       setActStatus('draft');
+      setActRefId(null);
       await loadActivities();
     } catch (err) {
       Alert.alert('Failed to create activity', err instanceof Error ? err.message : 'Something went wrong.');
@@ -639,6 +642,27 @@ export default function CourseDetailScreen() {
               onChangeText={setActTitle}
               editable={!creatingActivity}
             />
+
+            {actKind === 'quiz' && (
+              <>
+                <Text style={styles.label}>Attach quiz {quizzes.length > 0 ? '' : '(none in this class yet)'}</Text>
+                {quizzes.length > 0 ? (
+                  <View style={styles.kindRow}>
+                    <FilterChip label="No quiz" active={actRefId === null} onPress={() => setActRefId(null)} />
+                    {quizzes.map((q) => (
+                      <FilterChip
+                        key={q.id}
+                        label={q.title}
+                        active={actRefId === q.id}
+                        onPress={() => setActRefId(q.id)}
+                      />
+                    ))}
+                  </View>
+                ) : (
+                  <Pill label="Create quizzes in the Quizzes section first" color={COLORS.textMuted} icon="information-circle-outline" />
+                )}
+              </>
+            )}
 
             <Text style={styles.label}>Note (optional)</Text>
             <TextInput

@@ -35,6 +35,22 @@ export interface QuestionResult {
   correctAnswer: string;
 }
 
+function resolveCorrectAnswer(question: QuizQuestion): string {
+  const raw = String(question.correct_answer ?? '').trim();
+  const options = question.options || [];
+  const exact = options.find((opt) => opt === raw);
+  if (exact !== undefined) return exact;
+  if (/^[A-Za-z]$/.test(raw)) {
+    const idx = raw.toUpperCase().charCodeAt(0) - 65;
+    if (options[idx] !== undefined) return options[idx];
+  }
+  if (/^\d+$/.test(raw)) {
+    const idx = parseInt(raw, 10);
+    if (options[idx] !== undefined) return options[idx];
+  }
+  return raw;
+}
+
 export default function QuizRunner({ questions, passingScore = 70, onFinish }: QuizRunnerProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [results, setResults] = useState<QuestionResult[]>([]);
@@ -45,17 +61,19 @@ export default function QuizRunner({ questions, passingScore = 70, onFinish }: Q
   const isLast = currentIndex === questions.length - 1;
   const progress = (currentIndex) / questions.length;
 
+  const currentCorrectAnswer = current ? resolveCorrectAnswer(current) : '';
+
   const handleSelect = useCallback((answer: string) => {
-    if (answered) return;
+    if (answered || !current) return;
     setSelected(answer);
     setAnswered(true);
 
-    const isCorrect = answer === current.correct_answer;
+    const isCorrect = answer === resolveCorrectAnswer(current);
     const newResults = [...results, {
       questionIndex: currentIndex,
       correct: isCorrect,
       selectedAnswer: answer,
-      correctAnswer: current.correct_answer,
+      correctAnswer: resolveCorrectAnswer(current),
     }];
     setResults(newResults);
   }, [answered, current, currentIndex, results]);
@@ -106,7 +124,7 @@ export default function QuizRunner({ questions, passingScore = 70, onFinish }: Q
           let textStyle: any = styles.optionText;
 
           if (answered) {
-            if (opt === current.correct_answer) {
+            if (opt === currentCorrectAnswer) {
               optStyle = { ...optStyle, ...styles.optionCorrect };
               textStyle = { ...textStyle, color: 'white' };
             } else if (opt === selected) {
@@ -128,8 +146,8 @@ export default function QuizRunner({ questions, passingScore = 70, onFinish }: Q
               activeOpacity={0.8}
             >
               <Text style={textStyle}>{opt}</Text>
-              {answered && opt === current.correct_answer && <Ionicons name="checkmark-circle" size={18} color="white" />}
-              {answered && opt === selected && opt !== current.correct_answer && <Ionicons name="close-circle" size={18} color="white" />}
+              {answered && opt === currentCorrectAnswer && <Ionicons name="checkmark-circle" size={18} color="white" />}
+              {answered && opt === selected && opt !== currentCorrectAnswer && <Ionicons name="close-circle" size={18} color="white" />}
             </TouchableOpacity>
           );
         })}

@@ -136,6 +136,45 @@ class CourseAPITests(APITestCase):
         resp = self.client.get(reverse('course_detail', args=[course.id]))
         self.assertEqual(resp.status_code, 403)
 
+    def test_enrolled_student_can_list_and_read_course_quizzes(self):
+        from ai_assistant.models import Quiz
+        course = Course.objects.create(name='Math', educator=self.educator)
+        course.students.add(self.student1)
+        quiz = Quiz.objects.create(
+            user=self.educator,
+            course=course,
+            title='Algebra Quiz',
+            quiz_type='Multiple Choice',
+        )
+
+        # Enrolled student can list the course's quizzes (educator-owned too)
+        self.client.force_authenticate(user=self.student1)
+        resp = self.client.get(reverse('quiz_list'), {'course': course.id})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([q['id'] for q in resp.data], [quiz.id])
+
+        # Enrolled student can read the educator-owned quiz (take it)
+        resp = self.client.get(reverse('quiz_detail', args=[quiz.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['title'], 'Algebra Quiz')
+
+        # Non-member cannot access the course's quizzes
+        self.client.force_authenticate(user=self.student2)
+        resp = self.client.get(reverse('quiz_list'), {'course': course.id})
+        self.assertEqual(resp.status_code, 403)
+        resp = self.client.get(reverse('quiz_detail', args=[quiz.id]))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_educator_can_read_course_quiz(self):
+        from ai_assistant.models import Quiz
+        course = Course.objects.create(name='Math', educator=self.educator)
+        quiz = Quiz.objects.create(
+            user=self.educator, course=course, title='Pop Quiz',
+        )
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(reverse('quiz_detail', args=[quiz.id]))
+        self.assertEqual(resp.status_code, 200)
+
 
 class GamificationServiceTests(TestCase):
     def setUp(self):

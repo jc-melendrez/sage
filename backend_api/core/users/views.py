@@ -1,6 +1,8 @@
 import threading
 import os
+import sys
 import json
+import time
 import requests
 import re
 from django.core.exceptions import ValidationError
@@ -44,6 +46,12 @@ from core.firestore_service import (
     send_message, get_messages, generate_join_code,
     toggle_reaction, ALLOWED_REACTIONS,
 )
+
+# Windows console (cp1252) crashes when printing Groq/AI output that contains
+# unicode (e.g. arrows, curly quotes). Make print() lossy-tolerant instead.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(errors='replace')
+    sys.stderr.reconfigure(errors='replace')
 
 
 class FirebaseLoginView(APIView):
@@ -255,19 +263,106 @@ def _as_bool(value, default=False):
         return value.strip().lower() in ('1', 'true', 'yes', 'on')
     return bool(value)
 
+def _coerce_parsed(value):
+    """The reasoning model sometimes wraps the object in a top-level array;
+    unwrap to the first dict so schema checks still pass."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                return item
+    return None
+
 def safe_json_parse(text):
     """Try to parse JSON from text, with fallback to regex extraction."""
     try:
-        return json.loads(text)
+        return _coerce_parsed(json.loads(text))
     except json.JSONDecodeError:
         # Try to extract a JSON object using regex
         match = re.search(r"\{[\s\S]*\}", text)
         if match:
             try:
-                return json.loads(match.group())
+                return _coerce_parsed(json.loads(match.group()))
             except json.JSONDecodeError:
                 pass
     return None
+
+
+def normalize_question_answers(content):
+    """Rewrite practice/mastery questions so 'correct_answer' holds the actual
+    option text. The model sometimes emits the answer as a letter ('A'/'B') or
+    a 0-based index while 'options' store the full strings, which previously
+    broke client-side grading."""
+    questions = content.get('questions') if isinstance(content, dict) else None
+    if not isinstance(questions, list):
+        return
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        options = q.get('options')
+        if not isinstance(options, list):
+            continue
+        options = [str(o) for o in options]
+        q['options'] = options
+        raw = str(q.get('correct_answer', '')).strip()
+        if not raw:
+            continue
+        if raw in options:
+            continue
+        resolved = None
+        if re.fullmatch(r'[A-Za-z]', raw):
+            idx = ord(raw.upper()) - 65
+            if 0 <= idx < len(options):
+                resolved = options[idx]
+        elif re.fullmatch(r'\d+', raw):
+            idx = int(raw)
+            if 0 <= idx < len(options):
+                resolved = options[idx]
+        if resolved is not None:
+            q['correct_answer'] = resolved
+
+def groq_chat_completion(payload, api_key, max_retries=3):
+    """POST to Groq and retry transient failures (e.g. json_validate_failed)."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    last_response = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            last_response = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=120,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"[Groq] attempt {attempt} request error: {e}")
+            last_response = None
+            if attempt < max_retries:
+                time.sleep(2 * attempt)
+            continue
+
+        if last_response.status_code == 200:
+            return last_response
+
+        print(f"[Groq] attempt {attempt} status {last_response.status_code}: {last_response.text[:300]}")
+        if attempt < max_retries:
+            # Honor Groq's suggested wait time (rate limits) when present.
+            wait = 2 * attempt
+            retry_after = last_response.headers.get('Retry-After')
+            if retry_after:
+                try:
+                    wait = max(wait, float(retry_after))
+                except (TypeError, ValueError):
+                    pass
+            else:
+                match = re.search(r"Please try again in\s+([\d.]+)\s*s", last_response.text)
+                if match:
+                    wait = max(wait, float(match.group(1)))
+            time.sleep(wait)
+    return last_response
 
 PALETTE = ['#7F77DD', '#1D9E75', '#D85A30', '#D4537E', '#378ADD', '#639922']
 
@@ -1314,28 +1409,18 @@ Each level must have:
                 }
             ],
             "temperature": 0.7,
-            "max_tokens": 4000,
+            "max_tokens": 12000,
             "response_format": {"type": "json_object"}
-        }
-
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
         }
 
         print("🧠 Sending request to Groq...")
 
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
+        response = groq_chat_completion(payload, api_key)
 
-        if response.status_code != 200:
-            print("❌ Groq error:", response.text)
+        if response is None or response.status_code != 200:
+            print("❌ Groq error:", getattr(response, 'text', 'no response'))
             return Response(
-                {"error": response.text},
+                {"error": "AI generation failed. Please try again."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1487,26 +1572,16 @@ For "practice" and "mastery" nodes, content_json must have a "questions" array:
                 {'role': 'user', 'content': prompt},
             ],
             'temperature': 0.7,
-            'max_tokens': 4000,
+            'max_tokens': 12000,
             'response_format': {'type': 'json_object'},
         }
 
-        headers = {
-            'Authorization': f'Bearer {api_key}',
-            'Content-Type': 'application/json',
-        }
-
         try:
-            response = requests.post(
-                'https://api.groq.com/openai/v1/chat/completions',
-                headers=headers,
-                json=payload,
-                timeout=60,
-            )
+            response = groq_chat_completion(payload, api_key)
 
-            if response.status_code != 200:
-                print(f"[GenerateTopicView] Groq error: {response.text}")
-                return Response({'error': 'AI generation failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            if response is None or response.status_code != 200:
+                print(f"[GenerateTopicView] Groq error: {getattr(response, 'text', 'no response')}")
+                return Response({'error': 'AI generation failed. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             data = response.json()
             raw_content = data['choices'][0]['message']['content']
@@ -1515,7 +1590,14 @@ For "practice" and "mastery" nodes, content_json must have a "questions" array:
             if not topic_data or 'title' not in topic_data or 'nodes' not in topic_data:
                 return Response({'error': 'AI returned invalid structure'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            for i, node in enumerate(topic_data['nodes']):
+            # Guard against the model emitting stray string/list entries in "nodes".
+            nodes = topic_data['nodes']
+            if not isinstance(nodes, list):
+                nodes = []
+            for i, node in enumerate(list(nodes)):
+                if not isinstance(node, dict):
+                    nodes.remove(node)
+                    continue
                 node.setdefault('node_type', 'learn')
                 node.setdefault('title', f'Node {i + 1}')
                 node.setdefault('description', '')
@@ -1526,11 +1608,21 @@ For "practice" and "mastery" nodes, content_json must have a "questions" array:
                 if node['node_type'] not in {c[0] for c in LearningNode.NODE_TYPES}:
                     node['node_type'] = 'learn'
                 node['title'] = str(node['title'])[:255]
+                if not isinstance(node.get('content_json'), dict):
+                    parsed_content = safe_json_parse(str(node.get('content_json') or '')) \
+                        if isinstance(node.get('content_json'), str) else None
+                    node['content_json'] = parsed_content if isinstance(parsed_content, dict) else {}
+                if node['node_type'] in ('practice', 'mastery', 'challenge'):
+                    normalize_question_answers(node['content_json'])
                 for field in ('xp_reward', 'required_score', 'estimated_minutes'):
                     try:
                         node[field] = int(float(node[field]))
                     except (TypeError, ValueError):
                         node[field] = {'xp_reward': 25, 'required_score': 70, 'estimated_minutes': 5}[field]
+
+            if not nodes:
+                return Response({'error': 'AI returned invalid structure'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            topic_data['nodes'] = nodes
 
             return Response(topic_data, status=status.HTTP_200_OK)
 
