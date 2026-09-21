@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator,
-  Platform, KeyboardAvoidingView, Image, TextInput,
+  Platform, KeyboardAvoidingView, Image, TextInput, Modal,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -45,6 +45,7 @@ export default function EditProfileScreen() {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [avatar, setAvatar] = useState('');
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -117,21 +118,29 @@ export default function EditProfileScreen() {
           <View style={styles.backButton} />
         </View>
 
-        {selectedSource ? (
-          <View style={styles.avatarWrap}>
-            <Image source={selectedSource} style={styles.avatarImage} resizeMode="cover" />
-          </View>
-        ) : (
-          <LinearGradient
-            colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.avatarWrap}
-          >
-            <Text style={styles.avatarText}>{initials}</Text>
-          </LinearGradient>
-        )}
-        <Text style={styles.avatarHint}>Choose a profile picture for your avatar</Text>
+        <TouchableOpacity onPress={() => setPickerOpen(true)} activeOpacity={0.85} accessibilityLabel="Choose a profile picture">
+          {selectedSource ? (
+            <View style={styles.avatarWrap}>
+              <Image source={selectedSource} style={styles.avatarImage} resizeMode="cover" />
+              <View style={styles.avatarEditBadge}>
+                <Ionicons name="create-outline" size={14} color="white" />
+              </View>
+            </View>
+          ) : (
+            <LinearGradient
+              colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.avatarWrap}
+            >
+              <Text style={styles.avatarText}>{initials}</Text>
+              <View style={styles.avatarEditBadge}>
+                <Ionicons name="create-outline" size={14} color="white" />
+              </View>
+            </LinearGradient>
+          )}
+        </TouchableOpacity>
+        <Text style={styles.avatarHint}>Tap to change your profile picture</Text>
       </LinearGradient>
 
       <KeyboardAvoidingView
@@ -139,44 +148,6 @@ export default function EditProfileScreen() {
         style={{ flex: 1 }}
       >
         <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 48 }}>
-          <Text style={styles.sectionTitle}>Profile Picture</Text>
-          <View style={styles.pfpGrid}>
-            <TouchableOpacity
-              style={[styles.pfpCell, avatar === '' && styles.pfpCellSelected]}
-              onPress={() => setAvatar('')}
-              activeOpacity={0.8}
-            >
-              <LinearGradient
-                colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.pfpThumb}
-              >
-                <Text style={styles.pfpInitials}>{firstName.trim() ? initials : username.substring(0, 2).toUpperCase()}</Text>
-              </LinearGradient>
-              {avatar === '' && <View style={styles.selectedBadge}><Ionicons name="checkmark" size={12} color="white" /></View>}
-            </TouchableOpacity>
-
-            {PFP_OPTIONS.map((pfp) => {
-              const isSelected = avatar === pfp.key;
-              return (
-                <TouchableOpacity
-                  key={pfp.key}
-                  style={[styles.pfpCell, isSelected && styles.pfpCellSelected]}
-                  onPress={() => setAvatar(pfp.key)}
-                  activeOpacity={0.8}
-                >
-                  <Image source={pfp.source} style={styles.pfpThumb} resizeMode="cover" />
-                  {isSelected && (
-                    <View style={styles.selectedBadge}>
-                      <Ionicons name="checkmark" size={12} color="white" />
-                    </View>
-                  )}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
           <Text style={styles.sectionTitle}>Account Details</Text>
           <View style={styles.formCard}>
             <Text style={styles.modalLabel}>User Name</Text>
@@ -227,6 +198,63 @@ export default function EditProfileScreen() {
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <Modal
+        visible={pickerOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setPickerOpen(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setPickerOpen(false)} />
+          <View style={styles.pickerSheet}>
+            <View style={styles.sheetHeader}>
+              <Text style={styles.sheetTitle}>Choose Profile Picture</Text>
+              <TouchableOpacity onPress={() => setPickerOpen(false)} style={styles.sheetCloseBtn} accessibilityLabel="Close">
+                <Ionicons name="close" size={20} color={COLORS.textSecondary} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 12 }}>
+              <View style={styles.pfpGrid}>
+                <TouchableOpacity
+                  style={[styles.pfpCell, avatar === '' && styles.pfpCellSelected]}
+                  onPress={() => { setAvatar(''); setPickerOpen(false); }}
+                  activeOpacity={0.8}
+                >
+                  <LinearGradient
+                    colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.pfpThumb}
+                  >
+                    <Text style={styles.pfpInitials}>{firstName.trim() ? initials : username.substring(0, 2).toUpperCase()}</Text>
+                  </LinearGradient>
+                  {avatar === '' && <View style={styles.selectedBadge}><Ionicons name="checkmark" size={12} color="white" /></View>}
+                </TouchableOpacity>
+
+                {PFP_OPTIONS.map((pfp) => {
+                  const isSelected = avatar === pfp.key;
+                  return (
+                    <TouchableOpacity
+                      key={pfp.key}
+                      style={[styles.pfpCell, isSelected && styles.pfpCellSelected]}
+                      onPress={() => { setAvatar(pfp.key); setPickerOpen(false); }}
+                      activeOpacity={0.8}
+                    >
+                      <Image source={pfp.source} style={styles.pfpThumb} resizeMode="cover" />
+                      {isSelected && (
+                        <View style={styles.selectedBadge}>
+                          <Ionicons name="checkmark" size={12} color="white" />
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -281,6 +309,19 @@ const styles = StyleSheet.create({
   },
   avatarImage: { width: '100%', height: '100%' },
   avatarText: { fontSize: 32, fontFamily: FONTS.black, color: 'white' },
+  avatarEditBadge: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: COLORS.purpleDark,
+    borderWidth: 2,
+    borderColor: 'white',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   avatarHint: {
     marginTop: 12,
     fontSize: 13,
@@ -317,6 +358,20 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   pfpInitials: { fontSize: 18, fontFamily: FONTS.black, color: 'white' },
+  modalOverlay: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(76, 29, 149, 0.35)' },
+  modalBackdrop: { ...StyleSheet.absoluteFillObject },
+  pickerSheet: {
+    backgroundColor: COLORS.bg,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    paddingBottom: 28,
+    maxHeight: '75%',
+  },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
+  sheetCloseBtn: { padding: 4 },
+  sheetTitle: { fontSize: 16, fontFamily: FONTS.bold, color: COLORS.textPrimary },
   selectedBadge: {
     position: 'absolute',
     top: -2,

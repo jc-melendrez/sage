@@ -216,6 +216,7 @@ const styles = StyleSheet.create({
   avatarContainer: {
     width: 72, height: 72, borderRadius: 36,
     justifyContent: 'center', alignItems: 'center',
+    borderWidth: 3, borderColor: 'rgba(255,255,255,0.45)',
     shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3, shadowRadius: 8, elevation: 4,
   },

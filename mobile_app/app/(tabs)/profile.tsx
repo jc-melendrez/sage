@@ -330,6 +330,8 @@ const styles = StyleSheet.create({
     borderRadius: 38,
     justifyContent: 'center',
     alignItems: 'center',
+    borderWidth: 3,
+    borderColor: 'rgba(255,255,255,0.45)',
     shadowColor: COLORS.purpleDeep,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
