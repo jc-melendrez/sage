@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput,
-  KeyboardAvoidingView, Platform, StatusBar, ActivityIndicator, Alert, Modal, Switch,
+  KeyboardAvoidingView, Platform, StatusBar, ActivityIndicator, Alert, Modal, Switch, Image,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -13,15 +13,18 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser } from '@/services/authService';
 import { getFirebaseUid } from '@/services/firebaseAuthService';
+import { getGroupMembers, updateGroup, leaveGroup, GroupMember } from '@/services/chatService';
+import { pfpSource } from '@/constants/pfps';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
 interface StudyGroup {
-  id: number;
+  id: string;
   name: string;
   description: string;
   members_count: number;
   join_code: string;
-  created_by: number;
+  created_by: string;
+  members?: string[];
 }
 
 // Normalized message shape: Firestore docs, REST responses, and optimistic
@@ -90,6 +93,39 @@ function mergeMessages(prev: GroupMessage[], incoming: GroupMessage[]): GroupMes
   return [...incoming, ...unsyncedLocal];
 }
 
+function memberInitials(member?: GroupMember | null, name?: string): string {
+  const display = member?.display_name || name || '?';
+  const parts = display.split(' ').filter(Boolean);
+  if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  return display.substring(0, 2).toUpperCase();
+}
+
+function MemberAvatar({
+  member,
+  name,
+  size = 32,
+  style,
+}: {
+  member?: GroupMember | null;
+  name?: string;
+  size?: number;
+  style?: object;
+}) {
+  const source = pfpSource(member?.avatar);
+  const initials = memberInitials(member, name);
+  return (
+    <View style={[{ width: size, height: size, borderRadius: size / 2 }, style]}>
+      {source && member?.avatar ? (
+        <Image source={source} style={styles.avatarImage} resizeMode="cover" />
+      ) : (
+        <View style={[{ width: size, height: size, borderRadius: size / 2 }, styles.initialsCircle]}>
+          <Text style={[styles.initialsText, { fontSize: size * 0.38 }]}>{initials}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
 export default function GroupChatScreen() {
   const router = useRouter();
   const { groupId } = useLocalSearchParams<{ groupId: string }>();
@@ -99,12 +135,20 @@ export default function GroupChatScreen() {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [myUid, setMyUid] = useState<string | null>(null);
   const [messages, setMessages] = useState<GroupMessage[]>([]);
+  const [members, setMembers] = useState<GroupMember[]>([]);
+  const [memberMap, setMemberMap] = useState<Record<string, GroupMember>>({});
   const [chatInput, setChatInput] = useState('');
   const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isMembersOpen, setIsMembersOpen] = useState(false);
+  const [peekMember, setPeekMember] = useState<GroupMember | null>(null);
   const [isMuted, setIsMuted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [reactionTarget, setReactionTarget] = useState<GroupMessage | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editDesc, setEditDesc] = useState('');
+  const [savingGroup, setSavingGroup] = useState(false);
+  const [leavingGroup, setLeavingGroup] = useState(false);
 
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
@@ -127,19 +171,33 @@ export default function GroupChatScreen() {
         if (cancelled) return;
         setCurrentUser(user);
 
+        if (!token) {
+          if (!cancelled) setLoading(false);
+          return;
+        }
+
         // Messages identify senders by firebase_uid. Prefer the profile's
         // firebase_uid; fall back to the uid cached at Firebase sign-in.
         const uid = user?.firebase_uid || storedUid || null;
         setMyUid(uid);
 
-        const res = await fetch(`${API_BASE_URL}/users/groups/mine/`, {
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
+        const [res, memberRes] = await Promise.all([
+          fetch(`${API_BASE_URL}/users/groups/mine/`, {
+            headers: { 'Authorization': `Bearer ${token}` },
+          }),
+          getGroupMembers(String(groupId), token).catch(() => []),
+        ]);
+        if (memberRes.length > 0) {
+          setMembers(memberRes);
+          setMemberMap(Object.fromEntries(memberRes.map(m => [m.firebase_uid, m])));
+        }
         if (res.ok) {
           const myGroups: StudyGroup[] = await res.json();
           const found = myGroups.find(g => String(g.id) === String(groupId)) || null;
           if (cancelled) return;
           setGroup(found);
+          setEditName(found?.name || '');
+          setEditDesc(found?.description || '');
           if (!found) {
             Alert.alert('Group Not Found', 'This study group is no longer available.');
             router.back();
@@ -303,12 +361,70 @@ export default function GroupChatScreen() {
     Alert.alert('Code Copied!', 'The join code has been copied to your clipboard.');
   };
 
-  const isAdmin = currentUser?.id === group?.created_by;
+  const isAdmin = myUid != null && myUid === group?.created_by;
+
+  const openSettings = () => {
+    setEditName(group?.name || '');
+    setEditDesc(group?.description || '');
+    setIsSettingsOpen(true);
+  };
+
+  const saveGroupEdit = async () => {
+    if (!group || !isAdmin) return;
+    const name = editName.trim();
+    if (!name) {
+      Alert.alert('Name Required', 'Please enter a group name.');
+      return;
+    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setSavingGroup(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const updated = await updateGroup(String(group.id), token, { name, description: editDesc.trim() });
+      setGroup(prev => prev ? { ...prev, ...updated } : prev);
+      Alert.alert('Saved', 'Group settings updated.');
+    } catch (err) {
+      Alert.alert('Update Failed', err instanceof Error ? err.message : 'Please try again.');
+    } finally {
+      setSavingGroup(false);
+    }
+  };
+
+  const handleLeaveGroup = () => {
+    if (!group) return;
+    Alert.alert(
+      'Leave Group',
+      `Leave "${group.name}"? You can rejoin anytime with the invite code.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Leave',
+          style: 'destructive',
+          onPress: async () => {
+            setLeavingGroup(true);
+            try {
+              const token = await getToken();
+              if (!token) return;
+              await leaveGroup(String(group.id), token);
+              Alert.alert('Left Group', 'You are no longer a member.', [
+                { text: 'OK', onPress: () => router.back() },
+              ]);
+            } catch (err) {
+              Alert.alert('Failed', err instanceof Error ? err.message : 'Please try again.');
+              setLeavingGroup(false);
+            }
+          },
+        },
+      ],
+    );
+  };
 
   const renderMessage = (msg: GroupMessage, index: number) => {
     const isMe = msg.sender_uid != null && msg.sender_uid === myUid;
     const prev = messages[index - 1];
     const showSender = !isMe && (!prev || prev.sender_uid !== msg.sender_uid);
+    const senderMember = msg.sender_uid ? memberMap[msg.sender_uid] : undefined;
     const reactionEntries = Object.entries(msg.reactions || {}).filter(([, uids]) => uids.length > 0);
 
     const renderPills = () =>
@@ -333,7 +449,12 @@ export default function GroupChatScreen() {
 
     return (
       <View key={msg.id} style={[styles.messageWrapper, isMe ? styles.messageMe : styles.messageOther]}>
-        {showSender && <Text style={styles.senderName}>{msg.sender_name}</Text>}
+        {showSender && (
+          <View style={styles.senderRow}>
+            <MemberAvatar member={senderMember} name={msg.sender_name} size={22} />
+            <Text style={styles.senderName}>{msg.sender_name}</Text>
+          </View>
+        )}
         <TouchableOpacity
           activeOpacity={0.9}
           onLongPress={() => setReactionTarget(msg)}
@@ -379,11 +500,18 @@ export default function GroupChatScreen() {
         </TouchableOpacity>
         <View style={styles.chatHeaderTitleBox}>
           <Text style={styles.chatHeaderTitle} numberOfLines={1}>{group?.name || 'Group Chat'}</Text>
-          <Text style={styles.chatHeaderSubtitle}>{group?.members_count ?? '—'} members</Text>
+          <Text style={styles.chatHeaderSubtitle}>
+            {members.length > 0 ? `${members.length} members` : '— members'}
+          </Text>
         </View>
-        <TouchableOpacity onPress={() => setIsSettingsOpen(true)} style={{ padding: 4 }} accessibilityLabel="Group settings">
-          <Ionicons name="settings-outline" size={22} color="white" />
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity onPress={() => setIsMembersOpen(true)} style={styles.headerIconBtn} accessibilityLabel="Group members">
+            <Ionicons name="people" size={22} color="white" />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={openSettings} style={styles.headerIconBtn} accessibilityLabel="Group settings">
+            <Ionicons name="settings-outline" size={22} color="white" />
+          </TouchableOpacity>
+        </View>
       </LinearGradient>
 
       <ScrollView
@@ -435,9 +563,9 @@ export default function GroupChatScreen() {
       </View>
 
       {/* Group Settings Modal */}
-      <Modal visible={isSettingsOpen} animationType="slide" transparent={true}>
+      <Modal visible={isSettingsOpen} animationType="slide" transparent={true} onRequestClose={() => setIsSettingsOpen(false)}>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { minHeight: '65%' }]}>
+          <View style={[styles.modalContent, { minHeight: '70%' }]}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Group Info</Text>
               <TouchableOpacity onPress={() => setIsSettingsOpen(false)}>
@@ -453,6 +581,55 @@ export default function GroupChatScreen() {
                 <Text style={styles.settingsGroupDesc}>{group?.description || 'No description provided.'}</Text>
                 {isAdmin && <Text style={styles.adminBadge}>Admin</Text>}
               </View>
+
+              {isAdmin && (
+                <View style={styles.settingsSection}>
+                  <Text style={styles.settingsSectionTitle}>Edit Group</Text>
+                  <TextInput
+                    style={styles.editInput}
+                    value={editName}
+                    onChangeText={setEditName}
+                    placeholder="Group name"
+                    placeholderTextColor={COLORS.textMuted}
+                    maxLength={100}
+                  />
+                  <TextInput
+                    style={[styles.editInput, styles.editDescInput]}
+                    value={editDesc}
+                    onChangeText={setEditDesc}
+                    placeholder="Description (optional)"
+                    placeholderTextColor={COLORS.textMuted}
+                    multiline
+                    maxLength={500}
+                  />
+                  <TouchableOpacity
+                    style={[styles.saveBtn, savingGroup && { opacity: 0.6 }]}
+                    onPress={saveGroupEdit}
+                    disabled={savingGroup}
+                    activeOpacity={0.8}
+                  >
+                    {savingGroup ? (
+                      <ActivityIndicator size="small" color="white" />
+                    ) : (
+                      <Text style={styles.saveBtnText}>Save Changes</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              <View style={styles.settingsOptionsBlock}>
+                <TouchableOpacity
+                  style={styles.settingsOptionRow}
+                  onPress={() => { setIsSettingsOpen(false); setIsMembersOpen(true); }}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.settingsOptionIcon}><Ionicons name="people-outline" size={20} color={COLORS.textDark} /></View>
+                  <Text style={styles.settingsOptionText}>Members</Text>
+                  <Text style={styles.settingsOptionValue}>{members.length}</Text>
+                  <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+                </TouchableOpacity>
+              </View>
+
               <View style={styles.settingsSection}>
                 <Text style={styles.settingsSectionTitle}>Invite Members</Text>
                 <Text style={styles.settingsDesc}>Share this secret code with classmates so they can join.</Text>
@@ -464,6 +641,7 @@ export default function GroupChatScreen() {
                   </TouchableOpacity>
                 </View>
               </View>
+
               <View style={styles.settingsOptionsBlock}>
                 <View style={styles.settingsOptionRow}>
                   <View style={styles.settingsOptionIcon}><Ionicons name="notifications-outline" size={20} color={COLORS.textDark} /></View>
@@ -476,9 +654,86 @@ export default function GroupChatScreen() {
                   <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
                 </TouchableOpacity>
               </View>
+
+              <TouchableOpacity
+                style={[styles.leaveBtn, leavingGroup && { opacity: 0.6 }]}
+                onPress={handleLeaveGroup}
+                disabled={leavingGroup}
+                activeOpacity={0.8}
+              >
+                {leavingGroup ? (
+                  <ActivityIndicator size="small" color={COLORS.danger} />
+                ) : (
+                  <>
+                    <Ionicons name="exit-outline" size={18} color={COLORS.danger} />
+                    <Text style={styles.leaveBtnText}>Leave Group</Text>
+                  </>
+                )}
+              </TouchableOpacity>
             </ScrollView>
           </View>
         </View>
+      </Modal>
+
+      {/* Members Modal */}
+      <Modal visible={isMembersOpen} animationType="slide" transparent={true} onRequestClose={() => setIsMembersOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { minHeight: '55%', maxHeight: '75%' }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Members ({members.length})</Text>
+              <TouchableOpacity onPress={() => setIsMembersOpen(false)}>
+                <Ionicons name="close" size={24} color={COLORS.textDark} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {members.length === 0 ? (
+                <Text style={styles.emptyText}>No members yet. Share the invite code to add some.</Text>
+              ) : (
+                members.map(member => (
+                  <TouchableOpacity
+                    key={member.firebase_uid}
+                    style={styles.memberRow}
+                    onPress={() => setPeekMember(member)}
+                    activeOpacity={0.7}
+                  >
+                    <MemberAvatar member={member} size={44} />
+                    <View style={styles.memberInfo}>
+                      <View style={styles.memberNameRow}>
+                        <Text style={styles.memberName} numberOfLines={1}>{member.display_name}</Text>
+                        {member.is_you && <Text style={styles.youBadge}>You</Text>}
+                        {member.is_admin && <Text style={styles.adminBadgeSmall}>Admin</Text>}
+                      </View>
+                      <Text style={styles.memberMeta}>Level {member.level} · {member.role === 'superadmin' ? 'Superadmin' : member.role === 'educator' ? 'Educator' : 'Student'}</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Member Profile Peek Modal */}
+      <Modal visible={peekMember != null} animationType="fade" transparent={true} onRequestClose={() => setPeekMember(null)}>
+        <TouchableOpacity style={styles.reactionOverlay} activeOpacity={1} onPress={() => setPeekMember(null)}>
+          <View style={styles.peekCard}>
+            <MemberAvatar member={peekMember} size={84} />
+            <Text style={styles.peekName}>{peekMember?.display_name}</Text>
+            <View style={styles.peekBadges}>
+              {peekMember?.is_you && <Text style={styles.youBadge}>You</Text>}
+              {peekMember?.is_admin && <Text style={styles.adminBadge}>Admin</Text>}
+            </View>
+            <Text style={styles.peekMeta}>@{peekMember?.username}</Text>
+            <Text style={styles.peekMeta}>Level {peekMember?.level}</Text>
+            <Text style={styles.peekMeta}>
+              {peekMember?.role === 'superadmin' ? 'Superadmin' : peekMember?.role === 'educator' ? 'Educator' : 'Student'}
+            </Text>
+            <TouchableOpacity style={styles.peekCloseBtn} onPress={() => setPeekMember(null)} activeOpacity={0.8}>
+              <Text style={styles.peekCloseText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
       </Modal>
 
       {/* Reaction Picker */}
@@ -522,12 +777,18 @@ const styles = StyleSheet.create({
   chatHeaderTitleBox: { flex: 1, alignItems: 'center' },
   chatHeaderTitle: { color: 'white', fontSize: 18, fontFamily: FONTS.bold },
   chatHeaderSubtitle: { color: COLORS.purplePale, fontSize: 12, marginTop: 2, fontFamily: FONTS.medium },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerIconBtn: { padding: 4 },
   chatArea: { flex: 1, backgroundColor: COLORS.bg },
 
   messageWrapper: { marginBottom: 16, maxWidth: '80%' },
   messageMe: { alignSelf: 'flex-end', alignItems: 'flex-end' },
   messageOther: { alignSelf: 'flex-start', alignItems: 'flex-start' },
-  senderName: { fontSize: 10, color: COLORS.textMuted, marginBottom: 4, marginLeft: 4, fontFamily: FONTS.medium },
+  senderRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 4, marginLeft: 4, gap: 6 },
+  senderName: { fontSize: 10, color: COLORS.textMuted, fontFamily: FONTS.medium },
+  avatarImage: { width: '100%', height: '100%', borderRadius: 999 },
+  initialsCircle: { backgroundColor: COLORS.purpleVibrant, justifyContent: 'center', alignItems: 'center' },
+  initialsText: { color: 'white', fontFamily: FONTS.bold },
   messageBubble: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 20 },
   bubbleMe: { backgroundColor: COLORS.purplePrimary, borderBottomRightRadius: 4 },
   bubbleOther: { backgroundColor: COLORS.surface, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: COLORS.border },
@@ -578,4 +839,29 @@ const styles = StyleSheet.create({
   settingsOptionRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: COLORS.border },
   settingsOptionIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: COLORS.surface, justifyContent: 'center', alignItems: 'center', marginRight: 14 },
   settingsOptionText: { flex: 1, fontSize: 15, fontFamily: FONTS.medium, color: COLORS.textDark },
+  settingsOptionValue: { fontSize: 15, fontFamily: FONTS.bold, color: COLORS.textDark, marginRight: 6 },
+
+  editInput: { backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, fontFamily: FONTS.regular, color: COLORS.textDark, marginBottom: 10 },
+  editDescInput: { minHeight: 72, textAlignVertical: 'top' },
+  saveBtn: { backgroundColor: COLORS.purplePrimary, borderRadius: 12, paddingVertical: 12, alignItems: 'center', justifyContent: 'center' },
+  saveBtnText: { color: 'white', fontSize: 14, fontFamily: FONTS.bold },
+
+  memberRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: COLORS.border, gap: 12 },
+  memberInfo: { flex: 1 },
+  memberNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  memberName: { fontSize: 15, fontFamily: FONTS.semiBold, color: COLORS.textDark },
+  memberMeta: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 2 },
+  youBadge: { backgroundColor: 'rgba(34, 211, 238, 0.15)', color: '#0E7490', fontSize: 10, fontFamily: FONTS.bold, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, overflow: 'hidden' },
+  adminBadgeSmall: { backgroundColor: 'rgba(139, 92, 246, 0.12)', color: COLORS.purpleDark, fontSize: 10, fontFamily: FONTS.bold, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, overflow: 'hidden' },
+  emptyText: { color: COLORS.textMuted, fontSize: 13, fontFamily: FONTS.medium, textAlign: 'center', paddingVertical: 20 },
+
+  leaveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 20, paddingVertical: 14, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(239, 68, 68, 0.4)', backgroundColor: 'rgba(239, 68, 68, 0.06)', minHeight: 48 },
+  leaveBtnText: { color: COLORS.danger, fontSize: 15, fontFamily: FONTS.bold },
+
+  peekCard: { backgroundColor: COLORS.surface, borderRadius: 24, padding: 28, alignItems: 'center', width: '80%', borderWidth: 1, borderColor: COLORS.border, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 12 },
+  peekName: { fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textDark, marginTop: 12, textAlign: 'center' },
+  peekBadges: { flexDirection: 'row', gap: 6, marginTop: 8 },
+  peekMeta: { fontSize: 13, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 4 },
+  peekCloseBtn: { marginTop: 20, backgroundColor: COLORS.purplePrimary, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 32 },
+  peekCloseText: { color: 'white', fontSize: 14, fontFamily: FONTS.bold },
 });

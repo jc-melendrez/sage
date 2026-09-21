@@ -122,16 +122,49 @@ def get_user_groups(firebase_uid: str) -> list:
     return [{'id': d.id, **d.to_dict()} for d in docs]
 
 
+def get_study_group(group_id: str) -> dict | None:
+    db = get_db()
+    doc = db.collection('studyGroups').document(group_id).get()
+    return {'id': doc.id, **doc.to_dict()} if doc.exists else None
+
+
+def update_study_group(group_id: str, updates: dict) -> bool:
+    db = get_db()
+    ref = db.collection('studyGroups').document(group_id)
+    if not ref.get().exists:
+        return False
+    ref.update(updates)
+    return True
+
+
+def leave_study_group(group_id: str, firebase_uid: str) -> bool:
+    """Remove a user from the group. Deletes the group when the last member leaves."""
+    db = get_db()
+    ref = db.collection('studyGroups').document(group_id)
+    doc = ref.get()
+    if not doc.exists:
+        return False
+    members = doc.to_dict().get('members') or []
+    if firebase_uid not in members:
+        return False
+    if len(members) <= 1:
+        ref.delete()
+    else:
+        ref.update({'members': firestore.ArrayRemove([firebase_uid])})
+    return True
+
+
 # ── GROUP MESSAGES ───────────────────────────────────────────────
 
 ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢']
 
 
-def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '') -> str:
+def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '', sender_avatar: str = '') -> str:
     db = get_db()
     msg_ref = db.collection('studyGroups').document(group_id).collection('messages').add({
         'sender_uid': sender_uid,
         'sender_name': sender_name,
+        'sender_avatar': sender_avatar,
         'text': text,
         'reactions': {},
         'created_at': firestore.SERVER_TIMESTAMP,
@@ -140,7 +173,7 @@ def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '
     return msg_ref[1].id
 
 
-def get_messages(group_id: str, limit: int = 50, resolve_names: callable = None) -> list:
+def get_messages(group_id: str, limit: int = 50, resolve_users: callable = None) -> list:
     db = get_db()
     docs = (db.collection('studyGroups').document(group_id)
             .collection('messages')
@@ -159,19 +192,29 @@ def get_messages(group_id: str, limit: int = 50, resolve_names: callable = None)
             'id': d.id,
             'sender_uid': data.get('sender_uid'),
             'sender_name': data.get('sender_name') or 'Member',
+            'sender_avatar': data.get('sender_avatar') or '',
             'text': data.get('text'),
             'created_at': created_at,
             'reactions': data.get('reactions') or {},
         })
 
-    # Legacy messages (pre sender_name) get real names resolved from Django.
-    if resolve_names:
-        unknown = {m['sender_uid'] for m in messages if m['sender_name'] == 'Member' and m['sender_uid']}
+    # Legacy messages (pre sender_name / sender_avatar) get real data resolved
+    # from Django. `resolve_users` maps firebase_uid -> {name, avatar}.
+    if resolve_users:
+        unknown = {
+            m['sender_uid'] for m in messages
+            if m['sender_uid'] and (m['sender_name'] == 'Member' or not m['sender_avatar'])
+        }
         if unknown:
-            name_by_uid = resolve_names(unknown)
+            user_map = resolve_users(unknown)
             for m in messages:
-                if m['sender_name'] == 'Member' and m['sender_uid'] in name_by_uid:
-                    m['sender_name'] = name_by_uid[m['sender_uid']]
+                info = user_map.get(m['sender_uid'])
+                if not info:
+                    continue
+                if m['sender_name'] == 'Member':
+                    m['sender_name'] = info['name']
+                if not m['sender_avatar']:
+                    m['sender_avatar'] = info['avatar']
     return messages
 
 
