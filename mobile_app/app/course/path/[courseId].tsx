@@ -502,10 +502,10 @@ export default function CoursePathScreen() {
               style={[styles.topicDivider, { top: midY - 14 }]}
               pointerEvents="none"
             >
-              <View style={[styles.topicDividerLine, allPrevDone ? styles.topicDividerLineDone : null]} />
               <View style={styles.topicDividerPill}>
-                <Ionicons name="arrow-down" size={12} color={COLORS.purpleVibrant} />
-                <Text style={styles.topicDividerText}>Next topic · {f.topicTitle}</Text>
+                <View style={[styles.topicDividerDash, allPrevDone ? styles.topicDividerDashDone : null]} />
+                <Text style={[styles.topicDividerText, allPrevDone && styles.topicDividerTextDone]}>NEXT TOPIC</Text>
+                <View style={[styles.topicDividerDash, allPrevDone ? styles.topicDividerDashDone : null]} />
               </View>
             </View>
           );
@@ -836,23 +836,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     zIndex: 3,
   },
-  topicDividerLine: {
-    position: 'absolute',
-    top: 13,
-    left: '15%', right: '15%',
-    height: 2,
-    borderRadius: 1,
-    backgroundColor: 'rgba(139,92,246,0.25)',
-  },
-  topicDividerLineDone: {
-    backgroundColor: COLORS.trailDone,
-    opacity: 0.55,
-  },
   topicDividerPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
+    gap: 8,
+    paddingHorizontal: 16,
     paddingVertical: 6,
     borderRadius: 999,
     backgroundColor: 'rgba(255,255,255,0.95)',
@@ -864,10 +852,27 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 4,
   },
+  topicDividerDash: {
+    width: 22,
+    height: 1,
+    borderRadius: 1,
+    borderStyle: 'dashed',
+    borderTopWidth: 2,
+    borderColor: COLORS.purpleVibrant,
+  },
+  topicDividerDashDone: {
+    borderColor: COLORS.trailDone,
+    opacity: 0.6,
+  },
   topicDividerText: {
     fontSize: 12,
     fontFamily: FONTS.semiBold,
+    letterSpacing: 1.5,
     color: COLORS.purpleVibrant,
+    textTransform: 'uppercase',
+  },
+  topicDividerTextDone: {
+    color: COLORS.successDeep,
   },
 
   overlay: {
