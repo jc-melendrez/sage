@@ -27,8 +27,11 @@ urlpatterns = [
     path('groups/create/', views.CreateGroupView.as_view(), name='create_group'),
     path('groups/join/', views.JoinGroupView.as_view(), name='join_group'),
     path('groups/mine/', views.MyGroupsView.as_view(), name='my_groups'),
+    path('groups/<str:group_id>/members/', views.GroupMembersView.as_view(), name='group_members'),
+    path('groups/<str:group_id>/leave/', views.GroupLeaveView.as_view(), name='group_leave'),
     path('groups/<str:group_id>/chat/', views.GroupChatView.as_view(), name='group_chat'),
     path('groups/<str:group_id>/chat/<str:message_id>/reactions/', views.GroupChatReactionView.as_view(), name='group_chat_reactions'),
+    path('groups/<str:group_id>/', views.GroupUpdateView.as_view(), name='group_update'),
 
     path('courses/create/', views.CreateCourseView.as_view(), name='create_course'),
     path('courses/mine/', views.MyCoursesView.as_view(), name='my_courses'),

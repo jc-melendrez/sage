@@ -30,6 +30,12 @@ export const GRADIENT_COLORS = [
   COLORS.gradientEnd,
 ] as const;
 
+export const PURPLE_HEADER_GRADIENT = [
+  COLORS.purpleDeep,
+  COLORS.purpleDark,
+  COLORS.purplePrimary,
+] as const;
+
 export const FONTS = {
   black: 'Montserrat-Black',
   extraBold: 'Montserrat-ExtraBold',

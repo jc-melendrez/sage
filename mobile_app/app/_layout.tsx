@@ -10,6 +10,7 @@ import { testFirebase } from "@/services/firebaseTest";
 import { startSyncManager } from '@/services/syncManager';
 import { initOfflineQueue } from '@/services/offlineQueue';
 import { initOfflineGameDb } from '@/services/offlineGameService';
+import { initApiCache } from '@/services/apiCache';
 
 import {
   useFonts,
@@ -57,6 +58,7 @@ export default function RootLayout() {
   useEffect(() => {
     initOfflineQueue();
     initOfflineGameDb();
+    initApiCache();
     const stop = startSyncManager();
     return () => stop();
   }, []);
@@ -90,6 +92,7 @@ export default function RootLayout() {
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="login" options={{ headerShown: false }} />
+        <Stack.Screen name="edit-profile" options={{ headerShown: false, presentation: 'card' }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
         <Stack.Screen name="game" options={{ headerShown: false }} />
         <Stack.Screen name="superadmin" options={{ headerShown: false }} />

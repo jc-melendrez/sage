@@ -7,6 +7,8 @@ import {
   signInWithGoogle,
   signOutFirebase,
 } from './firebaseAuthService';
+import { getCachedResponse, setCachedResponse, setCacheUserId, clearApiCache, parseCached } from './apiCache';
+import { cachePolicyFor, buildCacheKey } from './cachePolicy';
 
 export interface LoginCredentials {
   username: string;
@@ -300,7 +302,7 @@ async function storeTokens(data: AuthResponse): Promise<void> {
 /**
  * Get the current user profile using stored Django token.
  */
-export async function getCurrentUser() {
+async function loadCurrentUser() {
   let token = await getToken();
   if (!token) return null;
   const doFetch = async (tok: string) => {
@@ -325,13 +327,53 @@ export async function getCurrentUser() {
   return await response.json();
 }
 
+export async function getCurrentUser() {
+  const url = `${API_BASE_URL}/users/me/`;
+  const policy = cachePolicyFor(url, 'GET');
+  if (policy) {
+    setCacheUserId(await getCachedUserId());
+    const key = buildCacheKey('GET', url);
+    const cached = getCachedResponse(key);
+    if (cached) {
+      const isFresh = Date.now() - cached.fetchedAt < cached.ttlSeconds * 1000;
+      if (isFresh) {
+        const hit = parseCached(cached.body);
+        if (hit != null) return hit;
+      } else {
+        (async () => {
+          try {
+            const fresh = await loadCurrentUser();
+            if (fresh) {
+              setCacheUserId(await getCachedUserId());
+              setCachedResponse(key, JSON.stringify(fresh), policy.ttlSeconds);
+            }
+          } catch {
+            // Keep serving the stale profile.
+          }
+        })();
+        const hit = parseCached(cached.body);
+        if (hit != null) return hit;
+      }
+    }
+  }
+
+  const profile = await loadCurrentUser();
+  if (profile && policy) {
+    setCacheUserId(await getCachedUserId());
+    setCachedResponse(buildCacheKey('GET', url), JSON.stringify(profile), policy.ttlSeconds);
+  }
+  return profile;
+}
+
 /**
- * Update the current user's editable profile fields (first_name, last_name).
- * Returns the updated profile.
+ * Update the current user's editable profile fields (username, first_name,
+ * last_name, avatar). Returns the updated profile.
  */
 export async function updateProfile(fields: {
+  username?: string;
   first_name?: string;
   last_name?: string;
+  avatar?: string;
 }) {
   let token = await getToken();
   if (!token) throw new Error('Not authenticated');
@@ -354,7 +396,14 @@ export async function updateProfile(fields: {
     const error = await safeJson(response);
     throw new Error(extractErrorMessage(error, 'Failed to update profile'));
   }
-  return await response.json();
+  const updated = await response.json();
+  const url = `${API_BASE_URL}/users/me/`;
+  const policy = cachePolicyFor(url, 'GET');
+  if (policy) {
+    setCacheUserId(await getCachedUserId());
+    setCachedResponse(buildCacheKey('GET', url), JSON.stringify(updated), policy.ttlSeconds);
+  }
+  return updated;
 }
 
 export async function getToken(): Promise<string | null> {
@@ -369,6 +418,8 @@ export async function logout(): Promise<void> {
   await signOutFirebase();
   await SecureStore.deleteItemAsync(TOKEN_KEY);
   await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
+  clearApiCache();
+  setCacheUserId(null);
 }
 
 function decodeJwt(token: string): Record<string, any> | null {

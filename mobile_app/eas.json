@@ -8,7 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://sage-bozz.onrender.com/api"
+        "EXPO_PUBLIC_API_URL": "https://sage-28kp.onrender.com/api"
       }
     },
     "preview": {
@@ -17,13 +17,13 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://sage-bozz.onrender.com/api"
+        "EXPO_PUBLIC_API_URL": "https://sage-28kp.onrender.com/api"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://sage-bozz.onrender.com/api"
+        "EXPO_PUBLIC_API_URL": "https://sage-28kp.onrender.com/api"
       }
     }
   },

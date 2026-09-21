@@ -649,9 +649,10 @@ class GroupChatMessageTests(APITestCase):
         self.assertEqual(res.data['text'], 'hello world')
         self.assertEqual(res.data['sender_uid'], 'fb-uid-chat')
         self.assertEqual(res.data['sender_name'], 'Chat Person')
+        self.assertEqual(res.data['sender_avatar'], '')
         self.assertIn('created_at', res.data)
         mock_send.assert_called_once_with(
-            'group-abc', 'fb-uid-chat', 'hello world', 'Chat Person',
+            'group-abc', 'fb-uid-chat', 'hello world', 'Chat Person', '',
         )
 
     def test_post_requires_text(self):
@@ -678,9 +679,9 @@ class GroupChatMessageTests(APITestCase):
         self.assertEqual(res.data[0]['sender_uid'], 'fb-uid-chat')
         self.assertEqual(res.data[0]['text'], 'old message')
         self.assertEqual(res.data[0]['reactions'], {'👍': ['some-other-uid']})
-        # View passes a legacy-name resolver into the service
+        # View passes a legacy-user resolver into the service
         mock_get.assert_called_once()
-        self.assertTrue(callable(mock_get.call_args.kwargs.get('resolve_names')))
+        self.assertTrue(callable(mock_get.call_args.kwargs.get('resolve_users')))
 
     def test_me_includes_firebase_uid(self):
         res = self.client.get(reverse('current_user_profile'))
@@ -741,6 +742,115 @@ class GroupChatReactionTests(APITestCase):
             format='json',
         )
         self.assertEqual(res.status_code, 401)
+
+
+class GroupMembersAndSettingsTests(APITestCase):
+    """Member list, admin edit, and leave-group endpoints."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.me = User.objects.create_user(
+            username='leader', password='pass12345', role='student',
+            first_name='Lead', last_name='Er',
+            firebase_uid='fb-uid-leader', avatar='sloth',
+        )
+        self.member = User.objects.create_user(
+            username='follower', password='pass12345', role='student',
+            first_name='Fold', last_name='Lower',
+            firebase_uid='fb-uid-follower', avatar='penguin',
+        )
+        self.ghost = User.objects.create_user(
+            username='ghost', password='pass12345', role='student',
+            first_name='No', last_name='Body',
+            firebase_uid='fb-uid-ghost',
+        )
+        self.client.force_authenticate(user=self.me)
+
+    def _group(self, created_by='fb-uid-leader'):
+        return {
+            'id': 'group-abc',
+            'name': 'Study Squad',
+            'description': 'Math help',
+            'created_by': created_by,
+            'members': ['fb-uid-leader', 'fb-uid-follower'],
+        }
+
+    def test_members_returns_profiles_admin_first(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()):
+            res = self.client.get(reverse('group_members', args=['group-abc']))
+        self.assertEqual(res.status_code, 200)
+        by_uid = {m['firebase_uid']: m for m in res.data}
+
+        me = by_uid['fb-uid-leader']
+        self.assertTrue(me['is_admin'])
+        self.assertTrue(me['is_you'])
+        self.assertEqual(me['avatar'], 'sloth')
+        self.assertEqual(me['display_name'], 'Lead Er')
+
+        other = by_uid['fb-uid-follower']
+        self.assertFalse(other['is_admin'])
+        self.assertFalse(other['is_you'])
+        self.assertEqual(other['avatar'], 'penguin')
+        self.assertEqual(other['role'], 'student')
+        self.assertIn('level', other)
+
+        self.assertEqual(res.data[0]['firebase_uid'], 'fb-uid-leader')
+
+    def test_members_skips_uids_without_django_account(self):
+        group = self._group()
+        group['members'] = ['fb-uid-leader', 'fb-uid-ghost', 'no-account-uid']
+        with patch.object(users_views, 'get_study_group', return_value=group):
+            res = self.client.get(reverse('group_members', args=['group-abc']))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.data), 2)
+
+    def test_members_404_when_group_missing(self):
+        with patch.object(users_views, 'get_study_group', return_value=None):
+            res = self.client.get(reverse('group_members', args=['group-abc']))
+        self.assertEqual(res.status_code, 404)
+
+    def test_update_group_as_admin(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()) as mock_get, \
+             patch.object(users_views, 'update_study_group', return_value=True) as mock_update:
+            res = self.client.patch(
+                reverse('group_update', args=['group-abc']),
+                {'name': 'Renamed', 'description': 'New desc'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['name'], 'Renamed')
+        self.assertEqual(res.data['description'], 'New desc')
+        mock_update.assert_called_once_with('group-abc', {'name': 'Renamed', 'description': 'New desc'})
+
+    def test_update_group_denied_for_non_admin(self):
+        with patch.object(users_views, 'get_study_group',
+                          return_value=self._group(created_by='fb-uid-other')):
+            res = self.client.patch(
+                reverse('group_update', args=['group-abc']),
+                {'name': 'Hijack'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 403)
+
+    def test_update_group_requires_name(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()):
+            res = self.client.patch(
+                reverse('group_update', args=['group-abc']),
+                {'name': '   '},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 400)
+
+    def test_leave_group(self):
+        with patch.object(users_views, 'leave_study_group', return_value=True) as mock_leave:
+            res = self.client.post(reverse('group_leave', args=['group-abc']))
+        self.assertEqual(res.status_code, 200)
+        mock_leave.assert_called_once_with('group-abc', 'fb-uid-leader')
+
+    def test_leave_group_404_when_missing(self):
+        with patch.object(users_views, 'leave_study_group', return_value=False):
+            res = self.client.post(reverse('group_leave', args=['group-abc']))
+        self.assertEqual(res.status_code, 404)
 
 
 class ProfileUpdateTests(APITestCase):

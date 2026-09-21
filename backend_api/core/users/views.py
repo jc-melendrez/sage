@@ -43,6 +43,7 @@ from .otp import create_otp_challenge, otp_matches
 from core.firestore_service import (
     get_user_profile, get_badges,
     create_study_group, join_group_by_code, get_user_groups,
+    get_study_group, update_study_group, leave_study_group,
     send_message, get_messages, generate_join_code,
     toggle_reaction, ALLOWED_REACTIONS,
 )
@@ -378,8 +379,8 @@ class CurrentUserProfileView(APIView):
     def patch(self, request):
         """Update the caller's own editable profile fields.
 
-        Only fields the serializer exposes as writable (first_name, last_name)
-        are accepted; username/email/role are read-only.
+        Only fields the serializer exposes as writable (first_name, last_name,
+        username, avatar) are accepted; email/role are read-only.
         """
         user = request.user
         serializer = UserProfileSerializer(user, data=request.data, partial=True)
@@ -630,21 +631,29 @@ class GroupChatView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, group_id):
-        def resolve_names(uids):
+        def resolve_users(uids):
             users = User.objects.filter(firebase_uid__in=uids)
-            return {u.firebase_uid: (u.get_full_name() or u.username) for u in users}
-        return Response(get_messages(group_id, resolve_names=resolve_names))
+            return {
+                u.firebase_uid: {
+                    'name': u.get_full_name() or u.username,
+                    'avatar': u.avatar or '',
+                }
+                for u in users
+            }
+        return Response(get_messages(group_id, resolve_users=resolve_users))
 
     def post(self, request, group_id):
         text = request.data.get('text')
         if not text:
             return Response({"error": "Message text is required"}, status=400)
         sender_name = request.user.get_full_name() or request.user.username
-        msg_id = send_message(group_id, request.user.firebase_uid, text, sender_name)
+        sender_avatar = request.user.avatar or ''
+        msg_id = send_message(group_id, request.user.firebase_uid, text, sender_name, sender_avatar)
         return Response({
             "id": msg_id,
             "sender_uid": request.user.firebase_uid,
             "sender_name": sender_name,
+            "sender_avatar": sender_avatar,
             "text": text,
             "reactions": {},
             # Server timestamp resolves in Firestore moments later; give the
@@ -674,6 +683,80 @@ class GroupChatReactionView(APIView):
         except LookupError:
             return Response({"error": "Message not found"}, status=404)
         return Response({"id": message_id, "reactions": reactions})
+
+
+class GroupMembersView(APIView):
+    """List a study group's members with profile info (avatar, role, level)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, group_id):
+        group = get_study_group(group_id)
+        if not group:
+            return Response({"error": "Group not found"}, status=404)
+        member_uids = group.get('members') or []
+        users = User.objects.filter(firebase_uid__in=member_uids)
+        by_uid = {u.firebase_uid: u for u in users}
+        created_by = group.get('created_by')
+
+        members = []
+        for uid in member_uids:
+            user = by_uid.get(uid)
+            if user is None:
+                continue
+            members.append({
+                'id': user.id,
+                'username': user.username,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'display_name': user.get_full_name().strip() or user.username,
+                'avatar': user.avatar or '',
+                'role': user.role,
+                'level': user.level,
+                'firebase_uid': uid,
+                'is_admin': uid == created_by,
+                'is_you': uid == request.user.firebase_uid,
+            })
+
+        members.sort(key=lambda m: (not m['is_admin'], m['display_name'].lower()))
+        return Response(members)
+
+
+class GroupUpdateView(APIView):
+    """Admin-only group edits: rename the group and/or update its description."""
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, group_id):
+        group = get_study_group(group_id)
+        if not group:
+            return Response({"error": "Group not found"}, status=404)
+        if group.get('created_by') != request.user.firebase_uid:
+            return Response({"error": "Only the group admin can edit settings"}, status=403)
+
+        updates = {}
+        if 'name' in request.data:
+            name = (request.data.get('name') or '').strip()
+            if not name:
+                return Response({"error": "Group name is required"}, status=400)
+            updates['name'] = name[:100]
+        if 'description' in request.data:
+            updates['description'] = (request.data.get('description') or '').strip()[:500]
+        if not updates:
+            return Response({"error": "Nothing to update"}, status=400)
+
+        update_study_group(group_id, updates)
+        return Response({'id': group_id, **updates})
+
+
+class GroupLeaveView(APIView):
+    """Remove the caller from the group. The group is deleted when the last member leaves."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, group_id):
+        if not request.user.firebase_uid:
+            return Response({"error": "Account has no linked Firebase profile"}, status=400)
+        if not leave_study_group(group_id, request.user.firebase_uid):
+            return Response({"error": "Group not found"}, status=404)
+        return Response({"message": "Left the group."})
 
 
 # ---------- COURSES: each course has its own set of students ----------
@@ -1281,6 +1364,7 @@ def sync_user_to_firestore(user):
             'current_xp': user.current_xp,
             'total_points': user.total_points,
             'streak': user.streak,
+            'avatar': user.avatar,
             'avatarColor': PALETTE[user.id % len(PALETTE)],
         }, merge=True)
     except Exception as e:

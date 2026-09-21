@@ -17,7 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
-import { COLORS, FONTS, DECK_COLORS, GRADIENT_COLORS } from '@/constants/gameTheme';
+import { COLORS, FONTS, DECK_COLORS, GRADIENT_COLORS, PURPLE_HEADER_GRADIENT } from '@/constants/gameTheme';
 import FlashBanner, { BannerType } from '@/components/FlashBanner';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
@@ -26,7 +26,6 @@ import {
   initFlashcardDb,
   getDecks,
   getDeckSummary,
-  getStreak,
   getReviewCountOn,
   getTotalReviews,
   getRatingTotals,
@@ -46,7 +45,6 @@ export default function FlashcardsHome() {
   const [summaries, setSummaries] = useState<Record<number, ReturnType<typeof getDeckSummary>>>({});
   const [loaded, setLoaded] = useState(false);
 
-  const [streak, setStreak] = useState(0);
   const [reviewsToday, setReviewsToday] = useState(0);
   const [totalReviews, setTotalReviews] = useState(0);
   const [totals, setTotals] = useState<Record<string, number>>({});
@@ -72,7 +70,6 @@ export default function FlashcardsHome() {
     const map: Record<number, ReturnType<typeof getDeckSummary>> = {};
     for (const d of all) map[d.id] = getDeckSummary(d.id);
     setSummaries(map);
-    setStreak(getStreak());
     setReviewsToday(getReviewCountOn(new Date()));
     setTotalReviews(getTotalReviews());
     setTotals(getRatingTotals());
@@ -154,30 +151,32 @@ export default function FlashcardsHome() {
 
   return (
     <KeyboardAvoidingView style={styles.keyboardWrap} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-    <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
-    <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
-      <StatusBar barStyle="dark-content" backgroundColor={COLORS.bg} translucent={false} />
+    <View style={styles.root}>
+      {/* PURPLE HEADER BAND */}
+      <LinearGradient colors={PURPLE_HEADER_GRADIENT} style={styles.headerBand}>
+        <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
+        <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.7}>
+            <Ionicons name="chevron-back" size={22} color="#fff" />
+          </TouchableOpacity>
+          <View style={styles.headerTitleWrap}>
+            <Text style={styles.headerTitle}>SOLO MODE</Text>
+            <Text style={styles.headerSub}>Flashcard studio</Text>
+          </View>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => setImportOpen(true)} activeOpacity={0.7}>
+            <Ionicons name="cloud-download-outline" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      </LinearGradient>
 
+      <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
+      <View style={styles.container}>
       <FlashBanner
         visible={!!banner}
         message={banner?.message ?? ''}
         type={banner?.type ?? 'info'}
         onHide={() => setBanner(null)}
       />
-
-      {/* HEADER */}
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.7}>
-          <Ionicons name="chevron-back" size={22} color={COLORS.textSecondary} />
-        </TouchableOpacity>
-        <View style={styles.headerTitleWrap}>
-          <Text style={styles.headerTitle}>SOLO MODE</Text>
-          <Text style={styles.headerSub}>Flashcard studio</Text>
-        </View>
-        <TouchableOpacity style={styles.headerBtn} onPress={() => setImportOpen(true)} activeOpacity={0.7}>
-          <Ionicons name="cloud-download-outline" size={20} color={COLORS.accentBright} />
-        </TouchableOpacity>
-      </View>
 
       {!loaded ? (
         <View style={styles.center}>
@@ -187,11 +186,6 @@ export default function FlashcardsHome() {
         <>
           {/* STAT STRIP */}
           <View style={styles.statStrip}>
-            <View style={styles.statCell}>
-              <Text style={styles.statValue}>{streak}</Text>
-              <Text style={styles.statLabel}>DAY STREAK</Text>
-            </View>
-            <View style={styles.statDivider} />
             <View style={styles.statCell}>
               <Text style={styles.statValue}>{reviewsToday}</Text>
               <Text style={styles.statLabel}>TODAY</Text>
@@ -473,14 +467,17 @@ export default function FlashcardsHome() {
           </View>
         </View>
       </Modal>
+      </View>
+      </LinearGradient>
     </View>
-    </LinearGradient>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   keyboardWrap: { flex: 1 },
+  root: { flex: 1 },
+  headerBand: { overflow: 'hidden' },
   gradient: { flex: 1 },
   container: { flex: 1, paddingHorizontal: 20 },
   header: {
@@ -488,26 +485,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 18,
+    paddingBottom: 26,
   },
   headerBtn: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(124,58,237,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.15)',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(124,58,237,0.15)',
+    borderColor: 'rgba(255,255,255,0.3)',
   },
   headerTitleWrap: { alignItems: 'center' },
   headerTitle: {
-    color: COLORS.textPrimary,
+    color: '#fff',
     fontSize: 18,
     fontFamily: FONTS.extraBold,
     letterSpacing: 1,
   },
   headerSub: {
-    color: COLORS.textMuted,
+    color: 'rgba(255,255,255,0.75)',
     fontSize: 12,
     fontFamily: FONTS.semiBold,
     marginTop: 2,

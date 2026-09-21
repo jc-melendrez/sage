@@ -1,9 +1,8 @@
-﻿import React, { useEffect, useState } from 'react';
-import { Platform } from 'react-native';
+import React, { useEffect, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { 
   View, Text, TextInput, TouchableOpacity, StyleSheet, 
-  ActivityIndicator, Alert, StatusBar, KeyboardAvoidingView 
+  ActivityIndicator, Alert, StatusBar, KeyboardAvoidingView, Platform 
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -99,7 +98,7 @@ export default function LoginScreen() {
       } else {
         router.replace(roleHomePath(response.user));
       }
-    } catch (err) {
+    } catch {
       Alert.alert('Login Failed', error || 'Please check your credentials');
     }
   };
@@ -128,7 +127,7 @@ export default function LoginScreen() {
       } else {
         router.replace(roleHomePath(response.user));
       }
-    } catch (err) {
+    } catch {
       Alert.alert('Sign Up Failed', error || 'Please try again');
     }
   };
@@ -146,7 +145,7 @@ export default function LoginScreen() {
       clearError();
       const response = await verifyOtp(challengeToken, otpCode);
       router.replace(roleHomePath(response.user));
-    } catch (err) {
+    } catch {
       Alert.alert('Verification Failed', error || 'Please try again');
     }
   };
@@ -348,7 +347,14 @@ export default function LoginScreen() {
                   <TextInput 
                     placeholder="Password" 
                     secureTextEntry={!showPassword}
-                    style={[styles.input, { flex: 1 }]} 
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    autoComplete={showPassword ? 'off' : 'current-password'}
+                    textContentType={showPassword ? 'none' : 'password'}
+                    importantForAutofill="no"
+                    key={showPassword ? 'pwd-visible' : 'pwd-hidden'}
+                    selectionColor={COLORS.purplePrimary}
+                    style={[styles.input, { flex: 1, fontFamily: Platform.OS === 'ios' ? 'System' : 'sans-serif' }]} 
                     value={password} 
                     onChangeText={setPassword} 
                     placeholderTextColor="#9CA3AF"
