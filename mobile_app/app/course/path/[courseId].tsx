@@ -406,6 +406,12 @@ export default function CoursePathScreen() {
 
   const selectedNode = selectedNodeIndex !== null ? flat[selectedNodeIndex] : null;
 
+  // Header title follows the topic of the active (scroll-tracked) node.
+  const activeTopicTitle =
+    activeNodeIndex != null && flat[activeNodeIndex]
+      ? flat[activeNodeIndex].topicTitle
+      : topics.length > 0 ? topics[0].title : 'Learning Path';
+
   return (
     <LinearGradient colors={[COLORS.bgTop, COLORS.bgMid, COLORS.bgBottom]} locations={[0, 0.32, 0.75]} style={styles.container}>
       {/* Header */}
@@ -416,7 +422,7 @@ export default function CoursePathScreen() {
           </TouchableOpacity>
           <View style={styles.headerCenter}>
             <Text style={styles.headerTitle} numberOfLines={1}>
-              {topics.length > 0 ? topics[0].title : 'Learning Path'}
+              {activeTopicTitle}
             </Text>
             <Text style={styles.headerSub}>{completedCount} of {flat.length} activities</Text>
           </View>
@@ -484,6 +490,26 @@ export default function CoursePathScreen() {
             }
           />
         ))}
+
+        {/* Topic transition dividers (first node of a topic that isn't index 0) */}
+        {flat.map((f, i) => {
+          if (!f.isFirstInTopic || i === 0) return null;
+          const midY = (getNodeY(i - 1) + getNodeY(i)) / 2;
+          const allPrevDone = flat.slice(0, i).every(n => n.node.progress?.passed);
+          return (
+            <View
+              key={`divider-${f.node.id}`}
+              style={[styles.topicDivider, { top: midY - 14 }]}
+              pointerEvents="none"
+            >
+              <View style={[styles.topicDividerLine, allPrevDone ? styles.topicDividerLineDone : null]} />
+              <View style={styles.topicDividerPill}>
+                <Ionicons name="arrow-down" size={12} color={COLORS.purpleVibrant} />
+                <Text style={styles.topicDividerText}>Next topic · {f.topicTitle}</Text>
+              </View>
+            </View>
+          );
+        })}
 
         {/* Trophy at the very end */}
         {flat.length > 0 && (
@@ -802,6 +828,46 @@ const styles = StyleSheet.create({
     justifyContent: 'center', alignItems: 'center',
     borderWidth: 3, borderColor: 'rgba(255,255,255,0.5)',
     shadowColor: '#F59E0B', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.4, shadowRadius: 8, elevation: 5,
+  },
+
+  topicDivider: {
+    position: 'absolute',
+    left: 0, right: 0,
+    alignItems: 'center',
+    zIndex: 3,
+  },
+  topicDividerLine: {
+    position: 'absolute',
+    top: 13,
+    left: '15%', right: '15%',
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: 'rgba(139,92,246,0.25)',
+  },
+  topicDividerLineDone: {
+    backgroundColor: COLORS.trailDone,
+    opacity: 0.55,
+  },
+  topicDividerPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    shadowColor: COLORS.shadow,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.18,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  topicDividerText: {
+    fontSize: 12,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.purpleVibrant,
   },
 
   overlay: {
