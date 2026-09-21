@@ -885,7 +885,7 @@ export default function CourseDetailScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
-  content: { flex: 1, paddingHorizontal: 24, paddingTop: 24 },
+  content: { flex: 1, paddingHorizontal: 24, paddingTop: 24, backgroundColor: 'white' },
   loadingBox: { paddingVertical: 60, alignItems: 'center' },
 
   tabsContainer: { flexDirection: 'row', marginBottom: 8 },

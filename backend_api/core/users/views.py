@@ -5,6 +5,7 @@ import json
 import time
 import requests
 import re
+from datetime import timedelta
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from rest_framework import status
@@ -530,7 +531,120 @@ def user_detail(request, user_id):
     return Response(serializer.data)
 
 
-@api_view(['GET'])
+def _recommendations_are_stale(user):
+    latest = Recommendation.objects.filter(user=user).order_by('-created_at').first()
+    if latest is None:
+        return True
+    return timezone.now() - latest.created_at > timedelta(hours=24)
+
+
+def _build_student_progress_snapshot(user):
+    """Gather learning-path progress + recent activity for the AI prompt."""
+    lines = []
+
+    # 1. Learning-path node progress across enrolled courses.
+    path_topics = Topic.objects.filter(
+        course__in=user.enrolled_courses.all()
+    ).select_related('course').order_by('course_id', 'order')
+    if path_topics.exists():
+        lines.append("LEARNING PATH PROGRESS:")
+        progress_map = {
+            np.node_id: np
+            for np in NodeProgress.objects.filter(user=user)
+        }
+        for topic in path_topics:
+            for node in topic.nodes.all().order_by('order'):
+                np = progress_map.get(node.id)
+                if np is None:
+                    status_text = 'not_started'
+                elif np.passed:
+                    status_text = f"passed (score {np.score}/{np.total}, tries {np.attempts})"
+                else:
+                    status_text = f"failed (score {np.score}/{np.total}, tries {np.attempts})"
+                lines.append(
+                    f"- [{topic.course.name} > {topic.title}] {node.title} "
+                    f"({node.node_type}): {status_text}"
+                )
+
+    # 2. Recent activity.
+    recent = Activity.objects.filter(user=user).order_by('-created_at')[:10]
+    if recent.exists():
+        lines.append("RECENT ACTIVITY:")
+        for act in recent:
+            lines.append(f"- {act.title} ({act.activity_type}): {act.description}")
+
+    return "\n".join(lines) or "The student has no learning activity yet."
+
+
+def _generate_recommendations(user):
+    """Call Groq to write personalized recommendations and persist them."""
+    from django.conf import settings
+
+    snapshot = _build_student_progress_snapshot(user)
+
+    GROQ_API_KEY = getattr(settings, 'GROQ_API_KEY', None)
+    if not GROQ_API_KEY:
+        return None
+
+    system_prompt = (
+        "You are SAGE, a Smart Assistant for Group-Based Education. "
+        "You write short, personalized study recommendations for a student based on "
+        "their real progress data. "
+        "You MUST return ONLY valid JSON. Do not include any text or markdown outside the JSON. "
+        "The JSON structure must be: "
+        '{"recommendations": [{"title": "Short actionable title", "description": "2-3 sentence explanation"}]} '
+        "Return exactly 3 to 4 recommendations that are specific to the data provided."
+    )
+
+    user_prompt = (
+        "Here is the student's current progress:\n\n"
+        f"{snapshot}\n\n"
+        "Write personalized study recommendations based on this. "
+        "Focus on the most useful next steps: topics to review or restart, "
+        "strengths to build on, and consistent study habits."
+    )
+
+    payload = {
+        "model": "openai/gpt-oss-120b",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.7,
+    }
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        api_response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        api_response.raise_for_status()
+        data = api_response.json()
+        parsed = json.loads(data['choices'][0]['message']['content'])
+        items = parsed.get('recommendations', [])[:4]
+        if not items:
+            return None
+
+        Recommendation.objects.filter(user=user).delete()
+        for item in items:
+            title = str(item.get('title', '')).strip()
+            description = str(item.get('description', '')).strip()
+            if title:
+                Recommendation.objects.create(user=user, title=title, description=description)
+        return Recommendation.objects.filter(user=user)
+    except Exception as e:
+        print(f"[Recommendation Generation Error] {e}")
+        return None
+
+
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def user_recommendations(request, user_id):
     try:
@@ -539,6 +653,11 @@ def user_recommendations(request, user_id):
         return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
     if not _can_access_user(request.user, user):
         return Response({'error': 'You are not authorized to view this user.'}, status=status.HTTP_403_FORBIDDEN)
+
+    # POST forces a fresh AI regeneration; GET auto-generates when empty/stale.
+    if request.method == 'POST' or _recommendations_are_stale(user):
+        _generate_recommendations(user)
+
     recommendations = Recommendation.objects.filter(user_id=user_id)
     serializer = RecommendationSerializer(recommendations, many=True)
     return Response(serializer.data)

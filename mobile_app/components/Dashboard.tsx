@@ -126,6 +126,7 @@ export default function Dashboard() {
   const currentPageRef = useRef(0);
   const scrollViewRef = useRef<ScrollView>(null);
   const autoSlideTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const refreshingRecs = useRef(false);
   
   // Animation value for smooth dot transition
   const scrollX = useSharedValue(0);
@@ -252,7 +253,11 @@ export default function Dashboard() {
         setBadges(await apiCall<Badge[]>(`/users/${realUserId}/badges/`));
       }
 
-      setRecommendations(await apiCall<Recommendation[]>(`/users/${realUserId}/recommendations/`));
+      let recs = await apiCall<Recommendation[]>(`/users/${realUserId}/recommendations/`);
+      if (Array.isArray(recs) && recs.length === 0) {
+        recs = await refreshRecommendations(realUserId);
+      }
+      setRecommendations(recs);
       setActivities(await apiCall<Activity[]>(`/users/${realUserId}/activities/`));
     } catch (err) {
       const rawError = err instanceof Error ? err : new Error('An error occurred');
@@ -295,6 +300,27 @@ export default function Dashboard() {
   };
   const handleLessonDisplayClose = () => {
     setLesson(null);
+  };
+
+  const refreshRecommendations = async (userId: number): Promise<Recommendation[]> => {
+    try {
+      const data = await apiCall<Recommendation[]>(`/users/${userId}/recommendations/`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      return Array.isArray(data) ? data : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const handleRefreshRecommendations = async () => {
+    if (refreshingRecs.current) return;
+    refreshingRecs.current = true;
+    if (user?.id) {
+      setRecommendations(await refreshRecommendations(user.id));
+    }
+    refreshingRecs.current = false;
   };
 
   if (loading && !user) {
@@ -506,8 +532,8 @@ export default function Dashboard() {
               </LinearGradient>
               <Text style={styles.sectionTitle}>For You</Text>
             </View>
-            <TouchableOpacity>
-              <Text style={styles.viewAllText}>View all</Text>
+            <TouchableOpacity onPress={handleRefreshRecommendations}>
+              <Text style={styles.viewAllText}>Refresh</Text>
             </TouchableOpacity>
           </View>
 
