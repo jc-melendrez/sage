@@ -652,6 +652,61 @@ class FinishGameView(APIView):
                     print(f'[FinishGame XP Award Error] user {entry["user_id"]}: {e}')
 
 
+class RoomLeaderboardView(APIView):
+    permission_classes = []
+
+    def get(self, request, room_code):
+        room_code = room_code.upper()
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+
+        room_data = room.to_dict()
+
+        players = []
+        for p in room_ref.collection('players').stream():
+            d = p.to_dict() or {}
+            players.append({
+                'id': p.id,
+                'displayName': d.get('displayName', 'Player'),
+                'score': d.get('score', 0),
+                'answeredCount': d.get('answeredCount', 0),
+                'isFinished': bool(d.get('isFinished', False)),
+                'teamId': d.get('teamId'),
+            })
+        players.sort(key=lambda x: x['score'], reverse=True)
+
+        teams = []
+        for t in room_ref.collection('teams').stream():
+            d = t.to_dict() or {}
+            teams.append({
+                'id': t.id,
+                'name': d.get('name', f'Team {t.id}'),
+                'color': d.get('color'),
+                'score': d.get('score', 0),
+                'correctCount': d.get('correctCount', 0),
+                'answeredCount': d.get('answeredCount', 0),
+                'memberCount': d.get('memberCount', 0),
+            })
+        teams.sort(key=lambda x: x['score'], reverse=True)
+
+        return Response({
+            'roomCode': room_code,
+            'status': room_data.get('status', 'waiting'),
+            'topic': room_data.get('topic', ''),
+            'questionCount': room_data.get('questionCount', 0),
+            'timePerQuestion': room_data.get('timePerQuestion', 15),
+            'teamMode': bool(room_data.get('teamMode', False)),
+            'hostId': str(room_data.get('hostId', '')),
+            'hostName': room_data.get('hostName', ''),
+            'players': players,
+            'teams': teams,
+        })
+
+
 class OfflineResultsView(APIView):
     permission_classes = [IsAuthenticated]
 
