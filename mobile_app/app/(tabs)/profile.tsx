@@ -221,7 +221,6 @@ export default function ProfileScreen() {
         <View style={styles.section}>
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>Badges</Text>
-            <TouchableOpacity><Text style={styles.viewAllText}>View All</Text></TouchableOpacity>
           </View>
           <View style={styles.badgesGrid}>
             {earnedBadges.length > 0 ? (
@@ -262,14 +261,7 @@ export default function ProfileScreen() {
                 <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
               </TouchableOpacity>
             )}
-            <TouchableOpacity style={styles.menuItem}>
-              <View style={styles.menuItemLeft}>
-                <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />
-                <Text style={styles.menuItemText}>Notifications</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.menuItem, styles.borderTop]}>
+            <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/settings' as Href)}>
               <View style={styles.menuItemLeft}>
                 <Ionicons name="settings-outline" size={22} color={COLORS.textSecondary} />
                 <Text style={styles.menuItemText}>Settings</Text>
