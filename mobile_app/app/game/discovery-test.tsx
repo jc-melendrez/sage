@@ -12,6 +12,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { generateRoomCode, LanMessage } from '@/services/lanProtocol';
+import { LanHostServer } from '@/services/lanHost';
 import { LanClientSession } from '@/services/lanClient';
 import { lanGame, setLanClient, resetLanState } from '@/services/lanSession';
 import {
@@ -51,15 +52,16 @@ export default function DiscoveryTestScreen() {
   const [rooms, setRooms] = useState<DiscoveredRoom[]>([]);
   const [log, setLog] = useState<string[]>([]);
   const joiningRef = useRef(false);
+  const hostRef = useRef<LanHostServer | null>(null);
 
   const pushLog = (line: string) => setLog(prev => [...prev.slice(-19), line]);
 
-  const onHostPlayerCount = () => 0;
+  const onHostPlayerCount = () => hostRef.current?.playerCount ?? 0;
 
   useEffect(() => {
     if (hosting) {
       const ok = startAdvertising(code.trim(), title, onHostPlayerCount);
-      setHostStatus(ok ? 'BROADCASTING ✓ (socket up)' : 'FAILED — socket error');
+      setHostStatus(ok ? 'HOSTING ✓ TCP 5050 + UDP 5051' : 'BROADCAST FAILED — socket error');
     } else {
       stopAdvertising();
       setHostStatus('');
@@ -68,6 +70,8 @@ export default function DiscoveryTestScreen() {
 
   useEffect(() => {
     return () => {
+      hostRef.current?.stop();
+      hostRef.current = null;
       stopAdvertising();
       stopScanning();
     };
@@ -75,9 +79,24 @@ export default function DiscoveryTestScreen() {
 
   const toggleHost = () => {
     if (hosting) {
+      hostRef.current?.stop();
+      hostRef.current = null;
       setHosting(false);
     } else {
       if (!code.trim()) return;
+      const host = new LanHostServer(code.trim());
+      host.onMessage(msg => {
+        if (msg.t === 'roster') {
+          pushLog(`${msg.players.filter(p => p.connected).length} player(s) in room`);
+        }
+      });
+      try {
+        host.start();
+      } catch {
+        pushLog('HOST FAILED — TCP server error');
+        return;
+      }
+      hostRef.current = host;
       setHosting(true);
     }
   };

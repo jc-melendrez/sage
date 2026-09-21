@@ -10,7 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Badge, Course, LessonProgress, LoginOtpChallenge, User
+from .models import Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, Topic, User
 from . import gamification
 from . import views as users_views
 
@@ -492,7 +492,9 @@ class FirebaseSignupRoleTests(APITestCase):
         }
         payload = {'id_token': 'fake-token', 'username': email.split('@')[0], **(extra or {})}
         with patch.object(users_views, 'verify_firebase_token', return_value=decoded), \
-             patch.object(users_views, 'sync_user_to_firestore'):
+             patch.object(users_views, 'sync_user_to_firestore'), \
+             patch.object(users_views, 'get_role_claim', return_value=None), \
+             patch.object(users_views, 'set_role_claim', return_value=True):
             return self.client.post(reverse('firebase_login'), payload, format='json')
 
     def test_is_educator_flag_creates_educator(self):
@@ -516,6 +518,48 @@ class FirebaseSignupRoleTests(APITestCase):
         res = self._signup('plain.student@example.com')
         self.assertEqual(res.status_code, 200)
         self.assertEqual(User.objects.get(email='plain.student@example.com').role, 'student')
+
+    def test_login_restores_educator_role_from_claim(self):
+        # A DB reset wiped the Django row, but the Firebase custom claim still says
+        # this identity is an educator. A bare login (no role in the request) must
+        # recreate the user as an educator, not default to student.
+        decoded = {
+            'uid': 'uid-restored',
+            'email': 'restored@example.com',
+            'firebase': {'sign_in_provider': 'password'},
+        }
+        with patch.object(users_views, 'verify_firebase_token', return_value=decoded), \
+             patch.object(users_views, 'sync_user_to_firestore'), \
+             patch.object(users_views, 'get_role_claim', return_value='educator'), \
+             patch.object(users_views, 'set_role_claim'):
+            res = self.client.post(
+                reverse('firebase_login'),
+                {'id_token': 'fake-token'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        user = User.objects.get(email='restored@example.com')
+        self.assertEqual(user.role, 'educator')
+        self.assertTrue(user.is_educator)
+
+    def test_signup_persists_role_claim(self):
+        # Signing up as an educator must store the role as a Firebase custom claim
+        # so it can be restored if the Django DB is ever reset.
+        decoded = {
+            'uid': 'uid-claim-set',
+            'email': 'claim.set@example.com',
+            'firebase': {'sign_in_provider': 'password'},
+        }
+        with patch.object(users_views, 'verify_firebase_token', return_value=decoded), \
+             patch.object(users_views, 'sync_user_to_firestore'), \
+             patch.object(users_views, 'set_role_claim', return_value=True) as mock_set:
+            res = self.client.post(
+                reverse('firebase_login'),
+                {'id_token': 'fake-token', 'username': 'claimset', 'is_educator': True},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        mock_set.assert_called_once_with('uid-claim-set', 'educator')
 
     def test_existing_user_role_unchanged_on_login(self):
         User.objects.create_user(
@@ -658,3 +702,354 @@ class GroupChatReactionTests(APITestCase):
             format='json',
         )
         self.assertEqual(res.status_code, 401)
+
+
+class ProfileUpdateTests(APITestCase):
+    """PATCH /users/me/ updates the caller's own editable name fields."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='editor', password='pass12345', role='student',
+            first_name='Old', last_name='Name',
+            firebase_uid='fb-uid-edit',
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_patch_updates_names(self):
+        with patch.object(users_views, 'sync_user_to_firestore'):
+            res = self.client.patch(
+                reverse('current_user_profile'),
+                {'first_name': 'New', 'last_name': 'Label'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, 'New')
+        self.assertEqual(self.user.last_name, 'Label')
+        self.assertEqual(res.data['first_name'], 'New')
+
+    def test_patch_cannot_change_role_or_email(self):
+        with patch.object(users_views, 'sync_user_to_firestore'):
+            res = self.client.patch(
+                reverse('current_user_profile'),
+                {'role': 'superadmin', 'email': 'hacker@example.com'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.role, 'student')
+        self.assertNotEqual(self.user.email, 'hacker@example.com')
+
+    def test_patch_requires_auth(self):
+        self.client.force_authenticate(user=None)
+        res = self.client.patch(
+            reverse('current_user_profile'),
+            {'first_name': 'X'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 401)
+
+
+class ClassActivityAPITests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='act-teacher', password='pass123', role='educator',
+        )
+        self.student = User.objects.create_user(
+            username='act-student', password='pass123', role='student',
+        )
+        self.course = Course.objects.create(name='Physics', educator=self.educator)
+        self.client.force_authenticate(user=self.educator)
+
+    def test_educator_creates_activity(self):
+        resp = self.client.post(
+            reverse('course_activities', args=[self.course.id]),
+            {
+                'kind': 'quiz',
+                'title': 'Forces Quiz',
+                'note': 'Chapters 1-3',
+                'due_date': '2026-10-01',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        activity = ClassActivity.objects.get()
+        self.assertEqual(activity.course, self.course)
+        self.assertEqual(activity.kind, 'quiz')
+        self.assertEqual(activity.status, 'draft')
+        self.assertEqual(resp.data['course_name'], 'Physics')
+
+    def test_educator_creates_published_activity(self):
+        resp = self.client.post(
+            reverse('course_activities', args=[self.course.id]),
+            {'kind': 'lesson', 'title': 'Waves', 'status': 'published'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['status'], 'published')
+
+    def test_non_educator_cannot_create(self):
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.post(
+            reverse('course_activities', args=[self.course.id]),
+            {'kind': 'game', 'title': 'Hack'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(ClassActivity.objects.count(), 0)
+
+    def test_student_member_can_read_activities(self):
+        self.course.students.add(self.student)
+        ClassActivity.objects.create(
+            course=self.course, kind='quiz', title='Forces Quiz', status='published',
+        )
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.get(reverse('course_activities', args=[self.course.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data[0]['title'], 'Forces Quiz')
+
+    def test_non_member_cannot_read_activities(self):
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.get(reverse('course_activities', args=[self.course.id]))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_educator_updates_activity(self):
+        activity = ClassActivity.objects.create(course=self.course, kind='quiz', title='Q')
+        resp = self.client.patch(
+            reverse('activity_detail', args=[activity.id]),
+            {'status': 'published'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        activity.refresh_from_db()
+        self.assertEqual(activity.status, 'published')
+
+    def test_non_educator_cannot_update_activity(self):
+        activity = ClassActivity.objects.create(course=self.course, kind='quiz', title='Q')
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.patch(
+            reverse('activity_detail', args=[activity.id]),
+            {'status': 'published'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_educator_deletes_activity(self):
+        activity = ClassActivity.objects.create(course=self.course, kind='quiz', title='Q')
+        resp = self.client.delete(reverse('activity_detail', args=[activity.id]))
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(ClassActivity.objects.count(), 0)
+
+    def test_my_activities_cross_class(self):
+        other = Course.objects.create(name='Chemistry', educator=self.educator)
+        ClassActivity.objects.create(course=self.course, kind='quiz', title='FQ')
+        ClassActivity.objects.create(course=other, kind='game', title='Battle')
+        resp = self.client.get(reverse('my_activities'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 2)
+        names = {a['course_name'] for a in resp.data}
+        self.assertEqual(names, {'Physics', 'Chemistry'})
+
+    def test_my_activities_scoped_to_own_courses(self):
+        other_educator = User.objects.create_user(
+            username='act-teacher2', password='pass123', role='educator',
+        )
+        foreign = Course.objects.create(name='History', educator=other_educator)
+        ClassActivity.objects.create(course=foreign, kind='quiz', title='HQ')
+        resp = self.client.get(reverse('my_activities'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data, [])
+
+
+class NodeCreateCoercionTests(APITestCase):
+    """AI-generated nodes can carry float numerics / off-schema types.
+    The serializer must coerce them instead of rejecting the whole save."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='node-teacher', password='pass123', role='educator',
+        )
+        self.course = Course.objects.create(name='Physics', educator=self.educator)
+        self.topic = Topic.objects.create(course=self.course, title='Waves', order=0)
+        self.client.force_authenticate(user=self.educator)
+
+    def test_node_create_coerces_float_and_bad_type(self):
+        resp = self.client.post(
+            reverse('node_create', args=[self.topic.id]),
+            {
+                'node_type': 'assessment',  # not a valid choice
+                'title': 'Basics',
+                'content_json': {},
+                'order': 0,
+                'xp_reward': 25.5,
+                'required_score': '70',
+                'estimated_minutes': 8.75,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        node = LearningNode.objects.get()
+        self.assertEqual(node.node_type, 'learn')
+        self.assertEqual(node.xp_reward, 25)
+        self.assertEqual(node.required_score, 70)
+        self.assertEqual(node.estimated_minutes, 8)
+
+    def test_node_title_truncated(self):
+        resp = self.client.post(
+            reverse('node_create', args=[self.topic.id]),
+            {
+                'node_type': 'learn',
+                'title': 't' * 500,
+                'content_json': {},
+                'order': 0,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(len(LearningNode.objects.get().title), 255)
+
+
+class NodeUpdateTests(APITestCase):
+    """Educators can edit and delete nodes in their own topics."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='edit-teacher', password='pass123', role='educator',
+        )
+        self.student = User.objects.create_user(
+            username='edit-student', password='pass123', role='student',
+        )
+        self.course = Course.objects.create(name='Physics', educator=self.educator)
+        self.topic = Topic.objects.create(course=self.course, title='Waves', order=0)
+        self.node = LearningNode.objects.create(
+            topic=self.topic, node_type='learn', title='Basics', content_json={},
+            order=0, xp_reward=25, required_score=70, estimated_minutes=5,
+        )
+        self.client.force_authenticate(user=self.educator)
+
+    def test_educator_updates_node_fields(self):
+        resp = self.client.patch(
+            reverse('node_detail', args=[self.node.id]),
+            {
+                'node_type': 'practice',
+                'title': 'Renamed',
+                'description': 'New desc',
+                'content_json': {'questions': []},
+                'xp_reward': 40,
+                'required_score': 80,
+                'estimated_minutes': 10,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.node.refresh_from_db()
+        self.assertEqual(self.node.node_type, 'practice')
+        self.assertEqual(self.node.title, 'Renamed')
+        self.assertEqual(self.node.description, 'New desc')
+        self.assertEqual(self.node.xp_reward, 40)
+        self.assertEqual(self.node.required_score, 80)
+        self.assertEqual(self.node.estimated_minutes, 10)
+
+    def test_node_update_coerces_values(self):
+        resp = self.client.patch(
+            reverse('node_detail', args=[self.node.id]),
+            {
+                'node_type': 'assessment',
+                'xp_reward': '50.7',
+                'estimated_minutes': 3.5,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.node.refresh_from_db()
+        self.assertEqual(self.node.node_type, 'learn')
+        self.assertEqual(self.node.xp_reward, 50)
+        self.assertEqual(self.node.estimated_minutes, 3)
+
+    def test_non_educator_cannot_update_node(self):
+        self.client.force_authenticate(user=self.student)
+        self.course.students.add(self.student)
+        resp = self.client.patch(
+            reverse('node_detail', args=[self.node.id]),
+            {'title': 'Hacked'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.node.refresh_from_db()
+        self.assertEqual(self.node.title, 'Basics')
+
+    def test_educator_deletes_node(self):
+        resp = self.client.delete(reverse('node_detail', args=[self.node.id]))
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(LearningNode.objects.filter(id=self.node.id).count(), 0)
+
+    def test_non_educator_cannot_delete_node(self):
+        stranger = User.objects.create_user(
+            username='edit-teacher2', password='pass123', role='educator',
+        )
+        self.client.force_authenticate(user=stranger)
+        resp = self.client.delete(reverse('node_detail', args=[self.node.id]))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(LearningNode.objects.filter(id=self.node.id).count(), 1)
+
+
+class TopicUpdateTests(APITestCase):
+    """Educators can rename/delete topics in their own courses."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='topic-teacher', password='pass123', role='educator',
+        )
+        self.student = User.objects.create_user(
+            username='topic-student', password='pass123', role='student',
+        )
+        self.course = Course.objects.create(name='Physics', educator=self.educator)
+        self.topic = Topic.objects.create(course=self.course, title='Waves', description='Intro', order=0)
+        self.client.force_authenticate(user=self.educator)
+
+    def test_educator_updates_topic_title_and_description(self):
+        resp = self.client.patch(
+            reverse('topic_update', args=[self.topic.id]),
+            {'title': 'Electromagnetic Waves', 'description': 'Updated'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.topic.refresh_from_db()
+        self.assertEqual(self.topic.title, 'Electromagnetic Waves')
+        self.assertEqual(self.topic.description, 'Updated')
+        self.assertEqual(resp.data['title'], 'Electromagnetic Waves')
+
+    def test_non_educator_cannot_update_topic(self):
+        self.client.force_authenticate(user=self.student)
+        self.course.students.add(self.student)
+        resp = self.client.patch(
+            reverse('topic_update', args=[self.topic.id]),
+            {'title': 'Hacked'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_educator_deletes_topic(self):
+        node_count = 5
+        for i in range(node_count):
+            LearningNode.objects.create(topic=self.topic, node_type='learn', title=f'N{i}')
+        self.assertEqual(Topic.objects.filter(id=self.topic.id).count(), 1)
+        resp = self.client.delete(reverse('topic_update', args=[self.topic.id]))
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(Topic.objects.filter(id=self.topic.id).count(), 0)
+        self.assertEqual(LearningNode.objects.filter(topic_id=self.topic.id).count(), 0)
+
+    def test_non_educator_cannot_delete_topic(self):
+        stranger = User.objects.create_user(
+            username='topic-teacher2', password='pass123', role='educator',
+        )
+        self.client.force_authenticate(user=stranger)
+        resp = self.client.delete(reverse('topic_update', args=[self.topic.id]))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(Topic.objects.filter(id=self.topic.id).count(), 1)

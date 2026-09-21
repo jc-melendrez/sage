@@ -7,5 +7,6 @@ urlpatterns = [
     path('start/', views.StartGameView.as_view(), name='start-game'),
     path('answer/', views.AnswerQuestionView.as_view(), name='answer-question'),
     path('finish/', views.FinishGameView.as_view(), name='finish-game'),
+    path('rooms/<str:room_code>/leaderboard/', views.RoomLeaderboardView.as_view(), name='room-leaderboard'),
     path('offline-results/', views.OfflineResultsView.as_view(), name='offline-results'),
 ]

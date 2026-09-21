@@ -10,7 +10,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
@@ -27,6 +27,7 @@ from .serializers import (
     CourseSerializer, CourseRosterSerializer,
     SuperadminUserUpdateSerializer, SuperadminCreateUserSerializer, RoleChangeLogSerializer,
     TopicSerializer, LearningNodeSerializer, NodeProgressSerializer, CoursePathTopicSerializer,
+    ClassActivitySerializer,
 )
 from .permissions import IsSuperadmin
 from .utils.file_parser import extract_text_from_file
@@ -34,7 +35,7 @@ from rest_framework.decorators import api_view, permission_classes, parser_class
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework_simplejwt.tokens import RefreshToken  # noqa: F401 (kept for imports elsewhere)
 from .authentication import SAGERefreshToken
-from core.firebase import verify_firebase_token, create_firebase_user
+from core.firebase import verify_firebase_token, create_firebase_user, set_role_claim, get_role_claim
 from .models import User
 from .otp import create_otp_challenge, otp_matches
 from core.firestore_service import (
@@ -88,7 +89,15 @@ class FirebaseLoginView(APIView):
             # accepted from the client and can only be granted by a superadmin.
             requested_role = request.data.get('role')
             if requested_role not in ('student', 'educator'):
-                requested_role = 'educator' if request.data.get('is_educator') else 'student'
+                requested_role = 'educator' if request.data.get('is_educator') else None
+
+            # Plain logins (just an id_token) don't carry a role. Restore it from
+            # the Firebase custom claim (set at signup / role change) so an educator
+            # whose Django row was lost isn't silently recreated as a student.
+            if not requested_role:
+                requested_role = get_role_claim(firebase_uid)
+            if requested_role not in ('student', 'educator'):
+                requested_role = 'student'
 
             # Ensure username is unique; if taken, append a random string from the UID
             if User.objects.filter(username=username).exists():
@@ -103,6 +112,8 @@ class FirebaseLoginView(APIView):
                 role=requested_role,
                 password=None # Password is managed by Firebase now
             )
+            # Persist the role as a Firebase custom claim so it survives DB resets
+            set_role_claim(firebase_uid, requested_role)
             # Sync the new user to Firestore immediately
             sync_user_to_firestore(user)
 
@@ -268,6 +279,23 @@ class CurrentUserProfileView(APIView):
         user = request.user
         serializer = UserProfileSerializer(user)
         return Response(serializer.data)
+
+    def patch(self, request):
+        """Update the caller's own editable profile fields.
+
+        Only fields the serializer exposes as writable (first_name, last_name)
+        are accepted; username/email/role are read-only.
+        """
+        user = request.user
+        serializer = UserProfileSerializer(user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            try:
+                sync_user_to_firestore(user)
+            except Exception as e:
+                print(f'[Profile Update Warning] Firebase sync failed: {e}')
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ---------- Gamification Endpoints ----------
@@ -680,6 +708,85 @@ class RemoveStudentFromCourseView(APIView):
         return Response(CourseRosterSerializer(course).data)
 
 
+# --- Class Activities (paper-aligned academic tasks, no grading) ---
+
+def _get_course_for_activity(request, course_id):
+    try:
+        course = Course.objects.get(id=course_id)
+    except Course.DoesNotExist:
+        return None, Response({"error": "Course not found"}, status=404)
+    return course, None
+
+
+class CourseActivitiesView(APIView):
+    """List / create activities for a single course (class)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, course_id):
+        course, err = _get_course_for_activity(request, course_id)
+        if err:
+            return err
+        if request.user != course.educator and not course.students.filter(id=request.user.id).exists():
+            return Response({"error": "You are not a member of this course"}, status=403)
+
+        activities = course.activities.all()
+        return Response(ClassActivitySerializer(activities, many=True).data)
+
+    def post(self, request, course_id):
+        course, err = _get_course_for_activity(request, course_id)
+        if err:
+            return err
+        if request.user != course.educator:
+            return Response({"error": "Only the course educator can create activities"}, status=403)
+
+        serializer = ClassActivitySerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+
+        activity = serializer.save(course=course, status=request.data.get('status', 'draft'))
+        return Response(ClassActivitySerializer(activity).data, status=201)
+
+
+class ClassActivityDetailView(APIView):
+    """Update / delete a single class activity (educator only)."""
+    permission_classes = [IsAuthenticated]
+
+    def _get_owned(self, request, activity_id):
+        try:
+            activity = ClassActivity.objects.select_related('course').get(id=activity_id)
+        except ClassActivity.DoesNotExist:
+            return None, Response({"error": "Activity not found"}, status=404)
+        if request.user != activity.course.educator:
+            return None, Response({"error": "Only the course educator can manage this activity"}, status=403)
+        return activity, None
+
+    def patch(self, request, activity_id):
+        activity, err = self._get_owned(request, activity_id)
+        if err:
+            return err
+        serializer = ClassActivitySerializer(activity, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+        activity = serializer.save()
+        return Response(ClassActivitySerializer(activity).data)
+
+    def delete(self, request, activity_id):
+        activity, err = self._get_owned(request, activity_id)
+        if err:
+            return err
+        activity.delete()
+        return Response(status=204)
+
+
+class MyClassActivitiesView(APIView):
+    """Cross-class activities feed for the educator (Activities tab + dashboard)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        activities = ClassActivity.objects.filter(course__educator=request.user)
+        return Response(ClassActivitySerializer(activities, many=True).data)
+
+
 # --- Learning Path Views ---
 
 class CourseTopicsView(APIView):
@@ -738,6 +845,36 @@ class NodeDetailView(APIView):
             data['progress'] = None
 
         return Response(data)
+
+    def patch(self, request, node_id):
+        """Update a node (educator only)."""
+        try:
+            node = LearningNode.objects.select_related('topic__course').get(id=node_id)
+        except LearningNode.DoesNotExist:
+            return Response({'error': 'Node not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user != node.topic.course.educator:
+            return Response({'error': 'Only the educator can edit nodes'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = LearningNodeSerializer(node, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+        return Response(serializer.data)
+
+    def delete(self, request, node_id):
+        """Delete a node (educator only)."""
+        try:
+            node = LearningNode.objects.select_related('topic__course').get(id=node_id)
+        except LearningNode.DoesNotExist:
+            return Response({'error': 'Node not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user != node.topic.course.educator:
+            return Response({'error': 'Only the educator can delete nodes'}, status=status.HTTP_403_FORBIDDEN)
+
+        node.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class CompleteNodeView(APIView):
@@ -831,6 +968,42 @@ class NodeCreateView(APIView):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+class TopicUpdateView(APIView):
+    """Update or delete a topic (educator only)."""
+    permission_classes = [IsAuthenticated]
+
+    def _get_topic(self, request, topic_id):
+        try:
+            topic = Topic.objects.select_related('course').get(id=topic_id)
+        except Topic.DoesNotExist:
+            return None, Response({'error': 'Topic not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user != topic.course.educator:
+            return None, Response({'error': 'Only the educator can edit topics'}, status=status.HTTP_403_FORBIDDEN)
+
+        return topic, None
+
+    def patch(self, request, topic_id):
+        topic, error = self._get_topic(request, topic_id)
+        if error:
+            return error
+
+        serializer = TopicSerializer(topic, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+        return Response(serializer.data)
+
+    def delete(self, request, topic_id):
+        topic, error = self._get_topic(request, topic_id)
+        if error:
+            return error
+
+        topic.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class TopicMistakesView(APIView):
     """Return mistakes from practice/mastery nodes in a topic (for Review nodes)."""
     permission_classes = [IsAuthenticated]
@@ -899,6 +1072,8 @@ def apply_role_change(actor, target_user, new_role):
     target_user.role = new_role
     target_user.token_version += 1
     target_user.save(update_fields=['role', 'token_version', 'is_student', 'is_educator'])
+    if target_user.firebase_uid:
+        set_role_claim(target_user.firebase_uid, new_role)
     RoleChangeLog.objects.create(
         changed_by=actor,
         target_user=target_user,
@@ -945,6 +1120,7 @@ class SuperadminUserListView(APIView):
             if uid:
                 user.firebase_uid = uid
                 user.save(update_fields=['firebase_uid'])
+                set_role_claim(uid, user.role)
         sync_user_to_firestore(user)
         RoleChangeLog.objects.create(
             changed_by=request.user,
@@ -1347,6 +1523,14 @@ For "practice" and "mastery" nodes, content_json must have a "questions" array:
                 node.setdefault('xp_reward', 25)
                 node.setdefault('required_score', 70)
                 node.setdefault('estimated_minutes', 5)
+                if node['node_type'] not in {c[0] for c in LearningNode.NODE_TYPES}:
+                    node['node_type'] = 'learn'
+                node['title'] = str(node['title'])[:255]
+                for field in ('xp_reward', 'required_score', 'estimated_minutes'):
+                    try:
+                        node[field] = int(float(node[field]))
+                    except (TypeError, ValueError):
+                        node[field] = {'xp_reward': 25, 'required_score': 70, 'estimated_minutes': 5}[field]
 
             return Response(topic_data, status=status.HTTP_200_OK)
 

@@ -24,9 +24,11 @@ import NetInfo from '@react-native-community/netinfo';
 import { cacheQuizzes, getCachedQuizzes, createOfflineGame } from '@/services/offlineGameService';
 import * as Clipboard from 'expo-clipboard';
 import { LanClientSession } from '@/services/lanClient';
-import { lanGame, setLanClient, resetLanState } from '@/services/lanSession';
-import { LanMessage } from '@/services/lanProtocol';
-import { startScanning, stopScanning, DiscoveredRoom } from '@/services/lanDiscovery';
+import { lanGame, setLanClient, setLanHost, resetLanState } from '@/services/lanSession';
+import { LanHostServer, makeOrder } from '@/services/lanHost';
+import { LanMessage, generateRoomCode } from '@/services/lanProtocol';
+import { startScanning, stopScanning, startAdvertising, stopAdvertising, DiscoveredRoom } from '@/services/lanDiscovery';
+import { buildQuestions } from '@/services/offlineEngine';
 
 // 🎨 SAGE Design System Colors
 const COLORS = {
@@ -94,6 +96,21 @@ export default function GameCenterScreen() {
   const [roomTopic, setRoomTopic] = useState<string>('');
   const [lanName, setLanName] = useState('Player');
   const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
+  const lanHostRef = useRef<LanHostServer | null>(null);
+  const lanPlayerCountRef = useRef(0);
+  const [lanPlayerCount, setLanPlayerCount] = useState(0);
+  const lanHostMsgRef = useRef<(msg: LanMessage) => void>(() => {});
+
+  const onLanHostMessage = (msg: LanMessage) => {
+    if (msg.t === 'roster') {
+      const count = msg.players.filter(p => p.connected).length;
+      lanPlayerCountRef.current = count;
+      setLanPlayerCount(count);
+    } else if (msg.t === 'error') {
+      Alert.alert('LAN Error', msg.message || 'Unexpected error');
+    }
+  };
+  lanHostMsgRef.current = onLanHostMessage;
 
   // When the JOIN modal opens, listen for LAN rooms on the hotspot so a
   // typed code can join an offline game the same way an online one does.
@@ -113,6 +130,16 @@ export default function GameCenterScreen() {
     };
   }, [showJoinModal]);
 
+  // Clean up the LAN host server when Game Center unmounts.
+  useEffect(() => {
+    return () => {
+      lanHostRef.current?.stop();
+      lanHostRef.current = null;
+      setLanHost(null);
+      stopAdvertising();
+    };
+  }, []);
+
   // Countdown State
   const [showCountdown, setShowCountdown] = useState(false);
   const [countdownValue, setCountdownValue] = useState(3);
@@ -121,7 +148,7 @@ export default function GameCenterScreen() {
 
   useEffect(() => {
     const unsub = NetInfo.addEventListener(state => {
-      setIsOffline(state.isConnected === false);
+      setIsOffline(state.isConnected === false || state.isInternetReachable === false);
     });
     return () => unsub();
   }, []);
@@ -190,7 +217,19 @@ export default function GameCenterScreen() {
   // 2. Handle Invite Press -> Create Room (if needed) & Show Code Modal
   const handleInvitePress = async () => {
     if (isOffline || usingCachedQuizzes) {
-      router.push('/game/lan-host' as any);
+      if (!lanHostRef.current) {
+        const code = generateRoomCode();
+        const host = new LanHostServer(code);
+        host.onMessage(msg => lanHostMsgRef.current(msg));
+        try {
+          host.start();
+        } catch {}
+        lanHostRef.current = host;
+        startAdvertising(code, selectedQuiz?.title || 'LAN Quiz', () => lanPlayerCountRef.current);
+        setRoomCode(code);
+        setRoomTopic(selectedQuiz?.title || 'LAN Quiz');
+      }
+      setShowInviteModal(true);
       return;
     }
     // If room already exists, just show the modal
@@ -240,7 +279,46 @@ export default function GameCenterScreen() {
   // 3. Handle Start Press -> Start Game & Countdown
   const handleStartPress = async () => {
     if (isOffline || usingCachedQuizzes) {
-      startOfflineGame();
+      const host = lanHostRef.current;
+      if (!host) {
+        startOfflineGame();
+        return;
+      }
+      if (!selectedQuiz) {
+        Alert.alert('Missing Quiz', 'Please select a quiz first.');
+        return;
+      }
+      const count = buildQuestions(selectedQuiz).length;
+      if (count === 0) {
+        Alert.alert('Empty Quiz', 'That quiz has no valid questions.');
+        return;
+      }
+      let hostName = 'Host';
+      try {
+        const user = await getCurrentUser();
+        if (user?.first_name) hostName = user.first_name;
+      } catch {}
+      const time = parseInt(timePerQuestion, 10) || 15;
+      const order = makeOrder(count);
+      host.setQuiz(selectedQuiz, order, time);
+      setLanHost(host);
+      lanGame.quiz = selectedQuiz;
+      lanGame.order = order;
+      lanGame.timePerQuestion = time;
+      lanGame.playerName = hostName;
+      lanGame.role = 'student';
+      lanGame.selfPlay = true;
+      lanGame.hostIp = '';
+      lanGame.roomCode = roomCode || '';
+      stopAdvertising();
+      const client = new LanClientSession(() => {});
+      setLanClient(client);
+      try {
+        await client.connect('127.0.0.1');
+        client.join(lanGame.roomCode, hostName);
+      } catch {}
+      host.startGame();
+      router.push('/game/lan-play' as any);
       return;
     }
 
@@ -437,8 +515,14 @@ export default function GameCenterScreen() {
       setJoinCode('');
       router.push({ pathname: '/game/lobby', params: { roomCode: code, isHost: 'false', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
     } catch (error: any) {
+      console.warn('Join fell back to LAN after server error', error);
       const joined = await tryJoinLan(code);
-      if (!joined) Alert.alert('Error', error.message || 'Failed to join room');
+      if (!joined) {
+        Alert.alert(
+          "Couldn't Join",
+          `The online server couldn't be reached and no nearby room "${code}" was found. Open the host screen on the other phone - Game Center, then INVITE - and keep it on screen, then try again.`
+        );
+      }
     } finally {
       setJoining(false);
     }
@@ -814,7 +898,11 @@ export default function GameCenterScreen() {
                     </TouchableOpacity>
 
                     <Text style={styles.modalTitle}>ROOM CODE</Text>
-                    <Text style={styles.modalSub}>Share this code with your students</Text>
+                    <Text style={styles.modalSub}>
+                      {(isOffline || usingCachedQuizzes)
+                        ? 'Open your hotspot - players type this code to join, then tap START to begin'
+                        : 'Share this code with your students'}
+                    </Text>
                     
                     <View style={styles.codeDisplayRow}>
                         {roomCode?.split('').map((char, i) => (
@@ -823,6 +911,12 @@ export default function GameCenterScreen() {
                             </View>
                         ))}
                     </View>
+
+                    {(isOffline || usingCachedQuizzes) && lanPlayerCount > 0 && (
+                        <Text style={styles.modalLanCount}>
+                            {lanPlayerCount} player{lanPlayerCount === 1 ? '' : 's'} connected
+                        </Text>
+                    )}
 
                     <TouchableOpacity 
                         style={styles.copyCodeBtn}
@@ -1236,6 +1330,13 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.medium,
     color: COLORS.textSecondary,
     marginBottom: 24,
+  },
+  modalLanCount: {
+    fontSize: 13,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.success,
+    textAlign: 'center',
+    marginTop: 12,
   },
   
   // Config Modal Styles

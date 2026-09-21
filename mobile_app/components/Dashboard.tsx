@@ -17,8 +17,6 @@ import Animated, {
   useAnimatedScrollHandler,
   useAnimatedStyle,
   interpolate,
-  withTiming,
-  withSpring,
   type SharedValue,
 } from 'react-native-reanimated';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -111,7 +109,7 @@ function DotIndicator({ index, scrollX }: { index: number; scrollX: SharedValue<
   return <Animated.View style={[styles.dot, animatedStyle, { backgroundColor: 'white' }]} />;
 }
 
-export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => void }) {
+export default function Dashboard() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
   const [badges, setBadges] = useState<Badge[]>([]);
@@ -122,9 +120,6 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
 
   const [lesson, setLesson] = useState<any>(null);
   const [showLessonGenerator, setShowLessonGenerator] = useState(false);
-
-  const [isFabOpen, setIsFabOpen] = useState(false);
-  const fabAnim = useSharedValue(0);
 
   // Carousel state
   const [currentPage, setCurrentPage] = useState(0);
@@ -166,7 +161,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       title: 'Play a Quiz',
       description: 'Join or create a quiz room and challenge friends in real‑time.',
       color: '#F59E0B',
-      route: '/game/classic-setup',
+      route: '/games',
     },
     {
       id: 'assistant',
@@ -174,7 +169,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       title: 'AI Assistant',
       description: 'Ask SAGE anything – get instant help and explanations.',
       color: '#22D3EE',
-      route: '/assistant',
+      route: '/ai-assistant',
     },
     {
       id: 'groups',
@@ -182,7 +177,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
       title: 'Study Groups',
       description: 'Collaborate with friends, share materials, and learn together.',
       color: '#10B981',
-      route: '/groups',
+      route: '/activities',
     },
   ];
 
@@ -306,43 +301,6 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
     }
   };
 
-  const toggleFab = () => {
-    if (isFabOpen) {
-      fabAnim.value = withTiming(0, { duration: 200 }, () => {
-        setIsFabOpen(false);
-      });
-    } else {
-      setIsFabOpen(true);
-      fabAnim.value = withSpring(1, { damping: 15, stiffness: 150 });
-    }
-  };
-
-  const spinStyle = useAnimatedStyle(() => ({
-    transform: [{ rotate: interpolate(fabAnim.value, [0, 1], [0, 180]) + 'deg' }],
-  }));
-
-  const item1Style = useAnimatedStyle(() => ({
-    opacity: fabAnim.value,
-    transform: [
-      { translateY: interpolate(fabAnim.value, [0, 1], [45, 0]) },
-      { scale: interpolate(fabAnim.value, [0, 1], [0.8, 1]) },
-    ],
-  }));
-  const item2Style = useAnimatedStyle(() => ({
-    opacity: fabAnim.value,
-    transform: [
-      { translateY: interpolate(fabAnim.value, [0, 1], [30, 0]) },
-      { scale: interpolate(fabAnim.value, [0, 1], [0.8, 1]) },
-    ],
-  }));
-  const item3Style = useAnimatedStyle(() => ({
-    opacity: fabAnim.value,
-    transform: [
-      { translateY: interpolate(fabAnim.value, [0, 1], [15, 0]) },
-      { scale: interpolate(fabAnim.value, [0, 1], [0.8, 1]) },
-    ],
-  }));
-
   const handleLessonGenerated = (generatedLesson: any) => {
     setLesson(generatedLesson);
     setShowLessonGenerator(false);
@@ -465,7 +423,7 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
                       {page.route ? (
                         <TouchableOpacity
                           style={styles.featureButton}
-                          onPress={() => router.push(page.route)}
+                          onPress={() => router.push(page.route as any)}
                           activeOpacity={0.8}
                         >
                           <LinearGradient
@@ -692,60 +650,6 @@ export default function Dashboard({ onGenerateQuiz }: { onGenerateQuiz?: () => v
           </View>
         )}
       </ScrollView>
-
-      {/* FAB Menu */}
-      {isFabOpen && (
-        <View style={styles.fabMenu}>
-          <Animated.View style={[styles.fabMenuItemWrapper, item1Style]}>
-            <TouchableOpacity
-              style={styles.fabMenuItem}
-              onPress={() => {
-                toggleFab();
-                onGenerateQuiz?.();
-              }}
-            >
-              <Text style={styles.fabMenuText}>Generate Quiz</Text>
-              <View style={styles.fabMenuIconBox}>
-                <Ionicons name="document-text" size={20} color={COLORS.purpleVibrant} />
-              </View>
-            </TouchableOpacity>
-          </Animated.View>
-          <Animated.View style={[styles.fabMenuItemWrapper, item2Style]}>
-            <TouchableOpacity style={styles.fabMenuItem} activeOpacity={0.8}>
-              <Text style={styles.fabMenuText}>Create Group</Text>
-              <View style={styles.fabMenuIconBox}>
-                <Ionicons name="people" size={20} color={COLORS.purpleVibrant} />
-              </View>
-            </TouchableOpacity>
-          </Animated.View>
-          <Animated.View style={[styles.fabMenuItemWrapper, item3Style]}>
-            <TouchableOpacity style={styles.fabMenuItem} activeOpacity={0.8}>
-              <Text style={styles.fabMenuText}>Study Plan</Text>
-              <View style={styles.fabMenuIconBox}>
-                <Ionicons name="calendar" size={20} color={COLORS.purpleVibrant} />
-              </View>
-            </TouchableOpacity>
-          </Animated.View>
-        </View>
-      )}
-
-      {/* Main FAB */}
-      <LinearGradient
-        colors={
-          isFabOpen
-            ? [COLORS.danger, '#F87171']
-            : [COLORS.purpleDeep, COLORS.purpleVibrant]
-        }
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.fabMain}
-      >
-        <TouchableOpacity onPress={toggleFab} activeOpacity={0.85}>
-          <Animated.View style={spinStyle}>
-            <Ionicons name={isFabOpen ? 'remove' : 'add'} size={32} color="white" />
-          </Animated.View>
-        </TouchableOpacity>
-      </LinearGradient>
     </LinearGradient>
   );
 }
@@ -1107,54 +1011,4 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  fabMain: {
-    position: 'absolute',
-    bottom: 24,
-    right: 20,
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: COLORS.purpleDeep,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.5,
-    shadowRadius: 16,
-    elevation: 10,
-  },
-  fabMenu: {
-    position: 'absolute',
-    bottom: 100,
-    right: 20,
-    alignItems: 'flex-end',
-  },
-  fabMenuItemWrapper: {
-    marginBottom: 16,
-  },
-  fabMenuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  fabMenuText: {
-    backgroundColor: COLORS.surface,
-    color: COLORS.textPrimary,
-    paddingHorizontal: 16,
-    paddingVertical: 11,
-    borderRadius: 14,
-    fontSize: 14,
-    marginRight: 12,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    fontFamily: FONTS.semiBold,
-  },
-  fabMenuIconBox: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: COLORS.bgSecondary,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
 });

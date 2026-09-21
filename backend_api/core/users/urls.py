@@ -38,12 +38,18 @@ urlpatterns = [
     path('courses/<int:course_id>/add-student/', views.AddStudentToCourseView.as_view(), name='course_add_student'),
     path('courses/<int:course_id>/remove-student/', views.RemoveStudentFromCourseView.as_view(), name='course_remove_student'),
 
+    # --- Class Activities ---
+    path('courses/<int:course_id>/activities/', views.CourseActivitiesView.as_view(), name='course_activities'),
+    path('activities/', views.MyClassActivitiesView.as_view(), name='my_activities'),
+    path('activities/<int:activity_id>/', views.ClassActivityDetailView.as_view(), name='activity_detail'),
+
     # --- Learning Path ---
     path('courses/<int:course_id>/topics/', views.CourseTopicsView.as_view(), name='course_topics'),
     path('courses/<int:course_id>/path/', views.CoursePathView.as_view(), name='course_path'),
     path('courses/<int:course_id>/topics/create/', views.TopicCreateView.as_view(), name='topic_create'),
     path('courses/<int:course_id>/generate-topic/', views.GenerateTopicView.as_view(), name='generate_topic'),
     path('topics/<int:topic_id>/nodes/create/', views.NodeCreateView.as_view(), name='node_create'),
+    path('topics/<int:topic_id>/', views.TopicUpdateView.as_view(), name='topic_update'),
     path('topics/<int:topic_id>/mistakes/', views.TopicMistakesView.as_view(), name='topic_mistakes'),
     path('nodes/<int:node_id>/', views.NodeDetailView.as_view(), name='node_detail'),
     path('nodes/<int:node_id>/complete/', views.CompleteNodeView.as_view(), name='node_complete'),

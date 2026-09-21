@@ -173,6 +173,43 @@ class Course(models.Model):
         return f"{self.name} ({self.join_code})"
 
 
+class ClassActivity(models.Model):
+    """A teacher-set academic task (activity) for a class.
+
+    Paper-aligned "activities / academic tasks" — there is deliberately NO
+    submission or grading concept here; that is out of scope. Activities group
+    the quizzes / lessons / live games an educator assigns to a course.
+    """
+
+    KIND_CHOICES = [
+        ('quiz', 'Quiz'),
+        ('lesson', 'Lesson'),
+        ('game', 'Live Game'),
+    ]
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('published', 'Published'),
+    ]
+
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='activities')
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default='quiz')
+    title = models.CharField(max_length=255)
+    # Optional reference to the attached Quiz (ai_assistant.Quiz); lessons and
+    # live games have no Django object, so this stays null for those kinds.
+    ref_id = models.IntegerField(null=True, blank=True)
+    note = models.TextField(blank=True, default='')
+    due_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.course.name} - {self.title} ({self.status})"
+
+
 # --- Lesson Progress (persisted course progression) ---
 
 class LessonProgress(models.Model):

@@ -32,7 +32,8 @@ const FONTS = {
 type ScreenPhase = 'loading' | 'lesson' | 'quiz' | 'results' | 'error';
 
 export default function NodePlayerScreen() {
-  const { nodeId } = useLocalSearchParams<{ nodeId: string }>();
+  const { nodeId, preview } = useLocalSearchParams<{ nodeId: string; preview?: string }>();
+  const isPreview = preview === '1';
   const router = useRouter();
 
   const [node, setNode] = useState<LearningNode | null>(null);
@@ -99,6 +100,11 @@ export default function NodePlayerScreen() {
 
   const submitScore = async (score: number) => {
     if (!node) return;
+    // Preview mode: render results without persisting progress or XP.
+    if (isPreview) {
+      setPhase('results');
+      return;
+    }
     try {
       const res = await completeNode(node.id, score);
       setPhase('results');
@@ -158,7 +164,7 @@ export default function NodePlayerScreen() {
           passed={(quizScore || (interactionsTotal > 0 ? Math.round((interactionsCorrect / interactionsTotal) * 100) : 100)) >= node.required_score}
           passingScore={node.required_score}
           results={quizResults}
-          xpEarned={node.xp_reward}
+          xpEarned={isPreview ? 0 : node.xp_reward}
           onRetry={handleRetry}
           onContinue={handleContinue}
         />

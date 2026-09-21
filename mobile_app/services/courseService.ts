@@ -123,6 +123,40 @@ export async function createNode(topicId: number, data: {
   });
 }
 
+export async function updateNode(nodeId: number, data: Partial<{
+  node_type: NodeType;
+  title: string;
+  description: string;
+  content_json: ContentJson;
+  order: number;
+  xp_reward: number;
+  required_score: number;
+  estimated_minutes: number;
+}>): Promise<LearningNode> {
+  return apiCall<LearningNode>(`/users/nodes/${nodeId}/`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteNode(nodeId: number): Promise<void> {
+  await apiCall<void>(`/users/nodes/${nodeId}/`, { method: 'DELETE' });
+}
+
+export async function updateTopic(
+  topicId: number,
+  data: Partial<{ title: string; description: string; order: number }>,
+): Promise<Topic> {
+  return apiCall<Topic>(`/users/topics/${topicId}/`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteTopic(topicId: number): Promise<void> {
+  await apiCall<void>(`/users/topics/${topicId}/`, { method: 'DELETE' });
+}
+
 export interface GenerateTopicResponse {
   title: string;
   description: string;

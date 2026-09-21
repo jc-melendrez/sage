@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, StatusBar, Platform } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, StatusBar, Platform, Modal, TextInput, KeyboardAvoidingView } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useAuth } from '@/hooks/useAuth';
-import { getCurrentUser } from '@/services/authService';
+import { getCurrentUser, updateProfile } from '@/services/authService';
 
 // 🎨 Exact same tokens as Dashboard for a unified Design System
 const COLORS = {
@@ -44,6 +44,12 @@ export default function ProfileScreen() {
   const [userData, setUserData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
+  const [isEditVisible, setIsEditVisible] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [editFirstName, setEditFirstName] = useState('');
+  const [editLastName, setEditLastName] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+
   useEffect(() => {
     const fetchProfile = async () => {
       try {
@@ -61,6 +67,30 @@ export default function ProfileScreen() {
   const handleLogout = async () => {
     await logout();
     router.replace('/login');
+  };
+
+  const openEdit = () => {
+    setEditFirstName(userData?.first_name || '');
+    setEditLastName(userData?.last_name || '');
+    setEditError(null);
+    setIsEditVisible(true);
+  };
+
+  const handleSaveProfile = async () => {
+    setIsSaving(true);
+    setEditError(null);
+    try {
+      const updated = await updateProfile({
+        first_name: editFirstName.trim(),
+        last_name: editLastName.trim(),
+      });
+      setUserData(updated);
+      setIsEditVisible(false);
+    } catch (err: any) {
+      setEditError(err?.message || 'Failed to save changes.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   if (loading) {
@@ -106,7 +136,12 @@ export default function ProfileScreen() {
           </LinearGradient>
 
           <View style={styles.userInfo}>
-            <Text style={styles.userName}>{fullName}</Text>
+            <View style={styles.nameRow}>
+              <Text style={styles.userName} numberOfLines={1}>{fullName}</Text>
+              <TouchableOpacity style={styles.editButton} onPress={openEdit} activeOpacity={0.8}>
+                <Ionicons name="pencil" size={16} color="white" />
+              </TouchableOpacity>
+            </View>
             <Text style={styles.userEmail}>{userData?.email || 'No email provided'}</Text>
             <View style={styles.roleBadge}>
               <Text style={styles.roleText}>{roleLabel}</Text>
@@ -287,6 +322,62 @@ export default function ProfileScreen() {
           <Text style={styles.footerText}>Member since {userData?.date_joined ? new Date(userData.date_joined).getFullYear() : '2026'}</Text>
         </View>
       </ScrollView>
+
+      {/* Edit Profile Modal */}
+      <Modal
+        animationType="slide"
+        transparent
+        visible={isEditVisible}
+        onRequestClose={() => setIsEditVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalOverlay}
+        >
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Edit Profile</Text>
+              <TouchableOpacity onPress={() => setIsEditVisible(false)}>
+                <Ionicons name="close" size={24} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalLabel}>First Name</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={editFirstName}
+              onChangeText={setEditFirstName}
+              placeholder="Enter your first name"
+              placeholderTextColor={COLORS.textMuted}
+              autoCapitalize="words"
+            />
+
+            <Text style={styles.modalLabel}>Last Name</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={editLastName}
+              onChangeText={setEditLastName}
+              placeholder="Enter your last name"
+              placeholderTextColor={COLORS.textMuted}
+              autoCapitalize="words"
+            />
+
+            {editError && <Text style={styles.modalError}>{editError}</Text>}
+
+            <TouchableOpacity
+              style={[styles.saveButton, isSaving && { opacity: 0.7 }]}
+              onPress={handleSaveProfile}
+              disabled={isSaving}
+            >
+              {isSaving ? (
+                <ActivityIndicator color="white" />
+              ) : (
+                <Text style={styles.saveButtonText}>Save Changes</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -315,12 +406,23 @@ const styles = StyleSheet.create({
   },
   avatarText: { fontSize: 26, fontFamily: FONTS.black, color: 'white' },
   userInfo: { flex: 1 },
+  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 4 },
+  editButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   userName: {
+    flexShrink: 1,
     fontSize: 26,
     fontFamily: FONTS.bold,
     fontWeight: '700',
     color: 'white',
-    marginBottom: 4,
     letterSpacing: -0.5
   },
   userEmail: {
@@ -519,5 +621,68 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: FONTS.medium,
     fontWeight: '500',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: COLORS.bg,
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
+    padding: 24,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  modalTitle: {
+    fontSize: 22,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+  },
+  modalLabel: {
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+    marginBottom: 8,
+    marginTop: 8,
+  },
+  modalInput: {
+    backgroundColor: COLORS.bgSecondary,
+    borderRadius: 12,
+    padding: 14,
+    fontSize: 15,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  modalError: {
+    color: COLORS.danger,
+    fontSize: 13,
+    fontFamily: FONTS.medium,
+    marginTop: 12,
+  },
+  saveButton: {
+    backgroundColor: COLORS.purpleDark,
+    borderRadius: 16,
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 24,
+    marginBottom: 8,
+  },
+  saveButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
   },
 });

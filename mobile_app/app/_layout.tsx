@@ -5,7 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { isAuthenticated, getCurrentUser, roleHomePath } from '@/services/authService';
+import { isAuthenticated, getCurrentUser, roleHomePath, getRoleFromToken } from '@/services/authService';
 import { testFirebase } from "@/services/firebaseTest";
 import { startSyncManager } from '@/services/syncManager';
 import { initOfflineQueue } from '@/services/offlineQueue';
@@ -30,7 +30,10 @@ async function fetchRoleHome() {
     const user = await getCurrentUser();
     return roleHomePath(user);
   } catch {
-    return '/(tabs)';
+    // Backend fetch failed (offline, waking up, transient 401). Fall back to the
+    // role embedded in the stored JWT instead of silently defaulting to student.
+    const tokenRole = await getRoleFromToken();
+    return roleHomePath(null, tokenRole);
   }
 }
 
@@ -92,6 +95,7 @@ export default function RootLayout() {
         <Stack.Screen name="superadmin" options={{ headerShown: false }} />
         <Stack.Screen name="educator" options={{ headerShown: false }} />
         <Stack.Screen name="course" options={{ headerShown: false }} />
+        <Stack.Screen name="tv" options={{ headerShown: false }} />
         <Stack.Screen name="chat/[groupId]" options={{ headerShown: false, presentation: 'card' }} />
       </Stack>
       <StatusBar style="auto" />

@@ -6,9 +6,10 @@ import {
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getToken, getCurrentUser } from '@/services/authService';
-import { API_BASE_URL } from '@/config/api';
+import { API_BASE_URL, getTvPageBaseUrl } from '@/config/api';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as Clipboard from 'expo-clipboard';
 import * as ScreenOrientation from 'expo-screen-orientation';
 
 const COLORS = {
@@ -711,6 +712,15 @@ export default function HostSessionScreen() {
   const codeChars = code.split('');
   const playerCount = students.length;
 
+  const tvBase = getTvPageBaseUrl();
+  const copyTvUrl = () => {
+    if (!tvBase) return;
+    const url = `${tvBase}/tv/${code}`;
+    Clipboard.setStringAsync(url)
+      .then(() => Alert.alert('TV link copied', url))
+      .catch(() => {});
+  };
+
   if (roomMissing) {
     return (
       <LinearGradient
@@ -782,6 +792,23 @@ export default function HostSessionScreen() {
           />
           <Text style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
         </View>
+      </View>
+
+      <View style={styles.tvLinkRow}>
+        <Ionicons name="tv" size={14} color={COLORS.accent} />
+        <Text style={styles.tvLinkText} numberOfLines={1}>
+          {tvBase ? `Open on a TV: ${tvBase}/tv/${code}` : 'Show the leaderboard on a TV with the TV link'}
+        </Text>
+        {tvBase ? (
+          <TouchableOpacity
+            style={styles.tvCopyBtn}
+            onPress={copyTvUrl}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="copy-outline" size={15} color={COLORS.accent} />
+            <Text style={styles.tvCopyText}>Copy</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
@@ -1075,6 +1102,24 @@ const styles = StyleSheet.create({
   },
   statusDot: { width: 7, height: 7, borderRadius: 4 },
   statusText: { fontSize: 10, fontFamily: FONTS.extraBold, letterSpacing: 1 },
+
+  /* ── TV link row ── */
+  tvLinkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginHorizontal: 24,
+    marginBottom: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(34,211,238,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(34,211,238,0.2)',
+    borderRadius: 12,
+  },
+  tvLinkText: { flex: 1, fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted },
+  tvCopyBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 4 },
+  tvCopyText: { fontSize: 12, fontFamily: FONTS.bold, color: COLORS.accent },
 
   /* ── room code card ── */
   codeCard: {

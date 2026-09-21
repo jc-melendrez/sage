@@ -1,21 +1,29 @@
-﻿import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, Modal, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
+import { getQuizzes } from '@/services/quizService';
+import { getMyCourses } from '@/services/courseService';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
-import { SectionHeader, Pill, FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
+import { SectionHeader, FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
 
 interface Quiz {
   id: number;
   title: string;
   quiz_type: string;
+  course: number | null;
   created_at: string;
   questions: { id: number; question_text: string; options: string[]; correct_answer: string; explanation?: string }[];
+}
+
+interface CourseOption {
+  id: number;
+  name: string;
 }
 
 interface EditableQuestion {
@@ -37,11 +45,17 @@ const QUESTION_TYPE_OPTIONS = ['Multiple Choice', 'True/False', 'Short Answer', 
 const HAS_OPTIONS = ['Multiple Choice', 'True/False'];
 
 export default function QuizManagerScreen() {
-  const router = useRouter();
+  const params = useLocalSearchParams<{ course?: string; generate?: string }>();
 
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
+
+  // Class scoping
+  const [courses, setCourses] = useState<CourseOption[]>([]);
+  const [selectedCourse, setSelectedCourse] = useState<number | null>(
+    params.course ? Number(params.course) : null,
+  );
 
   const [selectedFile, setSelectedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [difficulty, setDifficulty] = useState('Medium');
@@ -57,24 +71,41 @@ export default function QuizManagerScreen() {
   const [draft, setDraft] = useState<EditableQuiz | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
-  const loadQuizzes = async () => {
+  const loadQuizzes = useCallback(async () => {
     try {
       setLoading(true);
-      const token = await getToken();
-      const res = await fetch(`${API_BASE_URL}/ai/quizzes/`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-      if (res.ok) setQuizzes(await res.json());
+      const data = await getQuizzes(selectedCourse ?? undefined);
+      setQuizzes(data);
     } catch (error) {
       console.error('Failed to load quizzes:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedCourse]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const data = await getMyCourses();
+        if (!mounted) return;
+        setCourses(data.map((c) => ({ id: c.id, name: c.name })));
+      } catch {
+        // non-fatal — chips just won't render
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (params.generate === '1') setCreating(true);
+  }, [params.generate]);
 
   useEffect(() => {
     loadQuizzes();
-  }, []);
+  }, [loadQuizzes]);
 
   const pickFile = async () => {
     try {
@@ -126,6 +157,7 @@ export default function QuizManagerScreen() {
           count,
           type: questionType,
           instructions,
+          course: selectedCourse ?? undefined,
         }),
       });
 
@@ -327,7 +359,9 @@ export default function QuizManagerScreen() {
     <View style={styles.container}>
       <EducatorHeader
         title="Quiz & Content"
-        subtitle={`${quizzes.length} quizzes Â· AI generated`}
+        subtitle={selectedCourse && courses.length > 0
+          ? `${quizzes.length} quizzes · ${courses.find((c) => c.id === selectedCourse)?.name ?? ''}`
+          : `${quizzes.length} quizzes · all classes`}
         rightIcon={creating ? 'close' : 'add'}
         onRightPress={() => {
           setCreating(!creating);
@@ -336,24 +370,27 @@ export default function QuizManagerScreen() {
       />
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
-        {/* Assignments shortcut */}
-        <View style={styles.section}>
-          <SectionHeader title="Assignments" actionLabel="View all" onAction={() => router.push('/educator/assignments' as any)} />
-          <TouchableOpacity
-            style={styles.linkCard}
-            activeOpacity={0.8}
-            onPress={() => router.push('/educator/assignments' as any)}
-          >
-            <View style={[styles.linkIconBg, { backgroundColor: tint(COLORS.purplePrimary) }]}>
-              <Ionicons name="document-text-outline" size={18} color={COLORS.purplePrimary} />
+        {/* Class filter */}
+        {courses.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.filterLabel}>Class</Text>
+            <View style={styles.chipRow}>
+              <FilterChip
+                label="All"
+                active={selectedCourse === null}
+                onPress={() => setSelectedCourse(null)}
+              />
+              {courses.map((course) => (
+                <FilterChip
+                  key={course.id}
+                  label={course.name}
+                  active={selectedCourse === course.id}
+                  onPress={() => setSelectedCourse(course.id)}
+                />
+              ))}
             </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.linkTitle}>Track submissions & due dates</Text>
-              <Text style={styles.linkSub}>Manage assignments across your classes</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-          </TouchableOpacity>
-        </View>
+          </View>
+        )}
 
         <View style={styles.section}>
           <SectionHeader title="Quizzes" />
@@ -369,19 +406,23 @@ export default function QuizManagerScreen() {
                     <View style={{ flex: 1 }}>
                       <Text style={styles.quizCardTitle}>{q.title}</Text>
                       <Text style={styles.quizCardMeta}>
-                        {q.questions?.length || 0} questions Â· {q.quiz_type} Â· {new Date(q.created_at).toLocaleDateString()}
+                        {q.questions?.length || 0} questions · {q.quiz_type}
                       </Text>
+                      {q.course != null && (
+                        <Text style={styles.quizCardMeta}>
+                          {courses.find((c) => c.id === q.course)?.name ?? `Class #${q.course}`}
+                        </Text>
+                      )}
                     </View>
-                    <Pill label="AI Generated" color={COLORS.purpleVibrant} icon="sparkles" />
+                    <TouchableOpacity style={styles.quizActionBtn} onPress={() => setPreviewQuiz(q)}>
+                      <Ionicons name="eye-outline" size={16} color={COLORS.purplePrimary} />
+                      <Text style={styles.quizActionText}>Preview</Text>
+                    </TouchableOpacity>
                   </View>
                   <View style={styles.quizCardActions}>
                     <TouchableOpacity style={styles.quizActionBtn} onPress={() => openEditor(q)}>
                       <Ionicons name="create-outline" size={16} color={COLORS.purplePrimary} />
                       <Text style={styles.quizActionText}>Edit</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.quizActionBtn} onPress={() => setPreviewQuiz(q)}>
-                      <Ionicons name="eye-outline" size={16} color={COLORS.purplePrimary} />
-                      <Text style={styles.quizActionText}>Preview</Text>
                     </TouchableOpacity>
                     <TouchableOpacity style={styles.quizActionBtn} onPress={() => handleDeleteQuiz(q)}>
                       <Ionicons name="trash-outline" size={16} color={COLORS.danger} />
@@ -446,7 +487,7 @@ export default function QuizManagerScreen() {
                     </Text>
                     <Text style={styles.materialMeta}>
                       {selectedFile
-                        ? `${selectedFile.name.split('.').pop()?.toUpperCase() || 'FILE'} â€¢ ${selectedFile.size ? (selectedFile.size / (1024 * 1024)).toFixed(1) + ' MB' : 'Unknown size'}`
+                        ? `${selectedFile.name.split('.').pop()?.toUpperCase() || 'FILE'} · ${selectedFile.size ? (selectedFile.size / (1024 * 1024)).toFixed(1) + ' MB' : 'Unknown size'}`
                         : 'Select a PDF or text file'}
                     </Text>
                   </View>
@@ -454,6 +495,27 @@ export default function QuizManagerScreen() {
                     <Text style={styles.changeBtnText}>{selectedFile ? 'Change' : 'Select'}</Text>
                   </TouchableOpacity>
                 </View>
+
+                {courses.length > 0 && (
+                  <>
+                    <Text style={styles.fieldLabel}>Class</Text>
+                    <View style={styles.chipRow}>
+                      <FilterChip
+                        label="No class"
+                        active={selectedCourse === null}
+                        onPress={() => setSelectedCourse(null)}
+                      />
+                      {courses.map((course) => (
+                        <FilterChip
+                          key={course.id}
+                          label={course.name}
+                          active={selectedCourse === course.id}
+                          onPress={() => setSelectedCourse(course.id)}
+                        />
+                      ))}
+                    </View>
+                  </>
+                )}
 
                 <Text style={styles.fieldLabel}>Difficulty</Text>
                 <View style={styles.chipRow}>
@@ -702,6 +764,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   content: { flex: 1, paddingHorizontal: 24, paddingTop: 24 },
   section: { marginBottom: 28 },
+  filterLabel: { fontSize: 12, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textSecondary, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.3 },
 
   modalOverlay: {
     flex: 1,

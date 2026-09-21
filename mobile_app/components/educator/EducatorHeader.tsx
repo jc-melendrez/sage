@@ -4,6 +4,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { COLORS, FONTS } from '@/constants/educatorTheme';
+import { Avatar } from './EducatorPrimitives';
 
 interface EducatorHeaderProps {
   title: string;
@@ -11,6 +12,12 @@ interface EducatorHeaderProps {
   showBack?: boolean;
   rightIcon?: keyof typeof Ionicons.glyphMap;
   onRightPress?: () => void;
+  /** Initials for a small avatar button rendered on the right. */
+  avatar?: string;
+  onAvatarPress?: () => void;
+  /** Show a notification bell on the right. */
+  showNotifications?: boolean;
+  onNotificationsPress?: () => void;
   children?: React.ReactNode; // e.g. quick-stat pills or a class switcher
 }
 
@@ -20,6 +27,10 @@ export function EducatorHeader({
   showBack = false,
   rightIcon,
   onRightPress,
+  avatar,
+  onAvatarPress,
+  showNotifications = false,
+  onNotificationsPress,
   children,
 }: EducatorHeaderProps) {
   const router = useRouter();
@@ -34,19 +45,25 @@ export function EducatorHeader({
         style={styles.header}
       >
         <View style={styles.row}>
-          {showBack ? (
+          {showBack && (
             <TouchableOpacity style={styles.iconBtn} onPress={() => router.back()}>
               <Ionicons name="chevron-back" size={22} color="white" />
             </TouchableOpacity>
-          ) : (
-            <View style={styles.roleBadge}>
-              <Ionicons name="school" size={13} color="white" />
-              <Text style={styles.roleText}>Educator</Text>
-            </View>
+          )}
+          <View style={{ flex: 1 }} />
+          {showNotifications && (
+            <TouchableOpacity style={[styles.iconBtn, styles.bellBtn]} onPress={onNotificationsPress}>
+              <Ionicons name="notifications-outline" size={20} color="white" />
+            </TouchableOpacity>
           )}
           {rightIcon && (
-            <TouchableOpacity style={styles.iconBtn} onPress={onRightPress}>
+            <TouchableOpacity style={[styles.iconBtn, styles.rightIconBtn]} onPress={onRightPress}>
               <Ionicons name={rightIcon} size={20} color="white" />
+            </TouchableOpacity>
+          )}
+          {avatar && (
+            <TouchableOpacity onPress={onAvatarPress} activeOpacity={0.85} style={styles.avatarWrap}>
+              <Avatar initials={avatar} size={36} />
             </TouchableOpacity>
           )}
         </View>
@@ -74,6 +91,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 14,
   },
+  bellBtn: { marginLeft: 10 },
+  rightIconBtn: { marginLeft: 10 },
+  avatarWrap: {
+    marginLeft: 10,
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.6)',
+  },
   iconBtn: {
     width: 36,
     height: 36,
@@ -82,19 +107,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  roleBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    alignSelf: 'flex-start',
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-  },
-  roleText: { color: 'white', fontSize: 12, fontFamily: FONTS.semiBold, fontWeight: '600' },
   title: {
     fontSize: 26,
     fontFamily: FONTS.bold,

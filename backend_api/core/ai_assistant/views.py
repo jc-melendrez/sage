@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from .models import ChatSession, ChatMessage, Quiz, QuizQuestion
 from .serializers import QuizSerializer # Import the new serializer
+from users.models import Course
 from users.utils.file_parser import extract_text_from_file
 import base64
 from io import BytesIO
@@ -189,6 +190,20 @@ class GenerateQuizView(APIView):
         q_type = request.data.get('type', 'Multiple Choice')
         instructions = request.data.get('instructions', '')
 
+        # Class-copy of the quiz: attach it to a course the caller owns.
+        course = None
+        course_id = request.data.get('course') or request.data.get('course_id')
+        if course_id:
+            try:
+                course = Course.objects.get(id=course_id)
+            except Course.DoesNotExist:
+                return Response({"error": "Course not found."}, status=404)
+            if request.user != course.educator:
+                return Response(
+                    {"error": "Only the course educator can add quizzes to a course."},
+                    status=403,
+                )
+
         GROQ_API_KEY = getattr(settings, 'GROQ_API_KEY', None)
         if not GROQ_API_KEY:
             return Response({"error": "Groq API key not configured."}, status=500)
@@ -248,6 +263,7 @@ class GenerateQuizView(APIView):
             # 🌟 SAVE TO DATABASE
             quiz = Quiz.objects.create(
                 user=request.user,
+                course=course,
                 title=quiz_json.get('title', 'Generated Quiz'),
                 quiz_type=q_type
             )
@@ -265,15 +281,34 @@ class GenerateQuizView(APIView):
         except json.JSONDecodeError:
             return Response({"error": "AI returned invalid JSON formatting."}, status=500)
         except Exception as e:
+            err_detail = str(e)
+            if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+                err_detail = f"{err_detail} | {e.response.text[:300]}"
             print(f"Quiz Gen Error: {e}")
-            return Response({"error": str(e)}, status=500)
+            return Response({"error": err_detail}, status=500)
 
 class QuizListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         # Retrieve all quizzes created by the authenticated user
-        quizzes = Quiz.objects.filter(user=request.user).order_by('-created_at')
+        quizzes = Quiz.objects.filter(user=request.user)
+
+        # Optional course filter: only the caller's own classes are visible.
+        course_id = request.query_params.get('course')
+        if course_id:
+            try:
+                course = Course.objects.get(id=course_id)
+            except (Course.DoesNotExist, ValueError):
+                return Response({"error": "Course not found."}, status=404)
+            if request.user != course.educator and not course.students.filter(id=request.user.id).exists():
+                return Response(
+                    {"error": "You are not a member of this course."},
+                    status=403,
+                )
+            quizzes = quizzes.filter(course=course)
+
+        quizzes = quizzes.order_by('-created_at')
         serializer = QuizSerializer(quizzes, many=True)
         return Response(serializer.data)
 

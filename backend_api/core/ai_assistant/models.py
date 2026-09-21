@@ -32,6 +32,14 @@ class ChatMessage(models.Model):
 
 class Quiz(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='quizzes')
+    # Optional class (Course) this quiz belongs to — quizzes are class-scoped.
+    course = models.ForeignKey(
+        'users.Course',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='quizzes',
+    )
     title = models.CharField(max_length=255)
     quiz_type = models.CharField(max_length=50, default="Multiple Choice")
     created_at = models.DateTimeField(auto_now_add=True)

@@ -85,7 +85,7 @@ export default function EducatorCoursesScreen() {
   return (
     <View style={styles.container}>
       <EducatorHeader
-        title="My Courses"
+        title="My Classes"
         subtitle={`${courses.length} course${courses.length === 1 ? '' : 's'}`}
         rightIcon="add"
         onRightPress={() => setModalVisible(true)}

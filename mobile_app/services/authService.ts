@@ -325,6 +325,38 @@ export async function getCurrentUser() {
   return await response.json();
 }
 
+/**
+ * Update the current user's editable profile fields (first_name, last_name).
+ * Returns the updated profile.
+ */
+export async function updateProfile(fields: {
+  first_name?: string;
+  last_name?: string;
+}) {
+  let token = await getToken();
+  if (!token) throw new Error('Not authenticated');
+  const doFetch = async (tok: string) =>
+    fetch(`${API_BASE_URL}/users/me/`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tok}` },
+      body: JSON.stringify(fields),
+    });
+  let response = await doFetch(token);
+  if (response.status === 401) {
+    const result = await refreshAccessToken();
+    if (result.ok) {
+      response = await doFetch(result.access);
+    } else if (result.reason === 'transient') {
+      throw new Error('Backend is still waking up — please retry.');
+    }
+  }
+  if (!response.ok) {
+    const error = await safeJson(response);
+    throw new Error(extractErrorMessage(error, 'Failed to update profile'));
+  }
+  return await response.json();
+}
+
 export async function getToken(): Promise<string | null> {
   return await SecureStore.getItemAsync(TOKEN_KEY);
 }
@@ -366,10 +398,26 @@ export async function getCachedUserId(): Promise<number | null> {
   return Number.isFinite(id) ? id : null;
 }
 
+/**
+ * Read the `role` claim straight from the stored access token.
+ * Backend tokens embed the role (users/authentication.py); this is used as
+ * a fallback when /api/users/me/ fails (offline, transient error) so an
+ * educator isn't silently sent to the student dashboard.
+ */
+export async function getRoleFromToken(): Promise<string | null> {
+  const token = await getToken();
+  if (!token) return null;
+  const payload = decodeJwt(token);
+  if (!payload || typeof payload.role !== 'string') return null;
+  return payload.role;
+}
+
 export function roleHomePath(
-  user?: { role?: string; is_educator?: boolean } | null
+  user?: { role?: string; is_educator?: boolean } | null,
+  tokenRole?: string | null
 ): Href {
-  if (user?.role === 'superadmin') return '/superadmin';
-  if (user?.role === 'educator' || user?.is_educator) return '/educator';
+  const role = user?.role || tokenRole || undefined;
+  if (role === 'superadmin') return '/superadmin';
+  if (role === 'educator' || user?.is_educator) return '/educator/dashboard';
   return '/(tabs)';
 }
