@@ -378,8 +378,8 @@ class CurrentUserProfileView(APIView):
     def patch(self, request):
         """Update the caller's own editable profile fields.
 
-        Only fields the serializer exposes as writable (first_name, last_name)
-        are accepted; username/email/role are read-only.
+        Only fields the serializer exposes as writable (first_name, last_name,
+        username, avatar) are accepted; email/role are read-only.
         """
         user = request.user
         serializer = UserProfileSerializer(user, data=request.data, partial=True)
@@ -1281,6 +1281,7 @@ def sync_user_to_firestore(user):
             'current_xp': user.current_xp,
             'total_points': user.total_points,
             'streak': user.streak,
+            'avatar': user.avatar,
             'avatarColor': PALETTE[user.id % len(PALETTE)],
         }, merge=True)
     except Exception as e:

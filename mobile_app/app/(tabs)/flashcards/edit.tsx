@@ -15,9 +15,8 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
-import { COLORS, FONTS, DECK_COLORS, GRADIENT_COLORS } from '@/constants/gameTheme';
+import { COLORS, FONTS, DECK_COLORS, GRADIENT_COLORS, PURPLE_HEADER_GRADIENT } from '@/constants/gameTheme';
 import FlashBanner, { BannerType } from '@/components/FlashBanner';
 import {
   Card,
@@ -27,12 +26,8 @@ import {
   createDeck,
   updateDeck,
   deleteDeck,
-  addCard,
   updateCard,
   deleteCard,
-  addCardsBulk,
-  parseBulkInput,
-  CardEntryInput,
 } from '@/services/flashcardService';
 
 export default function EditDeckScreen() {
@@ -46,14 +41,6 @@ export default function EditDeckScreen() {
   const [subject, setSubject] = useState('');
   const [color, setColor] = useState(DECK_COLORS[0]);
   const [cards, setCards] = useState<Card[]>([]);
-
-  const [quickFront, setQuickFront] = useState('');
-  const [quickBack, setQuickBack] = useState('');
-  const quickBackRef = React.useRef<TextInput>(null);
-
-  const [importOpen, setImportOpen] = useState(false);
-  const [bulkText, setBulkText] = useState('');
-  const [parsed, setParsed] = useState<CardEntryInput[]>([]);
 
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [editFront, setEditFront] = useState('');
@@ -109,23 +96,6 @@ export default function EditDeckScreen() {
     setBanner({ message: 'Deck saved.', type: 'success' });
   };
 
-  const quickAdd = () => {
-    const front = quickFront.trim();
-    const back = quickBack.trim();
-    if (!front || !back) {
-      setBanner({ message: 'Both front and back are required.', type: 'error' });
-      return;
-    }
-    const id = ensureDeck();
-    if (!id) return;
-    addCard(id, front, back);
-    setQuickFront('');
-    setQuickBack('');
-    loadCards(id);
-    if (Platform.OS !== 'web') Haptics.selectionAsync();
-    quickBackRef.current?.focus();
-  };
-
   const openCardEdit = (index: number) => {
     const card = cards[index];
     setEditIndex(index);
@@ -171,31 +141,19 @@ export default function EditDeckScreen() {
     ]);
   };
 
-  const onBulkChange = (text: string) => {
-    setBulkText(text);
-    setParsed(parseBulkInput(text));
-  };
-
-  const doBulkImport = () => {
-    if (parsed.length === 0) {
-      setBanner({ message: 'No valid cards found. Use "front | back" per line or JSON.', type: 'error' });
+  const goAddCard = () => {
+    if (!deckId) {
+      setBanner({ message: 'Save your deck first, then add cards.', type: 'error' });
       return;
     }
-    const id = ensureDeck();
-    if (!id) return;
-    const count = addCardsBulk(id, parsed);
-    loadCards(id);
-    setImportOpen(false);
-    setBulkText('');
-    setParsed([]);
-    setBanner({ message: `Imported ${count} cards.`, type: 'success' });
+    router.push({ pathname: '/flashcards/add', params: { deckId: String(deckId) } });
   };
 
   return (
     <KeyboardAvoidingView style={styles.keyboardWrap} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-    <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
-    <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
-      <StatusBar barStyle="dark-content" backgroundColor={COLORS.bg} translucent={false} />
+    <View style={styles.root}>
+    <LinearGradient colors={PURPLE_HEADER_GRADIENT} style={styles.headerBand}>
+      <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
 
       <FlashBanner
         visible={!!banner}
@@ -205,9 +163,9 @@ export default function EditDeckScreen() {
       />
 
       {/* HEADER */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
         <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.7}>
-          <Ionicons name="chevron-back" size={22} color={COLORS.textSecondary} />
+          <Ionicons name="chevron-back" size={22} color="#fff" />
         </TouchableOpacity>
         <View style={styles.headerTitleWrap}>
           <Text style={styles.headerTitle}>{deckId ? 'EDIT DECK' : 'NEW DECK'}</Text>
@@ -215,13 +173,16 @@ export default function EditDeckScreen() {
         </View>
         {deckId ? (
           <TouchableOpacity style={styles.headerBtn} onPress={confirmRemoveDeck} activeOpacity={0.7}>
-            <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
+            <Ionicons name="trash-outline" size={18} color="#fff" />
           </TouchableOpacity>
         ) : (
           <View style={styles.headerBtnPlaceholder} />
         )}
       </View>
+    </LinearGradient>
 
+    <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
+    <View style={styles.container}>
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
         {/* SETTINGS */}
         <Text style={styles.sectionLabel}>DECK SETTINGS</Text>
@@ -259,51 +220,24 @@ export default function EditDeckScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* RAPID ENTRY */}
+        {/* ADD A CARD */}
         <Text style={styles.sectionLabel}>ADD A CARD</Text>
-        <View style={styles.quickWrap}>
-          <View style={styles.quickRow}>
-            <TextInput
-              style={[styles.input, styles.quickInput]}
-              value={quickFront}
-              onChangeText={setQuickFront}
-              placeholder="Front (question)"
-              placeholderTextColor={COLORS.textMuted}
-              returnKeyType="next"
-              onSubmitEditing={() => quickBackRef.current?.focus()}
-            />
-            <View style={styles.quickSep}>
-              <Ionicons name="arrow-forward" size={16} color={COLORS.textMuted} />
-            </View>
-            <TextInput
-              ref={quickBackRef}
-              style={[styles.input, styles.quickInput]}
-              value={quickBack}
-              onChangeText={setQuickBack}
-              placeholder="Back (answer)"
-              placeholderTextColor={COLORS.textMuted}
-              returnKeyType="done"
-              onSubmitEditing={quickAdd}
-            />
-          </View>
-          <TouchableOpacity style={styles.addBtn} onPress={quickAdd} activeOpacity={0.85}>
+        <View style={styles.addCardWrap}>
+          <TouchableOpacity style={styles.addCardNavBtn} onPress={goAddCard} activeOpacity={0.85}>
             <Ionicons name="add" size={18} color="#fff" />
-            <Text style={styles.addBtnText}>Add card</Text>
+            <Text style={styles.addCardNavText}>Add card</Text>
           </TouchableOpacity>
+          <Text style={styles.addCardHint}>Add cards one at a time or bulk import from the Add Card screen.</Text>
         </View>
 
         {/* CARDS */}
         <View style={styles.cardsHeader}>
           <Text style={styles.sectionLabel}>CARDS</Text>
-          <TouchableOpacity style={styles.bulkBtn} onPress={() => setImportOpen(true)} activeOpacity={0.8}>
-            <Ionicons name="pricetags-outline" size={14} color={COLORS.purpleLight} />
-            <Text style={styles.bulkBtnText}>Bulk import</Text>
-          </TouchableOpacity>
         </View>
         {cards.length === 0 ? (
           <View style={styles.emptyWrap}>
             <Ionicons name="layers-outline" size={34} color={COLORS.textMuted} />
-            <Text style={styles.emptyText}>No cards yet — add one above or bulk import.</Text>
+            <Text style={styles.emptyText}>No cards yet — tap &ldquo;Add card&rdquo; above.</Text>
           </View>
         ) : (
           cards.map((card, index) => (
@@ -369,52 +303,17 @@ export default function EditDeckScreen() {
           </View>
         </View>
       </Modal>
-
-      {/* BULK IMPORT MODAL */}
-      <Modal visible={importOpen} transparent animationType="fade" onRequestClose={() => setImportOpen(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, styles.bulkModalCard]}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Bulk import</Text>
-              <TouchableOpacity onPress={() => setImportOpen(false)} activeOpacity={0.7}>
-                <Ionicons name="close" size={22} color={COLORS.textMuted} />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.inputLabel}>{'PASTE CARDS — "FRONT | BACK" PER LINE, OR JSON'}</Text>
-            <TextInput
-              style={[styles.input, styles.bulkInput]}
-              value={bulkText}
-              onChangeText={onBulkChange}
-              placeholder={'Paris | Capital of France\nH2O | Chemical formula of water'}
-              placeholderTextColor={COLORS.textMuted}
-              multiline
-              textAlignVertical="top"
-            />
-            <Text style={styles.bulkHint}>
-              {parsed.length > 0
-                ? `${parsed.length} valid ${parsed.length === 1 ? 'card' : 'cards'} ready to import.`
-                : 'Separate each card with a new line; separate front and back with " | ".'}
-            </Text>
-            <TouchableOpacity
-              style={[styles.saveBtn, parsed.length === 0 && styles.btnDisabled]}
-              onPress={doBulkImport}
-              disabled={parsed.length === 0}
-              activeOpacity={0.85}
-            >
-              <Ionicons name="download-outline" size={16} color="#fff" />
-              <Text style={styles.saveBtnText}>Import {parsed.length > 0 ? `${parsed.length} cards` : 'cards'}</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      </View>
+      </LinearGradient>
     </View>
-    </LinearGradient>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   keyboardWrap: { flex: 1 },
+  root: { flex: 1 },
+  headerBand: { overflow: 'hidden' },
   gradient: { flex: 1 },
   container: { flex: 1, paddingHorizontal: 20 },
   header: {
@@ -422,21 +321,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 18,
+    paddingBottom: 26,
   },
   headerBtn: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(124,58,237,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.15)',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(124,58,237,0.15)',
+    borderColor: 'rgba(255,255,255,0.3)',
   },
   headerBtnPlaceholder: { width: 40 },
   headerTitleWrap: { alignItems: 'center' },
-  headerTitle: { color: COLORS.textPrimary, fontSize: 17, fontFamily: FONTS.extraBold },
-  headerSub: { color: COLORS.textMuted, fontSize: 12, fontFamily: FONTS.semiBold, marginTop: 2 },
+  headerTitle: { color: '#fff', fontSize: 17, fontFamily: FONTS.extraBold },
+  headerSub: { color: 'rgba(255,255,255,0.75)', fontSize: 12, fontFamily: FONTS.semiBold, marginTop: 2 },
   content: { paddingBottom: 60 },
 
   sectionLabel: {
@@ -487,27 +387,27 @@ const styles = StyleSheet.create({
     marginTop: 16,
   },
   saveBtnText: { color: '#fff', fontSize: 14, fontFamily: FONTS.bold },
-  btnDisabled: { opacity: 0.5 },
 
-  quickWrap: { marginBottom: 24 },
-  quickRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  quickInput: { flex: 1 },
-  quickSep: { alignItems: 'center' },
-  addBtn: {
+  addCardWrap: { marginBottom: 24 },
+  addCardNavBtn: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
     gap: 6,
     backgroundColor: COLORS.success,
     borderRadius: 12,
-    paddingVertical: 12,
-    marginTop: 10,
+    paddingVertical: 14,
   },
-  addBtnText: { color: '#fff', fontSize: 14, fontFamily: FONTS.bold },
+  addCardNavText: { color: '#fff', fontSize: 15, fontFamily: FONTS.bold },
+  addCardHint: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontFamily: FONTS.medium,
+    textAlign: 'center',
+    marginTop: 8,
+  },
 
   cardsHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  bulkBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 10 },
-  bulkBtnText: { color: COLORS.purpleLight, fontSize: 12, fontFamily: FONTS.bold },
 
   emptyWrap: {
     alignItems: 'center',
@@ -557,10 +457,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.cardBorder,
   },
-  bulkModalCard: { maxHeight: '80%' },
   modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
   modalTitle: { color: COLORS.textPrimary, fontSize: 18, fontFamily: FONTS.extraBold },
   explanationInput: { maxHeight: 120 },
-  bulkInput: { maxHeight: 220, minHeight: 120, paddingTop: 12 },
-  bulkHint: { color: COLORS.textMuted, fontSize: 12, fontFamily: FONTS.medium, marginTop: 10 },
 });

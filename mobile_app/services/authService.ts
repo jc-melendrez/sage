@@ -326,12 +326,14 @@ export async function getCurrentUser() {
 }
 
 /**
- * Update the current user's editable profile fields (first_name, last_name).
- * Returns the updated profile.
+ * Update the current user's editable profile fields (username, first_name,
+ * last_name, avatar). Returns the updated profile.
  */
 export async function updateProfile(fields: {
+  username?: string;
   first_name?: string;
   last_name?: string;
+  avatar?: string;
 }) {
   let token = await getToken();
   if (!token) throw new Error('Not authenticated');

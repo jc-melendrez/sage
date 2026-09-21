@@ -342,11 +342,10 @@ export function deleteReviewLog(reviewId: number): void {
 
 // ---------- Session queue ----------
 
-export function buildQueue(deckId: number, opts?: { cram?: boolean; now?: Date }): CardEntry[] {
+export function buildQueue(deckId: number, opts?: { now?: Date }): CardEntry[] {
   const now = opts?.now ?? new Date();
   const cards = getCards(deckId);
   const all: CardEntry[] = cards.map((card) => ({ card, state: getCardState(card.id) }));
-  if (opts?.cram) return all;
   const due = all.filter((e) => e.state.state !== 'new' && isDue(e.state, now));
   const fresh = all.filter((e) => e.state.state === 'new');
   return [...due, ...fresh];

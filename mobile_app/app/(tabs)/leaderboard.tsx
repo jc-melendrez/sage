@@ -46,7 +46,11 @@ const FONTS = {
   regular: 'Montserrat-Regular',
 };
 
-const MEDALS = ['🥇', '🥈', '🥉'];
+const PODIUM_COLORS: readonly { medal: string; bg: readonly [string, string] }[] = [
+  { medal: '🥇', bg: ['#FBBF24', '#F59E0B'] },
+  { medal: '🥈', bg: ['#CBD5E1', '#94A3B8'] },
+  { medal: '🥉', bg: ['#FDBA74', '#F97316'] },
+];
 
 export default function LeaderboardScreen() {
   const router = useRouter();
@@ -140,7 +144,7 @@ export default function LeaderboardScreen() {
         </LinearGradient>
 
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Top 20</Text>
+          <Text style={styles.sectionTitle}>Top 3</Text>
         </View>
 
         {loading ? (
@@ -154,44 +158,88 @@ export default function LeaderboardScreen() {
             </TouchableOpacity>
           </View>
         ) : (
-          <View style={styles.listCard}>
-            {entries.map((entry, idx) => {
-              const isYou = entry.id === currentUserId || entry.is_you;
-              return (
-                <View
-                  key={String(entry.id)}
-                  style={[
-                    styles.rankRow,
-                    idx > 0 && styles.borderTop,
-                    isYou && styles.rankRowYou,
-                  ]}
-                >
-                  <View style={styles.rankBadgeWrap}>
-                    {idx < 3 ? (
-                      <Text style={styles.medal}>{MEDALS[idx]}</Text>
-                    ) : (
-                      <View style={[styles.rankBadge, { backgroundColor: 'rgba(124,58,237,0.12)' }]}>
-                        <Text style={styles.rankNumber}>{entry.rank}</Text>
+          <>
+            {entries.length > 0 && (
+              <View style={styles.podiumList}>
+                {entries.slice(0, 3).map((entry, idx) => {
+                  const isYou = entry.id === currentUserId || entry.is_you;
+                  const p = PODIUM_COLORS[idx];
+                  return (
+                    <LinearGradient
+                      key={String(entry.id)}
+                      colors={p.bg}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.podiumCard}
+                    >
+                      <View style={styles.podiumMedalWrap}>
+                        <Text style={styles.podiumMedal}>{p.medal}</Text>
+                        <Text style={styles.podiumRank}>#{entry.rank}</Text>
                       </View>
-                    )}
-                  </View>
-                  <View style={styles.rankInfo}>
-                    <Text style={[styles.rankName, isYou && styles.rankNameYou]} numberOfLines={1}>
-                      {entry.display_name}
-                      {isYou && <Text style={styles.youTag}> (You)</Text>}
-                    </Text>
-                    <Text style={styles.rankMeta}>Lv {entry.level}{entry.streak > 0 ? ` · 🔥${entry.streak}` : ''}</Text>
-                  </View>
-                  <Text style={styles.rankPoints}>{entry.total_points.toLocaleString()} pts</Text>
+                      <View style={styles.podiumInfo}>
+                        <Text style={styles.podiumName} numberOfLines={1}>
+                          {entry.display_name}
+                          {isYou && <Text style={styles.podiumYouTag}> · You</Text>}
+                        </Text>
+                        <Text style={styles.podiumMeta}>
+                          Lv {entry.level}
+                          {entry.streak > 0 ? ` · 🔥${entry.streak}` : ''}
+                        </Text>
+                      </View>
+                      <View style={styles.podiumRight}>
+                        <Text style={styles.podiumPoints}>{entry.total_points.toLocaleString()}</Text>
+                        <Text style={styles.podiumPointsLabel}>pts</Text>
+                      </View>
+                    </LinearGradient>
+                  );
+                })}
+              </View>
+            )}
+
+            {entries.length > 3 && (
+              <>
+                <View style={[styles.sectionHeader, styles.listSectionHeader]}>
+                  <Text style={styles.sectionTitle}>Next Ranks</Text>
                 </View>
-              );
-            })}
+                <View style={styles.listCard}>
+                  {entries.slice(3).map((entry, idx) => {
+                    const isYou = entry.id === currentUserId || entry.is_you;
+                    return (
+                      <View
+                        key={String(entry.id)}
+                        style={[
+                          styles.rankRow,
+                          idx > 0 && styles.borderTop,
+                          isYou && styles.rankRowYou,
+                        ]}
+                      >
+                        <View style={styles.rankBadgeWrap}>
+                          <View style={[styles.rankBadge, { backgroundColor: 'rgba(124,58,237,0.12)' }]}>
+                            <Text style={styles.rankNumber}>{entry.rank}</Text>
+                          </View>
+                        </View>
+                        <View style={styles.rankInfo}>
+                          <Text style={[styles.rankName, isYou && styles.rankNameYou]} numberOfLines={1}>
+                            {entry.display_name}
+                            {isYou && <Text style={styles.youTag}> (You)</Text>}
+                          </Text>
+                          <Text style={styles.rankMeta}>Lv {entry.level}{entry.streak > 0 ? ` · 🔥${entry.streak}` : ''}</Text>
+                        </View>
+                        <Text style={styles.rankPoints}>{entry.total_points.toLocaleString()} pts</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
             {entries.length === 0 && (
               <View style={styles.emptyCard}>
+                <Ionicons name="trophy-outline" size={36} color={COLORS.purplePale} />
                 <Text style={styles.emptyText}>No students on the leaderboard yet.</Text>
               </View>
             )}
-          </View>
+          </>
         )}
       </ScrollView>
     </View>
@@ -299,6 +347,54 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     overflow: 'hidden',
   },
+  podiumList: { gap: 10, marginBottom: 16 },
+  podiumCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 20,
+    padding: 16,
+    gap: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 4,
+  },
+  podiumMedalWrap: { alignItems: 'center', width: 48 },
+  podiumMedal: { fontSize: 26 },
+  podiumRank: {
+    fontSize: 11,
+    fontFamily: FONTS.black,
+    color: 'rgba(255,255,255,0.9)',
+    marginTop: 2,
+  },
+  podiumInfo: { flex: 1 },
+  podiumName: {
+    fontSize: 15,
+    fontFamily: FONTS.extraBold,
+    color: 'white',
+  },
+  podiumYouTag: {
+    fontSize: 12,
+    fontFamily: FONTS.extraBold,
+    color: 'rgba(255,255,255,0.9)',
+  },
+  podiumMeta: {
+    fontSize: 11.5,
+    fontFamily: FONTS.regular,
+    color: 'rgba(255,255,255,0.85)',
+    marginTop: 2,
+  },
+  podiumRight: { alignItems: 'flex-end' },
+  podiumPoints: { fontSize: 20, fontFamily: FONTS.black, color: 'white' },
+  podiumPointsLabel: {
+    fontSize: 10,
+    fontFamily: FONTS.semiBold,
+    color: 'rgba(255,255,255,0.85)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  listSectionHeader: { marginTop: 4 },
   borderTop: { borderTopWidth: 1, borderTopColor: COLORS.border },
   rankRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14 },
   rankRowYou: {

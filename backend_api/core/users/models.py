@@ -41,7 +41,11 @@ class User(AbstractUser):
     is_educator = models.BooleanField(default=False, editable=False)
 
     firebase_uid = models.CharField(max_length=128, unique=True, null=True, blank=True)
-    
+
+    # Key of the system-provided profile picture (see mobile_app/constants/pfps.ts).
+    # Empty string means the app falls back to initials.
+    avatar = models.CharField(max_length=50, blank=True, default='')
+
     # --- Gamification Overview ---
     level = models.IntegerField(default=1)
     current_xp = models.IntegerField(default=0)

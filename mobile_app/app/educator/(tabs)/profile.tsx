@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, Platform, StatusBar } from 'react-native';
+import { useState, useCallback } from 'react';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, Platform, StatusBar, Image } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect, type Href } from 'expo-router';
 import { useAuth } from '@/hooks/useAuth';
 import { getCurrentUser } from '@/services/authService';
 import { COLORS, FONTS, RADIUS } from '@/constants/educatorTheme';
+import { pfpSource } from '@/constants/pfps';
 
 export default function EducatorProfileScreen() {
   const { logout } = useAuth();
@@ -13,19 +14,24 @@ export default function EducatorProfileScreen() {
   const [userData, setUserData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchProfile = async () => {
-      try {
-        const profile = await getCurrentUser();
-        setUserData(profile);
-      } catch (error) {
-        console.error("Failed to load educator profile:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchProfile();
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      (async () => {
+        try {
+          const profile = await getCurrentUser();
+          if (active) setUserData(profile);
+        } catch (error) {
+          console.error("Failed to load educator profile:", error);
+        } finally {
+          if (active) setLoading(false);
+        }
+      })();
+      return () => {
+        active = false;
+      };
+    }, [])
+  );
 
   const handleLogout = () => {
     Alert.alert(
@@ -60,6 +66,7 @@ export default function EducatorProfileScreen() {
   const initials = firstName
     ? `${firstName[0]}${lastName ? lastName[0] : ''}`.toUpperCase()
     : username.substring(0, 2).toUpperCase();
+  const avatarSource = pfpSource(userData?.avatar);
 
   return (
     <View style={styles.container}>
@@ -72,16 +79,28 @@ export default function EducatorProfileScreen() {
         style={styles.header}
       >
         <View style={styles.headerTop}>
-          <LinearGradient
-            colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.avatarContainer}
-          >
-            <Text style={styles.avatarText}>{initials}</Text>
-          </LinearGradient>
+          {avatarSource && (
+            <View style={[styles.avatarContainer, { overflow: 'hidden' }]}>
+              <Image source={avatarSource} style={styles.avatarImage} resizeMode="cover" />
+            </View>
+          )}
+          {!avatarSource && (
+            <LinearGradient
+              colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.avatarContainer}
+            >
+              <Text style={styles.avatarText}>{initials}</Text>
+            </LinearGradient>
+          )}
           <View style={styles.userInfo}>
-            <Text style={styles.userName}>{fullName}</Text>
+            <View style={styles.nameRow}>
+              <Text style={styles.userName} numberOfLines={1}>{fullName}</Text>
+              <TouchableOpacity style={styles.editButton} onPress={() => router.push('/edit-profile' as Href)} activeOpacity={0.8}>
+                <Ionicons name="pencil" size={15} color="white" />
+              </TouchableOpacity>
+            </View>
             <Text style={styles.userEmail}>{userData?.email || 'No email provided'}</Text>
             <View style={styles.roleBadge}>
               <Ionicons name="school" size={12} color="white" />
@@ -200,9 +219,21 @@ const styles = StyleSheet.create({
     shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3, shadowRadius: 8, elevation: 4,
   },
+  avatarImage: { width: '100%', height: '100%' },
   avatarText: { fontSize: 24, fontFamily: FONTS.black, color: 'white' },
   userInfo: { flex: 1 },
-  userName: { fontSize: 24, fontFamily: FONTS.bold, color: 'white', marginBottom: 4, letterSpacing: -0.5 },
+  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 4 },
+  editButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  userName: { flexShrink: 1, fontSize: 24, fontFamily: FONTS.bold, color: 'white', marginBottom: 4, letterSpacing: -0.5 },
   userEmail: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.purplePale, marginBottom: 8 },
   roleBadge: {
     alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 5,

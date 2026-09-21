@@ -17,7 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
-import { COLORS, FONTS, GRADIENT_COLORS } from '@/constants/gameTheme';
+import { COLORS, FONTS, GRADIENT_COLORS, PURPLE_HEADER_GRADIENT } from '@/constants/gameTheme';
 import FlashBanner, { BannerType } from '@/components/FlashBanner';
 import { Rating, RATINGS, CardState, intervalLabel, RATING_LABELS } from '@/services/srs';
 import {
@@ -46,11 +46,11 @@ interface UndoEntry {
   requeued: boolean;
 }
 
-const RATING_STYLE: Record<Rating, { bg: string; border: string; color: string; icon: keyof typeof Ionicons.glyphMap }> = {
-  again: { bg: 'rgba(239,68,68,0.15)', border: 'rgba(239,68,68,0.5)', color: '#F87171', icon: 'refresh' },
-  hard: { bg: 'rgba(245,158,11,0.15)', border: 'rgba(245,158,11,0.5)', color: '#FBBF24', icon: 'trending-down' },
-  good: { bg: 'rgba(16,185,129,0.15)', border: 'rgba(16,185,129,0.5)', color: '#34D399', icon: 'checkmark' },
-  easy: { bg: 'rgba(34,211,238,0.15)', border: 'rgba(34,211,238,0.5)', color: '#22D3EE', icon: 'trending-up' },
+const RATING_STYLE: Record<Rating, { bg: string; color: string; icon: keyof typeof Ionicons.glyphMap }> = {
+  again: { bg: '#EF4444', color: '#fff', icon: 'refresh' },
+  hard: { bg: '#F59E0B', color: '#fff', icon: 'trending-down' },
+  good: { bg: '#10B981', color: '#fff', icon: 'checkmark' },
+  easy: { bg: '#0891B2', color: '#fff', icon: 'trending-up' },
 };
 
 export default function StudyScreen() {
@@ -61,7 +61,6 @@ export default function StudyScreen() {
 
   const [deck, setDeck] = useState<Deck | null>(null);
   const [phase, setPhase] = useState<Phase>('setup');
-  const [cram, setCram] = useState(false);
 
   const [cards, setCards] = useState<Card[]>([]);
   const [pos, setPos] = useState(0);
@@ -92,7 +91,7 @@ export default function StudyScreen() {
   const summary = useMemo(() => (deck ? getDeckSummary(deck.id) : null), [deck]);
 
   const startSession = () => {
-    const entries = buildQueue(deckId, { cram });
+    const entries = buildQueue(deckId);
     setCards(entries.map((e) => e.card));
     setPos(0);
     setCounts({ again: 0, hard: 0, good: 0, easy: 0 });
@@ -204,9 +203,9 @@ export default function StudyScreen() {
   const accuracy = totalReviewed > 0 ? Math.round(((counts.good + counts.easy) / totalReviewed) * 100) : 0;
 
   return (
-    <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
-    <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
-      <StatusBar barStyle="dark-content" backgroundColor={COLORS.bg} translucent={false} />
+    <LinearGradient colors={PURPLE_HEADER_GRADIENT} style={styles.headerBand}>
+    <View style={styles.root}>
+      <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
 
       <FlashBanner
         visible={!!banner}
@@ -216,9 +215,9 @@ export default function StudyScreen() {
       />
 
       {/* HEADER */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
         <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.7}>
-          <Ionicons name="chevron-back" size={22} color={COLORS.textSecondary} />
+          <Ionicons name="chevron-back" size={22} color="#fff" />
         </TouchableOpacity>
         <View style={styles.headerTitleWrap}>
           <Text style={styles.headerTitle} numberOfLines={1}>{deck?.name ?? 'Study'}</Text>
@@ -228,12 +227,15 @@ export default function StudyScreen() {
         </View>
         {phase === 'study' ? (
           <TouchableOpacity style={styles.headerBtn} onPress={openEdit} activeOpacity={0.7}>
-            <Ionicons name="create-outline" size={18} color={COLORS.textSecondary} />
+            <Ionicons name="create-outline" size={18} color="#fff" />
           </TouchableOpacity>
         ) : (
           <View style={styles.headerBtnPlaceholder} />
         )}
       </View>
+
+      <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
+      <View style={styles.container}>
 
       {phase === 'setup' && deck ? (
         <View style={styles.setupWrap}>
@@ -264,31 +266,14 @@ export default function StudyScreen() {
             </View>
           </View>
 
-          <TouchableOpacity
-            style={[styles.cramToggle, cram && styles.cramToggleOn]}
-            onPress={() => setCram((c) => !c)}
-            activeOpacity={0.8}
-          >
-            <View style={styles.cramLeft}>
-              <Ionicons name="flash" size={18} color={cram ? COLORS.warning : COLORS.textMuted} />
-              <View>
-                <Text style={[styles.cramTitle, cram && { color: COLORS.warning }]}>Cram mode</Text>
-                <Text style={styles.cramSub}>Study every card, ignoring due dates</Text>
-              </View>
-            </View>
-            <View style={[styles.toggleTrack, cram && styles.toggleTrackOn]}>
-              <View style={[styles.toggleThumb, cram && styles.toggleThumbOn]} />
-            </View>
-          </TouchableOpacity>
-
           <TouchableOpacity style={styles.startBtn} onPress={startSession} activeOpacity={0.85}>
             <Ionicons name="play" size={18} color="#fff" />
             <Text style={styles.startBtnText}>Start session</Text>
           </TouchableOpacity>
 
-          {(summary?.dueCount ?? 0) === 0 && (summary?.newCount ?? 0) === 0 && !cram && (
+          {(summary?.dueCount ?? 0) === 0 && (summary?.newCount ?? 0) === 0 && (
             <Text style={styles.nothingDueText}>
-              Nothing due right now — turn on cram mode to review anyway.
+              Nothing due right now — come back later.
             </Text>
           )}
         </View>
@@ -360,12 +345,12 @@ export default function StudyScreen() {
                 return (
                   <TouchableOpacity
                     key={rating}
-                    style={[styles.ratingBtn, { backgroundColor: style.bg, borderColor: style.border }]}
+                    style={[styles.ratingBtn, { backgroundColor: style.bg }, !flipped && styles.ratingBtnDisabled]}
                     disabled={!flipped}
                     onPress={() => handleRating(rating)}
                     activeOpacity={0.75}
                   >
-                    <View style={[styles.ratingIconWrap, { backgroundColor: `${style.color}22` }]}>
+                    <View style={[styles.ratingIconWrap, { backgroundColor: 'rgba(255,255,255,0.22)' }]}>
                       <Ionicons name={style.icon} size={15} color={style.color} />
                     </View>
                     <Text style={[styles.ratingLabel, { color: style.color }]}>{RATING_LABELS[rating]}</Text>
@@ -477,12 +462,16 @@ export default function StudyScreen() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+      </View>
+      </LinearGradient>
     </View>
     </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
+  root: { flex: 1 },
+  headerBand: { flex: 1 },
   gradient: { flex: 1 },
   container: { flex: 1, paddingHorizontal: 20 },
   header: {
@@ -490,21 +479,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 18,
+    paddingBottom: 26,
   },
   headerBtn: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(124,58,237,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.15)',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(124,58,237,0.15)',
+    borderColor: 'rgba(255,255,255,0.3)',
   },
   headerBtnPlaceholder: { width: 40 },
   headerTitleWrap: { flex: 1, alignItems: 'center', paddingHorizontal: 8 },
-  headerTitle: { color: COLORS.textPrimary, fontSize: 17, fontFamily: FONTS.extraBold },
-  headerSub: { color: COLORS.textMuted, fontSize: 12, fontFamily: FONTS.semiBold, marginTop: 2 },
+  headerTitle: { color: '#fff', fontSize: 17, fontFamily: FONTS.extraBold },
+  headerSub: { color: 'rgba(255,255,255,0.75)', fontSize: 12, fontFamily: FONTS.semiBold, marginTop: 2 },
 
   // Setup
   setupWrap: { flex: 1, justifyContent: 'center', paddingBottom: 40 },
@@ -531,32 +521,6 @@ const styles = StyleSheet.create({
   },
   setupStatValue: { fontSize: 22, fontFamily: FONTS.black },
   setupStatLabel: { color: COLORS.textMuted, fontSize: 9, fontFamily: FONTS.bold, letterSpacing: 1, marginTop: 4 },
-  cramToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: COLORS.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 14,
-    marginBottom: 20,
-  },
-  cramToggleOn: { borderColor: 'rgba(245,158,11,0.5)', backgroundColor: 'rgba(245,158,11,0.1)' },
-  cramLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
-  cramTitle: { color: COLORS.textPrimary, fontSize: 14, fontFamily: FONTS.bold },
-  cramSub: { color: COLORS.textMuted, fontSize: 11, fontFamily: FONTS.medium, marginTop: 2 },
-  toggleTrack: {
-    width: 46,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: 'rgba(124,58,237,0.18)',
-    justifyContent: 'center',
-    paddingHorizontal: 3,
-  },
-  toggleTrackOn: { backgroundColor: COLORS.warning },
-  toggleThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff' },
-  toggleThumbOn: { alignSelf: 'flex-end' },
   startBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -618,7 +582,7 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 24,
   },
   qTab: {
-    alignSelf: 'flex-start',
+    alignSelf: 'center',
     backgroundColor: COLORS.purplePrimary,
     borderRadius: 8,
     paddingHorizontal: 12,
@@ -631,10 +595,11 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: FONTS.extraBold,
     letterSpacing: 1,
+    textAlign: 'center',
   },
   cardScrollContent: { flexGrow: 1, justifyContent: 'center' },
-  questionText: { color: COLORS.textPrimary, fontSize: 21, fontFamily: FONTS.bold, lineHeight: 30 },
-  answerText: { color: COLORS.purpleDark, fontSize: 24, fontFamily: FONTS.extraBold, lineHeight: 33 },
+  questionText: { color: COLORS.textPrimary, fontSize: 21, fontFamily: FONTS.bold, lineHeight: 30, textAlign: 'center' },
+  answerText: { color: COLORS.purpleDark, fontSize: 24, fontFamily: FONTS.extraBold, lineHeight: 33, textAlign: 'center' },
   explanationBox: {
     marginTop: 20,
     backgroundColor: 'rgba(124,58,237,0.06)',
@@ -649,12 +614,14 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.bold,
     letterSpacing: 1,
     marginBottom: 6,
+    textAlign: 'center',
   },
   explanationText: {
     color: COLORS.textSecondary,
     fontSize: 13,
     fontFamily: FONTS.medium,
     lineHeight: 19,
+    textAlign: 'center',
   },
   flipHint: {
     color: COLORS.textMuted,
@@ -679,14 +646,19 @@ const styles = StyleSheet.create({
   ratingBtn: {
     flex: 1,
     borderRadius: 14,
-    borderWidth: 1,
-    paddingVertical: 10,
+    paddingVertical: 12,
     alignItems: 'center',
     gap: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    elevation: 3,
   },
-  ratingIconWrap: { width: 26, height: 26, borderRadius: 13, justifyContent: 'center', alignItems: 'center' },
-  ratingLabel: { fontSize: 12, fontFamily: FONTS.bold },
-  ratingInterval: { color: COLORS.textMuted, fontSize: 10, fontFamily: FONTS.semiBold },
+  ratingBtnDisabled: { opacity: 0.5 },
+  ratingIconWrap: { width: 28, height: 28, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
+  ratingLabel: { fontSize: 13, fontFamily: FONTS.extraBold },
+  ratingInterval: { color: 'rgba(255,255,255,0.85)', fontSize: 10, fontFamily: FONTS.semiBold },
 
   // Results
   resultsScroll: { flex: 1 },

@@ -4,6 +4,15 @@ from .models import Badge, Recommendation, Session, Activity, Course, User, Role
 from django.contrib.auth import get_user_model
 
 
+# Keys of the system-provided profile pictures (same set as the mobile app,
+# see mobile_app/constants/pfps.ts). Empty string = initials fallback.
+AVATAR_KEYS = {
+    'bear', 'bear2', 'beaver', 'cat', 'chicken', 'duck', 'giraffe', 'hen',
+    'hippopotamus', 'meerkat', 'panda', 'penguin', 'polar-bear', 'rabbit',
+    'sea-lion', 'shark', 'sloth',
+}
+
+
 class BadgeSerializer(serializers.ModelSerializer):
 
     class Meta:
@@ -20,13 +29,26 @@ class UserProfileSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name', # 🌟 Unhidden here!
             'role', 'firebase_uid',
+            'avatar',
             'is_student', 'is_educator', 'level', 'current_xp',
             'next_level_xp', 'total_points', 'streak',
             'courses_completed', 'study_hours', 'quizzes_taken',
             'group_activities_count', 'badges', 'date_joined'
         ]
-        read_only_fields = ['id', 'username', 'email', 'date_joined', 'role', 'firebase_uid']
-        
+        read_only_fields = ['id', 'email', 'date_joined', 'role', 'firebase_uid']
+
+    def validate_username(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Username is required.')
+        return value
+
+    def validate_avatar(self, value):
+        value = (value or '').strip()
+        if value and value not in AVATAR_KEYS:
+            raise serializers.ValidationError('Unknown avatar.')
+        return value
+
     def get_next_level_xp(self, obj):
         return obj.level * 1000
 

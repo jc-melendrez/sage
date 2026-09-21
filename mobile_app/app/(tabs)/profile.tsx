@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, StatusBar, Platform, Modal, TextInput, KeyboardAvoidingView } from 'react-native';
+import { useState, useCallback } from 'react';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, StatusBar, Platform, Image } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect, type Href } from 'expo-router';
 import { useAuth } from '@/hooks/useAuth';
-import { getCurrentUser, updateProfile } from '@/services/authService';
+import { getCurrentUser } from '@/services/authService';
+import { pfpSource } from '@/constants/pfps';
 
 // 🎨 Exact same tokens as Dashboard for a unified Design System
 const COLORS = {
@@ -44,25 +45,24 @@ export default function ProfileScreen() {
   const [userData, setUserData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
-  const [isEditVisible, setIsEditVisible] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-  const [editFirstName, setEditFirstName] = useState('');
-  const [editLastName, setEditLastName] = useState('');
-  const [editError, setEditError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const fetchProfile = async () => {
-      try {
-        const profile = await getCurrentUser();
-        setUserData(profile);
-      } catch (error) {
-        console.error("Failed to load profile:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchProfile();
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      (async () => {
+        try {
+          const profile = await getCurrentUser();
+          if (active) setUserData(profile);
+        } catch (error) {
+          console.error("Failed to refresh profile:", error);
+        } finally {
+          if (active) setLoading(false);
+        }
+      })();
+      return () => {
+        active = false;
+      };
+    }, [])
+  );
 
   const handleLogout = async () => {
     await logout();
@@ -70,27 +70,7 @@ export default function ProfileScreen() {
   };
 
   const openEdit = () => {
-    setEditFirstName(userData?.first_name || '');
-    setEditLastName(userData?.last_name || '');
-    setEditError(null);
-    setIsEditVisible(true);
-  };
-
-  const handleSaveProfile = async () => {
-    setIsSaving(true);
-    setEditError(null);
-    try {
-      const updated = await updateProfile({
-        first_name: editFirstName.trim(),
-        last_name: editLastName.trim(),
-      });
-      setUserData(updated);
-      setIsEditVisible(false);
-    } catch (err: any) {
-      setEditError(err?.message || 'Failed to save changes.');
-    } finally {
-      setIsSaving(false);
-    }
+    router.push('/edit-profile' as Href);
   };
 
   if (loading) {
@@ -114,6 +94,7 @@ export default function ProfileScreen() {
   const progressPercent = Math.min((currentXP / nextLevelXP) * 100, 100);
   const earnedBadges = userData?.badges || [];
   const roleLabel = userData?.role === 'superadmin' ? 'Superadmin' : userData?.is_educator ? 'Educator' : 'Student';
+  const avatarSource = pfpSource(userData?.avatar);
 
   return (
     <View style={styles.container}>
@@ -126,14 +107,21 @@ export default function ProfileScreen() {
         style={styles.header}
       >
         <View style={styles.headerTop}>
-          <LinearGradient
-            colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.avatarContainer}
-          >
-            <Text style={styles.avatarText}>{initials}</Text>
-          </LinearGradient>
+          {avatarSource && (
+            <View style={[styles.avatarContainer, { overflow: 'hidden' }]}>
+              <Image source={avatarSource} style={styles.avatarImage} resizeMode="cover" />
+            </View>
+          )}
+          {!avatarSource && (
+            <LinearGradient
+              colors={[COLORS.purpleVibrant, COLORS.purpleLight]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.avatarContainer}
+            >
+              <Text style={styles.avatarText}>{initials}</Text>
+            </LinearGradient>
+          )}
 
           <View style={styles.userInfo}>
             <View style={styles.nameRow}>
@@ -322,62 +310,6 @@ export default function ProfileScreen() {
           <Text style={styles.footerText}>Member since {userData?.date_joined ? new Date(userData.date_joined).getFullYear() : '2026'}</Text>
         </View>
       </ScrollView>
-
-      {/* Edit Profile Modal */}
-      <Modal
-        animationType="slide"
-        transparent
-        visible={isEditVisible}
-        onRequestClose={() => setIsEditVisible(false)}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={styles.modalOverlay}
-        >
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Edit Profile</Text>
-              <TouchableOpacity onPress={() => setIsEditVisible(false)}>
-                <Ionicons name="close" size={24} color={COLORS.textMuted} />
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.modalLabel}>First Name</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={editFirstName}
-              onChangeText={setEditFirstName}
-              placeholder="Enter your first name"
-              placeholderTextColor={COLORS.textMuted}
-              autoCapitalize="words"
-            />
-
-            <Text style={styles.modalLabel}>Last Name</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={editLastName}
-              onChangeText={setEditLastName}
-              placeholder="Enter your last name"
-              placeholderTextColor={COLORS.textMuted}
-              autoCapitalize="words"
-            />
-
-            {editError && <Text style={styles.modalError}>{editError}</Text>}
-
-            <TouchableOpacity
-              style={[styles.saveButton, isSaving && { opacity: 0.7 }]}
-              onPress={handleSaveProfile}
-              disabled={isSaving}
-            >
-              {isSaving ? (
-                <ActivityIndicator color="white" />
-              ) : (
-                <Text style={styles.saveButtonText}>Save Changes</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
     </View>
   );
 }
@@ -405,6 +337,7 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   avatarText: { fontSize: 26, fontFamily: FONTS.black, color: 'white' },
+  avatarImage: { width: '100%', height: '100%' },
   userInfo: { flex: 1 },
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 4 },
   editButton: {
@@ -621,68 +554,5 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: FONTS.medium,
     fontWeight: '500',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    backgroundColor: COLORS.bg,
-    borderTopLeftRadius: 32,
-    borderTopRightRadius: 32,
-    padding: 24,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  modalTitle: {
-    fontSize: 22,
-    fontFamily: FONTS.bold,
-    fontWeight: '700',
-    color: COLORS.textPrimary,
-  },
-  modalLabel: {
-    fontSize: 14,
-    fontFamily: FONTS.semiBold,
-    fontWeight: '600',
-    color: COLORS.textSecondary,
-    marginBottom: 8,
-    marginTop: 8,
-  },
-  modalInput: {
-    backgroundColor: COLORS.bgSecondary,
-    borderRadius: 12,
-    padding: 14,
-    fontSize: 15,
-    fontFamily: FONTS.medium,
-    color: COLORS.textPrimary,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  modalError: {
-    color: COLORS.danger,
-    fontSize: 13,
-    fontFamily: FONTS.medium,
-    marginTop: 12,
-  },
-  saveButton: {
-    backgroundColor: COLORS.purpleDark,
-    borderRadius: 16,
-    paddingVertical: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 24,
-    marginBottom: 8,
-  },
-  saveButtonText: {
-    color: 'white',
-    fontSize: 16,
-    fontFamily: FONTS.bold,
-    fontWeight: '700',
   },
 });
