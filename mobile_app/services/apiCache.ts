@@ -80,3 +80,46 @@ export function parseCached<T>(body: string): T | null {
     return null;
   }
 }
+
+// --- Chat history cache ---------------------------------------------------
+// One row per (user, group) holding the last-known messages plus the group
+// metadata and member roster, so reopening a chat paints instantly from local
+// storage (Messenger-style) and hydrates from the network behind the scenes.
+// Rows live in the same http_cache table, so logout's clearApiCache() wipes
+// them too (user-scoped keys) and they are never shared across accounts.
+
+const CHAT_TTL_SECONDS = 31536000; // 1 year — chat history persists.
+
+export interface ChatCacheDoc {
+  messages: unknown[];
+  group?: { id: string; name?: string; description?: string; join_code?: string; members_count?: number } | null;
+  members?: unknown[] | null;
+}
+
+function chatCacheKey(groupId: string): string {
+  return `chat|${getCacheUserId() ?? 'anon'}|${groupId}`;
+}
+
+export function getChatCache(groupId: string): ChatCacheDoc | null {
+  ensureInitialized();
+  const hit = getCachedResponse(chatCacheKey(groupId));
+  if (!hit) return null;
+  return parseCached<ChatCacheDoc>(hit.body);
+}
+
+export function setChatCache(groupId: string, doc: ChatCacheDoc) {
+  ensureInitialized();
+  const key = chatCacheKey(groupId);
+  const existing = getChatCache(groupId);
+  const next: ChatCacheDoc = {
+    messages: doc.messages,
+    group: doc.group ?? existing?.group ?? null,
+    members: doc.members ?? existing?.members ?? null,
+  };
+  setCachedResponse(key, JSON.stringify(next), CHAT_TTL_SECONDS);
+}
+
+export function clearChatCache(groupId: string) {
+  ensureInitialized();
+  db.runSync('DELETE FROM http_cache WHERE cache_key = ?', [chatCacheKey(groupId)]);
+}

@@ -11,8 +11,9 @@ import * as Clipboard from 'expo-clipboard';
 import firestore from '@react-native-firebase/firestore';
 import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
-import { getToken, getCurrentUser } from '@/services/authService';
+import { getToken, getCurrentUser, getCachedUserId } from '@/services/authService';
 import { getFirebaseUid } from '@/services/firebaseAuthService';
+import { getChatCache, setChatCache, clearChatCache, setCacheUserId } from '@/services/apiCache';
 import { getGroupMembers, updateGroup, leaveGroup, GroupMember } from '@/services/chatService';
 import { pfpSource } from '@/constants/pfps';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
@@ -216,6 +217,26 @@ export default function GroupChatScreen() {
   useEffect(() => {
     if (!groupId) return;
 
+    // Seed instantly from the local cache (Messenger-style): paint the last
+    // conversation + roster immediately, then hydrate behind the scenes.
+    (async () => {
+      setCacheUserId(await getCachedUserId());
+      const cached = getChatCache(String(groupId));
+      if (cached) {
+        const cachedMsgs = (cached.messages as GroupMessage[]).filter(m => !m.local);
+        if (cachedMsgs.length > 0) {
+          setMessages(cachedMsgs);
+          scrollToEnd(false);
+        }
+        if (cached.group) setGroup(cached.group as StudyGroup);
+        const cachedMembers = (cached.members as GroupMember[]) || [];
+        if (cachedMembers.length > 0) {
+          setMembers(cachedMembers);
+          setMemberMap(Object.fromEntries(cachedMembers.map(m => [m.firebase_uid, m])));
+        }
+      }
+    })();
+
     (async () => {
       try {
         const token = await getToken();
@@ -276,6 +297,26 @@ export default function GroupChatScreen() {
       }
     };
   }, [groupId, scrollToEnd]);
+
+  // Persist the latest conversation + group metadata + roster so the next
+  // visit paints instantly from SQLite. Optimistic echoes are never stored —
+  // only confirmed, synced messages.
+  useEffect(() => {
+    if (messages.length === 0 && !group && members.length === 0) return;
+    setChatCache(String(groupId), {
+      messages: messages.filter(m => !m.local),
+      group: group
+        ? {
+            id: group.id,
+            name: group.name,
+            description: group.description,
+            join_code: group.join_code,
+            members_count: group.members_count,
+          }
+        : null,
+      members,
+    });
+  }, [messages, group, members, groupId]);
 
   const sendChatMessage = async () => {
     if (!chatInput.trim()) return;
@@ -407,6 +448,7 @@ export default function GroupChatScreen() {
               const token = await getToken();
               if (!token) return;
               await leaveGroup(String(group.id), token);
+              clearChatCache(String(group.id));
               Alert.alert('Left Group', 'You are no longer a member.', [
                 { text: 'OK', onPress: () => router.back() },
               ]);
@@ -471,14 +513,6 @@ export default function GroupChatScreen() {
     );
   };
 
-  if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
-      </View>
-    );
-  }
-
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -501,7 +535,7 @@ export default function GroupChatScreen() {
         <View style={styles.chatHeaderTitleBox}>
           <Text style={styles.chatHeaderTitle} numberOfLines={1}>{group?.name || 'Group Chat'}</Text>
           <Text style={styles.chatHeaderSubtitle}>
-            {members.length > 0 ? `${members.length} members` : '— members'}
+            {loading ? 'Connecting…' : members.length > 0 ? `${members.length} members` : '— members'}
           </Text>
         </View>
         <View style={styles.headerActions}>
