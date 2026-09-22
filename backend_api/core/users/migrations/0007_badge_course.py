@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('users', '0005_coursescore'),
+        ('users', '0006_coursescore'),
     ]
 
     operations = [
