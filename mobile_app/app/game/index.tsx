@@ -13,6 +13,7 @@ import {
   Alert,
   Animated,
   TextInput,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -964,8 +965,12 @@ export default function GameCenterScreen() {
 
         {/* --- JOIN ROOM MODAL --- */}
         <Modal visible={showJoinModal} animationType="fade" transparent={true}>
-            <View style={styles.modalOverlay}>
-                <View style={styles.inviteModalCard}>
+            <View style={styles.joinModalOverlay}>
+                <KeyboardAvoidingView
+                    behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+                    style={styles.joinModalKeyboardWrap}
+                >
+                <View style={[styles.inviteModalCard, styles.joinModalCard]}>
                     <TouchableOpacity 
                         style={styles.closeInviteBtn}
                         onPress={() => { if (!joining) setShowJoinModal(false); }}
@@ -1008,6 +1013,7 @@ export default function GameCenterScreen() {
                         )}
                     </TouchableOpacity>
                 </View>
+                </KeyboardAvoidingView>
             </View>
         </Modal>
 
@@ -1337,6 +1343,18 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',
     justifyContent: 'flex-end',
+  },
+  joinModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+  },
+  joinModalCard: {
+    marginBottom: 0,
+  },
+  joinModalKeyboardWrap: {
+    width: '100%',
+    alignItems: 'center',
   },
   configModalCard: {
     backgroundColor: 'white',
