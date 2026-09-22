@@ -45,6 +45,8 @@ export default function LanPlayScreen() {
   const [pending, setPending] = useState<Record<PowerupKey, boolean>>(BASE_PENDING);
   const [standings, setStandings] = useState<LanPlayer[]>([]);
   const [, setQuizTick] = useState(0);
+  const [waitTimer, setWaitTimer] = useState(0);
+  const [engineError, setEngineError] = useState<string | null>(null);
   const engineRef = useRef<OfflineGame | null>(null);
   const submittedRef = useRef(false);
   const savedRef = useRef(false);
@@ -57,6 +59,7 @@ export default function LanPlayScreen() {
     try {
       engineRef.current = new OfflineGame(quiz, lanGame.timePerQuestion, { order: lanGame.order });
     } catch (e) {
+      setEngineError(e instanceof Error ? e.message : String(e));
       console.warn('OfflineGame build failed', e);
     }
   }
@@ -115,6 +118,12 @@ export default function LanPlayScreen() {
     };
   }, [onMessage]);
 
+  useEffect(() => {
+    if (engine || engineError) return;
+    const t = setInterval(() => setWaitTimer(w => w + 1), 1000);
+    return () => clearInterval(t);
+  }, [engine, engineError]);
+
   if (!engine) {
     return (
       <View style={styles.container}>
@@ -123,6 +132,27 @@ export default function LanPlayScreen() {
             <ActivityIndicator color={COLORS.purpleLight} size="large" />
             <Text style={styles.waitingTitle}>Waiting for the host to start…</Text>
             <Text style={styles.waitingSub}>The quiz will appear here in a moment</Text>
+
+            {engineError && (
+              <Text style={styles.waitingError}>
+                Could not build the quiz: {engineError}
+              </Text>
+            )}
+
+            {!engineError && waitTimer >= 12 && (
+              <Text style={styles.waitingWarn}>
+                Still waiting. Make sure both phones are on the same hotspot and the host tapped INVITE, then START.
+              </Text>
+            )}
+
+            {(engineError || waitTimer >= 12) && (
+              <TouchableOpacity
+                style={styles.backButton}
+                onPress={() => router.back()}
+              >
+                <Text style={styles.backButtonText}>Go Back</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </LinearGradient>
       </View>
@@ -266,6 +296,10 @@ const styles = StyleSheet.create({
   centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 30 },
   waitingTitle: { color: COLORS.textPrimary, fontFamily: 'Montserrat-Bold', fontSize: 18, marginTop: 20, textAlign: 'center' },
   waitingSub: { color: COLORS.textMuted, fontFamily: 'Montserrat-Medium', fontSize: 13, marginTop: 6, textAlign: 'center' },
+  waitingWarn: { color: COLORS.warning, fontFamily: 'Montserrat-Medium', fontSize: 13, marginTop: 16, textAlign: 'center', lineHeight: 20, marginHorizontal: 24 },
+  waitingError: { color: COLORS.danger, fontFamily: 'Montserrat-Medium', fontSize: 13, marginTop: 16, textAlign: 'center', lineHeight: 20, marginHorizontal: 24 },
+  backButton: { marginTop: 24, backgroundColor: COLORS.purplePrimary, paddingVertical: 12, paddingHorizontal: 32, borderRadius: 12, alignItems: 'center' },
+  backButtonText: { color: COLORS.textPrimary, fontFamily: 'Montserrat-SemiBold', fontSize: 14 },
   finalScroll: { paddingHorizontal: 24, paddingBottom: 50, alignItems: 'center' },
   finalTitle: { color: COLORS.textPrimary, fontFamily: 'Montserrat-Bold', fontSize: 26, marginTop: 12, marginBottom: 6 },
   finalBanner: { color: COLORS.warning, fontFamily: 'Montserrat-Medium', fontSize: 13, marginBottom: 12, textAlign: 'center' },
