@@ -18,10 +18,11 @@ import * as DocumentPicker from 'expo-document-picker';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, EmptyState, Pill, FilterChip } from '@/components/educator/EducatorPrimitives';
-import { getCoursePath, createTopic, createNode, generateTopic, GenerateTopicResponse } from '@/services/courseService';
+import { getCoursePath, createTopic, createNode, generateTopic, GenerateTopicResponse, getCourseLeaderboard, CourseLeaderboard, LeaderboardSort } from '@/services/courseService';
 import { getQuizzes, Quiz } from '@/services/quizService';
 import { getCourseActivities, createActivity, deleteActivity, updateActivity, ClassActivity, ActivityKind } from '@/services/activityService';
 import { CoursePathTopic, LearningNode, NODE_TYPE_CONFIG } from '@/types/learning';
+import CourseLeaderboardView from '@/components/courses/CourseLeaderboard';
 
 const QUIZ_TYPE_LABELS: Record<string, string> = {
   multiple_choice: 'Multiple Choice',
@@ -57,6 +58,11 @@ export default function CourseDetailScreen() {
   // Class quizzes + activities
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const [activities, setActivities] = useState<ClassActivity[]>([]);
+
+  // Class leaderboard
+  const [leaderboard, setLeaderboard] = useState<CourseLeaderboard | null>(null);
+  const [leaderboardLoading, setLeaderboardLoading] = useState(true);
+  const [leaderboardSort, setLeaderboardSort] = useState<LeaderboardSort>('points');
 
   // Add activity modal
   const [actVisible, setActVisible] = useState(false);
@@ -116,11 +122,34 @@ export default function CourseDetailScreen() {
     }
   }, [cid]);
 
+  const onSortLeaderboard = useCallback(async (sort: LeaderboardSort) => {
+    setLeaderboardSort(sort);
+    try {
+      const data = await getCourseLeaderboard(cid, sort);
+      setLeaderboard(data);
+    } catch {
+      // non-fatal — leaderboard section shows empty
+    }
+  }, [cid]);
+
+  const loadLeaderboard = useCallback(async () => {
+    setLeaderboardLoading(true);
+    try {
+      const data = await getCourseLeaderboard(cid, leaderboardSort);
+      setLeaderboard(data);
+    } catch {
+      setLeaderboard(null);
+    } finally {
+      setLeaderboardLoading(false);
+    }
+  }, [cid, leaderboardSort]);
+
   const loadAll = useCallback(() => {
     loadTopics();
     loadQuizzes();
     loadActivities();
-  }, [loadTopics, loadQuizzes, loadActivities]);
+    loadLeaderboard();
+  }, [loadTopics, loadQuizzes, loadActivities, loadLeaderboard]);
 
   useFocusEffect(useCallback(() => { loadAll(); }, [loadAll]));
 
@@ -325,11 +354,11 @@ export default function CourseDetailScreen() {
         title={courseName || 'Course'}
         subtitle={`${topics.length} topic${topics.length === 1 ? '' : 's'} · ${totalNodes} node${totalNodes === 1 ? '' : 's'}`}
         showBack
-        rightIcon="add"
+        rightIcon={section === 'leaderboard' ? undefined : 'add'}
         onRightPress={() => {
           if (section === 'quizzes') openQuizManager(true);
           else if (section === 'activities') setActVisible(true);
-          else setModalVisible(true);
+          else if (section === 'topics') setModalVisible(true);
         }}
       />
 
@@ -549,7 +578,8 @@ export default function CourseDetailScreen() {
             )}
           </>
         )}
-      </ScrollView>
+
+</ScrollView>
 
       {/* Add topic modal */}
       <Modal animationType="slide" transparent visible={modalVisible} onRequestClose={() => setModalVisible(false)}>
@@ -873,8 +903,8 @@ export default function CourseDetailScreen() {
                       <Text style={styles.createBtnText}>Save Topic & Nodes</Text>
                     </>
                   )}
-                </TouchableOpacity>
-              </ScrollView>
+</TouchableOpacity>
+      </ScrollView>
             )}
           </View>
         </View>

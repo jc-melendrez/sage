@@ -72,8 +72,12 @@ export interface LeaderboardEntry {
   is_you: boolean;
 }
 
-export async function completeQuiz(score: number, total: number): Promise<QuizResult> {
-  return postJson('/users/me/complete-quiz/', { score, total });
+export async function completeQuiz(score: number, total: number, courseId?: number): Promise<QuizResult> {
+  return postJson('/users/me/complete-quiz/', {
+    score,
+    total,
+    ...(courseId != null ? { course_id: courseId } : {}),
+  });
 }
 
 export async function completeLesson(

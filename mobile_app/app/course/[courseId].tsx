@@ -8,6 +8,8 @@ import { CoursePathTopic, NODE_TYPE_CONFIG, LearningNode } from '@/types/learnin
 import ProgressRing from '@/components/courses/ProgressRing';
 import { getCourseActivities, ClassActivity } from '@/services/activityService';
 import { getQuiz, getQuizzes, Quiz } from '@/services/quizService';
+import { getCurrentUser } from '@/services/authService';
+import CourseBadges from '@/components/courses/CourseBadges';
 
 const COLORS = {
   bg: '#baaeda',
@@ -72,6 +74,9 @@ export default function CourseDetailScreen() {
   // Course quizzes (educator + student created)
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
 
+  // Course badges
+  const [badges, setBadges] = useState<any[]>([]);
+
   // Active category tab
   const [section, setSection] = useState<SectionKey>('topics');
 
@@ -80,14 +85,20 @@ export default function CourseDetailScreen() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [topicsData, activitiesData, quizzesData] = await Promise.all([
+        const [topicsData, activitiesData, quizzesData, userData] = await Promise.all([
           getCoursePath(Number(courseId)),
           getCourseActivities(Number(courseId)).catch(() => [] as ClassActivity[]),
           getQuizzes(Number(courseId)).catch(() => [] as Quiz[]),
+          getCurrentUser().catch(() => null),
         ]);
         setTopics(topicsData);
         setActivities(activitiesData.filter((a) => a.status === 'published'));
         setQuizzes(quizzesData);
+        
+        if (userData && userData.badges) {
+          const courseBadges = userData.badges.filter((b: any) => b.course === Number(courseId));
+          setBadges(courseBadges);
+        }
       } catch (e: any) {
         setError(e?.message || 'Failed to load course');
       }
@@ -276,6 +287,7 @@ export default function CourseDetailScreen() {
 
         {section === 'topics' && (
           <>
+            <CourseBadges badges={badges} />
             {topics.length === 0 ? (
           <View style={styles.emptyState}>
             <Ionicons name="book-outline" size={48} color={COLORS.textMuted} />

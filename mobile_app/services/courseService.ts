@@ -45,6 +45,34 @@ export interface CourseRoster extends CourseSummary {
   students: CourseStudent[];
 }
 
+export type LeaderboardSort = 'points' | 'nodes' | 'streak';
+
+export interface CourseLeaderboardEntry {
+  rank: number;
+  id: number;
+  username: string;
+  display_name: string;
+  avatar: string;
+  level: number;
+  streak: number;
+  points: number;
+  node_points: number;
+  quiz_points: number;
+  nodes_completed: number;
+  quizzes_completed: number;
+  last_activity: string | null;
+  is_you: boolean;
+}
+
+export interface CourseLeaderboard {
+  course_id: number;
+  course_name: string;
+  sort: LeaderboardSort;
+  entries: CourseLeaderboardEntry[];
+  your_rank: number | null;
+  total_students: number;
+}
+
 export interface CreateCourseInput {
   name: string;
   description?: string;
@@ -69,6 +97,13 @@ export async function getEnrolledCourses(): Promise<CourseSummary[]> {
 
 export async function getCourse(courseId: number): Promise<CourseRoster> {
   return apiCall<CourseRoster>(`/users/courses/${courseId}/`);
+}
+
+export async function getCourseLeaderboard(
+  courseId: number,
+  sort: LeaderboardSort = 'points',
+): Promise<CourseLeaderboard> {
+  return apiCall<CourseLeaderboard>(`/users/courses/${courseId}/leaderboard/?sort=${sort}`);
 }
 
 export async function joinCourseByCode(joinCode: string): Promise<CourseRoster> {

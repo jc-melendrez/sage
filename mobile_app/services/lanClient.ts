@@ -9,7 +9,7 @@ export class LanClientSession {
 
   constructor(onEvent: (msg: LanMessage) => void) {
     this.buffer = new LineBuffer(msg => {
-      if (!this.disposed) onEvent(msg);
+      if (!this.disposed) this.onEvent(msg);
     });
     this.onEvent = onEvent;
   }
@@ -17,12 +17,22 @@ export class LanClientSession {
   connect(hostIp: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const socket = TcpSocket.createConnection({ host: hostIp.trim(), port: LAN_PORT }, () => {
+        clearTimeout(timer);
         socket.setNoDelay(true);
         this.socket = socket;
         resolve();
       });
+      const timer = setTimeout(() => {
+        try {
+          socket.destroy();
+        } catch {}
+        reject(new Error('Timed out connecting to host'));
+      }, 8000);
       socket.on('data', (d: any) => this.buffer.push(d));
-      socket.on('error', (e: any) => reject(e));
+      socket.on('error', (e: any) => {
+        clearTimeout(timer);
+        reject(e);
+      });
       socket.on('close', () => {
         this.socket = null;
         if (!this.disposed) this.onEvent({ t: 'end', reason: 'Connection lost' });
