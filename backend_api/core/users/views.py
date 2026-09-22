@@ -13,7 +13,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
@@ -22,6 +22,8 @@ from .gamification import (
     record_lesson_completion,
     record_daily_checkin,
     award_xp,
+    course_quiz_xp,
+    add_course_quiz_score,
 )
 from .serializers import (
     UserSerializer, UserRegistrationSerializer,
@@ -415,7 +417,33 @@ class CompleteQuizView(APIView):
             return Response({'error': 'score and total must be integers'}, status=400)
         if total < 0 or score < 0 or score > total:
             return Response({'error': 'Invalid score/total'}, status=400)
-        return Response(record_quiz_completion(request.user, score, total))
+
+        # Optional course-scoped scoring: when the quiz belongs to a course the
+        # caller is a member of, credit their class leaderboard row too.
+        course_id = request.data.get('course_id')
+        course = None
+        if course_id is not None:
+            try:
+                course = Course.objects.get(id=course_id)
+                is_member = (
+                    request.user == course.educator
+                    or course.students.filter(id=request.user.id).exists()
+                )
+                if not is_member:
+                    course = None # Don't award course-specific rewards if not a member
+            except Course.DoesNotExist:
+                pass
+
+        result = record_quiz_completion(request.user, score, total, course=course)
+
+        if course:
+            add_course_quiz_score(
+                course,
+                request.user,
+                quiz_xp=course_quiz_xp(score, total, result.get('perfect', False)),
+            )
+
+        return Response(result)
 
 
 class CompleteLessonView(APIView):
@@ -437,8 +465,16 @@ class CompleteLessonView(APIView):
         passed = request.data.get('passed')
         if passed is not None:
             passed = _as_bool(passed)
+
+        course = None
+        try:
+            # Try to see if this lesson belongs to a real Course model
+            course = Course.objects.get(id=int(course_id))
+        except (ValueError, TypeError, Course.DoesNotExist):
+            pass
+
         return Response(record_lesson_completion(
-            request.user, str(course_id), level_id, score, total, passed
+            request.user, str(course_id), level_id, score, total, passed, course=course
         ))
 
 
@@ -1020,6 +1056,87 @@ def _get_course_for_activity(request, course_id):
     except Course.DoesNotExist:
         return None, Response({"error": "Course not found"}, status=404)
     return course, None
+
+
+class CourseLeaderboardView(APIView):
+    """Per-class leaderboard: course-scoped XP from passed nodes + quiz completions.
+
+    Supports sorting by `sort` query param: points (default), nodes, streak.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, course_id):
+        try:
+            course = Course.objects.get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({"error": "Course not found"}, status=404)
+
+        if request.user != course.educator and not course.students.filter(id=request.user.id).exists():
+            return Response({"error": "You are not a member of this course"}, status=403)
+
+        sort = request.query_params.get('sort', 'points')
+        if sort not in ('points', 'nodes', 'streak'):
+            sort = 'points'
+
+        # Node-based stats (authoritative source: passing NodeProgress rows).
+        grade = {}
+        progress_rows = NodeProgress.objects.filter(
+            node__topic__course=course, passed=True, completed_at__isnull=False
+        ).select_related('node', 'user')
+        for np in progress_rows:
+            stat = grade.setdefault(np.user_id, {'nodes': 0, 'points': 0, 'last': None})
+            stat['nodes'] += 1
+            stat['points'] += np.node.xp_reward
+            if stat['last'] is None or np.completed_at > stat['last']:
+                stat['last'] = np.completed_at
+
+        # Quiz-based stats (stored incrementally in CourseScore).
+        quiz_by_user = {
+            score.user_id: score for score in CourseScore.objects.filter(course=course)
+        }
+
+        entries = []
+        for student in course.students.all():
+            stat = grade.get(student.id, {'nodes': 0, 'points': 0, 'last': None})
+            qs = quiz_by_user.get(student.id)
+            quiz_pts = qs.quiz_points if qs else 0
+            quizzes = qs.quizzes_completed if qs else 0
+            last = (qs.last_activity if qs and qs.last_activity else None) or stat['last']
+            entries.append({
+                'id': student.id,
+                'username': student.username,
+                'display_name': student.get_full_name().strip() or student.username,
+                'avatar': student.avatar,
+                'level': student.level,
+                'streak': student.streak,
+                'points': stat['points'] + quiz_pts,
+                'node_points': stat['points'],
+                'quiz_points': quiz_pts,
+                'nodes_completed': stat['nodes'],
+                'quizzes_completed': quizzes,
+                'last_activity': last.isoformat() if last else None,
+                'is_you': student.id == request.user.id,
+            })
+
+        if sort == 'nodes':
+            entries.sort(key=lambda e: (-e['nodes_completed'], -e['points'], e['username'].lower()))
+        elif sort == 'streak':
+            entries.sort(key=lambda e: (-e['streak'], -e['points'], e['username'].lower()))
+        else:
+            entries.sort(key=lambda e: (-e['points'], -e['nodes_completed'], e['username'].lower()))
+
+        ranked = [{'rank': i + 1, **entry} for i, entry in enumerate(entries)]
+        your_rank = next((e['rank'] for e in ranked if e['is_you']), None)
+
+        return Response({
+            'course_id': course.id,
+            'course_name': course.name,
+            'sort': sort,
+            'entries': ranked,
+            'your_rank': your_rank,
+            'total_students': len(ranked),
+        })
 
 
 class CourseActivitiesView(APIView):

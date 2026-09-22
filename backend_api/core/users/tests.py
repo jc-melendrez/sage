@@ -10,7 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, Topic, User
+from .models import Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, Topic, User
 from . import gamification
 from . import views as users_views
 
@@ -174,6 +174,110 @@ class CourseAPITests(APITestCase):
         self.client.force_authenticate(user=self.educator)
         resp = self.client.get(reverse('quiz_detail', args=[quiz.id]))
         self.assertEqual(resp.status_code, 200)
+
+    # --- Course leaderboard (per-class gamification) ---
+
+    def _make_course_with_students(self):
+        course = Course.objects.create(name='Cloud Computing', educator=self.educator)
+        course.students.add(self.student1, self.student2)
+        return course
+
+    def test_course_leaderboard_sorted_by_points(self):
+        course = self._make_course_with_students()
+        topic = Topic.objects.create(course=course, title='Intro', order=0)
+        easy = LearningNode.objects.create(topic=topic, node_type='learn', title='Lesson', xp_reward=25, required_score=70)
+        hard = LearningNode.objects.create(topic=topic, node_type='mastery', title='Mastery', xp_reward=60, required_score=70)
+        for node in (easy, hard):
+            gamification.award_xp(self.student1, node.xp_reward)
+            NodeProgress.objects.create(user=self.student1, node=node, score=100, passed=True, completed_at=timezone.now())
+        gamification.award_xp(self.student2, easy.xp_reward)
+        NodeProgress.objects.create(user=self.student2, node=easy, score=100, passed=True, completed_at=timezone.now())
+
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(reverse('course_leaderboard', args=[course.id]))
+        self.assertEqual(resp.status_code, 200)
+        entries = resp.data['entries']
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]['username'], 'student1')
+        self.assertEqual(entries[0]['points'], 85)
+        self.assertEqual(entries[0]['nodes_completed'], 2)
+        self.assertEqual(entries[1]['username'], 'student2')
+        self.assertEqual(entries[1]['points'], 25)
+
+    def test_course_leaderboard_sort_by_streak_and_nodes(self):
+        course = self._make_course_with_students()
+        topic = Topic.objects.create(course=course, title='Intro', order=0)
+        node = LearningNode.objects.create(topic=topic, node_type='learn', title='Lesson', xp_reward=25, required_score=70)
+        for student in (self.student1, self.student2):
+            NodeProgress.objects.create(user=student, node=node, score=90, passed=True, completed_at=timezone.now())
+        self.student1.streak = 9
+        self.student1.save()
+        self.student2.streak = 3
+        self.student2.save()
+
+        resp = self.client.get(reverse('course_leaderboard', args=[course.id]), {'sort': 'streak'})
+        self.assertEqual(resp.data['entries'][0]['username'], 'student1')
+        resp = self.client.get(reverse('course_leaderboard', args=[course.id]), {'sort': 'nodes'})
+        self.assertEqual(resp.data['entries'][0]['nodes_completed'], 1)
+        resp = self.client.get(reverse('course_leaderboard', args=[course.id]), {'sort': 'bogus'})
+        self.assertEqual(resp.data['sort'], 'points')
+
+    def test_course_leaderboard_quiz_points(self):
+        course = self._make_course_with_students()
+        gamification.add_course_quiz_score(
+            course, self.student1, gamification.course_quiz_xp(5, 5, perfect=True)
+        )
+        resp = self.client.get(reverse('course_leaderboard', args=[course.id]))
+        entry = next(e for e in resp.data['entries'] if e['username'] == 'student1')
+        self.assertEqual(entry['quiz_points'], 50)
+        self.assertEqual(entry['quizzes_completed'], 1)
+        self.assertEqual(entry['points'], 50)
+
+    def test_course_leaderboard_marks_your_rank(self):
+        course = self._make_course_with_students()
+        topic = Topic.objects.create(course=course, title='T', order=0)
+        node = LearningNode.objects.create(topic=topic, node_type='learn', title='L', xp_reward=25, required_score=70)
+        NodeProgress.objects.create(user=self.student1, node=node, score=90, passed=True, completed_at=timezone.now())
+
+        self.client.force_authenticate(user=self.student1)
+        resp = self.client.get(reverse('course_leaderboard', args=[course.id]))
+        self.assertEqual(resp.data['your_rank'], 1)
+        entry = next(e for e in resp.data['entries'] if e['is_you'])
+        self.assertEqual(entry['rank'], 1)
+
+    def test_course_leaderboard_access_control(self):
+        course = self._make_course_with_students()
+        outsider = User.objects.create_user(username='outsider', password='pass123', role='student')
+        self.client.force_authenticate(user=outsider)
+        resp = self.client.get(reverse('course_leaderboard', args=[course.id]))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_complete_quiz_with_course_id_records_score(self):
+        course = self._make_course_with_students()
+        self.client.force_authenticate(user=self.student1)
+        resp = self.client.post(
+            reverse('complete_quiz'),
+            {'score': 4, 'total': 4, 'course_id': course.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        score = Course.objects.get(id=course.id).scores.get(user=self.student1)
+        self.assertEqual(score.quiz_points, 45)
+        self.assertEqual(score.quizzes_completed, 1)
+
+    def test_complete_quiz_with_foreign_course_id_ignored(self):
+        course_a = self._make_course_with_students()
+        course_b = Course.objects.create(name='Other', educator=self.educator)
+        course_b.students.add(self.student2)
+        self.client.force_authenticate(user=self.student1)
+        resp = self.client.post(
+            reverse('complete_quiz'),
+            {'score': 4, 'total': 4, 'course_id': course_b.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(course_b.scores.filter(user=self.student1).exists())
+        self.assertFalse(course_a.scores.filter(user=self.student1).exists())
 
 
 class GamificationServiceTests(TestCase):

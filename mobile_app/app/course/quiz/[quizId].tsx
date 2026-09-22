@@ -7,7 +7,7 @@ import TakeQuiz from '../../../components/TakeQuiz';
 
 export default function CourseQuizScreen() {
   const router = useRouter();
-  const { quizId } = useLocalSearchParams<{ quizId: string }>();
+  const { quizId, courseId } = useLocalSearchParams<{ quizId: string; courseId?: string }>();
   const [quiz, setQuiz] = useState<Quiz | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -50,7 +50,11 @@ export default function CourseQuizScreen() {
       quizTitle={quiz.title}
       questions={questions}
       onFinish={async (score) => {
-        const result = await completeQuiz(score, questions.length);
+        const result = await completeQuiz(
+          score,
+          questions.length,
+          courseId ? Number(courseId) : undefined,
+        );
         return { xp: result.xp, badges: result.badges };
       }}
       onClose={() => router.back()}

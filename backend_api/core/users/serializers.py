@@ -14,10 +14,14 @@ AVATAR_KEYS = {
 
 
 class BadgeSerializer(serializers.ModelSerializer):
+    course_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Badge
-        fields = ['id', 'icon', 'name', 'earned_at']
+        fields = ['id', 'icon', 'name', 'earned_at', 'course', 'course_name']
+
+    def get_course_name(self, obj):
+        return obj.course.name if obj.course else None
 
 
 class UserProfileSerializer(serializers.ModelSerializer):

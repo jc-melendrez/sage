@@ -88,12 +88,13 @@ class User(AbstractUser):
 
 class Badge(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='badges')
+    course = models.ForeignKey('Course', on_delete=models.CASCADE, related_name='badges', null=True, blank=True)
     icon = models.CharField(max_length=10)
     name = models.CharField(max_length=100)
     earned_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.user.username} - {self.name}"
+        return f"{self.user.username} - {self.name}" + (f" ({self.course.name})" if self.course else "")
 
 class Recommendation(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='recommendations')
@@ -175,6 +176,28 @@ class Course(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.join_code})"
+
+
+class CourseScore(models.Model):
+    """Per-student gamification stats scoped to a single course.
+
+    Node points are derived live from `NodeProgress` (that table is the
+    authority for learning-path results). This model only accumulates the
+    things NodeProgress can't represent: course-quiz completion XP.
+    """
+
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='scores')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='course_scores')
+
+    quiz_points = models.IntegerField(default=0)
+    quizzes_completed = models.IntegerField(default=0)
+    last_activity = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ('course', 'user')
+
+    def __str__(self):
+        return f"{self.user.username} in {self.course.name} ({self.quiz_points} quiz pts)"
 
 
 class ClassActivity(models.Model):
