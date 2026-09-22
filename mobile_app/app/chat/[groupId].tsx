@@ -153,6 +153,10 @@ export default function GroupChatScreen() {
   const router = useRouter();
   const { groupId } = useLocalSearchParams<{ groupId: string }>();
   const insets = useSafeAreaInsets();
+  // Some Android nav bar devices under-report the bottom inset, so when the
+  // system reports zero we fall back to an on-screen navigation bar (~48dp) to
+  // stop the input from resting on the back/home/recent buttons.
+  const bottomInset = insets.bottom > 0 ? insets.bottom : (Platform.OS === 'android' ? 48 : 0);
 
   const [group, setGroup] = useState<StudyGroup | null>(null);
   const [currentUser, setCurrentUser] = useState<any>(null);
@@ -556,8 +560,7 @@ export default function GroupChatScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       contentContainerStyle={{ flex: 1 }}
     >
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} />
@@ -611,7 +614,7 @@ export default function GroupChatScreen() {
         )}
       </ScrollView>
 
-      <View style={[styles.inputContainer, { paddingBottom: Math.max(12, insets.bottom) }]}>
+      <View style={[styles.inputContainer, { paddingBottom: 12 + bottomInset }]}>
         <View style={styles.textInputWrapper}>
           <TextInput
             style={styles.textInput}
@@ -635,7 +638,7 @@ export default function GroupChatScreen() {
       {/* Group Settings Modal */}
       <Modal visible={isSettingsOpen} animationType="slide" transparent={true} onRequestClose={() => setIsSettingsOpen(false)}>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { minHeight: '70%' }]}>
+          <View style={[styles.modalContent, { maxHeight: '75%' }]}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Group Info</Text>
               <TouchableOpacity onPress={() => setIsSettingsOpen(false)}>
@@ -786,7 +789,7 @@ export default function GroupChatScreen() {
 
       {/* Member Profile Peek Modal */}
       <Modal visible={peekMember != null} animationType="fade" transparent={true} onRequestClose={() => setPeekMember(null)}>
-        <TouchableOpacity style={styles.reactionOverlay} activeOpacity={1} onPress={() => setPeekMember(null)}>
+        <TouchableOpacity style={styles.peekOverlay} activeOpacity={1} onPress={() => setPeekMember(null)}>
           <View style={styles.peekCard}>
             <MemberAvatar member={peekMember} size={84} />
             <Text style={styles.peekName}>{peekMember?.display_name}</Text>
@@ -890,6 +893,7 @@ const styles = StyleSheet.create({
   reactionPillCount: { fontSize: 11, color: COLORS.textMuted, marginLeft: 3, fontFamily: FONTS.medium },
 
   reactionOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
+  peekOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center', padding: 24 },
   reactionSheet: { backgroundColor: COLORS.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderTopColor: COLORS.border, paddingHorizontal: 24, paddingBottom: 32, alignItems: 'center' },
   reactionSheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: COLORS.borderStrong, marginVertical: 12 },
   reactionSheetTitle: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted, textAlign: 'center', marginBottom: 14 },
@@ -903,23 +907,23 @@ const styles = StyleSheet.create({
   textInput: { fontSize: 15, color: COLORS.textDark, fontFamily: FONTS.regular, paddingVertical: 8 },
   sendButton: { backgroundColor: COLORS.purplePrimary, width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center', marginLeft: 8, marginBottom: 2, shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 3 },
 
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 24 },
-  modalContent: { backgroundColor: COLORS.surface, borderRadius: 24, padding: 24, borderWidth: 1, borderColor: COLORS.border },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 20 },
+  modalContent: { backgroundColor: COLORS.surface, borderRadius: 24, padding: 20, borderWidth: 1, borderColor: COLORS.border },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   modalTitle: { fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textDark },
 
-  bigAvatar: { width: 72, height: 72, borderRadius: 36, justifyContent: 'center', alignItems: 'center', marginBottom: 12, backgroundColor: COLORS.purpleVibrant, shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
-  bigAvatarText: { color: 'white', fontSize: 24, fontFamily: FONTS.bold },
-  settingsGroupName: { fontSize: 22, fontFamily: FONTS.bold, color: COLORS.textDark },
+  bigAvatar: { width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', marginBottom: 10, backgroundColor: COLORS.purpleVibrant, shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
+  bigAvatarText: { color: 'white', fontSize: 22, fontFamily: FONTS.bold },
+  settingsGroupName: { fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textDark },
   settingsGroupDesc: { fontSize: 14, color: COLORS.textMuted, marginTop: 6, textAlign: 'center', paddingHorizontal: 20, fontFamily: FONTS.regular },
   adminBadge: { backgroundColor: 'rgba(239, 68, 68, 0.1)', color: COLORS.danger, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, fontSize: 12, fontFamily: FONTS.bold, marginTop: 12 },
-  settingsSection: { backgroundColor: COLORS.bg, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: COLORS.border, marginTop: 20 },
+  settingsSection: { backgroundColor: COLORS.bg, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: COLORS.border, marginTop: 14 },
   settingsSectionTitle: { fontSize: 16, fontFamily: FONTS.bold, color: COLORS.textDark, marginBottom: 6 },
   settingsDesc: { fontSize: 13, color: COLORS.textMuted, marginBottom: 16, fontFamily: FONTS.regular },
   codeBox: { flexDirection: 'row', backgroundColor: COLORS.textDark, borderRadius: 12, padding: 6, alignItems: 'center' },
   codeText: { flex: 1, color: 'white', fontSize: 18, letterSpacing: 4, textAlign: 'center', fontFamily: FONTS.bold },
   copyBtn: { backgroundColor: COLORS.purplePrimary, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10, flexDirection: 'row', alignItems: 'center' },
-  settingsOptionsBlock: { marginTop: 20, backgroundColor: COLORS.bg, borderRadius: 16, borderWidth: 1, borderColor: COLORS.border, paddingHorizontal: 16 },
+  settingsOptionsBlock: { marginTop: 14, backgroundColor: COLORS.bg, borderRadius: 16, borderWidth: 1, borderColor: COLORS.border, paddingHorizontal: 16 },
   settingsOptionRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: COLORS.border },
   settingsOptionIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: COLORS.surface, justifyContent: 'center', alignItems: 'center', marginRight: 14 },
   settingsOptionText: { flex: 1, fontSize: 15, fontFamily: FONTS.medium, color: COLORS.textDark },
@@ -939,7 +943,7 @@ const styles = StyleSheet.create({
   adminBadgeSmall: { backgroundColor: 'rgba(139, 92, 246, 0.12)', color: COLORS.purpleDark, fontSize: 10, fontFamily: FONTS.bold, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, overflow: 'hidden' },
   emptyText: { color: COLORS.textMuted, fontSize: 13, fontFamily: FONTS.medium, textAlign: 'center', paddingVertical: 20 },
 
-  leaveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 20, paddingVertical: 14, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(239, 68, 68, 0.4)', backgroundColor: 'rgba(239, 68, 68, 0.06)', minHeight: 48 },
+  leaveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 14, paddingVertical: 14, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(239, 68, 68, 0.4)', backgroundColor: 'rgba(239, 68, 68, 0.06)', minHeight: 48 },
   leaveBtnText: { color: COLORS.danger, fontSize: 15, fontFamily: FONTS.bold },
 
   peekCard: { backgroundColor: COLORS.surface, borderRadius: 24, padding: 28, alignItems: 'center', width: '80%', borderWidth: 1, borderColor: COLORS.border, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 12 },
