@@ -14,6 +14,7 @@ import { getToken } from '@/services/authService';
 import { completeQuiz } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
+import { deleteQuiz } from '@/services/quizService';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
@@ -177,6 +178,28 @@ export default function ActivitiesScreen() {
       setRefreshing(false);
     }
   }, [loadInitialData]);
+
+  const handleDeleteQuiz = (quiz: Quiz) => {
+    Alert.alert(
+      'Delete quiz',
+      `"${quiz.title}" will be permanently removed.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteQuiz(quiz.id);
+              setQuizzes((prev) => prev.filter((q) => q.id !== quiz.id));
+            } catch (err) {
+              Alert.alert('Delete failed', err instanceof Error ? err.message : 'Could not delete the quiz.');
+            }
+          },
+        },
+      ],
+    );
+  };
 
   // Initial load
   useEffect(() => { loadInitialData(); }, [loadInitialData]);
@@ -396,6 +419,13 @@ export default function ActivitiesScreen() {
                     <Text style={styles.cardTitle}>{quiz.title}</Text>
                     <Text style={styles.metaText}>Created {new Date(quiz.created_at).toLocaleDateString()}</Text>
                   </View>
+                  <TouchableOpacity
+                    style={styles.deleteQuizBtn}
+                    onPress={() => handleDeleteQuiz(quiz)}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
+                  </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.takeQuizBtn}
                     onPress={() => {
@@ -876,6 +906,7 @@ const styles = StyleSheet.create({
   badgePill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.bgSecondary },
   badgePillText: { fontSize: 10, color: COLORS.textMuted, fontFamily: FONTS.semiBold },
   takeQuizBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.purplePrimary, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, gap: 6, alignSelf: 'center', shadowColor: COLORS.purpleDeep, shadowOffset: {width:0, height:2}, shadowOpacity: 0.2, shadowRadius: 4, elevation: 3 },
+  deleteQuizBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 8, borderRadius: 12, alignSelf: 'center' },
   takeQuizBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 13 },
 
   inboxContainer: { paddingTop: 8 },

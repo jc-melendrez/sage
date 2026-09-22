@@ -1,6 +1,7 @@
 from firebase_admin import firestore
 from core.firebase import initialize_firebase
-import random, string, datetime
+import random, string
+from datetime import datetime
 
 def get_db():
     initialize_firebase()

@@ -47,7 +47,10 @@ class AskSAGEView(APIView):
         # 1. Figure out where to save this message
         session = None
         if session_id and session_id != 0:
-            session = ChatSession.objects.get(id=session_id, user=request.user)
+            try:
+                session = ChatSession.objects.get(id=session_id, user=request.user)
+            except ChatSession.DoesNotExist:
+                return Response({"error": "Session not found"}, status=404)
         elif session_id == 0:
             pass 
         else:
