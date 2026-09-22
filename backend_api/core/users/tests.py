@@ -10,7 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, Topic, User
+from .models import Activity, Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, Topic, User
 from . import gamification
 from . import views as users_views
 
@@ -351,6 +351,84 @@ class GamificationServiceTests(TestCase):
         self.assertTrue(result['leveled_up'])
         self.assertEqual(self.user.level, 5)
         self.assertTrue(Badge.objects.filter(user=self.user, name='Level 5').exists())
+
+
+class ActivityFeedTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='feeduser',
+            password='pass12345',
+            role='student',
+        )
+        self.client = APIClient()
+
+    def test_quiz_completion_logs_activity(self):
+        gamification.record_quiz_completion(self.user, score=4, total=5)
+        activity = Activity.objects.get(user=self.user)
+        self.assertEqual(activity.kind, 'quiz')
+        self.assertEqual(activity.activity_type, 'quiz')
+        self.assertEqual(activity.xp_earned, 20)
+        self.assertEqual(activity.description, 'Scored 4/5')
+
+    def test_perfect_quiz_logs_activity(self):
+        gamification.record_quiz_completion(self.user, score=5, total=5)
+        activity = Activity.objects.get(user=self.user)
+        self.assertIn('Perfect', activity.description)
+        self.assertEqual(activity.xp_earned, 50)
+
+    def test_course_quiz_logs_course_context(self):
+        course = Course.objects.create(name='Algebra', educator=self.user)
+        gamification.record_quiz_completion(self.user, score=4, total=4, course=course)
+        activity = Activity.objects.get(user=self.user)
+        self.assertEqual(activity.course_name, 'Algebra')
+        self.assertEqual(activity.payload, {'route': f'/course/{course.id}'})
+        self.assertIn('Algebra', activity.title)
+
+    def test_lesson_pass_logs_only_on_first_pass(self):
+        gamification.record_lesson_completion(self.user, 'course-1', 1, score=8, total=10, passed=True)
+        self.assertEqual(Activity.objects.filter(user=self.user).count(), 1)
+        gamification.record_lesson_completion(self.user, 'course-1', 1, score=10, total=10, passed=True)
+        self.assertEqual(Activity.objects.filter(user=self.user).count(), 1)
+
+    def test_failed_lesson_does_not_log(self):
+        gamification.record_lesson_completion(self.user, 'course-1', 1, score=3, total=10, passed=False)
+        self.assertFalse(Activity.objects.filter(user=self.user).exists())
+
+    def test_daily_checkin_logs_once_per_day(self):
+        gamification.record_daily_checkin(self.user)
+        self.assertEqual(Activity.objects.filter(user=self.user, kind='checkin').count(), 1)
+        # Same-day re-check-in awards nothing and logs nothing extra.
+        gamification.record_daily_checkin(self.user)
+        self.assertEqual(Activity.objects.filter(user=self.user, kind='checkin').count(), 1)
+
+    def test_game_finish_logs_activity(self):
+        gamification.record_game_finish(self.user, 1, room_code='ABC123')
+        activity = Activity.objects.get(user=self.user)
+        self.assertEqual(activity.kind, 'game')
+        self.assertEqual(activity.xp_earned, 100)
+        self.assertEqual(activity.payload, {'route': '/games'})
+        self.assertIn('ABC123', activity.title)
+
+    def test_activity_endpoint_returns_newest_first_with_meta(self):
+        gamification.record_quiz_completion(self.user, score=3, total=5)
+        gamification.record_daily_checkin(self.user)
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get(reverse('user_activities', args=[self.user.id]))
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data
+        self.assertEqual(len(data), 2)
+        self.assertEqual(data[0]['kind'], 'checkin')
+        self.assertEqual(data[1]['kind'], 'quiz')
+        self.assertTrue(all('created_at' in row for row in data))
+        self.assertEqual(data[1]['xp_earned'], 15)
+
+    def test_activity_pruned_to_cap(self):
+        for i in range(gamification.MAX_ACTIVITY_PER_USER + 10):
+            gamification.log_activity(self.user, kind='other', title=f'activity-{i}')
+        self.assertEqual(
+            Activity.objects.filter(user=self.user).count(),
+            gamification.MAX_ACTIVITY_PER_USER,
+        )
 
 
 class GamificationEndpointTests(TestCase):

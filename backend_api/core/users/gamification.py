@@ -2,7 +2,10 @@ from datetime import date, timedelta
 
 from django.utils import timezone
 
-from .models import Badge, LessonProgress, CourseScore
+from .models import Activity, Badge, LessonProgress, CourseScore
+
+# How many recent activity rows we keep per user.
+MAX_ACTIVITY_PER_USER = 200
 
 # --- XP Economy ---
 QUIZ_XP_PER_QUESTION = 5
@@ -32,6 +35,28 @@ def award_badge(user, name, icon, course=None):
 
 def _badge_dicts(badges):
     return [{'icon': b.icon, 'name': b.name, 'course_id': b.course_id} for b in badges]
+
+
+def log_activity(user, kind, title, description='', xp=0, course_name='', payload=None):
+    """Write a "recent activity" feed row for the student dashboard.
+
+    Keeps `activity_type` in sync with `kind` so legacy readers (e.g. the AI
+    recommendation snapshot) keep working unchanged.
+    """
+    Activity.objects.create(
+        user=user,
+        kind=kind,
+        activity_type=kind,
+        title=title,
+        description=description,
+        xp_earned=xp,
+        course_name=course_name,
+        payload=payload or {},
+    )
+    # Prune to a bounded per-user history so the feed stays cheap.
+    stale = Activity.objects.filter(user=user).order_by('-created_at')[MAX_ACTIVITY_PER_USER:]
+    if stale:
+        Activity.objects.filter(id__in=[a.id for a in stale]).delete()
 
 
 def check_badges(user, course=None):
@@ -132,6 +157,17 @@ def record_quiz_completion(user, score, total, course=None):
         if course_perfect:
             badges.append(_badge_dicts([course_perfect])[0])
 
+    payload = {'route': f'/course/{course.id}'} if course else None
+    log_activity(
+        user,
+        kind='quiz',
+        title=f"Quiz {course.name if course else ''}".strip(),
+        description=f"Scored {score}/{total}" + (" · Perfect!" if perfect else ""),
+        xp=result['xp'],
+        course_name=course.name if course else '',
+        payload=payload,
+    )
+
     return {
         'xp': result['xp'],
         'level': result['level'],
@@ -164,6 +200,16 @@ def record_lesson_completion(user, course_id, level_id, score, total, passed=Non
     result = {'xp': 0, 'level': user.level, 'leveled_up': False, 'badges': []}
     if xp:
         result = award_xp(user, xp, source='lesson', course=course)
+        payload = {'route': f'/course/{course.id}'} if course else None
+        log_activity(
+            user,
+            kind='lesson',
+            title=f"Completed {course.name if course else ''} lesson".strip(),
+            description=f"Scored {score}/{total}",
+            xp=result['xp'],
+            course_name=course.name if course else '',
+            payload=payload,
+        )
 
     return {
         'xp': result['xp'],
@@ -196,6 +242,14 @@ def record_daily_checkin(user):
 
     result = award_xp(user, CHECKIN_XP, source='checkin')
 
+    log_activity(
+        user,
+        kind='checkin',
+        title='Daily check-in',
+        description=f"{user.streak} day streak" + (" 🔥" if user.streak > 1 else ""),
+        xp=result['xp'],
+    )
+
     return {
         'checked_in': True,
         'xp': result['xp'],
@@ -206,7 +260,7 @@ def record_daily_checkin(user):
     }
 
 
-def record_game_finish(user, rank):
+def record_game_finish(user, rank, room_code=None):
     """Award placement XP after a multiplayer game finishes."""
     xp = GAME_PLACEMENT_XP.get(rank, GAME_DEFAULT_XP)
     result = award_xp(user, xp, source='game')
@@ -216,6 +270,15 @@ def record_game_finish(user, rank):
         champ = award_badge(user, 'Game Champion', '🏆')
         if champ:
             badges.append(_badge_dicts([champ])[0])
+
+    log_activity(
+        user,
+        kind='game',
+        title=f"#{rank} in live game" + (f" ({room_code})" if room_code else ""),
+        description='Multiplayer game finished',
+        xp=result['xp'],
+        payload={'route': '/games'},
+    )
 
     return {
         'xp': result['xp'],

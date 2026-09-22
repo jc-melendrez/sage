@@ -73,7 +73,7 @@ class SessionSerializer(serializers.ModelSerializer):
 class ActivitySerializer(serializers.ModelSerializer):
     class Meta:
         model = Activity
-        fields = ['id', 'title', 'description', 'activity_type', 'created_at']
+        fields = ['id', 'title', 'description', 'activity_type', 'created_at', 'kind', 'xp_earned', 'course_name', 'payload']
 
 # --- Updated User Serializers ---
 

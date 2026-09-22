@@ -117,10 +117,17 @@ class Session(models.Model):
 
 class Activity(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='activities')
+    kind = models.CharField(max_length=20, default='other')  # quiz | lesson | checkin | game | offline_game | other
     title = models.CharField(max_length=255)
     description = models.TextField()
     activity_type = models.CharField(max_length=50)
+    xp_earned = models.IntegerField(default=0)
+    course_name = models.CharField(max_length=255, blank=True, default='')
+    payload = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
 
     def __str__(self):
         return f"{self.user.username} - {self.title}"

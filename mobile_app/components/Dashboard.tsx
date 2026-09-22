@@ -92,6 +92,32 @@ interface Activity {
   title: string;
   description: string;
   activity_type: string;
+  kind?: string;
+  xp_earned?: number;
+  course_name?: string;
+  payload?: { route?: string } | null;
+  created_at?: string;
+}
+
+const ACTIVITY_META: Record<string, { icon: any; color: string }> = {
+  quiz: { icon: 'book', color: COLORS.purpleVibrant },
+  lesson: { icon: 'checkmark-circle', color: COLORS.success },
+  checkin: { icon: 'flame', color: COLORS.warning },
+  game: { icon: 'trophy', color: '#F59E0B' },
+  offline_game: { icon: 'game-controller', color: COLORS.accent },
+  other: { icon: 'time', color: COLORS.textMuted },
+};
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
 function DotIndicator({ index, scrollX }: { index: number; scrollX: SharedValue<number> }) {
@@ -598,26 +624,49 @@ export default function Dashboard() {
               </View>
               <Text style={styles.sectionTitle}>Recent Activity</Text>
             </View>
-            <TouchableOpacity>
+            <TouchableOpacity onPress={() => router.push('/(tabs)/activities')}>
               <Text style={styles.viewAllText}>View all</Text>
             </TouchableOpacity>
           </View>
 
           {activities.length > 0 ? (
             <View style={styles.activityList}>
-              {activities.slice(0, 4).map((activity) => (
-                <View key={activity.id} style={styles.activityItem}>
-                  <View style={styles.activityIconBox}>
-                    <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />
-                  </View>
-                  <View style={styles.activityContent}>
-                    <Text style={styles.activityTitle}>{activity.title}</Text>
-                    <Text style={styles.activityDesc} numberOfLines={1}>
-                      {activity.description}
-                    </Text>
-                  </View>
-                </View>
-              ))}
+              {activities.slice(0, 4).map((activity) => {
+                const meta = ACTIVITY_META[activity.kind || ''] || ACTIVITY_META.other;
+                return (
+                  <TouchableOpacity
+                    key={activity.id}
+                    style={styles.activityItem}
+                    activeOpacity={0.7}
+                    disabled={!activity.payload?.route}
+                    onPress={() => {
+                      if (activity.payload?.route) router.push(activity.payload.route as any);
+                    }}
+                  >
+                    <View style={[styles.activityIconBox, { backgroundColor: `${meta.color}26` }]}>
+                      <Ionicons name={meta.icon} size={20} color={meta.color} />
+                    </View>
+                    <View style={styles.activityContent}>
+                      <Text style={styles.activityTitle} numberOfLines={1}>
+                        {activity.title}
+                      </Text>
+                      <Text style={styles.activityDesc} numberOfLines={1}>
+                        {activity.description}
+                      </Text>
+                    </View>
+                    <View style={styles.activityRight}>
+                      {activity.xp_earned ? (
+                        <View style={styles.xpChip}>
+                          <Text style={styles.xpChipText}>+{activity.xp_earned} XP</Text>
+                        </View>
+                      ) : null}
+                      {activity.created_at ? (
+                        <Text style={styles.activityTime}>{relativeTime(activity.created_at)}</Text>
+                      ) : null}
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
           ) : (
             <View style={styles.emptyStateCard}>
@@ -1027,6 +1076,27 @@ const styles = StyleSheet.create({
   },
   activityContent: {
     flex: 1,
+  },
+  activityRight: {
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  xpChip: {
+    backgroundColor: 'rgba(124, 58, 237, 0.12)',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  xpChipText: {
+    color: COLORS.purpleVibrant,
+    fontSize: 11,
+    fontFamily: FONTS.bold,
+    fontWeight: '700',
+  },
+  activityTime: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontFamily: FONTS.medium,
   },
   activityTitle: {
     color: COLORS.textPrimary,
