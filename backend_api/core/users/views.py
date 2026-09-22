@@ -28,7 +28,7 @@ from .serializers import (
     BadgeSerializer, RecommendationSerializer,
     SessionSerializer, ActivitySerializer,
     CourseSerializer, CourseRosterSerializer,
-    SuperadminUserUpdateSerializer, SuperadminCreateUserSerializer, RoleChangeLogSerializer,
+    SuperadminUserUpdateSerializer, SuperadminCreateUserSerializer,
     TopicSerializer, LearningNodeSerializer, NodeProgressSerializer, CoursePathTopicSerializer,
     ClassActivitySerializer,
 )
@@ -81,13 +81,12 @@ class FirebaseLoginView(APIView):
             user = User.objects.get(firebase_uid=firebase_uid)
         except User.DoesNotExist:
             if email:
-                try:
-                    user = User.objects.get(email__iexact=email)
+                # first() (not get()) so duplicate emails can't crash the login
+                user = User.objects.filter(email__iexact=email).first()
+                if user is not None:
                     user.firebase_uid = firebase_uid
                     user.save(update_fields=['firebase_uid'])
                     sync_user_to_firestore(user)
-                except User.DoesNotExist:
-                    pass
 
         if user is None:
             # If the user doesn't exist in Django yet, create them using data from the request

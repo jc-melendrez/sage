@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput,
   KeyboardAvoidingView, Platform, StatusBar, ActivityIndicator, Alert, Modal, Switch, Image,
@@ -61,15 +61,37 @@ function toTimestamp(created_at: GroupMessage['created_at']): number | null {
 function formatTime(created_at: GroupMessage['created_at']): string {
   const ms = toTimestamp(created_at);
   if (!ms) return '';
+  return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function sameDay(a: number, b: number): boolean {
+  const da = new Date(a);
+  const db = new Date(b);
+  return (
+    da.getFullYear() === db.getFullYear() &&
+    da.getMonth() === db.getMonth() &&
+    da.getDate() === db.getDate()
+  );
+}
+
+function isNewDay(prev: GroupMessage | undefined, cur: GroupMessage['created_at']): boolean {
+  if (!prev) return true;
+  const prevMs = toTimestamp(prev.created_at);
+  const curMs = toTimestamp(cur);
+  return prevMs == null || curMs == null || !sameDay(prevMs, curMs);
+}
+
+function formatDayLabel(created_at: GroupMessage['created_at']): string | null {
+  const ms = toTimestamp(created_at);
+  if (ms == null) return null;
   const date = new Date(ms);
   const now = new Date();
-  const sameDay =
-    date.getDate() === now.getDate() &&
-    date.getMonth() === now.getMonth() &&
-    date.getFullYear() === now.getFullYear();
-  return sameDay
-    ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-    : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const dayMs = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const diffDays = Math.round((dayMs(now) - dayMs(date)) / 86400000);
+  if (diffDays <= 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return date.toLocaleDateString([], { weekday: 'long' });
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
 // Accepts REST GET, REST POST, and Firestore snapshot docs alike.
@@ -139,7 +161,6 @@ export default function GroupChatScreen() {
   const [members, setMembers] = useState<GroupMember[]>([]);
   const [memberMap, setMemberMap] = useState<Record<string, GroupMember>>({});
   const [chatInput, setChatInput] = useState('');
-  const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isMembersOpen, setIsMembersOpen] = useState(false);
   const [peekMember, setPeekMember] = useState<GroupMember | null>(null);
@@ -465,9 +486,13 @@ export default function GroupChatScreen() {
   const renderMessage = (msg: GroupMessage, index: number) => {
     const isMe = msg.sender_uid != null && msg.sender_uid === myUid;
     const prev = messages[index - 1];
-    const showSender = !isMe && (!prev || prev.sender_uid !== msg.sender_uid);
+    const next = messages[index + 1];
     const senderMember = msg.sender_uid ? memberMap[msg.sender_uid] : undefined;
     const reactionEntries = Object.entries(msg.reactions || {}).filter(([, uids]) => uids.length > 0);
+    const isGroupStart = !isMe && (!prev || prev.sender_uid !== msg.sender_uid);
+    const isGroupEnd = !next || next.sender_uid !== msg.sender_uid;
+    const showDayDivider = isNewDay(prev, msg.created_at);
+    const dayLabel = formatDayLabel(msg.created_at);
 
     const renderPills = () =>
       reactionEntries.length > 0 && (
@@ -490,26 +515,41 @@ export default function GroupChatScreen() {
       );
 
     return (
-      <View key={msg.id} style={[styles.messageWrapper, isMe ? styles.messageMe : styles.messageOther]}>
-        {showSender && (
-          <View style={styles.senderRow}>
-            <MemberAvatar member={senderMember} name={msg.sender_name} size={22} />
-            <Text style={styles.senderName}>{msg.sender_name}</Text>
+      <Fragment key={msg.id}>
+        {showDayDivider && dayLabel && (
+          <View style={styles.dayDivider}>
+            <View style={styles.dayDividerLine} />
+            <Text style={styles.dayDividerText}>{dayLabel}</Text>
+            <View style={styles.dayDividerLine} />
           </View>
         )}
-        <TouchableOpacity
-          activeOpacity={0.9}
-          onLongPress={() => setReactionTarget(msg)}
-          delayLongPress={300}
-          accessibilityLabel={`Message from ${isMe ? 'you' : msg.sender_name}. Long press to react.`}
-        >
-          <View style={[styles.messageBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
-            <Text style={[styles.messageText, isMe ? { color: 'white' } : { color: COLORS.textDark }]}>{msg.text}</Text>
+        <View style={[styles.messageWrapper, isGroupEnd ? null : styles.messageWrapperTight, isMe ? styles.messageMe : styles.messageOther]}>
+          {!isMe && (
+            <View style={styles.avatarColumn}>
+              {isGroupStart && <MemberAvatar member={senderMember} name={msg.sender_name} size={34} />}
+            </View>
+          )}
+          <View style={styles.messageColumn}>
+            {isGroupStart && <Text style={styles.senderName}>{msg.sender_name}</Text>}
+            <TouchableOpacity
+              activeOpacity={0.9}
+              onLongPress={() => setReactionTarget(msg)}
+              delayLongPress={300}
+              accessibilityLabel={`Message from ${isMe ? 'you' : msg.sender_name}. Long press to react.`}
+            >
+              <View style={[styles.messageBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
+                <Text style={[styles.messageText, isMe ? { color: 'white' } : { color: COLORS.textDark }]}>{msg.text}</Text>
+              </View>
+            </TouchableOpacity>
+            {renderPills()}
+            {isGroupEnd && (
+              <Text style={[styles.messageTime, isMe && styles.timeMe]}>
+                {msg.local ? 'Sending…' : formatTime(msg.created_at)}
+              </Text>
+            )}
           </View>
-        </TouchableOpacity>
-        {renderPills()}
-        <Text style={styles.messageTime}>{formatTime(msg.created_at)}</Text>
-      </View>
+        </View>
+      </Fragment>
     );
   };
 
@@ -554,28 +594,24 @@ export default function GroupChatScreen() {
         contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
         onContentSizeChange={() => scrollToEnd(false)}
       >
-        {messages.map(renderMessage)}
+        {loading && messages.length === 0 ? (
+          <View style={styles.chatState}>
+            <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
+          </View>
+        ) : messages.length === 0 ? (
+          <View style={styles.chatState}>
+            <View style={styles.emptyIcon}>
+              <Ionicons name="chatbubbles-outline" size={34} color={COLORS.purpleVibrant} />
+            </View>
+            <Text style={styles.emptyTitle}>No messages yet</Text>
+            <Text style={styles.emptySubtitle}>Say hi to your study group</Text>
+          </View>
+        ) : (
+          messages.map(renderMessage)
+        )}
       </ScrollView>
 
-      {isActionMenuOpen && (
-        <View style={styles.actionMenuContainer}>
-          <View style={styles.actionRow}>
-            <TouchableOpacity style={styles.actionBtn} onPress={() => Alert.alert('Coming Soon', 'File sharing is on the roadmap.')}>
-              <View style={[styles.actionIconBox, { backgroundColor: COLORS.purplePrimary }]}><Ionicons name="document-text" size={20} color="white" /></View>
-              <Text style={styles.actionBtnText}>File</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.actionBtn} onPress={() => Alert.alert('Coming Soon', 'Photo sharing is on the roadmap.')}>
-              <View style={[styles.actionIconBox, { backgroundColor: COLORS.success }]}><Ionicons name="image" size={20} color="white" /></View>
-              <Text style={styles.actionBtnText}>Photo</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      )}
-
       <View style={[styles.inputContainer, { paddingBottom: Math.max(12, insets.bottom) }]}>
-        <TouchableOpacity onPress={() => setIsActionMenuOpen(!isActionMenuOpen)} style={styles.plusButton} accessibilityLabel="More actions">
-          <Ionicons name={isActionMenuOpen ? 'close' : 'add'} size={28} color={COLORS.purpleDeep} />
-        </TouchableOpacity>
         <View style={styles.textInputWrapper}>
           <TextInput
             style={styles.textInput}
@@ -773,7 +809,7 @@ export default function GroupChatScreen() {
       {/* Reaction Picker */}
       <Modal
         visible={reactionTarget != null}
-        animationType="fade"
+        animationType="slide"
         transparent={true}
         onRequestClose={() => setReactionTarget(null)}
       >
@@ -782,21 +818,27 @@ export default function GroupChatScreen() {
           activeOpacity={1}
           onPress={() => setReactionTarget(null)}
         >
-          <View style={styles.reactionPicker}>
-            {ALLOWED_REACTIONS.map(emoji => {
-              const mine = reactionTarget?.reactions?.[emoji]?.includes(myUid ?? '');
-              return (
-                <TouchableOpacity
-                  key={emoji}
-                  style={[styles.reactionOption, mine && styles.reactionOptionMine]}
-                  onPress={() => reactionTarget && toggleReaction(reactionTarget, emoji)}
-                  accessibilityLabel={`React with ${emoji}`}
-                >
-                  <Text style={styles.reactionOptionEmoji}>{emoji}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+          <TouchableOpacity style={styles.reactionSheet} activeOpacity={1} onPress={() => {}}>
+            <View style={styles.reactionSheetHandle} />
+            <Text style={styles.reactionSheetTitle}>
+              React to {reactionTarget ? (reactionTarget.sender_uid === myUid ? 'your message' : `${reactionTarget.sender_name || 'this message'}'s message`) : 'message'}
+            </Text>
+            <View style={styles.reactionSheetRow}>
+              {ALLOWED_REACTIONS.map(emoji => {
+                const mine = reactionTarget?.reactions?.[emoji]?.includes(myUid ?? '');
+                return (
+                  <TouchableOpacity
+                    key={emoji}
+                    style={[styles.reactionOption, mine && styles.reactionOptionMine]}
+                    onPress={() => reactionTarget && toggleReaction(reactionTarget, emoji)}
+                    accessibilityLabel={`React with ${emoji}`}
+                  >
+                    <Text style={styles.reactionOptionEmoji}>{emoji}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </TouchableOpacity>
         </TouchableOpacity>
       </Modal>
     </KeyboardAvoidingView>
@@ -815,11 +857,13 @@ const styles = StyleSheet.create({
   headerIconBtn: { padding: 4 },
   chatArea: { flex: 1, backgroundColor: COLORS.bg },
 
-  messageWrapper: { marginBottom: 16, maxWidth: '80%' },
-  messageMe: { alignSelf: 'flex-end', alignItems: 'flex-end' },
-  messageOther: { alignSelf: 'flex-start', alignItems: 'flex-start' },
-  senderRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 4, marginLeft: 4, gap: 6 },
-  senderName: { fontSize: 10, color: COLORS.textMuted, fontFamily: FONTS.medium },
+  messageWrapper: { marginBottom: 16, maxWidth: '82%', flexDirection: 'row' },
+  messageWrapperTight: { marginBottom: 2 },
+  messageMe: { alignSelf: 'flex-end', justifyContent: 'flex-end' },
+  messageOther: { alignSelf: 'flex-start', justifyContent: 'flex-start' },
+  avatarColumn: { width: 40, alignItems: 'center', marginTop: 2 },
+  messageColumn: { minWidth: 0, flexShrink: 1 },
+  senderName: { fontSize: 11, color: COLORS.textMuted, fontFamily: FONTS.medium, marginBottom: 4, marginLeft: 6 },
   avatarImage: { width: '100%', height: '100%', borderRadius: 999 },
   initialsCircle: { backgroundColor: COLORS.purpleVibrant, justifyContent: 'center', alignItems: 'center' },
   initialsText: { color: 'white', fontFamily: FONTS.bold },
@@ -828,6 +872,16 @@ const styles = StyleSheet.create({
   bubbleOther: { backgroundColor: COLORS.surface, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: COLORS.border },
   messageText: { fontSize: 15, lineHeight: 22, fontFamily: FONTS.regular },
   messageTime: { fontSize: 10, color: COLORS.textMuted, marginTop: 4, fontFamily: FONTS.medium },
+  timeMe: { alignSelf: 'flex-end' },
+
+  dayDivider: { flexDirection: 'row', alignItems: 'center', alignSelf: 'center', marginVertical: 12, maxWidth: '85%' },
+  dayDividerLine: { flex: 1, height: 1, backgroundColor: COLORS.border },
+  dayDividerText: { fontSize: 10, color: COLORS.textMuted, fontFamily: FONTS.medium, marginHorizontal: 10, textTransform: 'uppercase', letterSpacing: 0.5 },
+
+  chatState: { alignItems: 'center', justifyContent: 'center', paddingVertical: 90 },
+  emptyIcon: { width: 72, height: 72, borderRadius: 36, backgroundColor: COLORS.bgSecondary, justifyContent: 'center', alignItems: 'center', marginBottom: 14 },
+  emptyTitle: { fontSize: 17, fontFamily: FONTS.bold, color: COLORS.textDark },
+  emptySubtitle: { fontSize: 14, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 4, textAlign: 'center' },
 
   reactionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
   reactionPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 3 },
@@ -835,20 +889,16 @@ const styles = StyleSheet.create({
   reactionPillEmoji: { fontSize: 12 },
   reactionPillCount: { fontSize: 11, color: COLORS.textMuted, marginLeft: 3, fontFamily: FONTS.medium },
 
-  reactionOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
-  reactionPicker: { flexDirection: 'row', backgroundColor: COLORS.surface, borderRadius: 28, padding: 8, borderWidth: 1, borderColor: COLORS.border, gap: 4, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8 },
-  reactionOption: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
+  reactionOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
+  reactionSheet: { backgroundColor: COLORS.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderTopColor: COLORS.border, paddingHorizontal: 24, paddingBottom: 32, alignItems: 'center' },
+  reactionSheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: COLORS.borderStrong, marginVertical: 12 },
+  reactionSheetTitle: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted, textAlign: 'center', marginBottom: 14 },
+  reactionSheetRow: { flexDirection: 'row', gap: 8 },
+  reactionOption: { width: 48, height: 48, borderRadius: 24, justifyContent: 'center', alignItems: 'center' },
   reactionOptionMine: { backgroundColor: 'rgba(139, 92, 246, 0.15)' },
-  reactionOptionEmoji: { fontSize: 24 },
-
-  actionMenuContainer: { backgroundColor: COLORS.surface, paddingVertical: 16, paddingHorizontal: 16, borderTopWidth: 1, borderTopColor: COLORS.border },
-  actionRow: { flexDirection: 'row', justifyContent: 'flex-start', flexWrap: 'wrap', gap: 16 },
-  actionBtn: { alignItems: 'center', width: '22%', marginBottom: 12 },
-  actionIconBox: { width: 48, height: 48, borderRadius: 24, justifyContent: 'center', alignItems: 'center', marginBottom: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4, elevation: 2 },
-  actionBtnText: { fontSize: 11, color: COLORS.textDark, fontFamily: FONTS.medium, textAlign: 'center' },
+  reactionOptionEmoji: { fontSize: 26 },
 
   inputContainer: { flexDirection: 'row', alignItems: 'flex-end', padding: 12, backgroundColor: COLORS.surface, borderTopWidth: 1, borderTopColor: COLORS.border },
-  plusButton: { padding: 6, marginRight: 8, backgroundColor: COLORS.bgSecondary, borderRadius: 20, width: 36, height: 36, justifyContent: 'center', alignItems: 'center' },
   textInputWrapper: { flex: 1, backgroundColor: COLORS.bg, borderRadius: 20, paddingHorizontal: 16, maxHeight: 100, borderWidth: 1, borderColor: COLORS.border },
   textInput: { fontSize: 15, color: COLORS.textDark, fontFamily: FONTS.regular, paddingVertical: 8 },
   sendButton: { backgroundColor: COLORS.purplePrimary, width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center', marginLeft: 8, marginBottom: 2, shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 3 },
