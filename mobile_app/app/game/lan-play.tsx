@@ -44,7 +44,8 @@ export default function LanPlayScreen() {
   const [qIndex, setQIndex] = useState(0);
   const [pending, setPending] = useState<Record<PowerupKey, boolean>>(BASE_PENDING);
   const [standings, setStandings] = useState<LanPlayer[]>([]);
-  const [, setQuizTick] = useState(0);
+  const [quizTick, setQuizTick] = useState(0);
+  const [engine, setEngine] = useState<OfflineGame | null>(null);
   const [waitTimer, setWaitTimer] = useState(0);
   const [engineError, setEngineError] = useState<string | null>(null);
   const engineRef = useRef<OfflineGame | null>(null);
@@ -52,17 +53,17 @@ export default function LanPlayScreen() {
   const savedRef = useRef(false);
   const finishCalledRef = useRef(false);
 
-  const engine = engineRef.current;
-  const quiz = lanGame.quiz;
-
-  if (!engine && quiz) {
+  useEffect(() => {
+    if (engineRef.current || !lanGame.quiz) return;
     try {
-      engineRef.current = new OfflineGame(quiz, lanGame.timePerQuestion, { order: lanGame.order });
+      const g = new OfflineGame(lanGame.quiz, lanGame.timePerQuestion, { order: lanGame.order });
+      engineRef.current = g;
+      setEngine(g);
     } catch (e) {
       setEngineError(e instanceof Error ? e.message : String(e));
       console.warn('OfflineGame build failed', e);
     }
-  }
+  }, [engine, quizTick]);
 
   const finish = useCallback((reason?: string) => {
     if (finishCalledRef.current) return;
