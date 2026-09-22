@@ -9,7 +9,7 @@ export class LanClientSession {
 
   constructor(onEvent: (msg: LanMessage) => void) {
     this.buffer = new LineBuffer(msg => {
-      if (!this.disposed) onEvent(msg);
+      if (!this.disposed) this.onEvent(msg);
     });
     this.onEvent = onEvent;
   }
