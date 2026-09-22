@@ -9,6 +9,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('users', '0004_user_avatar'),
+        ('users', '0005_fix_role_derived_flags'),
     ]
 
     operations = [
