@@ -1,7 +1,7 @@
 import React, { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput,
-  KeyboardAvoidingView, Platform, StatusBar, ActivityIndicator, Alert, Modal, Switch, Image,
+  KeyboardAvoidingView, Platform, StatusBar, ActivityIndicator, Alert, Modal, Switch, Image, Keyboard,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -14,7 +14,7 @@ import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser, getCachedUserId } from '@/services/authService';
 import { getFirebaseUid } from '@/services/firebaseAuthService';
 import { getChatCache, setChatCache, clearChatCache, setCacheUserId } from '@/services/apiCache';
-import { getGroupMembers, updateGroup, leaveGroup, GroupMember } from '@/services/chatService';
+import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest } from '@/services/chatService';
 import { pfpSource } from '@/constants/pfps';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
@@ -26,6 +26,7 @@ interface StudyGroup {
   join_code: string;
   created_by: string;
   members?: string[];
+  privacy?: string;
 }
 
 // Normalized message shape: Firestore docs, REST responses, and optimistic
@@ -173,11 +174,26 @@ export default function GroupChatScreen() {
   const [reactionTarget, setReactionTarget] = useState<GroupMessage | null>(null);
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
+  const [editPrivacy, setEditPrivacy] = useState<'open' | 'private'>('open');
+  const [joinRequests, setJoinRequests] = useState<JoinRequestMember[]>([]);
   const [savingGroup, setSavingGroup] = useState(false);
   const [leavingGroup, setLeavingGroup] = useState(false);
 
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
+  const [keyboardBottom, setKeyboardBottom] = useState(0);
+
+  // Android's edge-to-edge mode (targetSdk 35+) stops resizing the window for
+  // the keyboard, so we track its height ourselves and pad the layout up.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const show = Keyboard.addListener('keyboardDidShow', (e) => setKeyboardBottom(e.endCoordinates.height));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboardBottom(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   const scrollToEnd = useCallback((animated = false) => {
     // Let content layout settle instead of relying on fixed timeouts.
@@ -207,16 +223,20 @@ export default function GroupChatScreen() {
         const uid = user?.firebase_uid || storedUid || null;
         setMyUid(uid);
 
-        const [res, memberRes] = await Promise.all([
+        const [res] = await Promise.all([
           fetch(`${API_BASE_URL}/users/groups/mine/`, {
             headers: { 'Authorization': `Bearer ${token}` },
           }),
-          getGroupMembers(String(groupId), token).catch(() => []),
+          getGroupRoster(String(groupId), token)
+            .then(roster => {
+              if (roster.members.length > 0) {
+                setMembers(roster.members);
+                setMemberMap(Object.fromEntries(roster.members.map(m => [m.firebase_uid, m])));
+              }
+              setJoinRequests(roster.join_requests || []);
+            })
+            .catch(() => {}),
         ]);
-        if (memberRes.length > 0) {
-          setMembers(memberRes);
-          setMemberMap(Object.fromEntries(memberRes.map(m => [m.firebase_uid, m])));
-        }
         if (res.ok) {
           const myGroups: StudyGroup[] = await res.json();
           const found = myGroups.find(g => String(g.id) === String(groupId)) || null;
@@ -253,12 +273,18 @@ export default function GroupChatScreen() {
           setMessages(cachedMsgs);
           scrollToEnd(false);
         }
-        if (cached.group) setGroup(cached.group as StudyGroup);
+        if (cached.group) {
+          const cachedGroup = cached.group as StudyGroup;
+          if (cached.privacy) cachedGroup.privacy = cached.privacy;
+          setGroup(cachedGroup);
+        }
         const cachedMembers = (cached.members as GroupMember[]) || [];
         if (cachedMembers.length > 0) {
           setMembers(cachedMembers);
           setMemberMap(Object.fromEntries(cachedMembers.map(m => [m.firebase_uid, m])));
         }
+        const cachedRequests = (cached.join_requests as JoinRequestMember[]) || [];
+        if (cachedRequests.length > 0) setJoinRequests(cachedRequests);
       }
     })();
 
@@ -337,11 +363,14 @@ export default function GroupChatScreen() {
             description: group.description,
             join_code: group.join_code,
             members_count: group.members_count,
+            privacy: group.privacy,
           }
         : null,
       members,
+      join_requests: joinRequests,
+      privacy: group?.privacy,
     });
-  }, [messages, group, members, groupId]);
+  }, [messages, group, members, joinRequests, groupId]);
 
   const sendChatMessage = async () => {
     if (!chatInput.trim()) return;
@@ -428,11 +457,66 @@ export default function GroupChatScreen() {
   };
 
   const isAdmin = myUid != null && myUid === group?.created_by;
+  const currentPrivacy = isAdmin ? editPrivacy : (group?.privacy === 'private' ? 'private' : 'open');
 
   const openSettings = () => {
     setEditName(group?.name || '');
     setEditDesc(group?.description || '');
+    setEditPrivacy(group?.privacy === 'private' ? 'private' : 'open');
     setIsSettingsOpen(true);
+  };
+
+  const refreshRoster = useCallback(async () => {
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const roster = await getGroupRoster(String(groupId), token);
+      setMembers(roster.members);
+      setMemberMap(Object.fromEntries(roster.members.map(m => [m.firebase_uid, m])));
+      setJoinRequests(roster.join_requests || []);
+      setGroup(prev => prev ? { ...prev, privacy: roster.privacy } : prev);
+    } catch (err) {
+      console.error('Failed to refresh roster:', err);
+    }
+  }, [groupId]);
+
+  const handleRemoveMember = (member: GroupMember) => {
+    const displayName = member.display_name || member.username;
+    Alert.alert(
+      'Remove Member',
+      `Remove ${displayName} from the group? They can rejoin with the invite code.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const token = await getToken();
+              if (!token) return;
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              await removeGroupMember(String(groupId), token, member.firebase_uid);
+              refreshRoster();
+            } catch (err) {
+              Alert.alert('Failed', err instanceof Error ? err.message : 'Please try again.');
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const handleJoinRequestAction = async (req: JoinRequestMember, action: 'approve' | 'reject') => {
+    try {
+      const token = await getToken();
+      if (!token) return;
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      await handleJoinRequest(String(groupId), token, req.firebase_uid, action);
+      setJoinRequests(prev => prev.filter(r => r.firebase_uid !== req.firebase_uid));
+      if (action === 'approve') refreshRoster();
+    } catch (err) {
+      Alert.alert('Failed', err instanceof Error ? err.message : 'Please try again.');
+    }
   };
 
   const saveGroupEdit = async () => {
@@ -447,7 +531,11 @@ export default function GroupChatScreen() {
     try {
       const token = await getToken();
       if (!token) return;
-      const updated = await updateGroup(String(group.id), token, { name, description: editDesc.trim() });
+      const updated = await updateGroup(String(group.id), token, {
+        name,
+        description: editDesc.trim(),
+        privacy: editPrivacy,
+      });
       setGroup(prev => prev ? { ...prev, ...updated } : prev);
       Alert.alert('Saved', 'Group settings updated.');
     } catch (err) {
@@ -559,7 +647,7 @@ export default function GroupChatScreen() {
 
   return (
     <KeyboardAvoidingView
-      style={styles.container}
+      style={[styles.container, Platform.OS === 'android' && { paddingBottom: keyboardBottom }]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       contentContainerStyle={{ flex: 1 }}
     >
@@ -705,7 +793,9 @@ export default function GroupChatScreen() {
 
               <View style={styles.settingsSection}>
                 <Text style={styles.settingsSectionTitle}>Invite Members</Text>
-                <Text style={styles.settingsDesc}>Share this secret code with classmates so they can join.</Text>
+                <Text style={styles.settingsDesc}>
+                  Share this secret code with classmates. {currentPrivacy === 'private' ? 'Joining requires your approval.' : 'Anyone with the code can join instantly.'}
+                </Text>
                 <View style={styles.codeBox}>
                   <Text style={styles.codeText}>{group?.join_code}</Text>
                   <TouchableOpacity style={styles.copyBtn} onPress={() => group && copyToClipboard(group.join_code)}>
@@ -716,6 +806,22 @@ export default function GroupChatScreen() {
               </View>
 
               <View style={styles.settingsOptionsBlock}>
+                <View style={styles.settingsOptionRow}>
+                  <View style={styles.settingsOptionIcon}>
+                    <Ionicons name={currentPrivacy === 'private' ? 'lock-closed-outline' : 'lock-open-outline'} size={20} color={COLORS.textDark} />
+                  </View>
+                  <Text style={styles.settingsOptionText}>Private Group</Text>
+                  <Text style={styles.settingsOptionValue}>{currentPrivacy === 'private' ? 'Approval required' : 'Anyone with code'}</Text>
+                  {isAdmin ? (
+                    <Switch
+                      value={editPrivacy === 'private'}
+                      onValueChange={(v) => setEditPrivacy(v ? 'private' : 'open')}
+                      trackColor={{ false: '#D1D5DB', true: COLORS.purpleVibrant }}
+                    />
+                  ) : (
+                    <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+                  )}
+                </View>
                 <View style={styles.settingsOptionRow}>
                   <View style={styles.settingsOptionIcon}><Ionicons name="notifications-outline" size={20} color={COLORS.textDark} /></View>
                   <Text style={styles.settingsOptionText}>Mute Notifications</Text>
@@ -759,6 +865,26 @@ export default function GroupChatScreen() {
               </TouchableOpacity>
             </View>
             <ScrollView showsVerticalScrollIndicator={false}>
+              {isAdmin && joinRequests.length > 0 && (
+                <View style={styles.pendingBlock}>
+                  <Text style={styles.pendingTitle}>Pending Requests ({joinRequests.length})</Text>
+                  {joinRequests.map(req => (
+                    <View key={req.firebase_uid} style={styles.requestRow}>
+                      <MemberAvatar name={req.display_name} size={40} />
+                      <View style={styles.memberInfo}>
+                        <Text style={styles.memberName} numberOfLines={1}>{req.display_name}</Text>
+                        <Text style={styles.memberMeta}>Wants to join the group</Text>
+                      </View>
+                      <TouchableOpacity style={styles.requestApproveBtn} onPress={() => handleJoinRequestAction(req, 'approve')} accessibilityLabel={`Approve ${req.display_name}`}>
+                        <Ionicons name="checkmark" size={18} color="white" />
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.requestRejectBtn} onPress={() => handleJoinRequestAction(req, 'reject')} accessibilityLabel={`Reject ${req.display_name}`}>
+                        <Ionicons name="close" size={18} color={COLORS.danger} />
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              )}
               {members.length === 0 ? (
                 <Text style={styles.emptyText}>No members yet. Share the invite code to add some.</Text>
               ) : (
@@ -778,6 +904,11 @@ export default function GroupChatScreen() {
                       </View>
                       <Text style={styles.memberMeta}>Level {member.level} · {member.role === 'superadmin' ? 'Superadmin' : member.role === 'educator' ? 'Educator' : 'Student'}</Text>
                     </View>
+                    {isAdmin && !member.is_admin && !member.is_you && (
+                      <TouchableOpacity style={styles.removeMemberBtn} onPress={() => handleRemoveMember(member)} accessibilityLabel={`Remove ${member.display_name}`}>
+                        <Ionicons name="close-circle" size={22} color={COLORS.danger} />
+                      </TouchableOpacity>
+                    )}
                     <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
                   </TouchableOpacity>
                 ))
@@ -805,6 +936,16 @@ export default function GroupChatScreen() {
             <TouchableOpacity style={styles.peekCloseBtn} onPress={() => setPeekMember(null)} activeOpacity={0.8}>
               <Text style={styles.peekCloseText}>Close</Text>
             </TouchableOpacity>
+            {isAdmin && peekMember && !peekMember.is_admin && !peekMember.is_you && (
+              <TouchableOpacity
+                style={styles.peekRemoveBtn}
+                onPress={() => { const m = peekMember; setPeekMember(null); handleRemoveMember(m); }}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="remove-circle-outline" size={16} color={COLORS.danger} />
+                <Text style={styles.peekRemoveText}>Remove from Group</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </TouchableOpacity>
       </Modal>
@@ -943,12 +1084,21 @@ const styles = StyleSheet.create({
   adminBadgeSmall: { backgroundColor: 'rgba(139, 92, 246, 0.12)', color: COLORS.purpleDark, fontSize: 10, fontFamily: FONTS.bold, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, overflow: 'hidden' },
   emptyText: { color: COLORS.textMuted, fontSize: 13, fontFamily: FONTS.medium, textAlign: 'center', paddingVertical: 20 },
 
+  pendingBlock: { marginBottom: 16, backgroundColor: COLORS.bg, borderRadius: 16, borderWidth: 1, borderColor: COLORS.border, paddingHorizontal: 16, paddingBottom: 8 },
+  pendingTitle: { fontSize: 11, fontFamily: FONTS.bold, color: COLORS.textMuted, textTransform: 'uppercase', letterSpacing: 0.4, paddingVertical: 12 },
+  requestRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: 12 },
+  requestApproveBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#10B981', justifyContent: 'center', alignItems: 'center' },
+  requestRejectBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: 'rgba(239, 68, 68, 0.12)', justifyContent: 'center', alignItems: 'center' },
+  removeMemberBtn: { padding: 4 },
+  peekRemoveBtn: { marginTop: 10, flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 10, paddingHorizontal: 20, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(239, 68, 68, 0.4)', backgroundColor: 'rgba(239, 68, 68, 0.06)' },
+  peekRemoveText: { color: COLORS.danger, fontSize: 14, fontFamily: FONTS.bold },
+
   leaveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 14, paddingVertical: 14, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(239, 68, 68, 0.4)', backgroundColor: 'rgba(239, 68, 68, 0.06)', minHeight: 48 },
   leaveBtnText: { color: COLORS.danger, fontSize: 15, fontFamily: FONTS.bold },
 
   peekCard: { backgroundColor: COLORS.surface, borderRadius: 24, padding: 28, alignItems: 'center', width: '80%', borderWidth: 1, borderColor: COLORS.border, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 12 },
   peekName: { fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textDark, marginTop: 12, textAlign: 'center' },
-  peekBadges: { flexDirection: 'row', gap: 6, marginTop: 8 },
+  peekBadges: { flexDirection: 'row', gap: 6, marginTop: 8, alignItems: 'center' },
   peekMeta: { fontSize: 13, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 4 },
   peekCloseBtn: { marginTop: 20, backgroundColor: COLORS.purplePrimary, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 32 },
   peekCloseText: { color: 'white', fontSize: 14, fontFamily: FONTS.bold },

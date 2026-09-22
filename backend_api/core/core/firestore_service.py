@@ -103,6 +103,8 @@ def create_study_group(firebase_uid: str, name: str, description: str, join_code
         'join_code': join_code,
         'created_by': firebase_uid,
         'members': [firebase_uid],
+        'privacy': 'open',          # 'open' = code joins instantly, 'private' = admin approval
+        'join_requests': [],        # firebase uids waiting for admin approval
         'created_at': firestore.SERVER_TIMESTAMP,
     })
     return group_ref[1].id
@@ -112,8 +114,15 @@ def join_group_by_code(firebase_uid: str, join_code: str):
     db = get_db()
     groups = db.collection('studyGroups').where('join_code', '==', join_code).limit(1).stream()
     for group in groups:
+        data = group.to_dict() or {}
+        members = data.get('members') or []
+        if firebase_uid in members:
+            return {'id': group.id, **data, 'status': 'joined'}
+        if data.get('privacy') == 'private':
+            group.reference.update({'join_requests': firestore.ArrayUnion([firebase_uid])})
+            return {'id': group.id, **data, 'status': 'pending'}
         group.reference.update({'members': firestore.ArrayUnion([firebase_uid])})
-        return {'id': group.id, **group.to_dict()}
+        return {'id': group.id, **data, 'status': 'joined'}
     return None
 
 
@@ -152,6 +161,55 @@ def leave_study_group(group_id: str, firebase_uid: str) -> bool:
         ref.delete()
     else:
         ref.update({'members': firestore.ArrayRemove([firebase_uid])})
+    return True
+
+
+def remove_group_member(group_id: str, target_uid: str) -> bool:
+    """Admin action: remove a member. The group creator can never be removed."""
+    db = get_db()
+    ref = db.collection('studyGroups').document(group_id)
+    doc = ref.get()
+    if not doc.exists:
+        return False
+    data = doc.to_dict() or {}
+    members = data.get('members') or []
+    if data.get('created_by') == target_uid or target_uid not in members:
+        return False
+    if len(members) <= 1:
+        ref.delete()
+    else:
+        ref.update({'members': firestore.ArrayRemove([target_uid])})
+    return True
+
+
+def approve_join_request(group_id: str, firebase_uid: str) -> bool:
+    """Move a pending requester into the member list."""
+    db = get_db()
+    ref = db.collection('studyGroups').document(group_id)
+    doc = ref.get()
+    if not doc.exists:
+        return False
+    requests = (doc.to_dict() or {}).get('join_requests') or []
+    if firebase_uid not in requests:
+        return False
+    ref.update({
+        'join_requests': firestore.ArrayRemove([firebase_uid]),
+        'members': firestore.ArrayUnion([firebase_uid]),
+    })
+    return True
+
+
+def reject_join_request(group_id: str, firebase_uid: str) -> bool:
+    """Drop a pending join request without adding the requester."""
+    db = get_db()
+    ref = db.collection('studyGroups').document(group_id)
+    doc = ref.get()
+    if not doc.exists:
+        return False
+    requests = (doc.to_dict() or {}).get('join_requests') or []
+    if firebase_uid not in requests:
+        return False
+    ref.update({'join_requests': firestore.ArrayRemove([firebase_uid])})
     return True
 
 

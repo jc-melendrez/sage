@@ -779,7 +779,9 @@ class GroupMembersAndSettingsTests(APITestCase):
         with patch.object(users_views, 'get_study_group', return_value=self._group()):
             res = self.client.get(reverse('group_members', args=['group-abc']))
         self.assertEqual(res.status_code, 200)
-        by_uid = {m['firebase_uid']: m for m in res.data}
+        self.assertEqual(res.data['privacy'], 'open')
+        self.assertEqual(res.data['join_requests'], [])
+        by_uid = {m['firebase_uid']: m for m in res.data['members']}
 
         me = by_uid['fb-uid-leader']
         self.assertTrue(me['is_admin'])
@@ -794,7 +796,7 @@ class GroupMembersAndSettingsTests(APITestCase):
         self.assertEqual(other['role'], 'student')
         self.assertIn('level', other)
 
-        self.assertEqual(res.data[0]['firebase_uid'], 'fb-uid-leader')
+        self.assertEqual(res.data['members'][0]['firebase_uid'], 'fb-uid-leader')
 
     def test_members_skips_uids_without_django_account(self):
         group = self._group()
@@ -802,11 +804,43 @@ class GroupMembersAndSettingsTests(APITestCase):
         with patch.object(users_views, 'get_study_group', return_value=group):
             res = self.client.get(reverse('group_members', args=['group-abc']))
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(len(res.data), 2)
+        self.assertEqual(len(res.data['members']), 2)
 
     def test_members_404_when_group_missing(self):
         with patch.object(users_views, 'get_study_group', return_value=None):
             res = self.client.get(reverse('group_members', args=['group-abc']))
+        self.assertEqual(res.status_code, 404)
+
+    def test_members_returns_privacy_and_pending_requests(self):
+        group = self._group()
+        group['privacy'] = 'private'
+        group['join_requests'] = ['fb-uid-ghost']
+        with patch.object(users_views, 'get_study_group', return_value=group):
+            res = self.client.get(reverse('group_members', args=['group-abc']))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['privacy'], 'private')
+        self.assertEqual(len(res.data['join_requests']), 1)
+        self.assertEqual(res.data['join_requests'][0]['firebase_uid'], 'fb-uid-ghost')
+        self.assertEqual(len(res.data['members']), 2)
+
+    def test_join_open_group_returns_joined(self):
+        with patch.object(users_views, 'join_group_by_code',
+                          return_value={'id': 'group-abc', 'name': 'Study Squad', 'status': 'joined'}):
+            res = self.client.post(reverse('join_group'), {'join_code': 'ABCDEF'}, format='json')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['status'], 'joined')
+        self.assertEqual(res.data['group_id'], 'group-abc')
+
+    def test_join_private_group_returns_pending(self):
+        with patch.object(users_views, 'join_group_by_code',
+                          return_value={'id': 'group-abc', 'name': 'Study Squad', 'status': 'pending'}):
+            res = self.client.post(reverse('join_group'), {'join_code': 'ABCDEF'}, format='json')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['status'], 'pending')
+
+    def test_join_group_missing_404(self):
+        with patch.object(users_views, 'join_group_by_code', return_value=None):
+            res = self.client.post(reverse('join_group'), {'join_code': 'ABCDEF'}, format='json')
         self.assertEqual(res.status_code, 404)
 
     def test_update_group_as_admin(self):
@@ -841,6 +875,27 @@ class GroupMembersAndSettingsTests(APITestCase):
             )
         self.assertEqual(res.status_code, 400)
 
+    def test_update_group_privacy(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()) as mock_get, \
+             patch.object(users_views, 'update_study_group', return_value=True) as mock_update:
+            res = self.client.patch(
+                reverse('group_update', args=['group-abc']),
+                {'privacy': 'private'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['privacy'], 'private')
+        mock_update.assert_called_once_with('group-abc', {'privacy': 'private'})
+
+    def test_update_group_rejects_bad_privacy(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()):
+            res = self.client.patch(
+                reverse('group_update', args=['group-abc']),
+                {'privacy': 'secret'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 400)
+
     def test_leave_group(self):
         with patch.object(users_views, 'leave_study_group', return_value=True) as mock_leave:
             res = self.client.post(reverse('group_leave', args=['group-abc']))
@@ -851,6 +906,97 @@ class GroupMembersAndSettingsTests(APITestCase):
         with patch.object(users_views, 'leave_study_group', return_value=False):
             res = self.client.post(reverse('group_leave', args=['group-abc']))
         self.assertEqual(res.status_code, 404)
+
+    def test_remove_member_as_admin(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()) as mock_get, \
+             patch.object(users_views, 'remove_group_member', return_value=True) as mock_remove:
+            res = self.client.post(
+                reverse('group_remove_member', args=['group-abc']),
+                {'firebase_uid': 'fb-uid-follower'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        mock_remove.assert_called_once_with('group-abc', 'fb-uid-follower')
+
+    def test_remove_member_denied_for_non_admin(self):
+        with patch.object(users_views, 'get_study_group',
+                          return_value=self._group(created_by='fb-uid-other')):
+            res = self.client.post(
+                reverse('group_remove_member', args=['group-abc']),
+                {'firebase_uid': 'fb-uid-follower'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 403)
+
+    def test_remove_member_cant_remove_self(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()):
+            res = self.client.post(
+                reverse('group_remove_member', args=['group-abc']),
+                {'firebase_uid': 'fb-uid-leader'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 400)
+
+    def test_remove_member_404_when_missing_target(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()) as mock_get, \
+             patch.object(users_views, 'remove_group_member', return_value=False):
+            res = self.client.post(
+                reverse('group_remove_member', args=['group-abc']),
+                {'firebase_uid': 'fb-uid-follower'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 400)
+
+    def test_approve_join_request(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()) as mock_get, \
+             patch.object(users_views, 'approve_join_request', return_value=True) as mock_approve:
+            res = self.client.post(
+                reverse('group_join_requests', args=['group-abc']),
+                {'action': 'approve', 'firebase_uid': 'fb-uid-ghost'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        mock_approve.assert_called_once_with('group-abc', 'fb-uid-ghost')
+
+    def test_reject_join_request(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()) as mock_get, \
+             patch.object(users_views, 'reject_join_request', return_value=True) as mock_reject:
+            res = self.client.post(
+                reverse('group_join_requests', args=['group-abc']),
+                {'action': 'reject', 'firebase_uid': 'fb-uid-ghost'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        mock_reject.assert_called_once_with('group-abc', 'fb-uid-ghost')
+
+    def test_join_request_denied_for_non_admin(self):
+        with patch.object(users_views, 'get_study_group',
+                          return_value=self._group(created_by='fb-uid-other')):
+            res = self.client.post(
+                reverse('group_join_requests', args=['group-abc']),
+                {'action': 'approve', 'firebase_uid': 'fb-uid-ghost'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 403)
+
+    def test_join_request_requires_valid_action(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()):
+            res = self.client.post(
+                reverse('group_join_requests', args=['group-abc']),
+                {'action': 'ban', 'firebase_uid': 'fb-uid-ghost'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 400)
+
+    def test_join_request_404_when_no_pending_request(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()) as mock_get, \
+             patch.object(users_views, 'approve_join_request', return_value=False):
+            res = self.client.post(
+                reverse('group_join_requests', args=['group-abc']),
+                {'action': 'approve', 'firebase_uid': 'fb-uid-ghost'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 400)
 
 
 class ProfileUpdateTests(APITestCase):

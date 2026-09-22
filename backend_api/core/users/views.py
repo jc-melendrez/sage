@@ -45,6 +45,7 @@ from core.firestore_service import (
     get_user_profile, get_badges,
     create_study_group, join_group_by_code, get_user_groups,
     get_study_group, update_study_group, leave_study_group,
+    remove_group_member, approve_join_request, reject_join_request,
     send_message, get_messages, generate_join_code,
     toggle_reaction, ALLOWED_REACTIONS,
 )
@@ -738,10 +739,18 @@ class JoinGroupView(APIView):
         group = join_group_by_code(request.user.firebase_uid, join_code.upper())
         if not group:
             return Response({"error": "Invalid join code. Group not found."}, status=404)
+        if group.get('status') == 'pending':
+            return Response({
+                "message": "Request sent! The group admin will approve your request.",
+                "status": "pending",
+                "group_id": group['id'],
+                "name": group['name'],
+            }, status=200)
         return Response({
             "message": f"Successfully joined {group['name']}!",
+            "status": "joined",
             "group_id": group['id'],
-            "name": group['name']
+            "name": group['name'],
         })
 
 class MyGroupsView(APIView):
@@ -811,7 +820,8 @@ class GroupChatReactionView(APIView):
 
 
 class GroupMembersView(APIView):
-    """List a study group's members with profile info (avatar, role, level)."""
+    """List a study group's roster: members with profiles, the group's
+    privacy setting, and any pending join requests (resolved to profiles)."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, group_id):
@@ -843,7 +853,30 @@ class GroupMembersView(APIView):
             })
 
         members.sort(key=lambda m: (not m['is_admin'], m['display_name'].lower()))
-        return Response(members)
+
+        request_uids = group.get('join_requests') or []
+        req_users = User.objects.filter(firebase_uid__in=request_uids)
+        req_by_uid = {u.firebase_uid: u for u in req_users}
+        join_requests = []
+        for uid in request_uids:
+            user = req_by_uid.get(uid)
+            if user is None:
+                continue
+            join_requests.append({
+                'id': user.id,
+                'username': user.username,
+                'display_name': user.get_full_name().strip() or user.username,
+                'avatar': user.avatar or '',
+                'role': user.role,
+                'level': user.level,
+                'firebase_uid': uid,
+            })
+
+        return Response({
+            'privacy': group.get('privacy', 'open'),
+            'members': members,
+            'join_requests': join_requests,
+        })
 
 
 class GroupUpdateView(APIView):
@@ -865,6 +898,11 @@ class GroupUpdateView(APIView):
             updates['name'] = name[:100]
         if 'description' in request.data:
             updates['description'] = (request.data.get('description') or '').strip()[:500]
+        if 'privacy' in request.data:
+            privacy = (request.data.get('privacy') or '').strip().lower()
+            if privacy not in ('open', 'private'):
+                return Response({"error": "privacy must be 'open' or 'private'"}, status=400)
+            updates['privacy'] = privacy
         if not updates:
             return Response({"error": "Nothing to update"}, status=400)
 
@@ -882,6 +920,53 @@ class GroupLeaveView(APIView):
         if not leave_study_group(group_id, request.user.firebase_uid):
             return Response({"error": "Group not found"}, status=404)
         return Response({"message": "Left the group."})
+
+
+class GroupRemoveMemberView(APIView):
+    """Admin-only action: remove a member from the group."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, group_id):
+        group = get_study_group(group_id)
+        if not group:
+            return Response({"error": "Group not found"}, status=404)
+        if group.get('created_by') != request.user.firebase_uid:
+            return Response({"error": "Only the group admin can remove members"}, status=403)
+        target_uid = request.data.get('firebase_uid')
+        if not target_uid:
+            return Response({"error": "firebase_uid is required"}, status=400)
+        if target_uid == request.user.firebase_uid:
+            return Response({"error": "You can't remove yourself. Use Leave Group instead."}, status=400)
+        if not remove_group_member(group_id, target_uid):
+            return Response({"error": "Member not found in this group"}, status=400)
+        return Response({"message": "Member removed."})
+
+
+class GroupJoinRequestView(APIView):
+    """Admin-only action: approve or reject a pending join request."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, group_id):
+        group = get_study_group(group_id)
+        if not group:
+            return Response({"error": "Group not found"}, status=404)
+        if group.get('created_by') != request.user.firebase_uid:
+            return Response({"error": "Only the group admin can review requests"}, status=403)
+        action = request.data.get('action')
+        target_uid = request.data.get('firebase_uid')
+        if action not in ('approve', 'reject'):
+            return Response({"error": "action must be 'approve' or 'reject'"}, status=400)
+        if not target_uid:
+            return Response({"error": "firebase_uid is required"}, status=400)
+        if action == 'approve':
+            ok = approve_join_request(group_id, target_uid)
+        else:
+            ok = reject_join_request(group_id, target_uid)
+        if not ok:
+            return Response({"error": "No pending request from this user"}, status=400)
+        return Response({
+            "message": "Request approved." if action == 'approve' else "Request rejected.",
+        })
 
 
 # ---------- COURSES: each course has its own set of students ----------

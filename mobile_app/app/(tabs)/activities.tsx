@@ -252,9 +252,14 @@ export default function ActivitiesScreen() {
         body: JSON.stringify({ join_code: code })
       });
       if (res.ok) {
+        const data = await res.json().catch(() => ({}));
         setJoinCodeInput('');
         setIsJoinModalOpen(false);
-        loadInitialData();
+        if (data?.status === 'pending') {
+          Alert.alert('Request Sent', data.message || 'The group admin will approve your join request.');
+        } else {
+          loadInitialData();
+        }
       } else {
         const err = await res.json().catch(() => ({}));
         Alert.alert('Could Not Join', (err as any).error || (err as any).detail || 'Invalid join code.');

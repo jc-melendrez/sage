@@ -92,8 +92,10 @@ const CHAT_TTL_SECONDS = 31536000; // 1 year — chat history persists.
 
 export interface ChatCacheDoc {
   messages: unknown[];
-  group?: { id: string; name?: string; description?: string; join_code?: string; members_count?: number } | null;
+  group?: { id: string; name?: string; description?: string; join_code?: string; members_count?: number; privacy?: string } | null;
   members?: unknown[] | null;
+  join_requests?: unknown[] | null;
+  privacy?: string;
 }
 
 function chatCacheKey(groupId: string): string {
@@ -115,6 +117,8 @@ export function setChatCache(groupId: string, doc: ChatCacheDoc) {
     messages: doc.messages,
     group: doc.group ?? existing?.group ?? null,
     members: doc.members ?? existing?.members ?? null,
+    join_requests: doc.join_requests ?? existing?.join_requests ?? null,
+    privacy: doc.privacy ?? existing?.privacy,
   };
   setCachedResponse(key, JSON.stringify(next), CHAT_TTL_SECONDS);
 }
