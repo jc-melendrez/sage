@@ -14,7 +14,7 @@ import { getToken } from '@/services/authService';
 import { completeQuiz } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
-import { deleteQuiz } from '@/services/quizService';
+import { deleteQuiz, startQuizAttempt } from '@/services/quizService';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
@@ -36,6 +36,8 @@ interface Quiz {
   title: string;
   created_at: string;
   quiz_type?: string;
+  available_until?: string | null;
+  attempted?: boolean;
   questions: any[];
 }
 
@@ -67,7 +69,8 @@ export default function ActivitiesScreen() {
 
   // --- Quiz Player State ---
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
-  const [quizToTake, setQuizToTake] = useState<{ title: string; questions: any[]; levelId: number; passingScore: number } | null>(null);
+  const [quizToTake, setQuizToTake] = useState<{ id?: number; title: string; questions: any[]; levelId: number; passingScore: number } | null>(null);
+  const [isQuizStarting, setIsQuizStarting] = useState(false);
 
   // --- Quiz Generator State ---
   const [isGenerateQuizModalOpen, setIsGenerateQuizModalOpen] = useState(false);
@@ -178,6 +181,54 @@ export default function ActivitiesScreen() {
       setRefreshing(false);
     }
   }, [loadInitialData]);
+
+  const handleTakeQuiz = (quiz: Quiz) => {
+    if (quiz.attempted) {
+      Alert.alert('Already Taken', 'You already took this quiz. Each quiz can only be taken once.');
+      return;
+    }
+    if (quiz.available_until && new Date(quiz.available_until).getTime() <= Date.now()) {
+      Alert.alert('Quiz Closed', `This quiz closed on ${new Date(quiz.available_until).toLocaleString()}.`);
+      return;
+    }
+    Alert.alert(
+      'Take this quiz?',
+      `You can only take "${quiz.title}" once.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Start',
+          onPress: async () => {
+            setIsQuizStarting(true);
+            try {
+              await startQuizAttempt(quiz.id);
+              setQuizToTake({
+                id: quiz.id,
+                title: quiz.title,
+                questions: quiz.questions.map((q: any) => ({
+                  id: q.id,
+                  question: q.question_text,
+                  type: (quiz.quiz_type || 'Multiple Choice') as any,
+                  options: q.options,
+                  correct_answer: q.correct_answer,
+                })),
+                levelId: -1,
+                passingScore: 0,
+              });
+              setIsQuizModalOpen(true);
+            } catch (err) {
+              Alert.alert(
+                'Cannot Take Quiz',
+                err instanceof Error ? err.message : 'This quiz is no longer available.',
+              );
+            } finally {
+              setIsQuizStarting(false);
+            }
+          },
+        },
+      ],
+    );
+  };
 
   const handleDeleteQuiz = (quiz: Quiz) => {
     Alert.alert(
@@ -423,6 +474,13 @@ export default function ActivitiesScreen() {
                     </View>
                     <Text style={styles.cardTitle}>{quiz.title}</Text>
                     <Text style={styles.metaText}>Created {new Date(quiz.created_at).toLocaleDateString()}</Text>
+                    {quiz.available_until && (
+                      <Text style={styles.metaText}>
+                        {new Date(quiz.available_until).getTime() <= Date.now()
+                          ? `Closed ${new Date(quiz.available_until).toLocaleString()}`
+                          : `Closes ${new Date(quiz.available_until).toLocaleString()}`}
+                      </Text>
+                    )}
                   </View>
                   <TouchableOpacity
                     style={styles.deleteQuizBtn}
@@ -431,27 +489,27 @@ export default function ActivitiesScreen() {
                   >
                     <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
                   </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.takeQuizBtn}
-                    onPress={() => {
-                      setQuizToTake({
-                        title: quiz.title,
-                        questions: quiz.questions.map((q: any) => ({
-                          id: q.id,
-                          question: q.question_text,
-                          type: (quiz.quiz_type || 'Multiple Choice') as any,
-                          options: q.options,
-                          correct_answer: q.correct_answer,
-                        })),
-                        levelId: -1,
-                        passingScore: 0,
-                      });
-                      setIsQuizModalOpen(true);
-                    }}
-                  >
-                    <Ionicons name="play-outline" size={16} color="white" />
-                    <Text style={styles.takeQuizBtnText}>Take</Text>
-                  </TouchableOpacity>
+                  {quiz.attempted ? (
+                    <View style={[styles.takeQuizBtn, { backgroundColor: COLORS.success, opacity: 0.8 }]}>
+                      <Ionicons name="checkmark-outline" size={16} color="white" />
+                      <Text style={styles.takeQuizBtnText}>Taken</Text>
+                    </View>
+                  ) : (
+                    <TouchableOpacity
+                      style={styles.takeQuizBtn}
+                      onPress={() => handleTakeQuiz(quiz)}
+                      disabled={isQuizStarting}
+                    >
+                      {isQuizStarting ? (
+                        <ActivityIndicator size="small" color="white" />
+                      ) : (
+                        <>
+                          <Ionicons name="play-outline" size={16} color="white" />
+                          <Text style={styles.takeQuizBtnText}>Take</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  )}
                 </View>
               </View>
             ))}
@@ -577,7 +635,7 @@ export default function ActivitiesScreen() {
             const total = quizToTake?.questions.length ?? 0;
 
             try {
-              const quizResult = await completeQuiz(score, total);
+              const quizResult = await completeQuiz(score, total, undefined, quizToTake?.id);
               return { xp: quizResult.xp, badges: quizResult.badges };
             } catch (error) {
               console.error('Failed to record quiz completion:', error);
@@ -587,6 +645,7 @@ export default function ActivitiesScreen() {
           onClose={() => {
             setIsQuizModalOpen(false);
             setQuizToTake(null);
+            loadInitialData({ isRefresh: true });
           }}
         />
       </Modal>

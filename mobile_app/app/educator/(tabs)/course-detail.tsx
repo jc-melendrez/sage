@@ -583,7 +583,7 @@ export default function CourseDetailScreen() {
 
       {/* Add topic modal */}
       <Modal animationType="slide" transparent visible={modalVisible} onRequestClose={() => setModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Add Topic</Text>
@@ -634,7 +634,7 @@ export default function CourseDetailScreen() {
 
       {/* Add activity modal */}
       <Modal animationType="slide" transparent visible={actVisible} onRequestClose={() => !creatingActivity && setActVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Add Activity</Text>
@@ -770,7 +770,7 @@ export default function CourseDetailScreen() {
 
       {/* AI generation modal */}
       <Modal animationType="slide" transparent visible={aiModalVisible} onRequestClose={() => !generating && setAiModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Generate with AI</Text>
@@ -914,7 +914,7 @@ export default function CourseDetailScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg },
+  container: { flex: 1, backgroundColor: 'white' },
   content: { flex: 1, paddingHorizontal: 24, paddingTop: 24, backgroundColor: 'white' },
   loadingBox: { paddingVertical: 60, alignItems: 'center' },
 

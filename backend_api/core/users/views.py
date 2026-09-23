@@ -14,6 +14,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore
+from ai_assistant.models import Quiz, QuizAttempt
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
@@ -534,6 +535,42 @@ class CompleteQuizView(APIView):
         if total < 0 or score < 0 or score > total:
             return Response({'error': 'Invalid score/total'}, status=400)
 
+        # Optional quiz-scoped enforcement: when the caller identifies the quiz,
+        # verify it's readable, not past its deadline, and only takeable once.
+        quiz_id = request.data.get('quiz_id')
+        quiz = None
+        attempt = None
+        if quiz_id is not None:
+            try:
+                quiz = Quiz.objects.get(id=int(quiz_id))
+            except (Quiz.DoesNotExist, TypeError, ValueError):
+                return Response({'error': 'Quiz not found.'}, status=404)
+
+            readable = request.user == quiz.user or (
+                quiz.course and quiz.course.students.filter(id=request.user.id).exists()
+            )
+            if not readable:
+                return Response({'error': 'Quiz not found.'}, status=404)
+
+            if quiz.available_until and timezone.now() >= quiz.available_until:
+                return Response(
+                    {'error': 'This quiz is closed. The deadline has passed.'},
+                    status=403,
+                )
+
+            try:
+                attempt = QuizAttempt.objects.get(quiz=quiz, user=request.user)
+            except QuizAttempt.DoesNotExist:
+                return Response(
+                    {'error': 'Take quiz cannot be completed because you did not start it.'},
+                    status=409,
+                )
+            if attempt.completed_at is not None:
+                return Response(
+                    {'error': 'You have already completed this quiz. It can only be taken once.'},
+                    status=409,
+                )
+
         # Optional course-scoped scoring: when the quiz belongs to a course the
         # caller is a member of, credit their class leaderboard row too.
         course_id = request.data.get('course_id')
@@ -549,6 +586,12 @@ class CompleteQuizView(APIView):
                     course = None # Don't award course-specific rewards if not a member
             except Course.DoesNotExist:
                 pass
+
+        if attempt is not None:
+            attempt.score = score
+            attempt.total = total
+            attempt.completed_at = timezone.now()
+            attempt.save(update_fields=['score', 'total', 'completed_at'])
 
         result = record_quiz_completion(request.user, score, total, course=course)
 

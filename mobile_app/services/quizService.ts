@@ -17,7 +17,11 @@ export interface Quiz {
   quiz_type: string;
   course: number | null;
   created_at: string;
+  /** ISO datetime deadline — quiz can't be taken after this. null = always open. */
+  available_until?: string | null;
   questions: QuizQuestion[];
+  /** True if the current user has already taken this quiz (take-once). */
+  attempted?: boolean;
 }
 
 export interface GenerateQuizInput {
@@ -31,6 +35,8 @@ export interface GenerateQuizInput {
   instructions?: string;
   /** Optional class to attach the generated quiz to */
   course?: number;
+  /** Optional ISO datetime deadline after which the quiz is closed. */
+  available_until?: string | null;
 }
 
 /** List the caller's quizzes, optionally scoped to a class. */
@@ -59,9 +65,19 @@ export async function generateQuiz(input: GenerateQuizInput): Promise<Quiz> {
   return data as Quiz;
 }
 
+/** Record the one-and-only "take" of a quiz. Server-side take-once + deadline gate.
+ *  Throws when the quiz was already taken (or its deadline passed). */
+export async function startQuizAttempt(quizId: number): Promise<void> {
+  await apiCall<{ id: number }>(`/ai/quizzes/${quizId}/attempts/`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+    noCache: true,
+  });
+}
+
 export async function updateQuiz(
   quizId: number,
-  data: { title?: string; questions?: Partial<QuizQuestion>[] },
+  data: { title?: string; questions?: Partial<QuizQuestion>[]; available_until?: string | null },
 ): Promise<Quiz> {
   const quiz = await apiCall<Quiz>(`/ai/quizzes/${quizId}/`, {
     method: 'PATCH',

@@ -28,7 +28,7 @@ import * as Clipboard from 'expo-clipboard';
 import { LanClientSession } from '@/services/lanClient';
 import { lanGame, setLanClient, setLanHost, resetLanState } from '@/services/lanSession';
 import { LanHostServer, makeOrder } from '@/services/lanHost';
-import { LanMessage, generateRoomCode } from '@/services/lanProtocol';
+import { LanMessage, LanPlayer, generateRoomCode } from '@/services/lanProtocol';
 import { startScanning, stopScanning, startAdvertising, stopAdvertising, DiscoveredRoom } from '@/services/lanDiscovery';
 import { buildQuestions } from '@/services/offlineEngine';
 
@@ -103,13 +103,15 @@ export default function GameCenterScreen() {
   const lanHostRef = useRef<LanHostServer | null>(null);
   const lanPlayerCountRef = useRef(0);
   const [lanPlayerCount, setLanPlayerCount] = useState(0);
+  const [lanJoined, setLanJoined] = useState<LanPlayer[]>([]);
   const lanHostMsgRef = useRef<(msg: LanMessage) => void>(() => {});
 
   const onLanHostMessage = (msg: LanMessage) => {
     if (msg.t === 'roster') {
-      const count = msg.players.filter(p => p.connected).length;
-      lanPlayerCountRef.current = count;
-      setLanPlayerCount(count);
+      const connected = msg.players.filter(p => p.connected);
+      lanPlayerCountRef.current = connected.length;
+      setLanPlayerCount(connected.length);
+      setLanJoined(connected);
     } else if (msg.t === 'error') {
       Alert.alert('LAN Error', msg.message || 'Unexpected error');
     }
@@ -140,6 +142,7 @@ export default function GameCenterScreen() {
       lanHostRef.current?.stop();
       lanHostRef.current = null;
       setLanHost(null);
+      setLanJoined([]);
       stopAdvertising();
     };
   }, []);
@@ -242,6 +245,7 @@ export default function GameCenterScreen() {
   const handleInvitePress = async () => {
     if (isOffline || usingCachedQuizzes) {
       if (!lanHostRef.current) {
+        setLanJoined([]);
         const code = generateRoomCode();
         const host = new LanHostServer(code);
         host.onMessage(msg => lanHostMsgRef.current(msg));
@@ -569,6 +573,12 @@ export default function GameCenterScreen() {
   };
 
   // --- Render Helpers ---
+  const lanActive = !!lanHostRef.current;
+  const joinedPlayers = lanActive
+    ? lanJoined.map(p => ({ id: p.id, displayName: p.name }))
+    : roomPlayers.filter(p => String(p.id) !== String(currentUserId));
+  const joinedCount = joinedPlayers.length;
+
   const gameModes = [
     {
       id: 'classic',
@@ -635,7 +645,7 @@ export default function GameCenterScreen() {
                 </View>
 
                 {/* Joined Players */}
-                {roomPlayers.filter(p => String(p.id) !== String(currentUserId)).slice(0, 4).map((p) => (
+                {joinedPlayers.slice(0, 4).map((p) => (
                     <View key={p.id} style={styles.avatarContainer}>
                         <View style={styles.avatarCircleJoined}>
                             <Text style={styles.avatarCircleJoinedText}>{(p.displayName || '?').charAt(0).toUpperCase()}</Text>
@@ -645,7 +655,7 @@ export default function GameCenterScreen() {
                 ))}
 
                 {/* Empty Slots */}
-                {Array.from({ length: Math.max(0, 4 - roomPlayers.filter(p => String(p.id) !== String(currentUserId)).length) }).map((_, i) => (
+                {Array.from({ length: Math.max(0, 4 - joinedCount) }).map((_, i) => (
                     <View key={`empty-${i}`} style={styles.avatarContainer}>
                         <View style={styles.avatarCircleEmpty}>
                             <Ionicons name="person" size={24} color={COLORS.purpleLight} style={{opacity: 0.5}} />

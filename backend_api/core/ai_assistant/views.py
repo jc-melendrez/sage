@@ -1,11 +1,12 @@
 import json
 import requests
 from django.conf import settings
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from .models import ChatSession, ChatMessage, Quiz, QuizQuestion
+from .models import ChatSession, ChatMessage, Quiz, QuizAttempt, QuizQuestion
 from .serializers import QuizSerializer # Import the new serializer
 from users.models import Course
 from users.utils.file_parser import extract_text_from_file
@@ -196,6 +197,17 @@ class GenerateQuizView(APIView):
         q_type = request.data.get('type', 'Multiple Choice')
         instructions = request.data.get('instructions', '')
 
+        # Optional deadline set by the educator. ISO datetime string or null/empty = no deadline.
+        available_until = request.data.get('available_until') or None
+        if available_until:
+            try:
+                from django.utils.dateparse import parse_datetime
+                available_until = parse_datetime(available_until)
+                if available_until is None:
+                    return Response({"error": "available_until must be a valid datetime (ISO format)."}, status=400)
+            except (TypeError, ValueError):
+                return Response({"error": "available_until must be a valid datetime (ISO format)."}, status=400)
+
         # Class-copy of the quiz: attach it to a course the caller owns.
         course = None
         course_id = request.data.get('course') or request.data.get('course_id')
@@ -271,7 +283,8 @@ class GenerateQuizView(APIView):
                 user=request.user,
                 course=course,
                 title=quiz_json.get('title', 'Generated Quiz'),
-                quiz_type=q_type
+                quiz_type=q_type,
+                available_until=available_until,
             )
             for q in quiz_json.get('questions', []):
                 QuizQuestion.objects.create(
@@ -317,7 +330,7 @@ class QuizListView(APIView):
             quizzes = Quiz.objects.filter(course=course)
 
         quizzes = quizzes.order_by('-created_at')
-        serializer = QuizSerializer(quizzes, many=True)
+        serializer = QuizSerializer(quizzes, many=True, context={'request': request})
         return Response(serializer.data)
 
 class QuizDetailView(APIView):
@@ -339,7 +352,7 @@ class QuizDetailView(APIView):
         quiz = self._get_readable_quiz(request, quiz_id)
         if not quiz:
             return Response({"error": "Quiz not found."}, status=404)
-        return Response(QuizSerializer(quiz).data)
+        return Response(QuizSerializer(quiz, context={'request': request}).data)
 
     def _get_owned_quiz(self, request, quiz_id):
         return Quiz.objects.filter(id=quiz_id, user=request.user).first()
@@ -355,7 +368,20 @@ class QuizDetailView(APIView):
             if not title:
                 return Response({"error": "Quiz title cannot be empty."}, status=400)
             quiz.title = title
-            quiz.save()
+
+        # Deadline (educator-set). Empty/null clears it; ISO datetime string sets it.
+        if 'available_until' in request.data:
+            raw = request.data.get('available_until')
+            if raw in (None, '', 0, '0'):
+                quiz.available_until = None
+            else:
+                from django.utils.dateparse import parse_datetime
+                parsed = parse_datetime(str(raw))
+                if parsed is None:
+                    return Response({"error": "available_until must be a valid datetime (ISO format)."}, status=400)
+                quiz.available_until = parsed
+
+        quiz.save()
 
         questions = request.data.get('questions')
         if questions is not None:
@@ -406,7 +432,7 @@ class QuizDetailView(APIView):
             # Remove questions that were not kept in the payload
             quiz.questions.exclude(id__in=kept_ids).delete()
 
-        return Response(QuizSerializer(quiz).data)
+        return Response(QuizSerializer(quiz, context={'request': request}).data)
 
     def delete(self, request, quiz_id):
         quiz = self._get_owned_quiz(request, quiz_id)
@@ -414,3 +440,43 @@ class QuizDetailView(APIView):
             return Response({"error": "Quiz not found."}, status=404)
         quiz.delete()
         return Response(status=204)
+
+
+class QuizAttemptView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _get_readable_quiz(self, request, quiz_id):
+        quiz = Quiz.objects.filter(id=quiz_id).first()
+        if not quiz:
+            return None
+        if request.user == quiz.user:
+            return quiz
+        course = quiz.course
+        if course and course.students.filter(id=request.user.id).exists():
+            return quiz
+        return None
+
+    def post(self, request, quiz_id):
+        """Record the one-and-only take of a quiz. Server-side take-once gate."""
+        quiz = self._get_readable_quiz(request, quiz_id)
+        if not quiz:
+            return Response({"error": "Quiz not found."}, status=404)
+
+        if quiz.available_until and timezone.now() >= quiz.available_until:
+            return Response(
+                {"error": "This quiz is closed. The deadline has passed."},
+                status=403,
+            )
+
+        if QuizAttempt.objects.filter(quiz=quiz, user=request.user).exists():
+            return Response(
+                {"error": "You have already taken this quiz. It can only be taken once."},
+                status=409,
+            )
+
+        attempt = QuizAttempt.objects.create(quiz=quiz, user=request.user)
+        return Response({
+            'id': attempt.id,
+            'started_at': attempt.started_at.isoformat(),
+            'available_until': quiz.available_until.isoformat() if quiz.available_until else None,
+        })
