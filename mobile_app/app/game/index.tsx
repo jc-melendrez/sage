@@ -1137,7 +1137,7 @@ export default function GameCenterScreen() {
                     onPress={handleLeaveRoom}
                     activeOpacity={0.7}
                 >
-                    <Ionicons name="exit" size={20} color={COLORS.danger} style={{marginRight: 8}} />
+                    <Ionicons name="exit" size={20} color="white" style={{marginRight: 8}} />
                     <Text style={styles.actionBtnLeaveText}>LEAVE</Text>
                 </TouchableOpacity>
               </>
@@ -1630,15 +1630,18 @@ const styles = StyleSheet.create({
     width: '100%',
     height: 50,
     borderRadius: 12,
-    backgroundColor: 'white',
+    backgroundColor: COLORS.danger,
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 2,
-    borderColor: COLORS.danger,
+    shadowColor: COLORS.danger,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
   },
   actionBtnLeaveText: {
-    color: COLORS.danger,
+    color: 'white',
     fontFamily: FONTS.extraBold,
     fontSize: 16,
     letterSpacing: 0.5,
