@@ -927,7 +927,7 @@ const renderAttachments = () => {
                 style={[
                   styles.messageBubble,
                   isMe ? styles.bubbleMe : styles.bubbleOther,
-                  !isMe && (msg.attachments?.length ?? 0) > 0 ? styles.bubbleMedia : null,
+                  (msg.attachments?.length ?? 0) > 0 ? styles.bubbleMedia : null,
                 ]}
               >
                 {renderAttachments()}
@@ -1414,7 +1414,7 @@ const styles = StyleSheet.create({
   messageBubble: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 20 },
   bubbleMe: { backgroundColor: COLORS.purplePrimary, borderBottomRightRadius: 4 },
   bubbleOther: { backgroundColor: COLORS.surface, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: COLORS.border },
-  bubbleMedia: { borderWidth: 0, borderColor: 'rgba(76, 29, 149, 0.07)' },
+  bubbleMedia: { backgroundColor: 'transparent', borderWidth: 0, borderColor: 'transparent', paddingHorizontal: 0, paddingVertical: 0 },
   messageText: { fontSize: 15, lineHeight: 22, fontFamily: FONTS.regular },
   messageTime: { fontSize: 10, color: COLORS.textMuted, marginTop: 4, fontFamily: FONTS.medium },
   timeMe: { alignSelf: 'flex-end' },
