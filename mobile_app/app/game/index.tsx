@@ -14,6 +14,7 @@ import {
   Animated,
   TextInput,
   KeyboardAvoidingView,
+  Image,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -31,6 +32,7 @@ import { LanHostServer, makeOrder } from '@/services/lanHost';
 import { LanMessage, LanPlayer, generateRoomCode } from '@/services/lanProtocol';
 import { startScanning, stopScanning, startAdvertising, stopAdvertising, DiscoveredRoom } from '@/services/lanDiscovery';
 import { buildQuestions } from '@/services/offlineEngine';
+import { pfpSource } from '@/constants/pfps';
 
 // 🎨 SAGE Design System Colors
 const COLORS = {
@@ -98,6 +100,8 @@ export default function GameCenterScreen() {
   const [roomTopic, setRoomTopic] = useState<string>('');
   const [roomPlayers, setRoomPlayers] = useState<any[]>([]);
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
+  const [currentUserAvatar, setCurrentUserAvatar] = useState<string>('');
+  const [currentUserInitial, setCurrentUserInitial] = useState<string>('');
   const [lanName, setLanName] = useState('Player');
   const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
   const lanHostRef = useRef<LanHostServer | null>(null);
@@ -161,7 +165,11 @@ export default function GameCenterScreen() {
   }, []);
 
   useEffect(() => {
-    getCurrentUser().then(u => setCurrentUserId(u?.id ?? null));
+    getCurrentUser().then(u => {
+      setCurrentUserId(u?.id ?? null);
+      setCurrentUserAvatar(u?.avatar ?? '');
+      setCurrentUserInitial((u?.first_name || u?.username || '?').charAt(0).toUpperCase());
+    });
   }, []);
 
   // Listen for players joining the online room so the top avatar slots update live.
@@ -565,9 +573,13 @@ export default function GameCenterScreen() {
     const clean = next.join('').slice(0, 6);
     setJoinCode(clean);
     if (char && i < 5) codeBoxRefs.current[i + 1]?.focus();
+    else if (!char && i > 0) codeBoxRefs.current[i - 1]?.focus();
   };
   const handleCodeKeyPress = (e: any, i: number) => {
     if (e.nativeEvent.key === 'Backspace' && !joinCode[i] && i > 0) {
+      const next = joinCode.split('').slice(0, 6);
+      next[i - 1] = '';
+      setJoinCode(next.join(''));
       codeBoxRefs.current[i - 1]?.focus();
     }
   };
@@ -635,7 +647,11 @@ export default function GameCenterScreen() {
                 {/* Host Avatar (Active) */}
                 <View style={styles.avatarContainer}>
                     <View style={styles.avatarCircleHost}>
-                        <Ionicons name="trophy" size={24} color={COLORS.warning} />
+                        {pfpSource(currentUserAvatar) ? (
+                            <Image source={pfpSource(currentUserAvatar)!} style={styles.avatarImage} resizeMode="cover" />
+                        ) : (
+                            <Text style={styles.avatarCircleJoinedText}>{currentUserInitial || '?'}</Text>
+                        )}
                     </View>
                     <View style={styles.hostBadges}>
                         <View style={styles.badgeIcon}><Ionicons name="person" size={10} color="white" /></View>
@@ -648,7 +664,11 @@ export default function GameCenterScreen() {
                 {joinedPlayers.slice(0, 4).map((p) => (
                     <View key={p.id} style={styles.avatarContainer}>
                         <View style={styles.avatarCircleJoined}>
-                            <Text style={styles.avatarCircleJoinedText}>{(p.displayName || '?').charAt(0).toUpperCase()}</Text>
+                            {pfpSource(p.avatar) ? (
+                                <Image source={pfpSource(p.avatar)!} style={styles.avatarImage} resizeMode="cover" />
+                            ) : (
+                                <Text style={styles.avatarCircleJoinedText}>{(p.displayName || '?').charAt(0).toUpperCase()}</Text>
+                            )}
                         </View>
                         <Text style={styles.avatarName} numberOfLines={1}>{p.displayName || 'Player'}</Text>
                     </View>
@@ -886,34 +906,37 @@ export default function GameCenterScreen() {
         </View>
 
         {/* Bottom Action Bar */}
-        <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 10 }]}>
+        <View style={[styles.bottomBar, { paddingBottom: 10 }]}>
 
-            {/* JOIN BUTTON — enter a room code */}
-            <TouchableOpacity
-                style={styles.actionBtnJoin}
-                onPress={() => setShowJoinModal(true)}
-            >
-                <Ionicons name="enter" size={20} color={COLORS.purplePrimary} style={{marginRight: 8}} />
-                <Text style={styles.actionBtnJoinText}>JOIN</Text>
-            </TouchableOpacity>
+            {/* Row 1: JOIN + INVITE side by side */}
+            <View style={styles.bottomBarRow}>
+                {/* JOIN BUTTON — enter a room code */}
+                <TouchableOpacity
+                    style={styles.actionBtnJoin}
+                    onPress={() => setShowJoinModal(true)}
+                >
+                    <Ionicons name="enter" size={20} color={COLORS.purplePrimary} style={{marginRight: 8}} />
+                    <Text style={styles.actionBtnJoinText}>JOIN</Text>
+                </TouchableOpacity>
 
-            {/* INVITE BUTTON */}
-            <TouchableOpacity 
-                style={styles.actionBtnInvite} 
-                onPress={handleInvitePress}
-                disabled={isCreatingRoom}
-            >
-                {isCreatingRoom && !showCountdown ? (
-                    <ActivityIndicator color={COLORS.success} />
-                ) : (
-                    <>
-                        <Ionicons name="share-social" size={20} color={COLORS.success} style={{marginRight: 8}} />
-                        <Text style={styles.actionBtnText}>INVITE</Text>
-                    </>
-                )}
-            </TouchableOpacity>
+                {/* INVITE BUTTON */}
+                <TouchableOpacity 
+                    style={styles.actionBtnInvite} 
+                    onPress={handleInvitePress}
+                    disabled={isCreatingRoom}
+                >
+                    {isCreatingRoom && !showCountdown ? (
+                        <ActivityIndicator color={COLORS.success} />
+                    ) : (
+                        <>
+                            <Ionicons name="share-social" size={20} color={COLORS.success} style={{marginRight: 8}} />
+                            <Text style={styles.actionBtnText}>INVITE</Text>
+                        </>
+                    )}
+                </TouchableOpacity>
+            </View>
 
-            {/* START BUTTON */}
+            {/* Row 2: START full width */}
             <TouchableOpacity 
                 style={[styles.actionBtnStart, isCreatingRoom && { opacity: 0.7 }]} 
                 onPress={handleStartPress}
@@ -1108,6 +1131,11 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontFamily: FONTS.black,
   },
+  avatarImage: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+  },
   hostBadges: {
     position: 'absolute',
     bottom: 20,
@@ -1285,13 +1313,17 @@ const styles = StyleSheet.create({
 
   // Bottom Bar
   bottomBar: {
-    flexDirection: 'row',
+    flexDirection: 'column',
     paddingHorizontal: 16,
-    paddingTop: 16,
-    gap: 12,
+    paddingTop: 12,
+    gap: 10,
     backgroundColor: COLORS.purpleDeep,
     borderTopWidth: 1,
     borderTopColor: 'rgba(255,255,255,0.1)',
+  },
+  bottomBarRow: {
+    flexDirection: 'row',
+    gap: 12,
   },
   actionBtnInvite: {
     flex: 1,
@@ -1322,7 +1354,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   actionBtnStart: {
-    flex: 1,
+    width: '100%',
     height: 50,
     borderRadius: 12,
     backgroundColor: COLORS.success,

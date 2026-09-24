@@ -153,7 +153,7 @@ export default function ClassicGameSetupScreen() {
     const next = slots.join('').replace(/\s/g, '').substring(0, 6);
     setJoinCode(next);
     const firstEmpty = Math.min(next.length, 5);
-    codeRefs.current[firstEmpty]?.focus();
+    codeRefs.current[char ? firstEmpty : Math.max(0, index - 1)]?.focus();
   };
   const handleCodeKeyPress = (e: any, index: number) => {
     if (e.nativeEvent.key === 'Backspace' && !joinCode[index] && index > 0) {
