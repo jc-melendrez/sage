@@ -1,5 +1,6 @@
 from firebase_admin import firestore
 from core.firebase import initialize_firebase
+from core.s3 import upload_to_s3, get_attachment_key
 import random, string
 from datetime import datetime
 
@@ -217,14 +218,50 @@ def reject_join_request(group_id: str, firebase_uid: str) -> bool:
 
 ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢']
 
+# Chat attachment constraints (mirrors frontend limits).
+ATTACHMENT_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
+ALLOWED_ATTACHMENT_TYPES = {
+    'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic',
+    'application/pdf',
+    'text/plain',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+}
 
-def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '', sender_avatar: str = '') -> str:
+
+def upload_group_attachment(group_id: str, upload, filename: str) -> dict:
+    """Stream an uploaded file to the private S3 bucket for a group chat.
+
+    Returns a message-ready attachment dict ({key, name, mime, size}) where
+    `key` is the S3 object key. Files are never made public — downloads go
+    through GroupAttachmentLinkView, which mints a short-lived presigned URL
+    for verified group members. Raises ValueError on an unsupported content
+    type."""
+    content_type = getattr(upload, 'content_type', '') or 'application/octet-stream'
+    if content_type not in ALLOWED_ATTACHMENT_TYPES:
+        raise ValueError(
+            f"Unsupported file type (content_type required: "
+            f"{', '.join(sorted(ALLOWED_ATTACHMENT_TYPES))}). Got: {content_type}"
+        )
+    object_key = get_attachment_key(group_id, filename)
+    upload_to_s3(upload, object_key, content_type)
+    return {
+        'key': object_key,
+        'name': filename,
+        'mime': content_type,
+        'size': getattr(upload, 'size', 0),
+    }
+
+
+def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '', sender_avatar: str = '', attachments=None) -> str:
     db = get_db()
     msg_ref = db.collection('studyGroups').document(group_id).collection('messages').add({
         'sender_uid': sender_uid,
         'sender_name': sender_name,
         'sender_avatar': sender_avatar,
         'text': text,
+        'attachments': attachments or [],
         'reactions': {},
         'created_at': firestore.SERVER_TIMESTAMP,
         'is_synced': True,
@@ -253,6 +290,7 @@ def get_messages(group_id: str, limit: int = 50, resolve_users: callable = None)
             'sender_name': data.get('sender_name') or 'Member',
             'sender_avatar': data.get('sender_avatar') or '',
             'text': data.get('text'),
+            'attachments': data.get('attachments') or [],
             'created_at': created_at,
             'reactions': data.get('reactions') or {},
         })

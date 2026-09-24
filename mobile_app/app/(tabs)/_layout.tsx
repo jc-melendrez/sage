@@ -102,6 +102,8 @@ export default function TabLayout() {
       <Tabs.Screen name="leaderboard" options={{ href: null }} />
       {/* Solo mode (flashcards) lives as a tab so the bottom tab bar stays visible & interactive */}
       <Tabs.Screen name="flashcards" options={{ href: null }} />
+      {/* Course/class screens also live as a hidden tab so the bottom bar stays visible */}
+      <Tabs.Screen name="course" options={{ href: null }} />
       {/* Explicitly hide unwanted tabs that exist as files in the directory */}
       <Tabs.Screen name="explore" options={{ href: null }} />
       <Tabs.Screen name="dashboard" options={{ href: null }} />

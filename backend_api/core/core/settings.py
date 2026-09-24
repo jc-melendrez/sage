@@ -20,6 +20,17 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 FIREBASE_CREDENTIALS_PATH = os.path.join(BASE_DIR, 'core', 'serviceAccountKey.json')
 FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', 'sage-a47b8') 
+# --- S3 (chat file attachments) ---
+# The bucket stays private; the API hands out short-lived presigned links to
+# verified group members only. Leave the keys unset for local dev / tests
+# (uploads only touch AWS at runtime, and tests mock the S3 client).
+AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
+AWS_S3_BUCKET_NAME = os.environ.get('AWS_S3_BUCKET_NAME', 'sage-chat-attachments')
+AWS_S3_REGION_NAME = os.environ.get('AWS_S3_REGION_NAME', 'us-east-1')
+AWS_S3_ENDPOINT_URL = os.environ.get('AWS_S3_ENDPOINT_URL')
+# Presigned attachment links are valid for 30 minutes.
+ATTACHMENT_LINK_TTL_SECONDS = int(os.environ.get('ATTACHMENT_LINK_TTL_SECONDS', 1800)) 
 # --- SAGE SECRETS CONFIGURATION ---
 # Go up two more folders to reach SAGE_Project, then look for .env
 ENV_FILE_PATH = BASE_DIR.parent.parent / '.env'
@@ -187,6 +198,11 @@ STORAGES = {
         'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
     },
 }
+
+# Chat attachments are sent as multipart bodies (default 2.5 MB cap would
+# reject the allowed 10 MB chat files).
+FILE_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024
+DATA_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024
 
 AUTH_USER_MODEL = 'users.User'
 

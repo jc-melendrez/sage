@@ -41,6 +41,20 @@ module.exports = {
       "expo-document-picker",
       "expo-sharing",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "SAGE Learning lets you attach photos to study group chats.",
+          "cameraPermission": "SAGE Learning uses the camera so you can attach photos to study group chats."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "SAGE Learning lets you save images you download in chats to your photo library.",
+          "savePhotosPermission": "SAGE Learning lets you save images you download in chats to your photo library."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",

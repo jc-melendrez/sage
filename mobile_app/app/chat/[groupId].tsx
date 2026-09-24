@@ -3,18 +3,23 @@ import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput,
   KeyboardAvoidingView, Platform, StatusBar, ActivityIndicator, Alert, Modal, Switch, Image, Keyboard,
 } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import * as Clipboard from 'expo-clipboard';
+import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
+import * as MediaLibrary from 'expo-media-library';
 import firestore from '@react-native-firebase/firestore';
 import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser, getCachedUserId } from '@/services/authService';
 import { getFirebaseUid } from '@/services/firebaseAuthService';
 import { getChatCache, setChatCache, clearChatCache, setCacheUserId } from '@/services/apiCache';
-import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest } from '@/services/chatService';
+import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName } from '@/services/chatService';
 import { pfpSource } from '@/constants/pfps';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
@@ -38,15 +43,21 @@ interface GroupMessage {
   sender_name: string;
   created_at: number | string | null; // ISO string (REST) or ms/µs epoch (Firestore)
   reactions: Record<string, string[]>; // emoji -> list of firebase uids
+  attachments: Attachment[];
   local?: boolean; // true while this is an unsent optimistic echo
 }
 
 const ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢'];
 
-type RawMessage = Partial<Omit<GroupMessage, 'created_at' | 'reactions'>> & {
+// Server-side limit mirrors the 10 MB upload cap (views.py / firestore_service.py).
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const MAX_ATTACHMENTS = 5;
+
+type RawMessage = Partial<Omit<GroupMessage, 'created_at' | 'reactions' | 'attachments'>> & {
   id: string | number;
   created_at?: GroupMessage['created_at'];
   reactions?: Record<string, string[]> | null;
+  attachments?: Attachment[] | null;
 };
 
 // Firestore may deliver ms or µs depending on platform; REST delivers ISO strings.
@@ -104,6 +115,7 @@ function mapMessage(raw: RawMessage): GroupMessage {
     sender_name: raw.sender_name || 'Member',
     created_at: raw.created_at ?? null,
     reactions: raw.reactions ?? {},
+    attachments: raw.attachments ?? [],
     local: raw.local,
   };
 }
@@ -150,6 +162,17 @@ function MemberAvatar({
   );
 }
 
+function isImageMime(mime: string): boolean {
+  return mime.startsWith('image/');
+}
+
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export default function GroupChatScreen() {
   const router = useRouter();
   const { groupId } = useLocalSearchParams<{ groupId: string }>();
@@ -178,6 +201,15 @@ export default function GroupChatScreen() {
   const [joinRequests, setJoinRequests] = useState<JoinRequestMember[]>([]);
   const [savingGroup, setSavingGroup] = useState(false);
   const [leavingGroup, setLeavingGroup] = useState(false);
+  const [pendingAttachments, setPendingAttachments] = useState<LocalAttachment[]>([]);
+  const [isAttachOpen, setIsAttachOpen] = useState(false);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const [lightboxName, setLightboxName] = useState('image');
+  const [uploading, setUploading] = useState(false);
+  const [resolvedLinks, setResolvedLinks] = useState<Record<string, string>>({});
+  const [linkErrors, setLinkErrors] = useState<Record<string, boolean>>({});
+  const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
+  const linkCacheRef = useRef<Record<string, string>>({});
 
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
@@ -327,6 +359,7 @@ export default function GroupChatScreen() {
               sender_name: data?.sender_name,
               created_at: createdAt,
               reactions: data?.reactions,
+              attachments: data?.attachments,
             });
           });
 
@@ -372,10 +405,188 @@ export default function GroupChatScreen() {
     });
   }, [messages, group, members, joinRequests, groupId]);
 
+  // Attachments live in a private S3 bucket. Firestore messages store the S3
+  // object key, so before rendering we mint a short-lived presigned URL per
+  // key (server verifies group membership; the links expire in ~30 min).
+  useEffect(() => {
+    if (!groupId) return;
+    const keys = new Set<string>();
+    messages.forEach(m => (m.attachments || []).forEach(a => {
+      if (a.key && !linkCacheRef.current[a.key]) keys.add(a.key);
+    }));
+    if (keys.size === 0) return;
+    (async () => {
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const entries = await Promise.all(
+          [...keys].map(async (key) => {
+            try {
+              const url = await getAttachmentLink(String(groupId), token, key);
+              return [key, url] as const;
+            } catch (err) {
+              console.error(`Failed to resolve attachment link ${key}:`, err);
+              return [key, null] as const;
+            }
+          }),
+        );
+        const next: Record<string, string> = Object.fromEntries(entries.filter(([, u]) => u != null));
+        linkCacheRef.current = { ...linkCacheRef.current, ...next };
+        setResolvedLinks(prev => ({ ...prev, ...next }));
+        const failed = Object.fromEntries(entries.filter(([, u]) => u == null).map(([k]) => [k, true]));
+        if (Object.keys(failed).length > 0) {
+          setLinkErrors(prev => ({ ...prev, ...failed }));
+        }
+      } catch (err) {
+        console.error('Failed to resolve attachment links:', err);
+      }
+    })();
+  }, [groupId, messages]);
+
+  const resolveUrl = async (att: Attachment): Promise<string | null> => {
+    if (att.url) return att.url;
+    if (!att.key) return null;
+    const cached = linkCacheRef.current[att.key] || resolvedLinks[att.key];
+    if (cached) return cached;
+    try {
+      const token = await getToken();
+      if (!token) return null;
+      const url = await getAttachmentLink(String(groupId), token, att.key);
+      linkCacheRef.current = { ...linkCacheRef.current, [att.key]: url };
+      setResolvedLinks(prev => ({ ...prev, [att.key]: url }));
+      return url;
+    } catch {
+      setLinkErrors(prev => ({ ...prev, [att.key!]: true }));
+      return null;
+    }
+  };
+
+  const retryResolve = async (key: string) => {
+    if (!key) return;
+    const url = await resolveUrl({ key, name: 'attachment', mime: 'application/octet-stream', size: 0 });
+    if (!url) {
+      Alert.alert("Can't Load File", 'Check your connection and try again.');
+    }
+  };
+
+  const handleDownload = async (att: Attachment, saveToLibrary: boolean) => {
+    const url = await resolveUrl(att);
+    if (!url) {
+      Alert.alert("Can't Load File", 'Check your connection and try again.');
+      return;
+    }
+    const uid = att.key || att.url || 'file';
+    setDownloadingKey(uid);
+    try {
+      const localUri = await FileSystem.downloadAsync(url, `${FileSystem.cacheDirectory}${safeFileName(att.name)}`);
+      if (saveToLibrary) {
+        const perm = await MediaLibrary.requestPermissionsAsync(true);
+        if (!perm.granted) {
+          Alert.alert('Permission Needed', 'Please allow photo library access to save images.');
+          return;
+        }
+        await MediaLibrary.saveToLibraryAsync(localUri.uri);
+        Alert.alert('Saved To Photos', `${att.name} was saved to your photo library.`);
+      } else {
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(localUri.uri, { dialogTitle: att.name });
+        } else {
+          Alert.alert('Not Supported', 'Sharing is not available on this device.');
+        }
+      }
+    } catch (err) {
+      console.error('Download failed:', err);
+      Alert.alert('Download Failed', 'Could not download this file. Try again.');
+    } finally {
+      setDownloadingKey(null);
+    }
+  };
+
+  const addPendingAttachments = (items: LocalAttachment[]) => {
+    const oversized = items.filter(i => i.size > MAX_ATTACHMENT_SIZE);
+    if (oversized.length > 0) {
+      Alert.alert('File Too Large', `${oversized.length} file(s) skipped — files must be 10 MB or smaller.`);
+    }
+    const valid = items.filter(i => i.size <= MAX_ATTACHMENT_SIZE);
+    if (valid.length === 0) return;
+    const room = MAX_ATTACHMENTS - pendingAttachments.length;
+    if (room <= 0) {
+      Alert.alert('Limit Reached', `You can attach up to ${MAX_ATTACHMENTS} files per message.`);
+      return;
+    }
+    const accepted = valid.slice(0, room);
+    setPendingAttachments(prev => [...prev, ...accepted]);
+    if (valid.length > room) {
+      Alert.alert('Limit Reached', `Only ${room} more file(s) could be attached this message.`);
+    }
+  };
+
+  const attachFromLibrary = async () => {
+    setIsAttachOpen(false);
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('Permission Needed', 'Allow photo library access to attach images.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsMultipleSelection: true,
+      quality: 0.8,
+    });
+    if (result.canceled || result.assets.length === 0) return;
+    addPendingAttachments(result.assets.map(asset => ({
+      uri: asset.uri,
+      name: asset.fileName || `photo-${Date.now()}.jpg`,
+      mime: asset.mimeType || (asset.fileName?.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg'),
+      size: asset.fileSize || 0,
+    })));
+  };
+
+  const takePhoto = async () => {
+    setIsAttachOpen(false);
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('Permission Needed', 'Allow camera access to take a photo.');
+      return;
+    }
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images'],
+      quality: 0.8,
+    });
+    if (result.canceled || result.assets.length === 0) return;
+    addPendingAttachments(result.assets.map(asset => ({
+      uri: asset.uri,
+      name: asset.fileName || `photo-${Date.now()}.jpg`,
+      mime: asset.mimeType || 'image/jpeg',
+      size: asset.fileSize || 0,
+    })));
+  };
+
+  const attachDocument = async () => {
+    setIsAttachOpen(false);
+    const result = await DocumentPicker.getDocumentAsync({
+      copyToCacheDirectory: true,
+      multiple: true,
+    });
+    if (result.canceled || !result.assets) return;
+    addPendingAttachments(result.assets.map(doc => ({
+      uri: doc.uri,
+      name: doc.name || 'file',
+      mime: doc.mimeType || 'application/octet-stream',
+      size: doc.size || 0,
+    })));
+  };
+
+  const removePendingAttachment = (uri: string) => {
+    setPendingAttachments(prev => prev.filter(a => a.uri !== uri));
+  };
+
   const sendChatMessage = async () => {
-    if (!chatInput.trim()) return;
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const textToSend = chatInput.trim();
+    const pending = pendingAttachments;
+    if (!textToSend && pending.length === 0) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setUploading(true);
     setChatInput('');
 
     const tempMsg: GroupMessage = {
@@ -385,6 +596,8 @@ export default function GroupChatScreen() {
       sender_name: currentUser?.first_name || 'Me',
       created_at: Date.now(),
       reactions: {},
+      // Local file:// URIs preview the echo exactly like the uploaded URLs.
+      attachments: pending.map(a => ({ url: a.uri, name: a.name, mime: a.mime, size: a.size })),
       local: true,
     };
     setMessages(prev => [...prev, tempMsg]);
@@ -392,19 +605,35 @@ export default function GroupChatScreen() {
 
     try {
       const token = await getToken();
+      if (!token) return;
+
+      const uploaded: Attachment[] = [];
+      for (const att of pending) {
+        uploaded.push(await uploadGroupAttachment(String(groupId), token, att));
+      }
+      setPendingAttachments([]);
+
       const res = await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ text: textToSend }),
+        body: JSON.stringify({ text: textToSend, attachments: uploaded }),
       });
-      if (res.ok) {
-        const realMsg = mapMessage(await res.json());
-        // Replace the echo with the server copy; dedupes against the
-        // Firestore snapshot that lands moments later.
-        setMessages(prev => prev.map(m => (m.id === tempMsg.id ? realMsg : m)));
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({}));
+        throw new Error(error.error || 'Failed to send message');
       }
+      const realMsg = mapMessage(await res.json());
+      // Replace the echo with the server copy; dedupes against the
+      // Firestore snapshot that lands moments later.
+      setMessages(prev => prev.map(m => (m.id === tempMsg.id ? realMsg : m)));
     } catch (err) {
       console.error('Failed to send message:', err);
+      Alert.alert('Send Failed', err instanceof Error ? err.message : 'Please try again later.');
+      // Restore the attachment picks + text so nothing is lost.
+      setPendingAttachments(pending);
+      setChatInput(textToSend);
+    } finally {
+      setUploading(false);
     }
   };
 
@@ -606,6 +835,71 @@ export default function GroupChatScreen() {
         </View>
       );
 
+const renderAttachments = () => {
+  if (!msg.attachments || msg.attachments.length === 0) return null;
+  return (
+    <View style={styles.attachmentList}>
+      {msg.attachments.map((att, i) => {
+        // Uploaded attachments carry an S3 `key` that needs resolving to a
+        // short-lived presigned URL; the optimistic echo carries a local uri.
+        const uri = att.key ? resolvedLinks[att.key] : att.url;
+        const sourceKey = att.key || att.url || `att-${i}`;
+        const failed = att.key ? linkErrors[att.key] : false;
+        const downloading = downloadingKey === (att.key || att.url || 'file');
+        return isImageMime(att.mime) ? (
+          <TouchableOpacity
+            key={sourceKey}
+            style={styles.attachmentImageWrap}
+            onPress={() => {
+              if (uri) {
+                setLightboxUrl(uri);
+                setLightboxName(att.name);
+              } else if (failed && att.key) {
+                retryResolve(att.key);
+              }
+            }}
+            activeOpacity={0.85}
+            accessibilityLabel={failed && !uri ? `Reload attached image ${att.name}` : `View attached image ${att.name}`}
+          >
+            {uri ? (
+              <Image source={{ uri }} style={styles.attachmentImage} resizeMode="cover" />
+            ) : failed ? (
+              <View style={[styles.attachmentImageWrap, styles.attachmentLoading]}>
+                <Ionicons name="refresh" size={20} color={COLORS.purpleVibrant} />
+                <Text style={styles.attachmentRetry}>Retry</Text>
+              </View>
+            ) : (
+              <View style={[styles.attachmentImageWrap, styles.attachmentLoading]}>
+                <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
+              </View>
+            )}
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity
+            key={sourceKey}
+            style={[styles.attachmentDoc, isMe && { backgroundColor: COLORS.purplePrimary, borderColor: 'rgba(255,255,255,0.2)' }]}
+            onPress={() => handleDownload(att, false)}
+            activeOpacity={0.7}
+            disabled={downloading}
+            accessibilityLabel={`Download document ${att.name}`}
+          >
+            {downloading ? (
+              <ActivityIndicator size="small" color={isMe ? 'white' : COLORS.purpleVibrant} />
+            ) : (
+              <Ionicons name="document-text-outline" size={19} color={isMe ? 'white' : COLORS.purpleVibrant} />
+            )}
+            <Text style={[styles.attachmentDocName, isMe && { color: 'white' }]} numberOfLines={1}>{att.name}</Text>
+            <Text style={[styles.attachmentDocSize, isMe && { color: 'rgba(255,255,255,0.7)' }]}>{formatBytes(att.size)}</Text>
+            {!downloading && (
+              <Ionicons name="download-outline" size={16} color={isMe ? 'rgba(255,255,255,0.85)' : COLORS.textMuted} />
+            )}
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+};
+
     return (
       <Fragment key={msg.id}>
         {showDayDivider && dayLabel && (
@@ -629,8 +923,17 @@ export default function GroupChatScreen() {
               delayLongPress={300}
               accessibilityLabel={`Message from ${isMe ? 'you' : msg.sender_name}. Long press to react.`}
             >
-              <View style={[styles.messageBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
-                <Text style={[styles.messageText, isMe ? { color: 'white' } : { color: COLORS.textDark }]}>{msg.text}</Text>
+              <View
+                style={[
+                  styles.messageBubble,
+                  isMe ? styles.bubbleMe : styles.bubbleOther,
+                  (msg.attachments?.length ?? 0) > 0 ? styles.bubbleMedia : null,
+                ]}
+              >
+                {renderAttachments()}
+                {msg.text ? (
+                  <Text style={[styles.messageText, isMe ? { color: 'white' } : { color: COLORS.textDark }]}>{msg.text}</Text>
+                ) : null}
               </View>
             </TouchableOpacity>
             {renderPills()}
@@ -702,25 +1005,63 @@ export default function GroupChatScreen() {
         )}
       </ScrollView>
 
-      <View style={[styles.inputContainer, { paddingBottom: 12 + bottomInset }]}>
-        <View style={styles.textInputWrapper}>
-          <TextInput
-            style={styles.textInput}
-            placeholder="Message group..."
-            placeholderTextColor="#9CA3AF"
-            value={chatInput}
-            onChangeText={setChatInput}
-            multiline
-          />
+      <View style={styles.inputShell}>
+        {pendingAttachments.length > 0 && (
+          <View style={styles.pendingStrip}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, alignItems: 'center' }}>
+              {pendingAttachments.map((att, i) => (
+                <View key={`${att.uri}-${i}`} style={styles.pendingItem}>
+                  {isImageMime(att.mime) ? (
+                    <Image source={{ uri: att.uri }} style={styles.pendingImage} resizeMode="cover" />
+                  ) : (
+                    <View style={styles.pendingDoc}>
+                      <Ionicons name="document-text-outline" size={18} color={COLORS.purpleVibrant} />
+                    </View>
+                  )}
+                  <TouchableOpacity
+                    style={styles.pendingRemove}
+                    onPress={() => removePendingAttachment(att.uri)}
+                    accessibilityLabel={`Remove ${att.name}`}
+                  >
+                    <Ionicons name="close" size={12} color="white" />
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        )}
+        <View style={[styles.inputContainer, { paddingBottom: 12 + bottomInset }]}>
+          <TouchableOpacity
+            style={styles.attachButton}
+            onPress={() => setIsAttachOpen(true)}
+            disabled={uploading}
+            accessibilityLabel="Attach a file"
+          >
+            <Ionicons name="add" size={24} color={COLORS.purplePrimary} />
+          </TouchableOpacity>
+          <View style={styles.textInputWrapper}>
+            <TextInput
+              style={styles.textInput}
+              placeholder="Message group..."
+              placeholderTextColor="#9CA3AF"
+              value={chatInput}
+              onChangeText={setChatInput}
+              multiline
+            />
+          </View>
+          <TouchableOpacity
+            style={[styles.sendButton, (!chatInput.trim() && pendingAttachments.length === 0) && { opacity: 0.5, backgroundColor: COLORS.textMuted }]}
+            onPress={sendChatMessage}
+            disabled={!chatInput.trim() && pendingAttachments.length === 0}
+            accessibilityLabel="Send message"
+          >
+            {uploading ? (
+              <ActivityIndicator size="small" color="white" />
+            ) : (
+              <Ionicons name="send" size={16} color="white" />
+            )}
+          </TouchableOpacity>
         </View>
-        <TouchableOpacity
-          style={[styles.sendButton, !chatInput.trim() && { opacity: 0.5, backgroundColor: COLORS.textMuted }]}
-          onPress={sendChatMessage}
-          disabled={!chatInput.trim()}
-          accessibilityLabel="Send message"
-        >
-          <Ionicons name="send" size={16} color="white" />
-        </TouchableOpacity>
       </View>
 
       {/* Group Settings Modal */}
@@ -981,8 +1322,67 @@ export default function GroupChatScreen() {
                   </TouchableOpacity>
                 );
               })}
+</View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Attach Sheet */}
+      <Modal visible={isAttachOpen} animationType="slide" transparent={true} onRequestClose={() => setIsAttachOpen(false)}>
+        <TouchableOpacity style={styles.reactionOverlay} activeOpacity={1} onPress={() => setIsAttachOpen(false)}>
+          <TouchableOpacity style={styles.reactionSheet} activeOpacity={1} onPress={() => {}}>
+            <View style={styles.reactionSheetHandle} />
+            <Text style={styles.reactionSheetTitle}>Attach a file</Text>
+            <View style={styles.attachSheetRow}>
+              <TouchableOpacity style={styles.attachOption} onPress={attachFromLibrary} accessibilityLabel="Photos">
+                <View style={[styles.attachOptionIcon, { backgroundColor: '#10B981' }]}>
+                  <Ionicons name="image-outline" size={22} color="white" />
+                </View>
+                <Text style={styles.attachOptionText}>Photos</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.attachOption} onPress={takePhoto} accessibilityLabel="Camera">
+                <View style={[styles.attachOptionIcon, { backgroundColor: COLORS.purpleVibrant }]}>
+                  <Ionicons name="camera-outline" size={22} color="white" />
+                </View>
+                <Text style={styles.attachOptionText}>Camera</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.attachOption} onPress={attachDocument} accessibilityLabel="File">
+                <View style={[styles.attachOptionIcon, { backgroundColor: '#3B82F6' }]}>
+                  <Ionicons name="document-text-outline" size={22} color="white" />
+                </View>
+                <Text style={styles.attachOptionText}>File</Text>
+              </TouchableOpacity>
             </View>
           </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Image Lightbox */}
+      <Modal visible={lightboxUrl != null} animationType="fade" transparent={true} onRequestClose={() => setLightboxUrl(null)}>
+        <TouchableOpacity style={styles.lightbox} activeOpacity={1} onPress={() => setLightboxUrl(null)}>
+          {lightboxUrl != null && (
+            <Image source={{ uri: lightboxUrl }} style={styles.lightboxImage} resizeMode="contain" />
+          )}
+          <TouchableOpacity
+            style={styles.lightboxDownload}
+            activeOpacity={0.8}
+            onPress={(e) => {
+              e.stopPropagation();
+              if (lightboxUrl != null) {
+                handleDownload({ url: lightboxUrl, name: lightboxName, mime: 'image/jpeg', size: 0 }, true);
+              }
+            }}
+            accessibilityLabel="Save image to photo library"
+          >
+            {downloadingKey === 'lightbox' ? (
+              <ActivityIndicator size="small" color="white" />
+            ) : (
+              <Ionicons name="download-outline" size={26} color="white" />
+            )}
+          </TouchableOpacity>
+          <View style={styles.lightboxClose}>
+            <Ionicons name="close" size={28} color="white" />
+          </View>
         </TouchableOpacity>
       </Modal>
     </KeyboardAvoidingView>
@@ -1014,6 +1414,7 @@ const styles = StyleSheet.create({
   messageBubble: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 20 },
   bubbleMe: { backgroundColor: COLORS.purplePrimary, borderBottomRightRadius: 4 },
   bubbleOther: { backgroundColor: COLORS.surface, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: COLORS.border },
+  bubbleMedia: { backgroundColor: 'transparent', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(76, 29, 149, 0.15)', borderRadius: 12, paddingHorizontal: 0, paddingVertical: 0 },
   messageText: { fontSize: 15, lineHeight: 22, fontFamily: FONTS.regular },
   messageTime: { fontSize: 10, color: COLORS.textMuted, marginTop: 4, fontFamily: FONTS.medium },
   timeMe: { alignSelf: 'flex-end' },
@@ -1043,10 +1444,37 @@ const styles = StyleSheet.create({
   reactionOptionMine: { backgroundColor: 'rgba(139, 92, 246, 0.15)' },
   reactionOptionEmoji: { fontSize: 26 },
 
+  inputShell: { backgroundColor: COLORS.surface },
+  attachButton: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center', marginRight: 2 },
   inputContainer: { flexDirection: 'row', alignItems: 'flex-end', padding: 12, backgroundColor: COLORS.surface, borderTopWidth: 1, borderTopColor: COLORS.border },
   textInputWrapper: { flex: 1, backgroundColor: COLORS.bg, borderRadius: 20, paddingHorizontal: 16, maxHeight: 100, borderWidth: 1, borderColor: COLORS.border },
   textInput: { fontSize: 15, color: COLORS.textDark, fontFamily: FONTS.regular, paddingVertical: 8 },
   sendButton: { backgroundColor: COLORS.purplePrimary, width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center', marginLeft: 8, marginBottom: 2, shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 3 },
+
+  pendingStrip: { flexDirection: 'row', paddingHorizontal: 12, paddingTop: 10, paddingBottom: 2, backgroundColor: COLORS.surface, borderTopWidth: 1, borderTopColor: COLORS.border },
+  pendingItem: { width: 48, height: 48, position: 'relative' },
+  pendingImage: { width: 48, height: 48, borderRadius: 10, borderWidth: 1, borderColor: COLORS.border },
+  pendingDoc: { width: 48, height: 48, borderRadius: 10, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.bg, justifyContent: 'center', alignItems: 'center' },
+  pendingRemove: { position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: 9, backgroundColor: COLORS.textDark, justifyContent: 'center', alignItems: 'center', borderWidth: 1.5, borderColor: COLORS.surface },
+
+  attachmentList: { gap: 6, marginBottom: 4 },
+  attachmentImageWrap: { alignSelf: 'flex-start', width: 220 },
+  attachmentImage: { width: '100%', height: 170, borderRadius: 12 },
+  attachmentLoading: { height: 170, borderRadius: 12, backgroundColor: 'rgba(139, 92, 246, 0.08)', alignItems: 'center', justifyContent: 'center' },
+  attachmentRetry: { marginTop: 6, fontSize: 12, fontFamily: FONTS.medium, color: COLORS.purpleVibrant },
+  attachmentDoc: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'transparent', borderWidth: 0, borderColor: 'rgba(76, 29, 149, 0.15)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 8, maxWidth: 260 },
+  attachmentDocName: { flexShrink: 1, flexGrow: 1, fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textDark },
+  attachmentDocSize: { fontSize: 11, fontFamily: FONTS.regular, color: COLORS.textMuted },
+
+  attachSheetRow: { flexDirection: 'row', gap: 22 },
+  attachOption: { alignItems: 'center', gap: 8 },
+  attachOptionIcon: { width: 56, height: 56, borderRadius: 28, justifyContent: 'center', alignItems: 'center' },
+  attachOptionText: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textDark },
+
+  lightbox: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', justifyContent: 'center', alignItems: 'center' },
+  lightboxImage: { width: '100%', height: '100%' },
+  lightboxClose: { position: 'absolute', top: 52, right: 20, width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  lightboxDownload: { position: 'absolute', top: 52, left: 20, width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
 
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 20 },
   modalContent: { backgroundColor: COLORS.surface, borderRadius: 24, padding: 20, borderWidth: 1, borderColor: COLORS.border },

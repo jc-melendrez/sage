@@ -568,14 +568,15 @@ export default function Dashboard() {
               horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.scrollContent}
+              style={styles.carouselBleed}
               removeClippedSubviews={true}
             >
               {recommendations.slice(0, 4).map((rec, index) => {
                 const gradients = [
-                  [COLORS.purpleDeep, COLORS.purplePrimary],
-                  [COLORS.danger, '#F87171'],
-                  [COLORS.success, '#34D399'],
-                  [COLORS.purpleVibrant, COLORS.purpleLight],
+                  ['#EDE9FE', '#DDD6FE'],
+                  ['#FCE7F3', '#FBCFE8'],
+                  ['#D1FAE5', '#A7F3D0'],
+                  ['#FEF3C7', '#FDE68A'],
                 ];
                 return (
                   <TouchableOpacity key={rec.id} activeOpacity={0.7}>
@@ -698,10 +699,11 @@ export default function Dashboard() {
                 <Text style={styles.viewAllText}>View all</Text>
               </TouchableOpacity>
             </View>
-            <ScrollView
+<ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.scrollContent}
+              contentContainerStyle={styles.badgeScroll}
+              style={styles.carouselBleed}
               removeClippedSubviews={true}
             >
               {badges.slice(0, 6).map((badge) => (
@@ -997,7 +999,11 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   scrollContent: {
+    paddingLeft: 24,
     paddingRight: 24,
+  },
+  carouselBleed: {
+    marginHorizontal: -24,
   },
   emptyStateCard: {
     backgroundColor: COLORS.surface,
@@ -1038,20 +1044,20 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   recommendationTitle: {
-    color: 'white',
+    color: COLORS.textPrimary,
     fontSize: 16,
     fontFamily: FONTS.bold,
     marginBottom: 8,
   },
   recommendationDesc: {
-    color: 'rgba(255, 255, 255, 0.85)',
+    color: COLORS.textMuted,
     fontSize: 13,
     lineHeight: 19,
     fontFamily: FONTS.regular,
     marginBottom: 14,
   },
   recommendationCTA: {
-    color: 'white',
+    color: COLORS.purpleDeep,
     fontSize: 13,
     fontFamily: FONTS.semiBold,
     fontWeight: '600',
@@ -1112,6 +1118,7 @@ const styles = StyleSheet.create({
 
   badgeScroll: {
     gap: 16,
+    paddingLeft: 24,
     paddingRight: 24,
   },
   badgeItem: {

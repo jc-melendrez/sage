@@ -2,7 +2,7 @@ import json
 import re
 import unittest
 from datetime import date, timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.core import mail
@@ -822,7 +822,12 @@ class GroupChatMessageTests(APITestCase):
         self.client.force_authenticate(user=self.user)
 
     def test_post_returns_sender_identity(self):
-        with patch.object(users_views, 'send_message', return_value='msg-123') as mock_send:
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+        }
+        with patch.object(users_views, 'get_study_group', return_value=fake_group), \
+             patch.object(users_views, 'send_message', return_value='msg-123') as mock_send:
             res = self.client.post(
                 reverse('group_chat', args=['group-abc']),
                 {'text': 'hello world'},
@@ -834,9 +839,11 @@ class GroupChatMessageTests(APITestCase):
         self.assertEqual(res.data['sender_uid'], 'fb-uid-chat')
         self.assertEqual(res.data['sender_name'], 'Chat Person')
         self.assertEqual(res.data['sender_avatar'], '')
+        self.assertEqual(res.data['attachments'], [])
         self.assertIn('created_at', res.data)
         mock_send.assert_called_once_with(
             'group-abc', 'fb-uid-chat', 'hello world', 'Chat Person', '',
+            attachments=None,
         )
 
     def test_post_requires_text(self):
@@ -846,6 +853,196 @@ class GroupChatMessageTests(APITestCase):
             format='json',
         )
         self.assertEqual(res.status_code, 400)
+
+    def test_post_404_when_group_missing(self):
+        with patch.object(users_views, 'get_study_group', return_value=None):
+            res = self.client.post(
+                reverse('group_chat', args=['group-abc']),
+                {'text': 'hi'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 404)
+
+    def test_post_denied_for_non_member(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'someone-else',
+            'members': ['someone-else'],
+        }
+        with patch.object(users_views, 'get_study_group', return_value=fake_group):
+            res = self.client.post(
+                reverse('group_chat', args=['group-abc']),
+                {'text': 'hi'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 403)
+
+    def test_post_returns_attachments(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+        }
+        atts = [{
+            'key': 'chat-attachments/group-abc/abc123/pic.png',
+            'name': 'pic.png',
+            'mime': 'image/png',
+            'size': 2048,
+        }]
+        with patch.object(users_views, 'get_study_group', return_value=fake_group), \
+             patch.object(users_views, 'send_message', return_value='msg-att') as mock_send:
+            res = self.client.post(
+                reverse('group_chat', args=['group-abc']),
+                {'text': 'see pic', 'attachments': atts},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['attachments'], atts)
+        mock_send.assert_called_once_with(
+            'group-abc', 'fb-uid-chat', 'see pic', 'Chat Person', '',
+            attachments=atts,
+        )
+
+    def test_post_attachment_must_come_from_group_upload(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+        }
+        with patch.object(users_views, 'get_study_group', return_value=fake_group), \
+             patch.object(users_views, 'send_message') as mock_send:
+            res = self.client.post(
+                reverse('group_chat', args=['group-abc']),
+                {'text': 'x', 'attachments': [{'key': 'other-group/x.png', 'name': 'a', 'mime': 'image/png', 'size': 100}]},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 400)
+        mock_send.assert_not_called()
+
+    def test_post_attachment_no_key_rejected(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+        }
+        with patch.object(users_views, 'get_study_group', return_value=fake_group), \
+             patch.object(users_views, 'send_message') as mock_send:
+            res = self.client.post(
+                reverse('group_chat', args=['group-abc']),
+                {'text': 'x', 'attachments': [{'url': 'https://evil.example.com/a.png', 'name': 'a', 'mime': 'image/png', 'size': 100}]},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 400)
+        mock_send.assert_not_called()
+
+    def test_post_attachment_oversize(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+}
+        with patch.object(users_views, 'get_study_group', return_value=fake_group), \
+             patch.object(users_views, 'ATTACHMENT_MAX_SIZE', 10):
+            res = self.client.post(
+                reverse('group_attachments', args=['group-abc']),
+                {'file': SimpleUploadedFile('big.pdf', b'x' * 200, content_type='application/pdf')},
+                format='multipart',
+            )
+        self.assertEqual(res.status_code, 413)
+
+    def test_post_attachment_limits_count(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+        }
+        atts = [{'key': 'chat-attachments/group-abc/abc123/hi.png', 'name': 'a', 'mime': 'image/png', 'size': 100}] * 6
+        with patch.object(users_views, 'get_study_group', return_value=fake_group):
+            res = self.client.post(
+                reverse('group_chat', args=['group-abc']),
+                {'text': 'x', 'attachments': atts},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 400)
+
+    def test_post_attachment_only_message(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+        }
+        with patch.object(users_views, 'get_study_group', return_value=fake_group), \
+             patch.object(users_views, 'send_message', return_value='msg-att') as mock_send:
+            res = self.client.post(
+                reverse('group_chat', args=['group-abc']),
+                {'attachments': [{'key': 'chat-attachments/group-abc/abc123/hi.png', 'name': 'a', 'mime': 'image/png', 'size': 100}]},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 201)
+        mock_send.assert_called_once()
+        self.assertEqual(mock_send.call_args.args[2], '')
+
+    def test_upload_attachment_success(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+        }
+        uploaded = {'key': 'chat-attachments/group-abc/abc123/pic.png', 'name': 'pic.png', 'mime': 'image/png', 'size': 42}
+        with patch.object(users_views, 'get_study_group', return_value=fake_group), \
+             patch.object(users_views, 'upload_group_attachment', return_value=uploaded) as mock_upload:
+            res = self.client.post(
+                reverse('group_attachments', args=['group-abc']),
+                {'file': SimpleUploadedFile('pic.png', b'x' * 42, content_type='image/png')},
+                format='multipart',
+            )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data, uploaded)
+        mock_upload.assert_called_once()
+
+    def test_upload_attachment_denied_for_non_member(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'someone-else',
+            'members': ['someone-else'],
+        }
+        with patch.object(users_views, 'get_study_group', return_value=fake_group):
+            res = self.client.post(
+                reverse('group_attachments', args=['group-abc']),
+                {'file': SimpleUploadedFile('pic.png', b'x', content_type='image/png')},
+                format='multipart',
+            )
+        self.assertEqual(res.status_code, 403)
+
+    def test_upload_attachment_requires_file(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+        }
+        with patch.object(users_views, 'get_study_group', return_value=fake_group):
+            res = self.client.post(reverse('group_attachments', args=['group-abc']), {}, format='multipart')
+        self.assertEqual(res.status_code, 400)
+
+    def test_upload_attachment_oversize(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+        }
+        with patch.object(users_views, 'get_study_group', return_value=fake_group), \
+             patch.object(users_views, 'ATTACHMENT_MAX_SIZE', 10):
+            res = self.client.post(
+                reverse('group_attachments', args=['group-abc']),
+                {'file': SimpleUploadedFile('big.pdf', b'x' * 200, content_type='application/pdf')},
+                format='multipart',
+            )
+        self.assertEqual(res.status_code, 413)
+
+    def test_upload_attachment_bad_type(self):
+        fake_group = {
+            'id': 'group-abc', 'created_by': 'fb-uid-chat',
+            'members': ['fb-uid-chat'],
+        }
+        with patch.object(users_views, 'get_study_group', return_value=fake_group), \
+             patch.object(users_views, 'upload_group_attachment',
+                          side_effect=ValueError('Unsupported file type')) as mock_upload:
+            res = self.client.post(
+                reverse('group_attachments', args=['group-abc']),
+                {'file': SimpleUploadedFile('song.mp3', b'x', content_type='audio/mpeg')},
+                format='multipart',
+            )
+        self.assertEqual(res.status_code, 400)
+        mock_upload.assert_called_once()
 
     def test_get_returns_normalized_messages(self):
         fake_messages = [{
@@ -871,6 +1068,62 @@ class GroupChatMessageTests(APITestCase):
         res = self.client.get(reverse('current_user_profile'))
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data['firebase_uid'], 'fb-uid-chat')
+
+
+class GroupAttachmentLinkTests(APITestCase):
+    """
+    GET /groups/<id>/attachments/<key>/link/ mints a short-lived presigned S3
+    URL for a member; non-members, unknown groups, and foreign keys are rejected.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='linker', password='pass12345', role='student',
+            first_name='Lin', last_name='Ker',
+            firebase_uid='fb-uid-link',
+        )
+        self.client.force_authenticate(user=self.user)
+        self.key = 'chat-attachments/group-abc/abc123/notes.png'
+        self.url = reverse('group_attachment_link', args=['group-abc', self.key])
+
+    def _member_group(self):
+        return {'id': 'group-abc', 'created_by': 'fb-uid-other', 'members': ['fb-uid-link']}
+
+    def test_member_gets_presigned_url(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._member_group()), \
+             patch.object(users_views, 'presign_s3_url', return_value='https://s3.example/presigned-link') as mock_presign:
+            res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['url'], 'https://s3.example/presigned-link')
+        mock_presign.assert_called_once_with(self.key)
+
+    def test_non_member_denied(self):
+        group = {'id': 'group-abc', 'created_by': 'other', 'members': ['someone-else']}
+        with patch.object(users_views, 'get_study_group', return_value=group), \
+             patch.object(users_views, 'presign_s3_url') as mock_presign:
+            res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 403)
+        mock_presign.assert_not_called()
+
+    def test_unknown_group_404(self):
+        with patch.object(users_views, 'get_study_group', return_value=None), \
+             patch.object(users_views, 'presign_s3_url') as mock_presign:
+            res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 404)
+        mock_presign.assert_not_called()
+
+    def test_foreign_key_rejected(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._member_group()), \
+             patch.object(users_views, 'presign_s3_url') as mock_presign:
+            res = self.client.get(reverse('group_attachment_link', args=['group-abc', 'somewhere/else/x.png']))
+        self.assertEqual(res.status_code, 400)
+        mock_presign.assert_not_called()
+
+    def test_requires_auth(self):
+        self.client.force_authenticate(user=None)
+        res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 401)
 
 
 class GroupChatReactionTests(APITestCase):

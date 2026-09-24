@@ -4,7 +4,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { getQuiz, Quiz, startQuizAttempt } from '@/services/quizService';
 import { completeQuiz } from '@/services/gamificationService';
-import TakeQuiz from '../../../components/TakeQuiz';
+import TakeQuiz from '../../../../components/TakeQuiz';
 
 export default function CourseQuizScreen() {
   const router = useRouter();
