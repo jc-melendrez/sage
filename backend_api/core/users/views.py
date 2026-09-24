@@ -446,8 +446,8 @@ def _validate_provenance(nodes):
     return True, 'ok'
 
 
-def groq_chat_completion(payload, api_key, max_retries=3):
-    """POST to Groq and retry transient failures (e.g. json_validate_failed)."""
+def deepseek_chat_completion(payload, api_key, max_retries=3):
+    """POST to DeepSeek and retry transient failures."""
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -456,13 +456,13 @@ def groq_chat_completion(payload, api_key, max_retries=3):
     for attempt in range(1, max_retries + 1):
         try:
             last_response = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
+                "https://api.deepseek.com/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=120,
             )
         except requests.exceptions.RequestException as e:
-            print(f"[Groq] attempt {attempt} request error: {e}")
+            print(f"[DeepSeek] attempt {attempt} request error: {e}")
             last_response = None
             if attempt < max_retries:
                 time.sleep(2 * attempt)
@@ -471,9 +471,9 @@ def groq_chat_completion(payload, api_key, max_retries=3):
         if last_response.status_code == 200:
             return last_response
 
-        print(f"[Groq] attempt {attempt} status {last_response.status_code}: {last_response.text[:300]}")
+        print(f"[DeepSeek] attempt {attempt} status {last_response.status_code}: {last_response.text[:300]}")
         if attempt < max_retries:
-            # Honor Groq's suggested wait time (rate limits) when present.
+            # Honor DeepSeek's suggested wait time (rate limits) when present.
             wait = 2 * attempt
             retry_after = last_response.headers.get('Retry-After')
             if retry_after:
@@ -1905,8 +1905,8 @@ class TestModelConfigView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        model_name = os.getenv('GROQ_MODEL_NAME', 'openai/gpt-oss-120b')
-        api_key = os.getenv('GROQ_API_KEY', 'not_set')
+        model_name = os.getenv('DEEPSEEK_GEN_MODEL', 'deepseek-v4-pro')
+        api_key = os.getenv('DEEPSEEK_API_KEY', 'not_set')
         return Response({
             "model_name": model_name,
             "api_key_status": "set" if api_key != 'not_set' else "not_set",
@@ -2092,10 +2092,10 @@ def generate_lesson(request):
     clean_text = " ".join(extracted_text.split())
 
     try:
-        api_key = os.getenv('GROQ_API_KEY')
+        api_key = os.getenv('DEEPSEEK_API_KEY')
         if not api_key:
             return Response(
-                {"error": "Groq API key not configured"},
+                {"error": "DeepSeek API key not configured"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -2148,7 +2148,7 @@ Each level must have:
 {clean_text[:12000]}
 """
 
-        model_name = os.getenv('GROQ_MODEL_NAME', 'openai/gpt-oss-120b')
+        model_name = os.getenv('DEEPSEEK_GEN_MODEL', 'deepseek-v4-pro')
 
         payload = {
             "model": model_name,
@@ -2171,12 +2171,12 @@ Each level must have:
             "response_format": {"type": "json_object"}
         }
 
-        print("🧠 Sending request to Groq...")
+        print("🧠 Sending request to DeepSeek...")
 
-        response = groq_chat_completion(payload, api_key)
+        response = deepseek_chat_completion(payload, api_key)
 
         if response is None or response.status_code != 200:
-            print("❌ Groq error:", getattr(response, 'text', 'no response'))
+            print("❌ DeepSeek error:", getattr(response, 'text', 'no response'))
             return Response(
                 {"error": "AI generation failed. Please try again."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -2185,7 +2185,7 @@ Each level must have:
         data = response.json()
         lesson_content = data["choices"][0]["message"]["content"]
 
-        print("🔥 GROQ RAW OUTPUT:")
+        print("🔥 DEEPSEEK RAW OUTPUT:")
         print(lesson_content[:1000])
 
         # 4. Parse JSON safely
@@ -2283,9 +2283,9 @@ class GenerateTopicView(APIView):
             mix_requirements += f"- {mastery_count} \"mastery\" node(s)\n"
         mix_requirements += f"- Order them exactly: {order_arrow}\n"
 
-        api_key = os.getenv('GROQ_API_KEY')
+        api_key = os.getenv('DEEPSEEK_API_KEY')
         if not api_key:
-            return Response({'error': 'Groq API key not configured'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': 'DeepSeek API key not configured'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         prompt = f"""You are an expert curriculum designer. Given the uploaded study material, create a structured learning topic with exactly {node_count} nodes.
 
@@ -2370,7 +2370,7 @@ A practice question must be answerable from its cited Learn block without requir
 **Study Material:**
 {clean_text[:12000]}"""
 
-        model_name = os.getenv('GROQ_MODEL_NAME', 'openai/gpt-oss-120b')
+        model_name = os.getenv('DEEPSEEK_GEN_MODEL', 'deepseek-v4-pro')
 
         payload = {
             'model': model_name,
@@ -2384,10 +2384,10 @@ A practice question must be answerable from its cited Learn block without requir
         }
 
         try:
-            response = groq_chat_completion(payload, api_key)
+            response = deepseek_chat_completion(payload, api_key)
 
             if response is None or response.status_code != 200:
-                print(f"[GenerateTopicView] Groq error: {getattr(response, 'text', 'no response')}")
+                print(f"[GenerateTopicView] DeepSeek error: {getattr(response, 'text', 'no response')}")
                 return Response({'error': 'AI generation failed. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             data = response.json()

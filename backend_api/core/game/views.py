@@ -207,13 +207,13 @@ class CreateGameView(APIView):
 
         try:
             response = requests.post(
-                'https://api.groq.com/openai/v1/chat/completions',
+                'https://api.deepseek.com/chat/completions',
                 headers={
-                    'Authorization': f'Bearer {settings.GROQ_API_KEY}',
+                    'Authorization': f'Bearer {settings.DEEPSEEK_API_KEY}',
                     'Content-Type': 'application/json',
                 },
                 json={
-                    'model': 'openai/gpt-oss-120b',
+                    'model': 'deepseek-v4-pro',
                     'messages': [{
                         'role': 'user',
                         'content': f'''Based on the following content, 1) Provide a concise quiz title/topic (max 5 words). 2) {type_instruction}

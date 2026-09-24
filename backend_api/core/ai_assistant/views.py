@@ -61,14 +61,14 @@ class AskSAGEView(APIView):
         # 2. Save User Message
         ChatMessage.objects.create(user=request.user, session=session, text=user_message, is_ai=False)
 
-        # 3. 🌟 REAL AI LOGIC: Call Groq!
-        GROQ_API_KEY = getattr(settings, 'GROQ_API_KEY', None)
+        # 3. 🌟 REAL AI LOGIC: Call DeepSeek!
+        DEEPSEEK_API_KEY = getattr(settings, 'DEEPSEEK_API_KEY', None)
         
-        if not GROQ_API_KEY:
-            return Response({"error": "Groq API key not configured on server."}, status=500)
+        if not DEEPSEEK_API_KEY:
+            return Response({"error": "DeepSeek API key not configured on server."}, status=500)
 
         headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
             "Content-Type": "application/json"
         }
 
@@ -87,12 +87,13 @@ class AskSAGEView(APIView):
                     "content": msg.text
                 })
 
-        # Groq uses the exact same payload format as DeepSeek and OpenAI
+        # DeepSeek uses the same OpenAI-compatible payload format
         payload = {
-            # 🌟 Using Llama 3.3 70B for high-quality reasoning and educational support
-            "model": getattr(settings, 'GROQ_MODEL_NAME', 'openai/gpt-oss-120b'),
-            # This model spends tokens on hidden reasoning; without a generous
-            # budget the visible answer gets truncated to the first word.
+            # 🌟 DeepSeek V4 Flash for fast, low-latency educational chat
+            "model": "deepseek-v4-flash",
+            # V4 thinks by default; disable it so the 2048-token budget isn't
+            # eaten by hidden reasoning (which would truncate the visible answer).
+            "thinking": {"type": "disabled"},
             "max_tokens": 2048,
             "messages": [
                 {
@@ -115,12 +116,12 @@ class AskSAGEView(APIView):
         }
 
         try:
-            # Send the request to Groq
+            # Send the request to DeepSeek
             api_response = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
+                "https://api.deepseek.com/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=10 # Groq is exceptionally fast
+                timeout=10 # DeepSeek V4 Flash is fast
             )
             api_response.raise_for_status() 
             
@@ -128,7 +129,7 @@ class AskSAGEView(APIView):
             ai_reply = data['choices'][0]['message']['content']
             
         except Exception as e:
-            print(f"Groq API Error: {e}")
+            print(f"DeepSeek API Error: {e}")
             ai_reply = "I'm sorry, my AI brain is temporarily offline. Please check the server logs!"
 
         # 4. Save AI Response
@@ -229,9 +230,9 @@ class GenerateQuizView(APIView):
                     status=403,
                 )
 
-        GROQ_API_KEY = getattr(settings, 'GROQ_API_KEY', None)
-        if not GROQ_API_KEY:
-            return Response({"error": "Groq API key not configured."}, status=500)
+        DEEPSEEK_API_KEY = getattr(settings, 'DEEPSEEK_API_KEY', None)
+        if not DEEPSEEK_API_KEY:
+            return Response({"error": "DeepSeek API key not configured."}, status=500)
 
         system_prompt = (
             "You are an expert educator. Create a quiz based on the provided content. "
@@ -258,12 +259,12 @@ class GenerateQuizView(APIView):
         )
 
         headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
             "Content-Type": "application/json"
         }
 
         payload = {
-            "model": "openai/gpt-oss-120b",
+            "model": "deepseek-v4-pro",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -274,7 +275,7 @@ class GenerateQuizView(APIView):
 
         try:
             api_response = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
+                "https://api.deepseek.com/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=30

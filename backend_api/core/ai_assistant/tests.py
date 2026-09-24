@@ -34,7 +34,7 @@ FAKE_QUIZ_JSON = {
 }
 
 
-def _fake_groq_post(*args, **kwargs):
+def _fake_deepseek_post(*args, **kwargs):
     resp = MagicMock()
     resp.raise_for_status.return_value = None
     resp.json.return_value = {"choices": [{"message": {"content": json.dumps(FAKE_QUIZ_JSON)}}]}
@@ -57,8 +57,8 @@ class QuizCourseAPITests(APITestCase):
         self.foreign_course = Course.objects.create(name='History', educator=self.other_educator)
         self.client.force_authenticate(user=self.educator)
 
-    @override_settings(GROQ_API_KEY='test-key')
-    @patch('ai_assistant.views.requests.post', side_effect=_fake_groq_post)
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.requests.post', side_effect=_fake_deepseek_post)
     def test_generate_quiz_attaches_course(self, mock_post):
         resp = self.client.post(reverse('generate_quiz'), {
             'content': 'Study the basics of algebra.',
@@ -69,8 +69,8 @@ class QuizCourseAPITests(APITestCase):
         self.assertEqual(quiz.course, self.course)
         self.assertEqual(quiz.title, 'Math Basics')
 
-    @override_settings(GROQ_API_KEY='test-key')
-    @patch('ai_assistant.views.requests.post', side_effect=_fake_groq_post)
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.requests.post', side_effect=_fake_deepseek_post)
     def test_generate_quiz_other_educators_course_rejected(self, mock_post):
         resp = self.client.post(reverse('generate_quiz'), {
             'content': 'Study the basics of algebra.',
@@ -79,8 +79,8 @@ class QuizCourseAPITests(APITestCase):
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(Quiz.objects.count(), 0)
 
-    @override_settings(GROQ_API_KEY='test-key')
-    @patch('ai_assistant.views.requests.post', side_effect=_fake_groq_post)
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.requests.post', side_effect=_fake_deepseek_post)
     def test_generate_quiz_invalid_course(self, mock_post):
         resp = self.client.post(reverse('generate_quiz'), {
             'content': 'Study the basics of algebra.',

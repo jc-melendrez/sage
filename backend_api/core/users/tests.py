@@ -2113,7 +2113,7 @@ class GenerateTopicViewTests(APITestCase):
     def _post(self, raw_content):
         fake = lambda payload, api_key, max_retries=3: self.FakeGroqResponse(raw_content)
         upload = SimpleUploadedFile('material.txt', b'Water evaporates into vapor.', content_type='text/plain')
-        with patch.object(users_views, 'groq_chat_completion', side_effect=fake):
+        with patch.object(users_views, 'deepseek_chat_completion', side_effect=fake):
             return self.client.post(
                 reverse('generate_topic', args=[self.course.id]),
                 {'file': upload},
