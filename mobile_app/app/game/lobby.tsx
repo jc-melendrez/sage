@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert,
-  ActivityIndicator, Platform, StatusBar, Animated,
+  ActivityIndicator, Platform, StatusBar, Animated, Image,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
@@ -9,6 +9,7 @@ import { getToken, getCurrentUser } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { pfpSource } from '@/constants/pfps';
 
 const COLORS = {
   bg: '#0f0c29',
@@ -379,7 +380,11 @@ export default function LobbyScreen() {
               <View key={item.id} style={[styles.playerCard, isYou && styles.playerCardYou]}>
                 {isYou && <View style={styles.playerCardEdge} />}
                 <View style={[styles.avatar, isYou && styles.avatarYou]}>
-                  <Text style={[styles.avatarText, isYou && styles.avatarTextYou]}>{initial}</Text>
+                  {pfpSource(item.avatar) ? (
+                    <Image source={pfpSource(item.avatar)!} style={styles.avatarImage} resizeMode="cover" />
+                  ) : (
+                    <Text style={[styles.avatarText, isYou && styles.avatarTextYou]}>{initial}</Text>
+                  )}
                 </View>
                 <View style={styles.playerInfo}>
                   <View style={styles.playerNameRow}>
@@ -592,6 +597,9 @@ const styles = StyleSheet.create({
   avatarYou: { backgroundColor: COLORS.accent },
   avatarText: { fontSize: 18, fontFamily: FONTS.black, color: '#fff' },
   avatarTextYou: { color: COLORS.bg },
+  avatarImage: {
+    width: 46, height: 46, borderRadius: 23,
+  },
   playerInfo: { flex: 1 },
   playerNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 2 },
   playerName: { fontSize: 16, fontFamily: FONTS.bold, color: COLORS.textPrimary, flexShrink: 1 },

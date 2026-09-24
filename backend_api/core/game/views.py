@@ -150,6 +150,7 @@ class CreateGameView(APIView):
 
         player_data = {
             'displayName': get_display_name(request.user),
+            'avatar': request.user.avatar or '',
             'score': 0,
             'answeredCount': 0,
             'questionOrder': [],
@@ -255,6 +256,7 @@ class JoinGameView(APIView):
         # Add player to room
         player_data = {
             'displayName': get_display_name(request.user),
+            'avatar': request.user.avatar or '',
             'score': 0,
             'answeredCount': 0,
             'questionOrder': [],
