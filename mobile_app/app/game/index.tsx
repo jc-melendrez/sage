@@ -573,6 +573,7 @@ export default function GameCenterScreen() {
     const clean = next.join('').slice(0, 6);
     setJoinCode(clean);
     if (char && i < 5) codeBoxRefs.current[i + 1]?.focus();
+    else if (!char && i > 0) codeBoxRefs.current[i - 1]?.focus();
   };
   const handleCodeKeyPress = (e: any, i: number) => {
     if (e.nativeEvent.key === 'Backspace' && !joinCode[i] && i > 0) {
