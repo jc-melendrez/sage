@@ -43,9 +43,25 @@ class Quiz(models.Model):
     title = models.CharField(max_length=255)
     quiz_type = models.CharField(max_length=50, default="Multiple Choice")
     created_at = models.DateTimeField(auto_now_add=True)
+    # Optional deadline: the quiz can't be started/completed after this time.
+    # null/blank = always open.
+    available_until = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.title
+
+class QuizAttempt(models.Model):
+    # Tracks the one-and-only take of a quiz. unique_together(quiz, user) means
+    # each student can start a given quiz exactly once.
+    quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE, related_name='attempts')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='quiz_attempts')
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    score = models.IntegerField(null=True, blank=True)
+    total = models.IntegerField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ('quiz', 'user')
 
 class QuizQuestion(models.Model):
     quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE, related_name='questions')

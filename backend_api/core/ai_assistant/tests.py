@@ -1,12 +1,14 @@
 import json
+from datetime import timedelta
 from unittest.mock import patch, MagicMock
 
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Quiz
+from .models import Quiz, QuizAttempt
 from users.models import Course
 
 User = get_user_model()
@@ -104,3 +106,72 @@ class QuizCourseAPITests(APITestCase):
         self.client.force_authenticate(user=self.student)
         resp = self.client.get(reverse('quiz_list'), {'course': self.foreign_course.id})
         self.assertEqual(resp.status_code, 403)
+
+
+class QuizAttemptAPITests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='attempt-teacher', password='pass123', role='educator',
+        )
+        self.student = User.objects.create_user(
+            username='attempt-student', password='pass123', role='student',
+        )
+        self.course = Course.objects.create(name='Algebra', educator=self.educator)
+        self.course.students.add(self.student)
+        self.quiz = Quiz.objects.create(user=self.educator, course=self.course, title='Timed Quiz')
+        self.attempt_url = reverse('quiz_attempt', args=[self.quiz.id])
+
+    def test_student_member_can_start_attempt(self):
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.post(self.attempt_url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(QuizAttempt.objects.filter(quiz=self.quiz, user=self.student).exists())
+
+    def test_non_member_cannot_start_attempt(self):
+        other = User.objects.create_user(username='attempt-outsider', password='pass123', role='student')
+        self.client.force_authenticate(user=other)
+        resp = self.client.post(self.attempt_url)
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(QuizAttempt.objects.count(), 0)
+
+    def test_take_once_enforced(self):
+        self.client.force_authenticate(user=self.student)
+        QuizAttempt.objects.create(quiz=self.quiz, user=self.student)
+        resp = self.client.post(self.attempt_url)
+        self.assertEqual(resp.status_code, 409)
+
+    def test_deadline_passed_blocks_start(self):
+        self.quiz.available_until = timezone.now() - timedelta(minutes=5)
+        self.quiz.save()
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.post(self.attempt_url)
+        self.assertEqual(resp.status_code, 403)
+
+    def test_owner_can_patch_available_until(self):
+        self.client.force_authenticate(user=self.educator)
+        future = (timezone.now() + timedelta(days=2)).isoformat()
+        resp = self.client.patch(
+            reverse('quiz_detail', args=[self.quiz.id]),
+            {'available_until': future},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.quiz.refresh_from_db()
+        self.assertIsNotNone(self.quiz.available_until)
+
+        resp = self.client.patch(
+            reverse('quiz_detail', args=[self.quiz.id]),
+            {'available_until': None},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.quiz.refresh_from_db()
+        self.assertIsNone(self.quiz.available_until)
+
+    def test_serializer_reports_attempted(self):
+        self.client.force_authenticate(user=self.student)
+        QuizAttempt.objects.create(quiz=self.quiz, user=self.student)
+        resp = self.client.get(reverse('quiz_detail', args=[self.quiz.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['attempted'])

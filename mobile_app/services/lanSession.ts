@@ -35,6 +35,10 @@ export function setLanClient(client: LanClientSession | null) {
   lanClient = client;
 }
 
+export function getLanClient(): LanClientSession | null {
+  return lanClient;
+}
+
 export function resetLanState() {
   lanGame.quiz = null;
   lanGame.order = [];

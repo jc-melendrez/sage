@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, Pill, FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
@@ -16,6 +16,7 @@ const ACTIVITY_META: Record<ActivityKind, { label: string; icon: any; color: str
   quiz: { label: 'Quiz', icon: 'help-circle', color: COLORS.purpleVibrant },
   lesson: { label: 'Lesson', icon: 'book', color: COLORS.accent },
   game: { label: 'Game', icon: 'game-controller', color: COLORS.success },
+  task: { label: 'Task', icon: 'document-text', color: COLORS.warning },
 };
 
 type Filter = 'all' | ActivityStatus;
@@ -28,6 +29,7 @@ interface CourseOption {
 }
 
 export default function ActivitiesScreen() {
+  const router = useRouter();
   const [activities, setActivities] = useState<ClassActivity[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('all');
@@ -348,6 +350,21 @@ export default function ActivitiesScreen() {
                               {a.status === 'published' ? 'tap to hide' : 'tap to publish'}
                             </Text>
                           </TouchableOpacity>
+                          {a.kind === 'task' && (
+                            <TouchableOpacity
+                              style={styles.submissionsBtn}
+                              activeOpacity={0.8}
+                              onPress={() => router.push({
+                                pathname: '/educator/(tabs)/task-submissions',
+                                params: { taskId: a.id, taskTitle: a.title, courseName: a.course_name },
+                              })}
+                            >
+                              <Ionicons name="people-outline" size={15} color={COLORS.purpleVibrant} />
+                              <Text style={styles.submissionsBtnText}>
+                                View submissions ({a.submission_count ?? 0})
+                              </Text>
+                            </TouchableOpacity>
+                          )}
                         </View>
                       );
                     })}
@@ -392,4 +409,15 @@ const styles = StyleSheet.create({
   cardNote: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, lineHeight: 17, marginTop: 10 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12 },
   statusHint: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted },
+  submissionsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 12,
+    paddingVertical: 11,
+    borderRadius: RADIUS.sm,
+    backgroundColor: tint(COLORS.purpleVibrant),
+  },
+  submissionsBtnText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.purpleVibrant },
 });

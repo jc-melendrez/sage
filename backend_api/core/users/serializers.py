@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity
+from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, TaskSubmission
 # --- Your Related Serializers (Unchanged, these are great!) ---
 from django.contrib.auth import get_user_model
 
@@ -73,7 +73,7 @@ class SessionSerializer(serializers.ModelSerializer):
 class ActivitySerializer(serializers.ModelSerializer):
     class Meta:
         model = Activity
-        fields = ['id', 'title', 'description', 'activity_type', 'created_at']
+        fields = ['id', 'title', 'description', 'activity_type', 'created_at', 'kind', 'xp_earned', 'course_name', 'payload']
 
 # --- Updated User Serializers ---
 
@@ -142,17 +142,62 @@ class CourseRosterSerializer(CourseSerializer):
 class ClassActivitySerializer(serializers.ModelSerializer):
     course = serializers.IntegerField(source='course_id', read_only=True)
     course_name = serializers.SerializerMethodField()
+    submission_count = serializers.SerializerMethodField()
 
     class Meta:
         model = ClassActivity
         fields = [
             'id', 'course', 'course_name', 'kind', 'title',
             'ref_id', 'note', 'due_date', 'status', 'created_at',
+            'submission_count',
         ]
-        read_only_fields = ['id', 'course', 'course_name', 'created_at']
+        read_only_fields = ['id', 'course', 'course_name', 'created_at', 'submission_count']
 
     def get_course_name(self, obj):
         return obj.course.name
+
+    def get_submission_count(self, obj):
+        return obj.submissions.count()
+
+
+class TaskSubmissionSerializer(serializers.ModelSerializer):
+    """Full submission, including file bytes (base64 over the wire)."""
+    activity = serializers.IntegerField(source='activity_id', read_only=True)
+    student_id = serializers.IntegerField(read_only=True)
+    student_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TaskSubmission
+        fields = [
+            'id', 'activity', 'student_id', 'student_name',
+            'file_name', 'file_mime', 'file_size', 'file_data',
+            'submitted_at',
+        ]
+        read_only_fields = fields
+
+    def get_student_name(self, obj):
+        display_name = f"{obj.student.first_name} {obj.student.last_name}".strip()
+        return display_name or obj.student.username
+
+
+class TaskSubmissionListSerializer(serializers.ModelSerializer):
+    """Submission metadata only (no file bytes) for list views."""
+    activity = serializers.IntegerField(source='activity_id', read_only=True)
+    student_id = serializers.IntegerField(read_only=True)
+    student_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TaskSubmission
+        fields = [
+            'id', 'activity', 'student_id', 'student_name',
+            'file_name', 'file_mime', 'file_size',
+            'submitted_at',
+        ]
+        read_only_fields = fields
+
+    def get_student_name(self, obj):
+        display_name = f"{obj.student.first_name} {obj.student.last_name}".strip()
+        return display_name or obj.student.username
 
 
 # --- Superadmin Serializers ---

@@ -12,7 +12,7 @@ from django.utils.dateparse import parse_datetime
 from core.firebase import get_firestore
 from firebase_admin import firestore as fs
 from users.utils.file_parser import extract_text_from_file
-from users.gamification import award_xp, record_game_finish
+from users.gamification import award_xp, log_activity, record_game_finish
 from users.models import User
 from .models import OfflineGameResult
 
@@ -647,7 +647,7 @@ class FinishGameView(APIView):
             user = User.objects.filter(id=entry['user_id']).first()
             if user:
                 try:
-                    record_game_finish(user, rank)
+                    record_game_finish(user, rank, room_code=room_code)
                 except Exception as e:
                     print(f'[FinishGame XP Award Error] user {entry["user_id"]}: {e}')
 
@@ -744,6 +744,16 @@ class OfflineResultsView(APIView):
             session_key=session_key,
             defaults=defaults,
         )
+
+        if created:
+            log_activity(
+                request.user,
+                kind='offline_game',
+                title=(str(request.data.get('quizTitle') or '').strip() or 'Offline game'),
+                description=f"{record.correct_count}/{record.total_questions} correct · {record.score} pts",
+                xp=0,
+                payload={'route': '/game/classic'},
+            )
 
         return Response({
             'message': 'Offline result saved',

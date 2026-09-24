@@ -13,7 +13,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission
+from ai_assistant.models import Quiz, QuizAttempt
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
@@ -33,6 +34,7 @@ from .serializers import (
     SuperadminUserUpdateSerializer, SuperadminCreateUserSerializer,
     TopicSerializer, LearningNodeSerializer, NodeProgressSerializer, CoursePathTopicSerializer,
     ClassActivitySerializer,
+    TaskSubmissionSerializer, TaskSubmissionListSerializer,
 )
 from .permissions import IsSuperadmin
 from .utils.file_parser import extract_text_from_file
@@ -328,6 +330,122 @@ def normalize_question_answers(content):
         if resolved is not None:
             q['correct_answer'] = resolved
 
+_NODE_MIX_COUNTS = {
+    2: {'learn': 1, 'practice': 1, 'mastery': 0},
+    3: {'learn': 1, 'practice': 1, 'mastery': 1},
+    4: {'learn': 2, 'practice': 1, 'mastery': 1},
+    5: {'learn': 2, 'practice': 2, 'mastery': 1},
+    6: {'learn': 3, 'practice': 2, 'mastery': 1},
+}
+
+
+def _node_mix(node_count):
+    """Deterministic learn/practice/mastery split for a requested node count.
+
+    Learn is always >= practice so the earlier Learn content can actually
+    support the questions that follow. Each split sums to node_count."""
+    return _NODE_MIX_COUNTS.get(node_count, {'learn': 2, 'practice': 1, 'mastery': 1})
+
+
+def _phase_of(node_type):
+    return {
+        'learn': 'learn',
+        'practice': 'practice',
+        'mastery': 'mastery',
+    }.get(node_type, 'other')
+
+
+def _validate_phase_ordering(nodes):
+    """Validate the ORIGINAL (pre-sort) node sequence obeys Learn* -> Practice* -> Mastery*.
+
+    Runs BEFORE stable-sorting so a bad transition (e.g. Learn -> Practice -> Learn)
+    cannot be masked by reordering. Node types outside learn/practice/mastery
+    (challenge, group_activity, review) do not define a phase and are ignored."""
+    practice_seen = False
+    mastery_seen = False
+    learn_seen = False
+    for node in nodes:
+        phase = _phase_of(node.get('node_type'))
+        if phase == 'learn':
+            if practice_seen or mastery_seen:
+                return False
+            learn_seen = True
+        elif phase == 'practice':
+            if mastery_seen:
+                return False
+            practice_seen = True
+        elif phase == 'mastery':
+            mastery_seen = True
+    return learn_seen
+
+
+_NODE_PHASE_RANK = {'learn': 0, 'practice': 1, 'mastery': 2}
+
+
+def _stable_sort_nodes(nodes):
+    """Stable-sort nodes into Learn -> Practice -> Mastery, preserving the relative
+    order of nodes within each phase. Only called AFTER ordering validation passes."""
+    return sorted(nodes, key=lambda n: _NODE_PHASE_RANK.get(n.get('node_type', 'learn'), 99))
+
+
+def _learn_node_blocks(learn_node):
+    """Return the concept/example blocks of a learn node using its existing schema.
+
+    Only blocks with a `title` (concept/example) can be cited as the source of a
+    question; interaction/summary blocks are not valid provenance targets."""
+    content = learn_node.get('content_json') or {}
+    blocks = content.get('blocks') if isinstance(content, dict) else None
+    if not isinstance(blocks, list):
+        return []
+    return [b for b in blocks if isinstance(b, dict) and b.get('type') in ('concept', 'example')]
+
+
+_BASED_ON_RE = re.compile(r'^Learn\s+(\d+)\s*[-–—]\s*(.+)$', re.IGNORECASE)
+
+
+def _validate_provenance(nodes):
+    """Strict provenance check for every practice/mastery question.
+
+    `based_on` must match "Learn N — <exact block title>" where N is the ORDINAL
+    learn node (1 = first learn node in the sequence, not a raw array position)
+    and the title exactly matches the `title` of a non-empty concept/example block
+    of that learn node. Returns (ok, detail); on failure the whole topic is
+    rejected so corrupted questions are never delivered."""
+    learn_nodes = [n for n in nodes if n.get('node_type') == 'learn']
+    for node in nodes:
+        if node.get('node_type') not in ('practice', 'mastery'):
+            continue
+        content = node.get('content_json') or {}
+        questions = content.get('questions') if isinstance(content, dict) else None
+        if not isinstance(questions, list):
+            continue
+        for q in questions:
+            if not isinstance(q, dict):
+                return False, 'question entry is not an object'
+            based_on = q.get('based_on')
+            if not isinstance(based_on, str) or not based_on.strip():
+                return False, f"question '{str(q.get('question', ''))[:60]}' is missing based_on"
+            match = _BASED_ON_RE.match(based_on.strip())
+            if not match:
+                return False, f"based_on '{based_on}' is not in 'Learn N — block title' format"
+            try:
+                idx = int(match.group(1))
+            except ValueError:
+                return False, f"based_on '{based_on}' has a non-numeric Learn index"
+            if idx < 1 or idx > len(learn_nodes):
+                return False, f"based_on '{based_on}' references learn node {idx} but only {len(learn_nodes)} exist"
+            title = match.group(2).strip()
+            blocks = _learn_node_blocks(learn_nodes[idx - 1])
+            if not blocks:
+                return False, f"based_on '{based_on}' references a learn node with no concept/example content"
+            cited = next((b for b in blocks if str(b.get('title', '')).strip().lower() == title.lower()), None)
+            if cited is None:
+                return False, f"based_on '{based_on}' references unknown block title '{title}'"
+            if not str(cited.get('content', '') or '').strip():
+                return False, f"based_on '{based_on}' references an empty block"
+    return True, 'ok'
+
+
 def groq_chat_completion(payload, api_key, max_retries=3):
     """POST to Groq and retry transient failures (e.g. json_validate_failed)."""
     headers = {
@@ -420,6 +538,42 @@ class CompleteQuizView(APIView):
         if total < 0 or score < 0 or score > total:
             return Response({'error': 'Invalid score/total'}, status=400)
 
+        # Optional quiz-scoped enforcement: when the caller identifies the quiz,
+        # verify it's readable, not past its deadline, and only takeable once.
+        quiz_id = request.data.get('quiz_id')
+        quiz = None
+        attempt = None
+        if quiz_id is not None:
+            try:
+                quiz = Quiz.objects.get(id=int(quiz_id))
+            except (Quiz.DoesNotExist, TypeError, ValueError):
+                return Response({'error': 'Quiz not found.'}, status=404)
+
+            readable = request.user == quiz.user or (
+                quiz.course and quiz.course.students.filter(id=request.user.id).exists()
+            )
+            if not readable:
+                return Response({'error': 'Quiz not found.'}, status=404)
+
+            if quiz.available_until and timezone.now() >= quiz.available_until:
+                return Response(
+                    {'error': 'This quiz is closed. The deadline has passed.'},
+                    status=403,
+                )
+
+            try:
+                attempt = QuizAttempt.objects.get(quiz=quiz, user=request.user)
+            except QuizAttempt.DoesNotExist:
+                return Response(
+                    {'error': 'Take quiz cannot be completed because you did not start it.'},
+                    status=409,
+                )
+            if attempt.completed_at is not None:
+                return Response(
+                    {'error': 'You have already completed this quiz. It can only be taken once.'},
+                    status=409,
+                )
+
         # Optional course-scoped scoring: when the quiz belongs to a course the
         # caller is a member of, credit their class leaderboard row too.
         course_id = request.data.get('course_id')
@@ -435,6 +589,12 @@ class CompleteQuizView(APIView):
                     course = None # Don't award course-specific rewards if not a member
             except Course.DoesNotExist:
                 pass
+
+        if attempt is not None:
+            attempt.score = score
+            attempt.total = total
+            attempt.completed_at = timezone.now()
+            attempt.save(update_fields=['score', 'total', 'completed_at'])
 
         result = record_quiz_completion(request.user, score, total, course=course)
 
@@ -1379,6 +1539,106 @@ class MyClassActivitiesView(APIView):
         return Response(ClassActivitySerializer(activities, many=True).data)
 
 
+# --- Task Submissions (kind='task' activities) ---
+
+def _get_task_activity(request, activity_id):
+    """Fetch a ClassActivity and verify the user belongs to its course."""
+    try:
+        activity = ClassActivity.objects.select_related('course').get(id=activity_id)
+    except ClassActivity.DoesNotExist:
+        return None, Response({"error": "Activity not found"}, status=404)
+    if request.user != activity.course.educator and not activity.course.students.filter(id=request.user.id).exists():
+        return None, Response({"error": "You are not a member of this course"}, status=403)
+    if activity.kind != 'task':
+        return None, Response({"error": "This activity does not accept file submissions"}, status=400)
+    return activity, None
+
+
+class TaskSubmissionView(APIView):
+    """Student's own submission for a task: GET returns it, POST upserts it."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def _validate_file(self, request):
+        upload = request.FILES.get('file')
+        if not upload:
+            return None, Response({"error": "A file is required"}, status=400)
+        if upload.size > TaskSubmission.MAX_FILE_SIZE:
+            return None, Response(
+                {"error": f"File is too large (max {TaskSubmission.MAX_FILE_SIZE // (1024 * 1024)} MB)"},
+                status=400,
+            )
+        data = upload.read()
+        if not data:
+            return None, Response({"error": "File is empty"}, status=400)
+        return (upload, data), None
+
+    def get(self, request, activity_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        try:
+            submission = TaskSubmission.objects.get(activity=activity, student=request.user)
+        except TaskSubmission.DoesNotExist:
+            return Response(None)
+        return Response(TaskSubmissionSerializer(submission).data)
+
+    def post(self, request, activity_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        if request.user == activity.course.educator:
+            return Response({"error": "Only enrolled students can submit"}, status=403)
+
+        file_info, err = self._validate_file(request)
+        if err:
+            return err
+        upload, data = file_info
+
+        submission, created = TaskSubmission.objects.update_or_create(
+            activity=activity,
+            student=request.user,
+            defaults={
+                'file_name': upload.name[:255],
+                'file_mime': upload.content_type or 'application/octet-stream',
+                'file_size': len(data),
+                'file_data': data,
+            },
+        )
+        return Response(TaskSubmissionSerializer(submission).data, status=201 if created else 200)
+
+
+class TaskSubmissionsView(APIView):
+    """Educator sees all student submissions for a task (metadata only)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, activity_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        if request.user != activity.course.educator:
+            return Response({"error": "Only the course educator can view submissions"}, status=403)
+        submissions = TaskSubmission.objects.filter(activity=activity).select_related('student')
+        return Response(TaskSubmissionListSerializer(submissions, many=True).data)
+
+
+class TaskSubmissionDetailView(APIView):
+    """Educator fetches a single submission including file bytes."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, activity_id, submission_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        if request.user != activity.course.educator:
+            return Response({"error": "Only the course educator can view submissions"}, status=403)
+        try:
+            submission = TaskSubmission.objects.select_related('student').get(id=submission_id, activity=activity)
+        except TaskSubmission.DoesNotExist:
+            return Response({"error": "Submission not found"}, status=404)
+        return Response(TaskSubmissionSerializer(submission).data)
+
+
 # --- Learning Path Views ---
 
 class CourseTopicsView(APIView):
@@ -2008,21 +2268,45 @@ class GenerateTopicView(APIView):
         except (ValueError, TypeError):
             node_count = 4
 
+        mix = _node_mix(node_count)
+        learn_count = mix['learn']
+        practice_count = mix['practice']
+        mastery_count = mix['mastery']
+        order_arrow = ' -> '.join(
+            ['Learn'] * learn_count
+            + ['Practice'] * practice_count
+            + (['Mastery'] * mastery_count if mastery_count else [])
+        )
+        mix_requirements = f"- {learn_count} \"learn\" node(s)\n"
+        mix_requirements += f"- {practice_count} \"practice\" node(s)\n"
+        if mastery_count:
+            mix_requirements += f"- {mastery_count} \"mastery\" node(s)\n"
+        mix_requirements += f"- Order them exactly: {order_arrow}\n"
+
         api_key = os.getenv('GROQ_API_KEY')
         if not api_key:
             return Response({'error': 'Groq API key not configured'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        prompt = f"""You are an expert curriculum designer. Given the uploaded study material, create a structured learning topic with {node_count} nodes.
+        prompt = f"""You are an expert curriculum designer. Given the uploaded study material, create a structured learning topic with exactly {node_count} nodes.
 
 **Requirements:**
 - Create a topic with a clear title and description.
-- Generate {node_count} learning nodes of different types:
-  - 1-2 "learn" nodes with lesson content (concept, example, interaction, summary blocks)
-  - 1-2 "practice" nodes with quiz questions
-  - 1 "mastery" node with harder quiz questions
+- Generate exactly:
+{mix_requirements}
 
 Difficulty level: {difficulty}
 {f"Additional instructions: {instructions}" if instructions else ""}
+
+**STRUCTURE & ORDERING (mandatory):**
+The "nodes" array MUST appear in this exact phase order: Learn nodes first, then Practice nodes, then Mastery nodes: {order_arrow}.
+A node may only reference, depend on, or assume information taught in earlier Learn nodes.
+A Mastery node may synthesize information from multiple earlier Learn nodes.
+
+**GROUNDING RULE (critical):**
+The student only ever reads the Learn-node blocks generated in this topic. The student does NOT directly read the raw uploaded study material. Therefore:
+- Practice and Mastery questions may test ONLY facts, concepts, relationships, or procedures that are explicitly taught in the Learn nodes of this same topic.
+- If information exists in the raw study material but was not taught in a Learn node, it is unavailable to the student and MUST NOT be tested.
+- A question must be answerable using only the generated Learn content, never the original uploaded file.
 
 For "learn" nodes, content_json must have a "blocks" array with objects of these types:
 
@@ -2039,7 +2323,32 @@ Summary block:
 {{"type": "summary", "points": ["Key takeaway 1", "Key takeaway 2", "Key takeaway 3"]}}
 
 For "practice" and "mastery" nodes, content_json must have a "questions" array:
-{{"questions": [{{"question": "Question text?", "options": ["A", "B", "C", "D"], "correct_answer": "A", "explanation": "Why this is correct"}}]}}
+{{"questions": [{{"question": "Question text?", "options": ["A", "B", "C", "D"], "correct_answer": "A", "explanation": "Why this is correct", "based_on": "Learn 1 — Exact block title"}}]}}
+
+**based_on provenance (required for EVERY practice and mastery question):**
+- Each question MUST include a "based_on" field: "Learn N — <exact block title>", where N is the ORDINAL Learn node (1 = the first Learn node) and the title is copied EXACTLY from the "title" of the concept or example block that teaches the answer.
+- The cited block must contain the information needed to answer the question.
+- Do NOT paraphrase or invent the title, and do NOT reference a nonexistent Learn node or block.
+
+**No hidden prerequisites:**
+A practice question must be answerable from its cited Learn block without requiring the raw source material or an uncited concept the student was never taught. A mastery question may require synthesis across earlier Learn nodes, but every fact needed to answer it must have been explicitly taught in those earlier Learn nodes.
+
+**Coverage & question counts:**
+- Distribute practice/mastery questions evenly across ALL Learn nodes (do not repeatedly test one block while ignoring another).
+- Practice: 3-5 questions. Mastery: 2-4 harder questions.
+- Mastery should emphasize application, comparison, reasoning, or synthesis — not repeat practice questions.
+- Practice should test recall, identification, understanding, and simple application.
+- Never generate an unsupported question merely to reach a count. Hard bound: total practice + mastery questions must NOT exceed the total number of concept/example blocks available in the Learn nodes.
+- Every question must test a distinct fact, concept, relationship, or application. Do not create duplicate or near-duplicate questions.
+
+**SELF-CHECK (do this BEFORE outputting):**
+1. Re-read every cited Learn block for every practice/mastery question.
+2. Verify each question can be answered from the cited (or earlier) Learn content.
+3. Verify the correct answer is actually supported by that content — never justify a question using the raw study material.
+4. Replace any question that requires information not explicitly taught.
+5. Verify every "based_on" references a real Learn node + block title from this same topic.
+6. Verify the node order is exactly {order_arrow}.
+7. Verify practice and mastery questions are not duplicates.
 
 **Output MUST be pure JSON** with this exact schema:
 {{
@@ -2069,7 +2378,7 @@ For "practice" and "mastery" nodes, content_json must have a "questions" array:
                 {'role': 'system', 'content': 'You are an expert educator. Return ONLY valid JSON. No markdown. No explanations.'},
                 {'role': 'user', 'content': prompt},
             ],
-            'temperature': 0.7,
+            'temperature': 0.5,
             'max_tokens': 12000,
             'response_format': {'type': 'json_object'},
         }
@@ -2086,7 +2395,7 @@ For "practice" and "mastery" nodes, content_json must have a "questions" array:
             topic_data = safe_json_parse(raw_content)
 
             if not topic_data or 'title' not in topic_data or 'nodes' not in topic_data:
-                return Response({'error': 'AI returned invalid structure'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return Response({'error': 'AI returned invalid structure'}, status=status.HTTP_400_BAD_REQUEST)
 
             # Guard against the model emitting stray string/list entries in "nodes".
             nodes = topic_data['nodes']
@@ -2119,7 +2428,40 @@ For "practice" and "mastery" nodes, content_json must have a "questions" array:
                         node[field] = {'xp_reward': 25, 'required_score': 70, 'estimated_minutes': 5}[field]
 
             if not nodes:
-                return Response({'error': 'AI returned invalid structure'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return Response({'error': 'AI returned invalid structure'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Validate the ORIGINAL phase sequence BEFORE reordering so a bad
+            # transition (e.g. Learn -> Practice -> Learn) is never masked by the sort.
+            if not _validate_phase_ordering(nodes):
+                print(f"[GenerateTopicView] Invalid node phase ordering: {[n['node_type'] for n in nodes]}")
+                return Response(
+                    {'error': 'AI returned invalid node ordering (expected Learn, then Practice, then Mastery)'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Stable-sort into Learn -> Practice -> Mastery now that ordering is valid.
+            nodes = _stable_sort_nodes(nodes)
+
+            # Strict provenance: every practice/mastery question must cite a real,
+            # non-empty concept/example block of its ordinal Learn node.
+            provenance_ok, provenance_detail = _validate_provenance(nodes)
+            if not provenance_ok:
+                print(f"[GenerateTopicView] Provenance validation failed: {provenance_detail}")
+                return Response(
+                    {'error': 'AI generated questions not grounded in the Learn content. Please regenerate.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            actual_counts = {'learn': 0, 'practice': 0, 'mastery': 0}
+            for n in nodes:
+                if n['node_type'] in actual_counts:
+                    actual_counts[n['node_type']] += 1
+            print(
+                f"[GenerateTopicView] requested={node_count}"
+                f" ({learn_count} learn, {practice_count} practice, {mastery_count} mastery);"
+                f" actual={actual_counts}; ordering=ok; provenance=ok"
+            )
+
             topic_data['nodes'] = nodes
 
             return Response(topic_data, status=status.HTTP_200_OK)

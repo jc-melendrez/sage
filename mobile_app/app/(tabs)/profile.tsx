@@ -89,9 +89,6 @@ export default function ProfileScreen() {
     ? `${firstName[0]}${lastName ? lastName[0] : ''}`.toUpperCase()
     : username.substring(0, 2).toUpperCase();
 
-  const currentXP = userData?.current_xp || 0;
-  const nextLevelXP = userData?.next_level_xp || 1000;
-  const progressPercent = Math.min((currentXP / nextLevelXP) * 100, 100);
   const earnedBadges = userData?.badges || [];
   const roleLabel = userData?.role === 'superadmin' ? 'Superadmin' : userData?.is_educator ? 'Educator' : 'Student';
   const avatarSource = pfpSource(userData?.avatar);
@@ -135,25 +132,6 @@ export default function ProfileScreen() {
               <Text style={styles.roleText}>{roleLabel}</Text>
             </View>
           </View>
-        </View>
-
-        <View style={styles.glassCard}>
-          <View style={styles.glassCardHeader}>
-            <View style={styles.levelBadge}>
-              <Ionicons name="star" size={16} color={COLORS.warning} />
-              <Text style={styles.levelText}>Level {userData?.level || 1}</Text>
-            </View>
-            <Text style={styles.xpText}>{currentXP} / {nextLevelXP} XP</Text>
-          </View>
-          <View style={styles.progressBarBg}>
-            <LinearGradient
-              colors={[COLORS.purplePrimary, COLORS.purpleLight]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={[styles.progressBarFill, { width: `${progressPercent}%` }]}
-            />
-          </View>
-          <Text style={styles.xpRemainingText}>{nextLevelXP - currentXP} XP to next level</Text>
         </View>
       </LinearGradient>
 
@@ -372,35 +350,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: FONTS.semiBold,
     fontWeight: '600',
-  },
-  glassCard: {
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 20,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-  },
-  glassCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
-  levelBadge: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  levelText: {
-    color: 'white',
-    fontFamily: FONTS.bold,
-    fontWeight: '700',
-    fontSize: 16
-  },
-  xpText: {
-    color: COLORS.purplePale,
-    fontSize: 14,
-    fontFamily: FONTS.medium,
-    fontWeight: '500',
-  },
-  progressBarBg: { height: 8, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 4, overflow: 'hidden', marginBottom: 8 },
-  progressBarFill: { height: '100%', borderRadius: 4 },
-  xpRemainingText: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 12,
-    fontFamily: FONTS.regular,
-    fontWeight: '400',
   },
   content: { flex: 1, paddingHorizontal: 24, paddingTop: 24 },
   section: { marginBottom: 28 },

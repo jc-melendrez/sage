@@ -18,6 +18,7 @@ interface Quiz {
   quiz_type: string;
   course: number | null;
   created_at: string;
+  available_until?: string | null;
   questions: { id: number; question_text: string; options: string[]; correct_answer: string; explanation?: string }[];
 }
 
@@ -38,11 +39,37 @@ interface EditableQuiz {
   id: number;
   title: string;
   quiz_type: string;
+  /** User-facing deadline text ("YYYY-MM-DD HH:MM") or '' for no deadline. */
+  available_until: string;
   questions: EditableQuestion[];
 }
 
 const QUESTION_TYPE_OPTIONS = ['Multiple Choice', 'True/False', 'Short Answer', 'Fill-in-the-Blank'];
 const HAS_OPTIONS = ['Multiple Choice', 'True/False'];
+
+/** Format a Date as a local "YYYY-MM-DD HH:MM" string for editing. */
+function toDeadlineInput(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** Parse a "YYYY-MM-DD HH:MM" string into a Date, or null if invalid/empty. */
+function parseDeadlineInput(text: string): Date | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const m = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi] = m;
+  const date = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi));
+  if (
+    date.getFullYear() !== Number(y) ||
+    date.getMonth() !== Number(mo) - 1 ||
+    date.getDate() !== Number(d)
+  ) {
+    return null;
+  }
+  return date;
+}
 
 export default function QuizManagerScreen() {
   const params = useLocalSearchParams<{ course?: string; generate?: string }>();
@@ -63,6 +90,7 @@ export default function QuizManagerScreen() {
   const [questionType, setQuestionType] = useState('Multiple Choice');
   const [isTypeDropdownOpen, setIsTypeDropdownOpen] = useState(false);
   const [instructions, setInstructions] = useState('');
+  const [availableUntil, setAvailableUntil] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStatus, setGenerationStatus] = useState('');
   const [generationProgress, setGenerationProgress] = useState(0);
@@ -132,6 +160,16 @@ export default function QuizManagerScreen() {
       return;
     }
 
+    let deadlineIso: string | undefined;
+    if (availableUntil.trim()) {
+      const parsed = parseDeadlineInput(availableUntil);
+      if (!parsed) {
+        Alert.alert('Invalid Deadline', 'Enter the deadline as YYYY-MM-DD HH:MM (24-hour), or leave it blank.');
+        return;
+      }
+      deadlineIso = parsed.toISOString();
+    }
+
     setIsGenerating(true);
     try {
       setGenerationStatus('Reading file...');
@@ -158,6 +196,7 @@ export default function QuizManagerScreen() {
           type: questionType,
           instructions,
           course: selectedCourse ?? undefined,
+          available_until: deadlineIso,
         }),
       });
 
@@ -174,6 +213,7 @@ export default function QuizManagerScreen() {
       setSelectedFile(null);
       setQuestionCount('10');
       setInstructions('');
+      setAvailableUntil('');
       await loadQuizzes();
     } catch (err) {
       console.error('Generation Error Details:', err);
@@ -219,6 +259,7 @@ export default function QuizManagerScreen() {
       id: quiz.id,
       title: quiz.title,
       quiz_type: quiz.quiz_type,
+      available_until: quiz.available_until ? toDeadlineInput(new Date(quiz.available_until)) : '',
       questions: (quiz.questions || []).map((q) => ({
         id: q.id,
         question_text: q.question_text,
@@ -236,6 +277,10 @@ export default function QuizManagerScreen() {
 
   const updateTitle = (title: string) => {
     if (draft) setDraft({ ...draft, title });
+  };
+
+  const updateDeadline = (text: string) => {
+    if (draft) setDraft({ ...draft, available_until: text });
   };
 
   const updateQuestion = (index: number, field: keyof EditableQuestion, value: string | string[]) => {
@@ -323,6 +368,18 @@ export default function QuizManagerScreen() {
     setIsSaving(true);
     try {
       const token = await getToken();
+
+      let deadlineIso: string | null = null;
+      if (draft.available_until.trim()) {
+        const parsed = parseDeadlineInput(draft.available_until);
+        if (!parsed) {
+          Alert.alert('Invalid Deadline', 'Enter the deadline as YYYY-MM-DD HH:MM (24-hour), or leave it blank.');
+          setIsSaving(false);
+          return;
+        }
+        deadlineIso = parsed.toISOString();
+      }
+
       const res = await fetch(`${API_BASE_URL}/ai/quizzes/${draft.id}/`, {
         method: 'PATCH',
         headers: {
@@ -331,6 +388,7 @@ export default function QuizManagerScreen() {
         },
         body: JSON.stringify({
           title: draft.title.trim(),
+          available_until: deadlineIso,
           questions: draft.questions.map((q) => ({
             id: q.id,
             question_text: q.question_text.trim(),
@@ -408,6 +466,11 @@ export default function QuizManagerScreen() {
                       <Text style={styles.quizCardMeta}>
                         {q.questions?.length || 0} questions · {q.quiz_type}
                       </Text>
+                      {q.available_until ? (
+                        <Text style={[styles.quizCardMeta, { color: COLORS.warning }]}>
+                          Closes {new Date(q.available_until).toLocaleString()}
+                        </Text>
+                      ) : null}
                       {q.course != null && (
                         <Text style={styles.quizCardMeta}>
                           {courses.find((c) => c.id === q.course)?.name ?? `Class #${q.course}`}
@@ -575,6 +638,18 @@ export default function QuizManagerScreen() {
                   onChangeText={setInstructions}
                 />
 
+                <Text style={styles.fieldLabel}>Deadline (Optional) · YYYY-MM-DD HH:MM</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g. 2026-10-01 23:59"
+                  placeholderTextColor={COLORS.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  value={availableUntil}
+                  onChangeText={setAvailableUntil}
+                />
+                <Text style={styles.deadlineHint}>Quiz closes at this time — students can&apos;t take it after. Leave blank for no deadline.</Text>
+
                 <TouchableOpacity style={styles.generateBtn} activeOpacity={0.85} onPress={handleGenerateQuiz}>
                   <Ionicons name="sparkles" size={16} color="white" />
                   <Text style={styles.generateBtnText}>Generate Quiz</Text>
@@ -667,6 +742,16 @@ export default function QuizManagerScreen() {
                   onChangeText={updateTitle}
                   placeholder="Quiz title"
                   placeholderTextColor={COLORS.textMuted}
+                />
+                <Text style={styles.editorLabel}>Deadline (Optional) · YYYY-MM-DD HH:MM</Text>
+                <TextInput
+                  style={[styles.editorInput, { marginBottom: 4 }]}
+                  value={draft.available_until}
+                  onChangeText={updateDeadline}
+                  placeholder="e.g. 2026-10-01 23:59 — blank = no deadline"
+                  placeholderTextColor={COLORS.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
                 />
                 <Text style={styles.editorMeta}>
                   {draft.questions.length} questions Â· {draft.quiz_type} Â· Tap an option to mark the correct answer
@@ -911,6 +996,7 @@ const styles = StyleSheet.create({
   quizCardTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
   quizCardTitle: { fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary, marginBottom: 3 },
   quizCardMeta: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textSecondary },
+  deadlineHint: { fontSize: 11, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 6, marginBottom: 4, lineHeight: 16 },
   quizCardActions: { flexDirection: 'row', gap: 22, paddingTop: 12, marginTop: 12, borderTopWidth: 1, borderTopColor: COLORS.border },
   quizActionBtn: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   quizActionText: { fontSize: 12.5, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.purplePrimary },

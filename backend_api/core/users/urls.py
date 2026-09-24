@@ -51,6 +51,11 @@ urlpatterns = [
     path('activities/', views.MyClassActivitiesView.as_view(), name='my_activities'),
     path('activities/<int:activity_id>/', views.ClassActivityDetailView.as_view(), name='activity_detail'),
 
+    # --- Task Submissions ---
+    path('tasks/<int:activity_id>/submit/', views.TaskSubmissionView.as_view(), name='task_submit'),
+    path('tasks/<int:activity_id>/submissions/', views.TaskSubmissionsView.as_view(), name='task_submissions'),
+    path('tasks/<int:activity_id>/submissions/<int:submission_id>/', views.TaskSubmissionDetailView.as_view(), name='task_submission_detail'),
+
     # --- Learning Path ---
     path('courses/<int:course_id>/topics/', views.CourseTopicsView.as_view(), name='course_topics'),
     path('courses/<int:course_id>/path/', views.CoursePathView.as_view(), name='course_path'),

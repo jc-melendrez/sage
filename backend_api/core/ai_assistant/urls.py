@@ -8,4 +8,5 @@ urlpatterns = [
     path('generate-quiz/', views.GenerateQuizView.as_view(), name='generate_quiz'),
     path('quizzes/', views.QuizListView.as_view(), name='quiz_list'),
     path('quizzes/<int:quiz_id>/', views.QuizDetailView.as_view(), name='quiz_detail'),
+    path('quizzes/<int:quiz_id>/attempts/', views.QuizAttemptView.as_view(), name='quiz_attempt'),
 ]

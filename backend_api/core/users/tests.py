@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 from datetime import date, timedelta
@@ -11,7 +12,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, Topic, User
+from .models import Activity, Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, TaskSubmission, Topic, User
 from . import gamification
 from . import views as users_views
 
@@ -352,6 +353,84 @@ class GamificationServiceTests(TestCase):
         self.assertTrue(result['leveled_up'])
         self.assertEqual(self.user.level, 5)
         self.assertTrue(Badge.objects.filter(user=self.user, name='Level 5').exists())
+
+
+class ActivityFeedTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='feeduser',
+            password='pass12345',
+            role='student',
+        )
+        self.client = APIClient()
+
+    def test_quiz_completion_logs_activity(self):
+        gamification.record_quiz_completion(self.user, score=4, total=5)
+        activity = Activity.objects.get(user=self.user)
+        self.assertEqual(activity.kind, 'quiz')
+        self.assertEqual(activity.activity_type, 'quiz')
+        self.assertEqual(activity.xp_earned, 20)
+        self.assertEqual(activity.description, 'Scored 4/5')
+
+    def test_perfect_quiz_logs_activity(self):
+        gamification.record_quiz_completion(self.user, score=5, total=5)
+        activity = Activity.objects.get(user=self.user)
+        self.assertIn('Perfect', activity.description)
+        self.assertEqual(activity.xp_earned, 50)
+
+    def test_course_quiz_logs_course_context(self):
+        course = Course.objects.create(name='Algebra', educator=self.user)
+        gamification.record_quiz_completion(self.user, score=4, total=4, course=course)
+        activity = Activity.objects.get(user=self.user)
+        self.assertEqual(activity.course_name, 'Algebra')
+        self.assertEqual(activity.payload, {'route': f'/course/{course.id}'})
+        self.assertIn('Algebra', activity.title)
+
+    def test_lesson_pass_logs_only_on_first_pass(self):
+        gamification.record_lesson_completion(self.user, 'course-1', 1, score=8, total=10, passed=True)
+        self.assertEqual(Activity.objects.filter(user=self.user).count(), 1)
+        gamification.record_lesson_completion(self.user, 'course-1', 1, score=10, total=10, passed=True)
+        self.assertEqual(Activity.objects.filter(user=self.user).count(), 1)
+
+    def test_failed_lesson_does_not_log(self):
+        gamification.record_lesson_completion(self.user, 'course-1', 1, score=3, total=10, passed=False)
+        self.assertFalse(Activity.objects.filter(user=self.user).exists())
+
+    def test_daily_checkin_logs_once_per_day(self):
+        gamification.record_daily_checkin(self.user)
+        self.assertEqual(Activity.objects.filter(user=self.user, kind='checkin').count(), 1)
+        # Same-day re-check-in awards nothing and logs nothing extra.
+        gamification.record_daily_checkin(self.user)
+        self.assertEqual(Activity.objects.filter(user=self.user, kind='checkin').count(), 1)
+
+    def test_game_finish_logs_activity(self):
+        gamification.record_game_finish(self.user, 1, room_code='ABC123')
+        activity = Activity.objects.get(user=self.user)
+        self.assertEqual(activity.kind, 'game')
+        self.assertEqual(activity.xp_earned, 100)
+        self.assertEqual(activity.payload, {'route': '/games'})
+        self.assertIn('ABC123', activity.title)
+
+    def test_activity_endpoint_returns_newest_first_with_meta(self):
+        gamification.record_quiz_completion(self.user, score=3, total=5)
+        gamification.record_daily_checkin(self.user)
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get(reverse('user_activities', args=[self.user.id]))
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data
+        self.assertEqual(len(data), 2)
+        self.assertEqual(data[0]['kind'], 'checkin')
+        self.assertEqual(data[1]['kind'], 'quiz')
+        self.assertTrue(all('created_at' in row for row in data))
+        self.assertEqual(data[1]['xp_earned'], 15)
+
+    def test_activity_pruned_to_cap(self):
+        for i in range(gamification.MAX_ACTIVITY_PER_USER + 10):
+            gamification.log_activity(self.user, kind='other', title=f'activity-{i}')
+        self.assertEqual(
+            Activity.objects.filter(user=self.user).count(),
+            gamification.MAX_ACTIVITY_PER_USER,
+        )
 
 
 class GamificationEndpointTests(TestCase):
@@ -1517,6 +1596,136 @@ class ClassActivityAPITests(APITestCase):
         self.assertEqual(resp.data, [])
 
 
+class TaskSubmissionAPITests(APITestCase):
+    """Tasks (kind='task') with student file submissions."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='task-teacher', password='pass123', role='educator',
+            first_name='Task', last_name='Teacher',
+        )
+        self.student = User.objects.create_user(
+            username='task-student', password='pass123', role='student',
+            first_name='Task', last_name='Student',
+        )
+        self.other = User.objects.create_user(
+            username='task-outsider', password='pass123', role='student',
+        )
+        self.course = Course.objects.create(name='English', educator=self.educator)
+        self.course.students.add(self.student)
+        self.task = ClassActivity.objects.create(
+            course=self.course, kind='task', title='Essay on climate', status='published',
+            note='Write a one-page essay.',
+        )
+
+    def _submit(self, user, content=b'hello world'):
+        self.client.force_authenticate(user=user)
+        return self.client.post(
+            reverse('task_submit', args=[self.task.id]),
+            {'file': SimpleUploadedFile('essay.txt', content, content_type='text/plain')},
+            format='multipart',
+        )
+
+    def test_educator_creates_task(self):
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.post(
+            reverse('course_activities', args=[self.course.id]),
+            {'kind': 'task', 'title': 'Book report', 'note': 'Summarize chapters 1-3'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['kind'], 'task')
+        self.assertEqual(ClassActivity.objects.filter(kind='task').count(), 2)
+
+    def test_student_submits_file(self):
+        resp = self._submit(self.student)
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['file_name'], 'essay.txt')
+        self.assertEqual(resp.data['file_mime'], 'text/plain')
+        self.assertEqual(resp.data['file_size'], len(b'hello world'))
+        self.assertIn('file_data', resp.data)
+        self.assertEqual(resp.data['student_name'], 'Task Student')
+
+        # submission_count on the activity reflects it
+        self.assertEqual(self.task.submissions.count(), 1)
+
+    def test_resubmission_replaces_file(self):
+        self._submit(self.student)
+        resp = self._submit(self.student, content=b'new version')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.task.submissions.count(), 1)
+        self.assertEqual(resp.data['file_size'], len(b'new version'))
+
+    def test_student_can_read_own_submission(self):
+        self._submit(self.student)
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.get(reverse('task_submit', args=[self.task.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['file_name'], 'essay.txt')
+        self.assertIn('file_data', resp.data)
+
+    def test_no_submission_returns_null(self):
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.get(reverse('task_submit', args=[self.task.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.data)
+
+    def test_educator_lists_submissions_without_file_bytes(self):
+        self._submit(self.student)
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(reverse('task_submissions', args=[self.task.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data[0]['student_name'], 'Task Student')
+        self.assertNotIn('file_data', resp.data[0])
+
+    def test_educator_fetches_single_submission_with_file(self):
+        self._submit(self.student)
+        sub = self.task.submissions.get()
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(reverse('task_submission_detail', args=[self.task.id, sub.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('file_data', resp.data)
+        self.assertEqual(resp.data['file_name'], 'essay.txt')
+
+    def test_student_cannot_list_submissions(self):
+        self._submit(self.student)
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.get(reverse('task_submissions', args=[self.task.id]))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_non_member_cannot_submit(self):
+        resp = self._submit(self.other)
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.task.submissions.count(), 0)
+
+    def test_educator_cannot_submit_own_task(self):
+        resp = self._submit(self.educator)
+        self.assertEqual(resp.status_code, 403)
+
+    def test_submit_requires_file(self):
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.post(reverse('task_submit', args=[self.task.id]), {}, format='multipart')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_non_task_kind_rejects_submission(self):
+        quiz = ClassActivity.objects.create(course=self.course, kind='quiz', title='Q')
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.post(
+            reverse('task_submit', args=[quiz.id]),
+            {'file': SimpleUploadedFile('q.txt', b'x', content_type='text/plain')},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_oversized_file_rejected(self):
+        big = b'x' * (TaskSubmission.MAX_FILE_SIZE + 1)
+        resp = self._submit(self.student, content=big)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.task.submissions.count(), 0)
+
+
 class NodeCreateCoercionTests(APITestCase):
     """AI-generated nodes can carry float numerics / off-schema types.
     The serializer must coerce them instead of rejecting the whole save."""
@@ -1706,3 +1915,310 @@ class TopicUpdateTests(APITestCase):
         resp = self.client.delete(reverse('topic_update', args=[self.topic.id]))
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(Topic.objects.filter(id=self.topic.id).count(), 1)
+
+
+# --- GenerateTopicView: deterministic mix, phase ordering, provenance ---
+
+
+class GenerateTopicStructureTests(TestCase):
+    """Pure logic tests for the node-mix, phase-ordering and provenance helpers."""
+
+    def _node(self, node_type, title):
+        return {
+            'node_type': node_type,
+            'title': title,
+            'description': '',
+            'content_json': {},
+            'xp_reward': 25,
+            'required_score': 70,
+            'estimated_minutes': 5,
+        }
+
+    def _learn(self, blocks):
+        return {
+            'node_type': 'learn',
+            'title': 'L',
+            'description': '',
+            'content_json': {'blocks': blocks},
+            'xp_reward': 25,
+            'required_score': 70,
+            'estimated_minutes': 5,
+        }
+
+    def _block(self, btype, title, content):
+        return {'type': btype, 'title': title, 'content': content}
+
+    def _practice(self, questions):
+        return {
+            'node_type': 'practice',
+            'title': 'P',
+            'description': '',
+            'content_json': {'questions': questions},
+            'xp_reward': 25,
+            'required_score': 70,
+            'estimated_minutes': 5,
+        }
+
+    def test_node_mix_table(self):
+        expected = {
+            2: {'learn': 1, 'practice': 1, 'mastery': 0},
+            3: {'learn': 1, 'practice': 1, 'mastery': 1},
+            4: {'learn': 2, 'practice': 1, 'mastery': 1},
+            5: {'learn': 2, 'practice': 2, 'mastery': 1},
+            6: {'learn': 3, 'practice': 2, 'mastery': 1},
+        }
+        for count, mix in expected.items():
+            with self.subTest(count=count):
+                self.assertEqual(users_views._node_mix(count), mix)
+        # learn >= practice and the split always sums to the requested count.
+        for count in range(2, 7):
+            mix = users_views._node_mix(count)
+            self.assertGreaterEqual(mix['learn'], mix['practice'])
+            self.assertEqual(sum(mix.values()), count)
+
+    def test_phase_ordering_valid_sequences(self):
+        valid = [
+            ['learn', 'practice'],
+            ['learn', 'practice', 'mastery'],
+            ['learn', 'learn', 'practice', 'mastery'],
+            ['learn', 'learn', 'practice', 'practice', 'mastery'],
+            ['learn', 'learn', 'learn', 'practice', 'practice', 'mastery'],
+        ]
+        for seq in valid:
+            with self.subTest(seq=seq):
+                nodes = [self._node(t, t) for t in seq]
+                self.assertTrue(users_views._validate_phase_ordering(nodes))
+
+    def test_phase_ordering_invalid_sequences(self):
+        invalid = [
+            ['learn', 'practice', 'learn'],
+            ['learn', 'mastery', 'practice'],
+            ['practice', 'learn', 'mastery'],
+            ['learn', 'mastery', 'learn'],
+            ['practice'],
+            ['mastery'],
+            [],
+        ]
+        for seq in invalid:
+            with self.subTest(seq=seq):
+                self.assertFalse(users_views._validate_phase_ordering([self._node(t, t) for t in seq]))
+
+    def test_stable_sort_preserves_within_phase_order(self):
+        nodes = [
+            self._node('mastery', 'M1'),
+            self._node('learn', 'L1'),
+            self._node('practice', 'P1'),
+            self._node('learn', 'L2'),
+            self._node('mastery', 'M2'),
+        ]
+        sorted_nodes = users_views._stable_sort_nodes(nodes)
+        self.assertEqual([n['title'] for n in sorted_nodes], ['L1', 'L2', 'P1', 'M1', 'M2'])
+
+    def test_provenance_valid(self):
+        learn1 = self._learn([self._block('concept', 'The Water Cycle', 'Evaporation turns water to vapor.')])
+        learn2 = self._learn([self._block('example', 'Boiling Pots', 'Steam from a pot is evaporation.')])
+        q = {
+            'question': 'What does evaporation do?',
+            'options': ['Turns water to vapor', 'Freezes water', 'Condenses vapor', 'Melts ice'],
+            'correct_answer': 'Turns water to vapor',
+            'explanation': 'Evaporation turns water to vapor.',
+            'based_on': 'Learn 2 — Boiling Pots',
+        }
+        ok, detail = users_views._validate_provenance([learn1, learn2, self._practice([q])])
+        self.assertTrue(ok, detail)
+
+    def test_provenance_title_match_is_case_insensitive(self):
+        learn = self._learn([self._block('concept', 'The Water Cycle', 'Evaporation turns water to vapor.')])
+        q = {
+            'question': 'Q', 'options': ['A', 'B', 'C', 'D'], 'correct_answer': 'A',
+            'based_on': 'Learn 1 — the water cycle',
+        }
+        ok, detail = users_views._validate_provenance([learn, self._practice([q])])
+        self.assertTrue(ok, detail)
+
+    def test_provenance_uses_learn_ordinal_not_array_position(self):
+        # A non-learn node between learn nodes must not shift the ordinal.
+        learn1 = self._learn([self._block('concept', 'Alpha', 'content one')])
+        other = self._node('challenge', 'C')
+        learn2 = self._learn([self._block('concept', 'Beta', 'content two')])
+        q = {
+            'question': 'Q', 'options': ['A', 'B', 'C', 'D'], 'correct_answer': 'A',
+            'based_on': 'Learn 2 — Beta',
+        }
+        ok, detail = users_views._validate_provenance([learn1, other, learn2, self._practice([q])])
+        self.assertTrue(ok, detail)
+
+    def test_provenance_missing_based_on(self):
+        learn = self._learn([self._block('concept', 'The Water Cycle', 'content')])
+        q = {'question': 'Q', 'options': ['A', 'B', 'C', 'D'], 'correct_answer': 'A'}
+        ok, _ = users_views._validate_provenance([learn, self._practice([q])])
+        self.assertFalse(ok)
+
+    def test_provenance_bad_format(self):
+        learn = self._learn([self._block('concept', 'The Water Cycle', 'content')])
+        q = {'question': 'Q', 'options': ['A', 'B', 'C', 'D'], 'correct_answer': 'A', 'based_on': 'Water Cycle'}
+        ok, _ = users_views._validate_provenance([learn, self._practice([q])])
+        self.assertFalse(ok)
+
+    def test_provenance_out_of_range_ordinal(self):
+        learn = self._learn([self._block('concept', 'The Water Cycle', 'content')])
+        q = {'question': 'Q', 'options': ['A', 'B', 'C', 'D'], 'correct_answer': 'A', 'based_on': 'Learn 3 — The Water Cycle'}
+        ok, _ = users_views._validate_provenance([learn, self._practice([q])])
+        self.assertFalse(ok)
+
+    def test_provenance_unknown_block_title(self):
+        learn = self._learn([self._block('concept', 'The Water Cycle', 'content')])
+        q = {'question': 'Q', 'options': ['A', 'B', 'C', 'D'], 'correct_answer': 'A', 'based_on': 'Learn 1 — Evaporation'}
+        ok, _ = users_views._validate_provenance([learn, self._practice([q])])
+        self.assertFalse(ok)
+
+    def test_provenance_rejects_non_teaching_block(self):
+        # Interaction/summary blocks have no title and cannot be provenance targets.
+        learn = self._learn([{'type': 'summary', 'points': ['a', 'b']}])
+        q = {'question': 'Q', 'options': ['A', 'B', 'C', 'D'], 'correct_answer': 'A', 'based_on': 'Learn 1 — Anything'}
+        ok, _ = users_views._validate_provenance([learn, self._practice([q])])
+        self.assertFalse(ok)
+
+    def test_provenance_rejects_empty_learn_content(self):
+        learn = self._learn([])
+        q = {'question': 'Q', 'options': ['A', 'B', 'C', 'D'], 'correct_answer': 'A', 'based_on': 'Learn 1 — The Water Cycle'}
+        ok, _ = users_views._validate_provenance([learn, self._practice([q])])
+        self.assertFalse(ok)
+
+    def test_provenance_rejects_empty_block_content(self):
+        learn = self._learn([self._block('concept', 'The Water Cycle', '  ')])
+        q = {'question': 'Q', 'options': ['A', 'B', 'C', 'D'], 'correct_answer': 'A', 'based_on': 'Learn 1 — The Water Cycle'}
+        ok, _ = users_views._validate_provenance([learn, self._practice([q])])
+        self.assertFalse(ok)
+
+
+class GenerateTopicViewTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='gen-educator', password='pass123', role='educator',
+        )
+        self.client.force_authenticate(user=self.educator)
+        self.course = Course.objects.create(name='Gen Course', educator=self.educator, description='material')
+
+    class FakeGroqResponse:
+        def __init__(self, content, status_code=200):
+            self.status_code = status_code
+            self.text = content
+            self._content = content
+
+        def json(self):
+            return {'choices': [{'message': {'content': self._content}}]}
+
+    def _post(self, raw_content):
+        fake = lambda payload, api_key, max_retries=3: self.FakeGroqResponse(raw_content)
+        upload = SimpleUploadedFile('material.txt', b'Water evaporates into vapor.', content_type='text/plain')
+        with patch.object(users_views, 'groq_chat_completion', side_effect=fake):
+            return self.client.post(
+                reverse('generate_topic', args=[self.course.id]),
+                {'file': upload},
+                format='multipart',
+            )
+
+    def _valid_topic(self):
+        return {
+            'title': 'Water',
+            'description': 'How water moves',
+            'nodes': [
+                {
+                    'node_type': 'learn', 'title': 'Water Basics', 'description': '',
+                    'xp_reward': 25, 'required_score': 70, 'estimated_minutes': 5,
+                    'content_json': {'blocks': [
+                        {'type': 'concept', 'title': 'The Water Cycle', 'content': 'Evaporation turns liquid water into vapor.'},
+                        {'type': 'example', 'title': 'Boiling Pots', 'content': 'Steam rising from a boiling pot is evaporation.'},
+                    ]},
+                },
+                {
+                    'node_type': 'learn', 'title': 'Precipitation', 'description': '',
+                    'xp_reward': 25, 'required_score': 70, 'estimated_minutes': 5,
+                    'content_json': {'blocks': [
+                        {'type': 'concept', 'title': 'Precipitation', 'content': 'Precipitation is water falling from clouds.'},
+                    ]},
+                },
+                {
+                    'node_type': 'practice', 'title': 'Practice', 'description': '',
+                    'xp_reward': 30, 'required_score': 70, 'estimated_minutes': 5,
+                    'content_json': {'questions': [
+                        {'question': 'What does evaporation do?', 'options': ['Turns water to vapor', 'Freezes water', 'Condenses vapor', 'Melts ice'], 'correct_answer': 'Turns water to vapor', 'explanation': 'Evaporation turns liquid water into vapor.', 'based_on': 'Learn 1 — The Water Cycle'},
+                        {'question': 'What is precipitation?', 'options': ['Water falling from clouds', 'Water turning to vapor', 'Ice melting', 'Water boiling'], 'correct_answer': 'Water falling from clouds', 'explanation': 'Precipitation is water falling from clouds.', 'based_on': 'Learn 2 — Precipitation'},
+                    ]},
+                },
+                {
+                    'node_type': 'mastery', 'title': 'Mastery', 'description': '',
+                    'xp_reward': 40, 'required_score': 80, 'estimated_minutes': 8,
+                    'content_json': {'questions': [
+                        {'question': 'How do evaporation and precipitation connect?', 'options': ['Water goes up then falls back', 'Nothing connects them', 'They are the same', 'Only evaporation exists'], 'correct_answer': 'Water goes up then falls back', 'explanation': 'Evaporated water becomes precipitation.', 'based_on': 'Learn 1 — The Water Cycle'},
+                    ]},
+                },
+            ],
+        }
+
+    def test_generate_topic_ok(self):
+        resp = self._post(json.dumps(self._valid_topic()))
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['title'], 'Water')
+        self.assertEqual([n['node_type'] for n in data['nodes']], ['learn', 'learn', 'practice', 'mastery'])
+        q = data['nodes'][2]['content_json']['questions'][0]
+        self.assertEqual(q['based_on'], 'Learn 1 — The Water Cycle')
+
+    def test_generate_topic_stable_sorts_valid_sequence(self):
+        topic = self._valid_topic()
+        # Swap the two learn nodes: the phase order is still valid, so the
+        # backend must accept it and keep the generated learn order intact.
+        topic['nodes'][0], topic['nodes'][1] = topic['nodes'][1], topic['nodes'][0]
+        # Re-point based_on to the new ordinals so provenance stays valid.
+        for node in topic['nodes'][2:]:
+            for q in node['content_json']['questions']:
+                if q['based_on'] == 'Learn 1 — The Water Cycle':
+                    q['based_on'] = 'Learn 2 — The Water Cycle'
+                elif q['based_on'] == 'Learn 2 — Precipitation':
+                    q['based_on'] = 'Learn 1 — Precipitation'
+        resp = self._post(json.dumps(topic))
+        self.assertEqual(resp.status_code, 200)
+        titles = [n['title'] for n in resp.json()['nodes']]
+        self.assertEqual(titles, ['Precipitation', 'Water Basics', 'Practice', 'Mastery'])
+
+    def test_invalid_phase_order_rejected_before_sort(self):
+        topic = self._valid_topic()
+        # Learn node after a practice node. Sorting must NOT rescue it.
+        topic['nodes'].append(topic['nodes'][0])
+        topic['nodes'].remove(topic['nodes'][0])
+        resp = self._post(json.dumps(topic))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('ordering', resp.json()['error'].lower())
+
+    def test_missing_based_on_rejected(self):
+        topic = self._valid_topic()
+        del topic['nodes'][2]['content_json']['questions'][0]['based_on']
+        resp = self._post(json.dumps(topic))
+        self.assertEqual(resp.status_code, 400)
+
+    def test_bad_based_on_index_rejected(self):
+        topic = self._valid_topic()
+        topic['nodes'][2]['content_json']['questions'][0]['based_on'] = 'Learn 9 — The Water Cycle'
+        resp = self._post(json.dumps(topic))
+        self.assertEqual(resp.status_code, 400)
+
+    def test_unknown_based_on_title_rejected(self):
+        topic = self._valid_topic()
+        topic['nodes'][2]['content_json']['questions'][0]['based_on'] = 'Learn 1 — Evaporation'
+        resp = self._post(json.dumps(topic))
+        self.assertEqual(resp.status_code, 400)
+
+    def test_malformed_output_rejected(self):
+        resp = self._post('not json at all')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_missing_nodes_rejected(self):
+        resp = self._post(json.dumps({'title': 'Water'}))
+        self.assertEqual(resp.status_code, 400)
+
+    def test_empty_nodes_rejected(self):
+        resp = self._post(json.dumps({'title': 'Water', 'nodes': []}))
+        self.assertEqual(resp.status_code, 400)

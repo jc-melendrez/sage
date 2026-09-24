@@ -4,7 +4,7 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 
-from users.models import User
+from users.models import Activity, User
 from ai_assistant.models import Quiz, QuizQuestion
 from game.test_firestore_fake import FakeFirestoreClient
 
@@ -261,3 +261,30 @@ class TeamModeGameTests(TestCase):
         room = room_ref.get().to_dict()
         self.assertEqual(room['status'], 'finished')
         self.assertNotIn('teamResults', room)
+
+    def test_finish_logs_game_activity(self):
+        self.client.force_authenticate(user=self.host)
+        self.client.post(reverse('offline-results'), {
+            'sessionKey': 'sess-1',
+            'quizTitle': 'Math Sprint',
+            'score': 80,
+            'correctCount': 4,
+            'totalQuestions': 5,
+        }, format='json')
+        activity = Activity.objects.get(user=self.host)
+        self.assertEqual(activity.kind, 'offline_game')
+        self.assertIn('Math Sprint', activity.title)
+        self.assertEqual(activity.description, '4/5 correct · 80 pts')
+
+    def test_offline_result_repost_does_not_duplicate_activity(self):
+        payload = {
+            'sessionKey': 'sess-1',
+            'quizTitle': 'Math Sprint',
+            'score': 80,
+            'correctCount': 4,
+            'totalQuestions': 5,
+        }
+        self.client.force_authenticate(user=self.host)
+        self.client.post(reverse('offline-results'), payload, format='json')
+        self.client.post(reverse('offline-results'), payload, format='json')
+        self.assertEqual(Activity.objects.filter(user=self.host, kind='offline_game').count(), 1)

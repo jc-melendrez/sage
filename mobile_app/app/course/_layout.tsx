@@ -8,6 +8,7 @@ export default function CourseLayout() {
       <Stack.Screen name="topic/[topicId]" />
       <Stack.Screen name="node/[nodeId]" />
       <Stack.Screen name="quiz/[quizId]" />
+      <Stack.Screen name="task/[taskId]" />
     </Stack>
   );
 }

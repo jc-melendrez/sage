@@ -117,10 +117,17 @@ class Session(models.Model):
 
 class Activity(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='activities')
+    kind = models.CharField(max_length=20, default='other')  # quiz | lesson | checkin | game | offline_game | other
     title = models.CharField(max_length=255)
     description = models.TextField()
     activity_type = models.CharField(max_length=50)
+    xp_earned = models.IntegerField(default=0)
+    course_name = models.CharField(max_length=255, blank=True, default='')
+    payload = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
 
     def __str__(self):
         return f"{self.user.username} - {self.title}"
@@ -212,6 +219,7 @@ class ClassActivity(models.Model):
         ('quiz', 'Quiz'),
         ('lesson', 'Lesson'),
         ('game', 'Live Game'),
+        ('task', 'Task'),
     ]
     STATUS_CHOICES = [
         ('draft', 'Draft'),
@@ -235,6 +243,33 @@ class ClassActivity(models.Model):
 
     def __str__(self):
         return f"{self.course.name} - {self.title} ({self.status})"
+
+
+class TaskSubmission(models.Model):
+    """A student's file submission for a task-kind class activity.
+
+    A student may submit at most once per task (unique on activity + student);
+    resubmitting replaces the previous file. The file bytes are stored in the
+    database so uploads survive redeploys (no filesystem storage).
+    """
+
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+    activity = models.ForeignKey(ClassActivity, on_delete=models.CASCADE, related_name='submissions')
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='task_submissions')
+    file_name = models.CharField(max_length=255)
+    file_mime = models.CharField(max_length=120, default='application/octet-stream')
+    file_size = models.IntegerField(default=0)
+    file_data = models.BinaryField()
+    submitted_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('activity', 'student')
+        ordering = ['submitted_at']
+
+    def __str__(self):
+        return f"{self.student.username} -> {self.activity.title} ({self.file_name})"
 
 
 # --- Lesson Progress (persisted course progression) ---
