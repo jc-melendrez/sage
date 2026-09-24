@@ -6,6 +6,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
 import { LinearGradient } from 'expo-linear-gradient';
+import Markdown from '@ronradtke/react-native-markdown-display';
 
 // 🌟 Enable Layout Animations for Android
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -46,6 +47,83 @@ const FONTS = {
   medium: 'Montserrat-Medium',
   regular: 'Montserrat-Regular',
 };
+
+// 🎨 Markdown styles for SAGE AI replies — mirrored to the app theme
+const markdownStyles = StyleSheet.create({
+  body: {
+    color: COLORS.textPrimary,
+    fontFamily: FONTS.regular,
+    fontSize: 14,
+    lineHeight: 21,
+  },
+  text: {
+    color: COLORS.textPrimary,
+    fontFamily: FONTS.regular,
+    fontSize: 14,
+  },
+  paragraph: {
+    marginTop: 2,
+    marginBottom: 6,
+  },
+  heading1: { fontSize: 21, fontFamily: FONTS.extraBold, color: COLORS.purpleDeep, marginTop: 12, marginBottom: 6 },
+  heading2: { fontSize: 18, fontFamily: FONTS.extraBold, color: COLORS.purpleDeep, marginTop: 10, marginBottom: 4 },
+  heading3: { fontSize: 16, fontFamily: FONTS.bold, color: COLORS.purpleDeep, marginTop: 10, marginBottom: 4 },
+  heading4: { fontSize: 15, fontFamily: FONTS.bold, color: COLORS.purpleDeep, marginTop: 8, marginBottom: 4 },
+  heading5: { fontSize: 14, fontFamily: FONTS.bold, color: COLORS.purpleDeep, marginTop: 8, marginBottom: 3 },
+  heading6: { fontSize: 13, fontFamily: FONTS.bold, color: COLORS.purpleDeep, marginTop: 6, marginBottom: 3 },
+  strong: { fontFamily: FONTS.bold },
+  em: { fontFamily: FONTS.medium, fontStyle: 'italic' },
+  s: { textDecorationLine: 'line-through' },
+  link: { color: COLORS.purplePrimary, textDecorationLine: 'underline' },
+  blockquote: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.purpleLight,
+    backgroundColor: COLORS.bgSecondary,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    marginVertical: 8,
+  },
+  code_inline: {
+    fontFamily: 'monospace',
+    fontSize: 13,
+    color: COLORS.purpleDark,
+    backgroundColor: COLORS.bgSecondary,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  code_block: {
+    fontFamily: 'monospace',
+    fontSize: 13,
+    color: COLORS.textPrimary,
+    backgroundColor: COLORS.bgSecondary,
+    padding: 12,
+    borderRadius: 8,
+    marginVertical: 8,
+  },
+  fence: {
+    fontFamily: 'monospace',
+    fontSize: 13,
+    color: COLORS.textPrimary,
+    backgroundColor: COLORS.bgSecondary,
+    padding: 12,
+    borderRadius: 8,
+    marginVertical: 8,
+  },
+  bullet_list: { marginVertical: 4 },
+  ordered_list: { marginVertical: 4 },
+  list_item: { marginBottom: 4 },
+  bullet_list_icon: { color: COLORS.purplePrimary, fontFamily: FONTS.bold, fontSize: 14 },
+  ordered_list_icon: { color: COLORS.purplePrimary, fontFamily: FONTS.bold, fontSize: 14 },
+  hr: {
+    backgroundColor: COLORS.border,
+    height: StyleSheet.hairlineWidth * 2,
+    marginVertical: 12,
+  },
+  tableHeaderCell: { fontFamily: FONTS.bold, color: COLORS.purpleDeep },
+  tableCell: { fontFamily: FONTS.regular, color: COLORS.textPrimary },
+});
 
 interface Message {
   id: number;
@@ -436,12 +514,13 @@ export default function AIAssistantScreen() {
                   <Text style={styles.aiLabel}>SAGE AI</Text>
                 </View>
               )}
-              <Text style={[
-                styles.messageText, 
-                message.type === 'user' ? styles.userMessageText : styles.aiMessageText
-              ]}>
-                {message.text}
-              </Text>
+              {message.type === 'ai' ? (
+                <Markdown style={markdownStyles}>{message.text}</Markdown>
+              ) : (
+                <Text style={[styles.messageText, styles.userMessageText]}>
+                  {message.text}
+                </Text>
+              )}
               <Text style={[
                 styles.messageTime, 
                 message.type === 'user' ? styles.userMessageTime : styles.aiMessageTime
