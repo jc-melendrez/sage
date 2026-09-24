@@ -102,6 +102,13 @@ export default function GameCenterScreen() {
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [currentUserAvatar, setCurrentUserAvatar] = useState<string>('');
   const [currentUserInitial, setCurrentUserInitial] = useState<string>('');
+
+  // Joined room state
+  const [joinedRoom, setJoinedRoom] = useState(false);
+  const [roomStatus, setRoomStatus] = useState<'waiting' | 'active'>('waiting');
+  const [roomMode, setRoomMode] = useState<'classic' | 'group' | null>(null);
+  const [roomHostId, setRoomHostId] = useState<number | string | null>(null);
+  const [teams, setTeams] = useState<any[]>([]);
   const [lanName, setLanName] = useState('Player');
   const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
   const lanHostRef = useRef<LanHostServer | null>(null);
@@ -157,6 +164,37 @@ export default function GameCenterScreen() {
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
+  const animateNumber = useCallback((callback: () => void) => {
+    fadeAnim.setValue(0);
+    scaleAnim.setValue(0.5);
+
+    Animated.parallel([
+      Animated.timing(fadeAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
+      Animated.spring(scaleAnim, { toValue: 1, friction: 4, tension: 40, useNativeDriver: true })
+    ]).start(() => {
+      setTimeout(callback, 200); // Small pause between numbers
+    });
+  }, [fadeAnim, scaleAnim]);
+
+  const startJoinedCountdown = useCallback((code: string) => {
+    setShowCountdown(true);
+    setCountdownValue(3);
+
+    animateNumber(() => {
+      setCountdownValue(2);
+      animateNumber(() => {
+        setCountdownValue(1);
+        animateNumber(() => {
+          setShowCountdown(false);
+          router.replace({
+            pathname: '/game/question' as any,
+            params: { roomCode: code, isHost: 'false' }
+          });
+        });
+      });
+    });
+  }, [animateNumber, router]);
+
   useEffect(() => {
     const unsub = NetInfo.addEventListener(state => {
       setIsOffline(state.isConnected === false || state.isInternetReachable === false);
@@ -187,6 +225,56 @@ export default function GameCenterScreen() {
       });
     return () => unsub();
   }, [roomCode]);
+
+  // Room doc listener for joined players — mode, status, hostId
+  useEffect(() => {
+    if (!joinedRoom || !roomCode) return;
+    const unsub = firestore()
+      .collection('gameRooms')
+      .doc(roomCode)
+      .onSnapshot(snap => {
+        if (!snap.exists) {
+          // Room deleted — reset joined state
+          setJoinedRoom(false);
+          setRoomCode(null);
+          setRoomMode(null);
+          setRoomStatus('waiting');
+          return;
+        }
+        const d = snap.data();
+        if (!d) return;
+        setRoomStatus(d.status ?? 'waiting');
+        setRoomMode(d.mode === 'group' || d.teamMode ? 'group' : 'classic');
+        setRoomHostId(d.hostId ?? null);
+        if (d.status === 'active') {
+          startJoinedCountdown(roomCode);
+        }
+      });
+    return () => unsub();
+  }, [joinedRoom, roomCode, startJoinedCountdown]);
+
+  // Team picker subscription (team mode only) — separate effect
+  useEffect(() => {
+    if (!joinedRoom || !roomCode) return;
+    let unsub: (() => void) | null = null;
+    firestore()
+      .collection('gameRooms')
+      .doc(roomCode)
+      .get()
+      .then(snap => {
+        const d = snap?.data();
+        if (d?.teamMode) {
+          unsub = firestore()
+            .collection('gameRooms')
+            .doc(roomCode)
+            .collection('teams')
+            .onSnapshot(snap => {
+              setTeams(snap?.docs?.map(doc => ({ id: doc.id, ...doc.data() })) ?? []);
+            });
+        }
+      });
+    return () => unsub?.();
+  }, [joinedRoom, roomCode]);
 
   const fetchQuizzes = useCallback(async () => {
     setLoadingQuizzes(true);
@@ -239,9 +327,25 @@ export default function GameCenterScreen() {
     if (modeId === 'classic') {
       setSelectedMode(modeId);
       setActiveTab('custom');
+      // Sync mode to room doc if host has an active room
+      if (roomCode && !joinedRoom) {
+        firestore()
+          .collection('gameRooms')
+          .doc(roomCode)
+          .update({ mode: 'classic' })
+          .catch(() => {});
+      }
     } else if (modeId === 'group') {
       setSelectedMode(modeId);
       setActiveTab('custom');
+      // Sync mode to room doc if host has an active room
+      if (roomCode && !joinedRoom) {
+        firestore()
+          .collection('gameRooms')
+          .doc(roomCode)
+          .update({ mode: 'group' })
+          .catch(() => {});
+      }
     } else if (modeId === 'flashcards') {
       router.push('/flashcards');
     } else {
@@ -303,6 +407,12 @@ export default function GameCenterScreen() {
 
       setRoomCode(data.roomCode);
       setRoomTopic(data.topic || selectedQuiz.title);
+      // Sync host's selected mode to the room doc for joined players
+      firestore()
+        .collection('gameRooms')
+        .doc(data.roomCode)
+        .update({ mode: selectedMode === 'group' ? 'group' : 'classic' })
+        .catch(() => {});
       setShowInviteModal(true); // Show the code immediately
       
     } catch (error: any) {
@@ -466,18 +576,6 @@ export default function GameCenterScreen() {
     runCountdown('OFFLINE', { offline: 'true', quizTitle: selectedQuiz.title }, '/game/offline-play' as any);
   };
 
-  const animateNumber = (callback: () => void) => {
-    fadeAnim.setValue(0);
-    scaleAnim.setValue(0.5);
-    
-    Animated.parallel([
-      Animated.timing(fadeAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
-      Animated.spring(scaleAnim, { toValue: 1, friction: 4, tension: 40, useNativeDriver: true })
-    ]).start(() => {
-      setTimeout(callback, 200); // Small pause between numbers
-    });
-  };
-
   const copyCode = async () => {
     if (roomCode) {
       await Clipboard.setStringAsync(roomCode);
@@ -549,7 +647,13 @@ export default function GameCenterScreen() {
       if (!response.ok) throw new Error(data.error || 'Failed to join room');
       setShowJoinModal(false);
       setJoinCode('');
-      router.push({ pathname: '/game/lobby', params: { roomCode: code, isHost: 'false', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
+      // Stay on Play tab — joined room view
+      setRoomCode(code);
+      setRoomTopic(data.topic || '');
+      setJoinedRoom(true);
+      setRoomMode(data.teamMode ? 'group' : 'classic');
+      setSelectedMode(data.teamMode ? 'group' : 'classic');
+      setActiveTab('presets');
     } catch (error: any) {
       console.warn('Join fell back to LAN after server error', error);
       const joined = await tryJoinLan(code);
@@ -562,6 +666,46 @@ export default function GameCenterScreen() {
     } finally {
       setJoining(false);
     }
+  };
+
+  const handleLeaveRoom = () => {
+    Alert.alert(
+      'Leave Room',
+      'Are you sure you want to leave this room?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Leave',
+          style: 'destructive',
+          onPress: async () => {
+            if (roomCode && currentUserId) {
+              const roomRef = firestore().collection('gameRooms').doc(roomCode);
+              const playerRef = roomRef.collection('players').doc(String(currentUserId));
+              // Get current teamId if any, then remove from team memberIds
+              try {
+                const playerSnap = await playerRef.get();
+                const myTeamId = playerSnap.data()?.teamId;
+                if (myTeamId) {
+                  const teamRef = roomRef.collection('teams').doc(myTeamId);
+                  await teamRef.update({ memberIds: firestore.FieldValue.arrayRemove(String(currentUserId)) });
+                }
+              } catch {}
+              // Delete own player doc
+              await playerRef.delete().catch(() => {});
+            }
+            // Reset joined room state
+            setJoinedRoom(false);
+            setRoomCode(null);
+            setRoomTopic('');
+            setRoomStatus('waiting');
+            setRoomMode(null);
+            setRoomHostId(null);
+            setRoomPlayers([]);
+            setTeams([]);
+          },
+        },
+      ]
+    );
   };
 
   const codeBoxRefs = useRef<any[]>([]);
@@ -581,6 +725,31 @@ export default function GameCenterScreen() {
       next[i - 1] = '';
       setJoinCode(next.join(''));
       codeBoxRefs.current[i - 1]?.focus();
+    }
+  };
+
+  const assignToTeam = async (teamId: string) => {
+    if (!roomCode || !currentUserId) return;
+    const uid = String(currentUserId);
+    const roomRef = firestore().collection('gameRooms').doc(roomCode);
+    // Find current team to remove from memberIds
+    const playerRef = roomRef.collection('players').doc(uid);
+    try {
+      const playerSnap = await playerRef.get();
+      const myTeamId = playerSnap.data()?.teamId;
+      const batch = firestore().batch();
+      if (myTeamId && myTeamId !== teamId) {
+        batch.update(roomRef.collection('teams').doc(myTeamId), {
+          memberIds: firestore.FieldValue.arrayRemove(uid),
+        });
+      }
+      batch.update(roomRef.collection('teams').doc(teamId), {
+        memberIds: firestore.FieldValue.arrayUnion(uid),
+      });
+      batch.update(playerRef, { teamId });
+      await batch.commit();
+    } catch (e) {
+      console.warn('Team assignment failed', e);
     }
   };
 
@@ -655,7 +824,9 @@ export default function GameCenterScreen() {
                     </View>
                     <View style={styles.hostBadges}>
                         <View style={styles.badgeIcon}><Ionicons name="person" size={10} color="white" /></View>
-                        <View style={[styles.badgeIcon, {backgroundColor: COLORS.purpleVibrant}]}><Ionicons name="star" size={10} color="white" /></View>
+                        {!joinedRoom && (
+                          <View style={[styles.badgeIcon, {backgroundColor: COLORS.purpleVibrant}]}><Ionicons name="star" size={10} color="white" /></View>
+                        )}
                     </View>
                     <Text style={styles.avatarName}>YOU</Text>
                 </View>
@@ -670,6 +841,11 @@ export default function GameCenterScreen() {
                                 <Text style={styles.avatarCircleJoinedText}>{(p.displayName || '?').charAt(0).toUpperCase()}</Text>
                             )}
                         </View>
+                        {joinedRoom && String(p.id) === String(roomHostId) && (
+                          <View style={styles.hostBadges}>
+                            <View style={[styles.badgeIcon, {backgroundColor: COLORS.purpleVibrant}]}><Ionicons name="star" size={10} color="white" /></View>
+                          </View>
+                        )}
                         <Text style={styles.avatarName} numberOfLines={1}>{p.displayName || 'Player'}</Text>
                     </View>
                 ))}
@@ -692,15 +868,17 @@ export default function GameCenterScreen() {
             <View style={styles.tabsContainer}>
                 <TouchableOpacity
                     style={activeTab === 'presets' ? styles.tabActive : styles.tabInactive}
-                    onPress={() => setActiveTab('presets')}
+                    onPress={joinedRoom ? undefined : () => setActiveTab('presets')}
                     activeOpacity={0.7}
+                    disabled={joinedRoom}
                 >
                     <Text numberOfLines={1} adjustsFontSizeToFit style={activeTab === 'presets' ? styles.tabTextActive : styles.tabTextInactive}>PRESETS</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                     style={activeTab === 'custom' ? styles.tabActive : styles.tabInactive}
-                    onPress={() => setActiveTab('custom')}
+                    onPress={joinedRoom ? undefined : () => setActiveTab('custom')}
                     activeOpacity={0.7}
+                    disabled={joinedRoom}
                 >
                     <Text numberOfLines={1} adjustsFontSizeToFit style={activeTab === 'custom' ? styles.tabTextActive : styles.tabTextInactive}>CUSTOM SETTINGS</Text>
                 </TouchableOpacity>
@@ -739,18 +917,20 @@ export default function GameCenterScreen() {
                 }
             >
                 {gameModes.map((mode) => {
-                    const isSelected = selectedMode === mode.id;
+                    const isSelected = joinedRoom ? roomMode === mode.id : selectedMode === mode.id;
+                    const isLocked = joinedRoom;
                     return (
                         <TouchableOpacity
                             key={mode.id}
                             style={[
                                 styles.modeCard,
                                 isSelected && styles.modeCardSelected,
-                                !mode.active && styles.modeCardDisabled
+                                !mode.active && styles.modeCardDisabled,
+                                isLocked && styles.modeCardLocked,
                             ]}
-                            onPress={() => handleModePress(mode.id)}
+                            onPress={isLocked ? undefined : () => handleModePress(mode.id)}
                             activeOpacity={0.7}
-                            disabled={!mode.active}
+                            disabled={!mode.active || isLocked}
                         >
                             <View style={[
                                 styles.modeIconBox,
@@ -782,12 +962,52 @@ export default function GameCenterScreen() {
                                 </Text>
                             </View>
                             
-                            {mode.active && (
+                            {mode.active && !isLocked && (
                                 <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+                            )}
+                            {mode.active && isLocked && isSelected && (
+                                <Ionicons name="lock-closed" size={20} color={COLORS.purplePrimary} />
                             )}
                         </TouchableOpacity>
                     );
                 })}
+
+                {/* Team picker for joined players in GROUP MODE */}
+                {joinedRoom && roomMode === 'group' && teams.length > 0 && (
+                  <View style={styles.teamPickerSection}>
+                    <Text style={styles.teamPickerLabel}>PICK YOUR TEAM</Text>
+                    <View style={styles.teamPickerChips}>
+                      {teams.map((team) => {
+                        const myTeamId = roomPlayers.find(
+                          p => String(p.id) === String(currentUserId)
+                        )?.teamId as string | undefined;
+                        const isMyTeam = team.id === myTeamId;
+                        const memberCount = team.memberIds?.length || 0;
+                        return (
+                          <TouchableOpacity
+                            key={team.id}
+                            style={[
+                              styles.teamPickerChip,
+                              isMyTeam && styles.teamPickerChipActive,
+                            ]}
+                            onPress={() => assignToTeam(team.id)}
+                            activeOpacity={0.7}
+                            disabled={roomStatus === 'active'}
+                          >
+                            <Text style={[
+                              styles.teamPickerChipText,
+                              isMyTeam && styles.teamPickerChipTextActive,
+                            ]}>
+                              {team.name || `Team ${team.id}`}
+                              {'\n'}
+                              <Text style={{ fontSize: 10, opacity: 0.7 }}>{memberCount} players</Text>
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                )}
             </ScrollView>
             ) : (
             <ScrollView 
@@ -907,7 +1127,22 @@ export default function GameCenterScreen() {
 
         {/* Bottom Action Bar */}
         <View style={[styles.bottomBar, { paddingBottom: 10 }]}>
-
+            {joinedRoom ? (
+              <>
+                <View style={styles.bottomBarRow}>
+                  <Text style={styles.waitingText}>Waiting for host to start…</Text>
+                </View>
+                <TouchableOpacity
+                    style={styles.actionBtnLeave}
+                    onPress={handleLeaveRoom}
+                    activeOpacity={0.7}
+                >
+                    <Ionicons name="exit" size={20} color={COLORS.danger} style={{marginRight: 8}} />
+                    <Text style={styles.actionBtnLeaveText}>LEAVE</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+            <>
             {/* Row 1: JOIN + INVITE side by side */}
             <View style={styles.bottomBarRow}>
                 {/* JOIN BUTTON — enter a room code */}
@@ -951,6 +1186,8 @@ export default function GameCenterScreen() {
                     </>
                 )}
             </TouchableOpacity>
+            </>
+            )}
         </View>
 
         {/* --- INVITE CODE MODAL --- */}
@@ -1270,6 +1507,9 @@ const styles = StyleSheet.create({
   modeCardDisabled: {
     opacity: 0.6,
   },
+  modeCardLocked: {
+    opacity: 0.75,
+  },
   modeIconBox: {
     width: 50,
     height: 50,
@@ -1378,6 +1618,71 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.extraBold,
     fontSize: 16,
     letterSpacing: 0.5,
+  },
+  waitingText: {
+    flex: 1,
+    color: 'rgba(255,255,255,0.85)',
+    fontFamily: FONTS.semiBold,
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  actionBtnLeave: {
+    width: '100%',
+    height: 50,
+    borderRadius: 12,
+    backgroundColor: 'white',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: COLORS.danger,
+  },
+  actionBtnLeaveText: {
+    color: COLORS.danger,
+    fontFamily: FONTS.extraBold,
+    fontSize: 16,
+    letterSpacing: 0.5,
+  },
+
+  // Team Picker (joined players, group mode)
+  teamPickerSection: {
+    marginTop: 4,
+    paddingHorizontal: 4,
+    paddingBottom: 8,
+  },
+  teamPickerLabel: {
+    fontSize: 12,
+    fontFamily: FONTS.bold,
+    color: COLORS.textSecondary,
+    letterSpacing: 1,
+    marginBottom: 10,
+  },
+  teamPickerChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  teamPickerChip: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: COLORS.border,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  teamPickerChipActive: {
+    backgroundColor: '#F3E8FF',
+    borderColor: COLORS.purplePrimary,
+  },
+  teamPickerChipText: {
+    fontSize: 13,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textPrimary,
+    textAlign: 'center',
+  },
+  teamPickerChipTextActive: {
+    color: COLORS.purpleDeep,
   },
 
   // Modals
