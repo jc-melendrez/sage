@@ -50,7 +50,9 @@ from core.firestore_service import (
     remove_group_member, approve_join_request, reject_join_request,
     send_message, get_messages, generate_join_code,
     toggle_reaction, ALLOWED_REACTIONS,
+    upload_group_attachment, ATTACHMENT_MAX_SIZE,
 )
+from core.s3 import presign_s3_url, attachment_key_prefix
 
 # Windows console (cp1252) crashes when printing Groq/AI output that contains
 # unicode (e.g. arrows, curly quotes). Make print() lossy-tolerant instead.
@@ -797,6 +799,36 @@ class MyGroupsView(APIView):
 
 
 
+class GroupAttachmentUploadView(APIView):
+    """Member-only: upload a file for a group chat message to private S3.
+
+    Returns {key, name, mime, size} that can be attached to a message via the
+    group chat endpoint. `key` is the S3 object key; downloads are served as
+    short-lived presigned URLs through GroupAttachmentLinkView. Multipart with
+    a single 'file' field.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, group_id):
+        group = get_study_group(group_id)
+        if not group:
+            return Response({"error": "Group not found"}, status=404)
+        if request.user.firebase_uid not in (group.get('members') or []):
+            return Response({"error": "You must be a member of this group to upload files"}, status=403)
+
+        upload = request.FILES.get('file')
+        if upload is None:
+            return Response({"error": "file is required"}, status=400)
+        if upload.size > ATTACHMENT_MAX_SIZE:
+            return Response({"error": "Files must be 10 MB or smaller."}, status=413)
+        try:
+            attachment = upload_group_attachment(group_id, upload, upload.name or '')
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        return Response(attachment, status=201)
+
+
 class GroupChatView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -814,22 +846,77 @@ class GroupChatView(APIView):
 
     def post(self, request, group_id):
         text = request.data.get('text')
-        if not text:
+        has_attachments = 'attachments' in request.data
+        if not text and not has_attachments:
             return Response({"error": "Message text is required"}, status=400)
+
+        group = get_study_group(group_id)
+        if not group:
+            return Response({"error": "Group not found"}, status=404)
+        if request.user.firebase_uid not in (group.get('members') or []):
+            return Response({"error": "You must be a member of this group to send messages"}, status=403)
+
+        attachments = None
+        if has_attachments:
+            raw = request.data.get('attachments')
+            if not isinstance(raw, list) or len(raw) > 5:
+                return Response({"error": "attachments must be a list of at most 5 items"}, status=400)
+            attachments = []
+            group_key_prefix = attachment_key_prefix(group_id)
+            for att in raw:
+                if not isinstance(att, dict):
+                    return Response({"error": "Each attachment must be an object"}, status=400)
+                key = str(att.get('key') or '')
+                name = str(att.get('name') or '')[:180]
+                mime = str(att.get('mime') or '')
+                try:
+                    size = int(att.get('size') or 0)
+                except (TypeError, ValueError):
+                    size = 0
+                if not key.startswith(group_key_prefix) or len(key) > 512:
+                    return Response({"error": "Attachment key must come from a group upload"}, status=400)
+                if not 0 < size <= ATTACHMENT_MAX_SIZE:
+                    return Response({"error": "Attachments must be 10 MB or smaller."}, status=400)
+                attachments.append({'key': key, 'name': name, 'mime': mime, 'size': size})
+
         sender_name = request.user.get_full_name() or request.user.username
         sender_avatar = request.user.avatar or ''
-        msg_id = send_message(group_id, request.user.firebase_uid, text, sender_name, sender_avatar)
+        msg_id = send_message(
+            group_id, request.user.firebase_uid, text or '',
+            sender_name, sender_avatar, attachments=attachments,
+        )
         return Response({
             "id": msg_id,
             "sender_uid": request.user.firebase_uid,
             "sender_name": sender_name,
             "sender_avatar": sender_avatar,
             "text": text,
+            "attachments": attachments or [],
             "reactions": {},
             # Server timestamp resolves in Firestore moments later; give the
             # client an instant ISO timestamp to render with.
             "created_at": timezone.now().isoformat(),
         }, status=201)
+
+
+class GroupAttachmentLinkView(APIView):
+    """
+    Member-only: mint a short-lived presigned S3 URL for a stored group-chat
+    attachment. Files live in a private bucket; the Firestore message stores
+    the object key, so every download is authenticated and the link expires
+    (default 30 minutes) to keep the content unguessable.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, group_id, key):
+        group = get_study_group(group_id)
+        if not group:
+            return Response({"error": "Group not found"}, status=404)
+        if request.user.firebase_uid not in (group.get('members') or []):
+            return Response({"error": "You must be a member of this group to view files"}, status=403)
+        if not key.startswith(attachment_key_prefix(group_id)) or len(key) > 512:
+            return Response({"error": "Invalid attachment key"}, status=400)
+        return Response({"url": presign_s3_url(key)})
 
 
 class GroupChatReactionView(APIView):

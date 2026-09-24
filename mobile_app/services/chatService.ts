@@ -1,5 +1,4 @@
 // services/chatService.ts
-import firestore from '@react-native-firebase/firestore';
 import { API_BASE_URL } from '@/config/api';
 
 export interface GroupMember {
@@ -32,32 +31,61 @@ export interface GroupRoster {
   join_requests: JoinRequestMember[];
 }
 
-export function subscribeToGroupMessages(groupId: string, callback: (msgs: any[]) => void) {
-  return firestore()
-    .collection('studyGroups')
-    .doc(groupId)
-    .collection('messages')
-    .orderBy('created_at', 'asc')
-    .onSnapshot(snapshot => {
-      const messages = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-      callback(messages);
-    });
+export interface Attachment {
+  key?: string;      // S3 object key once uploaded; missing on an unsent echo
+  url?: string;      // local file:// URI used only while previewing an unsent echo
+  name: string;
+  mime: string;
+  size: number;
 }
 
-export async function sendMessage(groupId: string, senderUid: string, text: string) {
-  await firestore()
-    .collection('studyGroups')
-    .doc(groupId)
-    .collection('messages')
-    .add({
-      sender_uid: senderUid,
-      text,
-      created_at: firestore.FieldValue.serverTimestamp(),
-      is_synced: true,
-    });
+export interface LocalAttachment {
+  uri: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+
+export function safeFileName(name: string): string {
+  const base = (name || 'file').split('/').pop() || 'file';
+  return base.replace(/[^\w.\- ]+/g, '_').replace(/\s+/g, ' ').trim() || 'file';
+}
+
+export async function uploadGroupAttachment(
+  groupId: string,
+  token: string,
+  file: LocalAttachment,
+): Promise<Attachment> {
+  const form = new FormData();
+  form.append('file', {
+    uri: file.uri,
+    name: file.name,
+    type: file.mime,
+  } as any);
+  const res = await fetch(`${API_BASE_URL}/users/groups/${groupId}/attachments/`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to upload file');
+  }
+  return res.json();
+}
+
+export async function getAttachmentLink(groupId: string, token: string, key: string): Promise<string> {
+  // Encode per segment so the S3 key's slashes stay intact in the URL path.
+  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
+  const res = await fetch(`${API_BASE_URL}/users/groups/${groupId}/attachments/${encodedKey}/link/`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to load attachment link');
+  }
+  const data = await res.json();
+  return data.url;
 }
 
 export async function getGroupRoster(groupId: string, token: string): Promise<GroupRoster> {
@@ -66,11 +94,6 @@ export async function getGroupRoster(groupId: string, token: string): Promise<Gr
   });
   if (!res.ok) throw new Error('Failed to load group members');
   return res.json();
-}
-
-export async function getGroupMembers(groupId: string, token: string): Promise<GroupMember[]> {
-  const roster = await getGroupRoster(groupId, token);
-  return roster.members;
 }
 
 export async function updateGroup(
