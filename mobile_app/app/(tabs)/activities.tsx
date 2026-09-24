@@ -11,6 +11,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
 import { useRouter } from 'expo-router';
 import { getToken } from '@/services/authService';
+import { apiCall } from '@/services/apiClient';
+import { invalidateCachePrefix } from '@/services/apiCache';
 import { completeQuiz } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
@@ -158,16 +160,17 @@ export default function ActivitiesScreen() {
     const isRefresh = opts?.isRefresh ?? false;
     try {
       setLoading(!isRefresh);
-      const token = await getToken();
-
+      // Go through apiCall's SWR HTTP cache so both the group list and quiz
+      // list paint instantly on every visit and revalidate in the background.
+      // Pull-to-refresh bypasses the cache for a true network hit.
       const [groupRes, quizRes, enrolled] = await Promise.all([
-        fetch(`${API_BASE_URL}/users/groups/mine/`, { headers: { 'Authorization': `Bearer ${token}` } }),
-        fetch(`${API_BASE_URL}/ai/quizzes/`, { headers: { 'Authorization': `Bearer ${token}` } }),
+        apiCall<StudyGroup[]>('/users/groups/mine/', { noCache: isRefresh }).catch(() => null),
+        apiCall<Quiz[]>('/ai/quizzes/', { noCache: isRefresh }).catch(() => null),
         getEnrolledCourses().catch(() => null),
       ]);
 
-      if (groupRes.ok) setGroups(await groupRes.json());
-      if (quizRes.ok) setQuizzes(await quizRes.json());
+      if (Array.isArray(groupRes)) setGroups(groupRes);
+      if (Array.isArray(quizRes)) setQuizzes(quizRes);
       if (Array.isArray(enrolled)) setEnrolledCourses(enrolled);
     } catch (error) {
       console.error(error);
@@ -279,6 +282,7 @@ export default function ActivitiesScreen() {
       if (res.ok) {
         setNewGroupName('');
         setIsCreateModalOpen(false);
+        invalidateCachePrefix('/users/groups/mine');
         loadInitialData();
       } else {
         const err = await res.json().catch(() => ({}));
@@ -312,6 +316,7 @@ export default function ActivitiesScreen() {
         if (data?.status === 'pending') {
           Alert.alert('Request Sent', data.message || 'The group admin will approve your join request.');
         } else {
+          invalidateCachePrefix('/users/groups/mine');
           loadInitialData();
         }
       } else {

@@ -2,6 +2,7 @@
 // Client helpers for the gamification endpoints (XP, badges, streaks, leaderboard).
 import { API_BASE_URL } from '@/config/api';
 import { getToken, refreshAccessToken } from './authService';
+import { invalidateCachePrefix } from './apiCache';
 
 async function authFetch(path: string, options: RequestInit = {}) {
   const doFetch = async (token: string | null) => {
@@ -73,12 +74,16 @@ export interface LeaderboardEntry {
 }
 
 export async function completeQuiz(score: number, total: number, courseId?: number, quizId?: number): Promise<QuizResult> {
-  return postJson('/users/me/complete-quiz/', {
+  const result = await postJson('/users/me/complete-quiz/', {
     score,
     total,
     ...(courseId != null ? { course_id: courseId } : {}),
     ...(quizId != null ? { quiz_id: quizId } : {}),
   });
+  // The quiz list now reflects the "attempted" flag — drop the cached copy so
+  // the Quizzes tab revalidates instead of showing a stale "Take" button.
+  invalidateCachePrefix('/ai/quizzes');
+  return result;
 }
 
 export async function completeLesson(

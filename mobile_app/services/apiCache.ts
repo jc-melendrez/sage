@@ -96,6 +96,10 @@ export interface ChatCacheDoc {
   members?: unknown[] | null;
   join_requests?: unknown[] | null;
   privacy?: string;
+  /** S3 key -> presigned URL minted for this user, so already-seen images
+   *  render instantly (same URL => expo-image disk cache hit) without
+   *  re-minting links. entries only valid while the presign window is alive. */
+  attachment_urls?: Record<string, { url: string; minted_at: number }> | null;
 }
 
 function chatCacheKey(groupId: string): string {
@@ -119,6 +123,12 @@ export function setChatCache(groupId: string, doc: ChatCacheDoc) {
     members: doc.members ?? existing?.members ?? null,
     join_requests: doc.join_requests ?? existing?.join_requests ?? null,
     privacy: doc.privacy ?? existing?.privacy,
+    // Persist presigned URLs already minted this session so already-seen
+    // attachment images render from expo-image's disk cache without re-minting.
+    attachment_urls: {
+      ...(existing?.attachment_urls ?? {}),
+      ...(doc.attachment_urls ?? {}),
+    },
   };
   setCachedResponse(key, JSON.stringify(next), CHAT_TTL_SECONDS);
 }

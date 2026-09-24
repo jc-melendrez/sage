@@ -7,6 +7,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { Image as ExpoImage } from 'expo-image';
 import * as Haptics from 'expo-haptics';
 import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
@@ -18,10 +19,14 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser, getCachedUserId } from '@/services/authService';
 import { getFirebaseUid } from '@/services/firebaseAuthService';
-import { getChatCache, setChatCache, clearChatCache, setCacheUserId } from '@/services/apiCache';
+import { getChatCache, setChatCache, clearChatCache, setCacheUserId, invalidateCachePrefix } from '@/services/apiCache';
 import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName } from '@/services/chatService';
 import { pfpSource } from '@/constants/pfps';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
+
+// Presigned attachment links live ~30 min; only hydrate cached URLs while
+// they're comfortably inside that window so we never render a stale link.
+const PRESIGN_TTL_MS = 25 * 60 * 1000;
 
 interface StudyGroup {
   id: string;
@@ -205,11 +210,13 @@ export default function GroupChatScreen() {
   const [isAttachOpen, setIsAttachOpen] = useState(false);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [lightboxName, setLightboxName] = useState('image');
+  const [lightboxKey, setLightboxKey] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [resolvedLinks, setResolvedLinks] = useState<Record<string, string>>({});
   const [linkErrors, setLinkErrors] = useState<Record<string, boolean>>({});
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
   const linkCacheRef = useRef<Record<string, string>>({});
+  const mintAtRef = useRef<Record<string, number>>({});
 
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
@@ -317,6 +324,28 @@ export default function GroupChatScreen() {
         }
         const cachedRequests = (cached.join_requests as JoinRequestMember[]) || [];
         if (cachedRequests.length > 0) setJoinRequests(cachedRequests);
+        // Hydrate presigned URLs minted on an earlier visit (still inside the
+        // presign window) so already-seen attachment images render instantly
+        // from expo-image's disk cache without any re-minting round-trip.
+        const cachedLinks = (cached.attachment_urls as
+          | Record<string, { url: string; minted_at: number }>
+          | undefined) ?? undefined;
+        if (cachedLinks) {
+          const now = Date.now();
+          const fresh: Record<string, string> = {};
+          const mints: Record<string, number> = {};
+          for (const [key, entry] of Object.entries(cachedLinks)) {
+            if (entry?.url && entry.minted_at && now - entry.minted_at < PRESIGN_TTL_MS) {
+              fresh[key] = entry.url;
+              mints[key] = entry.minted_at;
+            }
+          }
+          if (Object.keys(fresh).length > 0) {
+            linkCacheRef.current = { ...linkCacheRef.current, ...fresh };
+            mintAtRef.current = { ...mintAtRef.current, ...mints };
+            setResolvedLinks(prev => ({ ...prev, ...fresh }));
+          }
+        }
       }
     })();
 
@@ -402,6 +431,15 @@ export default function GroupChatScreen() {
       members,
       join_requests: joinRequests,
       privacy: group?.privacy,
+      // Persist the minted presigned URLs (with their mint time) so already-seen
+      // attachment images render instantly from expo-image's disk cache on the
+      // next visit without re-minting or re-downloading.
+      attachment_urls: Object.fromEntries(
+        Object.keys(mintAtRef.current).map((key) => [
+          key,
+          { url: linkCacheRef.current[key] ?? '', minted_at: mintAtRef.current[key] },
+        ]),
+      ),
     });
   }, [messages, group, members, joinRequests, groupId]);
 
@@ -417,22 +455,26 @@ export default function GroupChatScreen() {
     if (keys.size === 0) return;
     (async () => {
       try {
-        const token = await getToken();
-        if (!token) return;
-        const entries = await Promise.all(
-          [...keys].map(async (key) => {
-            try {
-              const url = await getAttachmentLink(String(groupId), token, key);
-              return [key, url] as const;
-            } catch (err) {
-              console.error(`Failed to resolve attachment link ${key}:`, err);
-              return [key, null] as const;
-            }
-          }),
-        );
-        const next: Record<string, string> = Object.fromEntries(entries.filter(([, u]) => u != null));
-        linkCacheRef.current = { ...linkCacheRef.current, ...next };
-        setResolvedLinks(prev => ({ ...prev, ...next }));
+      const token = await getToken();
+      if (!token) return;
+      const now = Date.now();
+      const entries = await Promise.all(
+        [...keys].map(async (key) => {
+          try {
+            const url = await getAttachmentLink(String(groupId), token, key);
+            mintAtRef.current[key] = now;
+            return [key, url] as const;
+          } catch (err) {
+            console.error(`Failed to resolve attachment link ${key}:`, err);
+            return [key, null] as const;
+          }
+        }),
+      );
+      const next = Object.fromEntries(
+        entries.filter(([, u]) => u != null),
+      ) as Record<string, string>;
+      linkCacheRef.current = { ...linkCacheRef.current, ...next };
+      setResolvedLinks(prev => ({ ...prev, ...next }));
         const failed = Object.fromEntries(entries.filter(([, u]) => u == null).map(([k]) => [k, true]));
         if (Object.keys(failed).length > 0) {
           setLinkErrors(prev => ({ ...prev, ...failed }));
@@ -453,7 +495,7 @@ export default function GroupChatScreen() {
       if (!token) return null;
       const url = await getAttachmentLink(String(groupId), token, att.key);
       linkCacheRef.current = { ...linkCacheRef.current, [att.key]: url };
-      setResolvedLinks(prev => ({ ...prev, [att.key]: url }));
+      setResolvedLinks(prev => ({ ...prev, [att.key!]: url }));
       return url;
     } catch {
       setLinkErrors(prev => ({ ...prev, [att.key!]: true }));
@@ -766,6 +808,7 @@ export default function GroupChatScreen() {
         privacy: editPrivacy,
       });
       setGroup(prev => prev ? { ...prev, ...updated } : prev);
+      invalidateCachePrefix('/users/groups/mine');
       Alert.alert('Saved', 'Group settings updated.');
     } catch (err) {
       Alert.alert('Update Failed', err instanceof Error ? err.message : 'Please try again.');
@@ -791,6 +834,7 @@ export default function GroupChatScreen() {
               if (!token) return;
               await leaveGroup(String(group.id), token);
               clearChatCache(String(group.id));
+              invalidateCachePrefix('/users/groups/mine');
               Alert.alert('Left Group', 'You are no longer a member.', [
                 { text: 'OK', onPress: () => router.back() },
               ]);
@@ -854,6 +898,7 @@ const renderAttachments = () => {
               if (uri) {
                 setLightboxUrl(uri);
                 setLightboxName(att.name);
+                setLightboxKey(att.key || null);
               } else if (failed && att.key) {
                 retryResolve(att.key);
               }
@@ -862,7 +907,12 @@ const renderAttachments = () => {
             accessibilityLabel={failed && !uri ? `Reload attached image ${att.name}` : `View attached image ${att.name}`}
           >
             {uri ? (
-              <Image source={{ uri }} style={styles.attachmentImage} resizeMode="cover" />
+              <ExpoImage
+                source={{ uri, cacheKey: att.key || undefined }}
+                style={styles.attachmentImage}
+                contentFit="cover"
+                transition={150}
+              />
             ) : failed ? (
               <View style={[styles.attachmentImageWrap, styles.attachmentLoading]}>
                 <Ionicons name="refresh" size={20} color={COLORS.purpleVibrant} />
@@ -1361,7 +1411,12 @@ const renderAttachments = () => {
       <Modal visible={lightboxUrl != null} animationType="fade" transparent={true} onRequestClose={() => setLightboxUrl(null)}>
         <TouchableOpacity style={styles.lightbox} activeOpacity={1} onPress={() => setLightboxUrl(null)}>
           {lightboxUrl != null && (
-            <Image source={{ uri: lightboxUrl }} style={styles.lightboxImage} resizeMode="contain" />
+            <ExpoImage
+              source={{ uri: lightboxUrl, cacheKey: lightboxKey || undefined }}
+              style={styles.lightboxImage}
+              contentFit="contain"
+              transition={0}
+            />
           )}
           <TouchableOpacity
             style={styles.lightboxDownload}

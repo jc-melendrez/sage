@@ -23,12 +23,19 @@ const POLICY_RULES: Array<{ matcher: RegExp; ttlSeconds: number }> = [
   { matcher: /\/api\/users\/\d+\/activities/, ttlSeconds: 180 },
   { matcher: /\/api\/users\/activities/, ttlSeconds: 180 },
   { matcher: /\/api\/users\/\d+\/badges/, ttlSeconds: 180 },
+  // The study-group list in the Activities tab — SWR so the tab paints
+  // instantly on every visit and revalidates in the background. Groups are
+  // invalidated explicitly after create/join/leave/update writes.
+  { matcher: /\/api\/users\/groups\/mine\/?$/, ttlSeconds: 180 },
 ];
 
 // Truly volatile / user-scored data — never cache, even if it accidentally matches allowlist.
+// NOTE: the broad /groups/ rule was narrowed to PREFIXED per-group sub-resources
+// (chat history, members, attachments, presigned links) so the group *list*
+// below can enjoy SWR caching without leaking stale per-group payloads.
 const NEVER_CACHE: Array<RegExp> = [
   /\/leaderboard/,
-  /\/groups/,
+  /\/groups\/\d+\//,
   /\/game\//,
   /\/sessions/,
   /\/analytics/,
