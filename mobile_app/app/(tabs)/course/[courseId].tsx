@@ -12,8 +12,8 @@ import { getCurrentUser } from '@/services/authService';
 import CourseBadges from '@/components/courses/CourseBadges';
 
 const COLORS = {
-  bg: '#baaeda',
-  surface: '#cdc2dd',
+  bg: '#FFFFFF',
+  surface: '#F5F3FA',
   purpleDeep: '#4C1D95',
   purpleDark: '#6D28D9',
   purpleVibrant: '#8B5CF6',
