@@ -1462,7 +1462,7 @@ const styles = StyleSheet.create({
   attachmentImage: { width: '100%', height: 170, borderRadius: 12 },
   attachmentLoading: { height: 170, borderRadius: 12, backgroundColor: 'rgba(139, 92, 246, 0.08)', alignItems: 'center', justifyContent: 'center' },
   attachmentRetry: { marginTop: 6, fontSize: 12, fontFamily: FONTS.medium, color: COLORS.purpleVibrant },
-  attachmentDoc: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(139, 92, 246, 0.08)', borderWidth: 0, borderColor: 'rgba(76, 29, 149, 0.08)', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, maxWidth: 260 },
+  attachmentDoc: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'transparent', borderWidth: 0, borderColor: 'rgba(76, 29, 149, 0.08)', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, maxWidth: 260 },
   attachmentDocName: { flexShrink: 1, flexGrow: 1, fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textDark },
   attachmentDocSize: { fontSize: 11, fontFamily: FONTS.regular, color: COLORS.textMuted },
 
