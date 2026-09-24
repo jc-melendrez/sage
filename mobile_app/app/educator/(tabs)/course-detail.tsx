@@ -34,8 +34,10 @@ const ACTIVITY_META: Record<ActivityKind, { label: string; icon: any }> = {
   quiz: { label: 'Quiz', icon: 'help-circle' },
   lesson: { label: 'Lesson', icon: 'book' },
   game: { label: 'Game', icon: 'game-controller' },
-  task: { label: 'Task', icon: 'document-text' },
+  task: { label: 'Assignment', icon: 'document-text' },
 };
+
+const BUILDER_KINDS: ActivityKind[] = ['quiz', 'task'];
 
 type GeneratedNode = GenerateTopicResponse['nodes'][number];
 
@@ -588,7 +590,7 @@ export default function CourseDetailScreen() {
                 <EmptyState
                   icon="layers-outline"
                   title="No activities yet"
-                  text="Add a quiz, lesson, or game activity for this class."
+                  text="Add a quiz or assignment activity for this class."
                 />
               )
             )}
@@ -661,7 +663,7 @@ export default function CourseDetailScreen() {
 
             <Text style={styles.label}>Type</Text>
             <View style={styles.kindRow}>
-              {(Object.keys(ACTIVITY_META) as ActivityKind[]).map((kind) => {
+              {BUILDER_KINDS.map((kind) => {
                 const meta = ACTIVITY_META[kind];
                 const active = actKind === kind;
                 return (

@@ -16,8 +16,10 @@ const ACTIVITY_META: Record<ActivityKind, { label: string; icon: any; color: str
   quiz: { label: 'Quiz', icon: 'help-circle', color: COLORS.purpleVibrant },
   lesson: { label: 'Lesson', icon: 'book', color: COLORS.accent },
   game: { label: 'Game', icon: 'game-controller', color: COLORS.success },
-  task: { label: 'Task', icon: 'document-text', color: COLORS.warning },
+  task: { label: 'Assignment', icon: 'document-text', color: COLORS.warning },
 };
+
+const BUILDER_KINDS: ActivityKind[] = ['quiz', 'task'];
 
 type Filter = 'all' | ActivityStatus;
 type ActivityStatus = 'draft' | 'published';
@@ -209,7 +211,7 @@ export default function ActivitiesScreen() {
 
                 <Text style={styles.fieldLabel}>Type</Text>
                 <View style={styles.chipRow}>
-                  {(Object.keys(ACTIVITY_META) as ActivityKind[]).map((kind) => (
+                  {BUILDER_KINDS.map((kind) => (
                     <FilterChip
                       key={kind}
                       label={ACTIVITY_META[kind].label}

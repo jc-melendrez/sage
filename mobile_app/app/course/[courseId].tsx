@@ -45,7 +45,7 @@ const ACTIVITY_META: Record<ClassActivity['kind'], { label: string; icon: any }>
   quiz: { label: 'Quiz', icon: 'help-circle' },
   lesson: { label: 'Lesson', icon: 'book' },
   game: { label: 'Live Game', icon: 'game-controller' },
-  task: { label: 'Task', icon: 'document-text' },
+  task: { label: 'Assignment', icon: 'document-text' },
 };
 
 const QUIZ_TYPE_LABELS: Record<string, string> = {
@@ -121,8 +121,9 @@ export default function CourseDetailScreen() {
       router.push(`/course/task/${activity.id}?courseId=${courseId}` as any);
       return;
     }
-    if (activity.kind !== 'quiz' || activity.ref_id == null) {
-      Alert.alert(activity.title, 'Open the matching lesson or game from the educator to start.');
+    if (activity.kind !== 'quiz') return;
+    if (activity.ref_id == null) {
+      Alert.alert('No quiz attached yet.', 'The educator has not linked a quiz to this activity.');
       return;
     }
     setOpeningQuiz(true);
@@ -218,13 +219,14 @@ export default function CourseDetailScreen() {
                 <Text style={styles.activitiesHeader}>Class Tasks</Text>
                 {activities.map((activity) => {
                   const meta = ACTIVITY_META[activity.kind] || ACTIVITY_META.quiz;
+                  const hostedInClass = activity.kind === 'lesson' || activity.kind === 'game';
                   return (
                     <TouchableOpacity
                       key={activity.id}
                       style={styles.activityCard}
                       activeOpacity={0.8}
                       onPress={() => openActivity(activity)}
-                      disabled={openingQuiz}
+                      disabled={hostedInClass || openingQuiz}
                     >
                       <View style={styles.activityIconBox}>
                         <Ionicons name={meta.icon} size={18} color="white" />
@@ -237,13 +239,21 @@ export default function CourseDetailScreen() {
                         {activity.note ? (
                           <Text style={styles.activityNote} numberOfLines={2}>{activity.note}</Text>
                         ) : null}
-                        {activity.due_date ? (
+                        {hostedInClass ? (
+                          <Text style={styles.activityMeta}>
+                            Hosted live in class by your educator
+                          </Text>
+                        ) : activity.due_date ? (
                           <Text style={styles.activityMeta}>
                             Due {new Date(activity.due_date).toLocaleDateString()}
                           </Text>
                         ) : null}
                       </View>
-                      <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                      <Ionicons
+                        name={hostedInClass ? 'school' : 'chevron-forward'}
+                        size={18}
+                        color={COLORS.textMuted}
+                      />
                     </TouchableOpacity>
                   );
                 })}
