@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
   TextInput, ActivityIndicator, Alert, Platform, StatusBar, RefreshControl,
@@ -66,6 +66,9 @@ export default function ActivitiesScreen() {
   const [isJoinCourseModalOpen, setIsJoinCourseModalOpen] = useState(false);
   const [classCodeInput, setClassCodeInput] = useState('');
   const [isJoiningClass, setIsJoiningClass] = useState(false);
+
+  const groupCodeRefs = useRef<any[]>([]);
+  const classCodeRefs = useRef<any[]>([]);
 
   // --- Quiz Player State ---
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
@@ -342,6 +345,41 @@ export default function ActivitiesScreen() {
     }
   };
 
+  const handleGroupCodeChange = (t: string, i: number) => {
+    const char = t.slice(-1).toUpperCase();
+    const next = joinCodeInput.split('').slice(0, 6);
+    while (next.length < i) next.push('');
+    next[i] = char;
+    setJoinCodeInput(next.join('').slice(0, 6));
+    if (char && i < 5) groupCodeRefs.current[i + 1]?.focus();
+    else if (!char && i > 0) groupCodeRefs.current[i - 1]?.focus();
+  };
+  const handleGroupCodeKeyPress = (e: any, i: number) => {
+    if (e.nativeEvent.key === 'Backspace' && !joinCodeInput[i] && i > 0) {
+      const next = joinCodeInput.split('').slice(0, 6);
+      next[i - 1] = '';
+      setJoinCodeInput(next.join(''));
+      groupCodeRefs.current[i - 1]?.focus();
+    }
+  };
+  const handleClassCodeChange = (t: string, i: number) => {
+    const char = t.slice(-1).toUpperCase();
+    const next = classCodeInput.split('').slice(0, 6);
+    while (next.length < i) next.push('');
+    next[i] = char;
+    setClassCodeInput(next.join('').slice(0, 6));
+    if (char && i < 5) classCodeRefs.current[i + 1]?.focus();
+    else if (!char && i > 0) classCodeRefs.current[i - 1]?.focus();
+  };
+  const handleClassCodeKeyPress = (e: any, i: number) => {
+    if (e.nativeEvent.key === 'Backspace' && !classCodeInput[i] && i > 0) {
+      const next = classCodeInput.split('').slice(0, 6);
+      next[i - 1] = '';
+      setClassCodeInput(next.join(''));
+      classCodeRefs.current[i - 1]?.focus();
+    }
+  };
+
   const handleSelectTab = (tab: 'lessons' | 'quizzes' | 'groups') => {
     if (tab === selectedTab) return;
     Haptics.selectionAsync();
@@ -588,42 +626,84 @@ export default function ActivitiesScreen() {
 
       {/* Join Group Modal */}
       <Modal visible={isJoinModalOpen} animationType="fade" transparent={true}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Join Group</Text>
-              <TouchableOpacity onPress={() => setIsJoinModalOpen(false)}><Ionicons name="close" size={24} color={COLORS.textDark} /></TouchableOpacity>
+        <View style={styles.joinOverlay}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.joinKeyboardWrap}
+          >
+            <View style={[styles.modalContent, styles.joinModalCard]}>
+              <TouchableOpacity style={styles.closeInviteBtn} onPress={() => { if (!isSubmitting) setIsJoinModalOpen(false); }}>
+                <Ionicons name="close" size={24} color={COLORS.textMuted} />
+              </TouchableOpacity>
+              <Text style={styles.joinModalTitle}>JOIN GROUP</Text>
+              <Text style={styles.joinModalSub}>Enter the code your classmate shared to join their study group.</Text>
+              <View style={styles.codeBoxes}>
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <TextInput
+                    key={i}
+                    ref={(r) => { groupCodeRefs.current[i] = r; }}
+                    style={[styles.codeBox, joinCodeInput[i] ? styles.codeBoxFilled : null]}
+                    value={joinCodeInput[i] || ''}
+                    onChangeText={(t) => handleGroupCodeChange(t, i)}
+                    onKeyPress={(e) => handleGroupCodeKeyPress(e, i)}
+                    maxLength={1}
+                    autoCapitalize="characters"
+                    autoCorrect={false}
+                    editable={!isSubmitting}
+                  />
+                ))}
+              </View>
+              <TouchableOpacity
+                style={[styles.joinSubmitBtn, isSubmitting && { opacity: 0.7 }]}
+                onPress={handleJoinGroup}
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={styles.joinSubmitBtnText}>Join Group</Text>}
+              </TouchableOpacity>
             </View>
-            <TextInput style={[styles.modalInput, { textAlign: 'center', fontSize: 20, letterSpacing: 5 }]} placeholder="CODE" placeholderTextColor="#9CA3AF" autoCapitalize="characters" maxLength={6} value={joinCodeInput} onChangeText={setJoinCodeInput} />
-            <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleJoinGroup} disabled={isSubmitting}>
-              {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={styles.modalSubmitBtnText}>Join</Text>}
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
+          </KeyboardAvoidingView>
+        </View>
       </Modal>
 
       {/* Join Class Modal (educator courses) */}
       <Modal visible={isJoinCourseModalOpen} animationType="fade" transparent={true}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Join Class</Text>
-              <TouchableOpacity onPress={() => setIsJoinCourseModalOpen(false)}><Ionicons name="close" size={24} color={COLORS.textDark} /></TouchableOpacity>
+        <View style={styles.joinOverlay}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.joinKeyboardWrap}
+          >
+            <View style={[styles.modalContent, styles.joinModalCard]}>
+              <TouchableOpacity style={styles.closeInviteBtn} onPress={() => { if (!isJoiningClass) setIsJoinCourseModalOpen(false); }}>
+                <Ionicons name="close" size={24} color={COLORS.textMuted} />
+              </TouchableOpacity>
+              <Text style={styles.joinModalTitle}>JOIN CLASS</Text>
+              <Text style={styles.joinModalSub}>Enter the 6-character join code shared by your educator.</Text>
+              <View style={styles.codeBoxes}>
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <TextInput
+                    key={i}
+                    ref={(r) => { classCodeRefs.current[i] = r; }}
+                    style={[styles.codeBox, classCodeInput[i] ? styles.codeBoxFilled : null]}
+                    value={classCodeInput[i] || ''}
+                    onChangeText={(t) => handleClassCodeChange(t, i)}
+                    onKeyPress={(e) => handleClassCodeKeyPress(e, i)}
+                    maxLength={1}
+                    autoCapitalize="characters"
+                    autoCorrect={false}
+                    editable={!isJoiningClass}
+                  />
+                ))}
+              </View>
+              <TouchableOpacity
+                style={[styles.joinSubmitBtn, isJoiningClass && { opacity: 0.7 }]}
+                onPress={handleJoinClass}
+                disabled={isJoiningClass}
+              >
+                {isJoiningClass ? <ActivityIndicator color="white" /> : <Text style={styles.joinSubmitBtnText}>Join Class</Text>}
+              </TouchableOpacity>
             </View>
-            <TextInput
-              style={[styles.modalInput, { textAlign: 'center', fontSize: 20, letterSpacing: 5 }]}
-              placeholder="CLASS CODE"
-              placeholderTextColor="#9CA3AF"
-              autoCapitalize="characters"
-              maxLength={6}
-              value={classCodeInput}
-              onChangeText={setClassCodeInput}
-            />
-            <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleJoinClass} disabled={isJoiningClass}>
-              {isJoiningClass ? <ActivityIndicator color="white" /> : <Text style={styles.modalSubmitBtnText}>Join Class</Text>}
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
+          </KeyboardAvoidingView>
+        </View>
       </Modal>
 
       {/* TAKE QUIZ MODAL */}
@@ -987,6 +1067,37 @@ const styles = StyleSheet.create({
 
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 24 },
   modalContent: { backgroundColor: COLORS.surface, borderRadius: 24, padding: 24, borderWidth: 1, borderColor: COLORS.border },
+  joinOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center' },
+  joinKeyboardWrap: { width: '100%', alignItems: 'center' },
+  joinModalCard: { width: '90%', alignSelf: 'center', alignItems: 'center', position: 'relative', borderWidth: 0 },
+  closeInviteBtn: { position: 'absolute', top: 16, right: 16, padding: 4, zIndex: 10 },
+  joinModalTitle: { fontSize: 20, fontFamily: FONTS.black, color: COLORS.purpleDeep, marginBottom: 6 },
+  joinModalSub: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textMuted, textAlign: 'center', marginBottom: 24 },
+  codeBoxes: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 24 },
+  codeBox: {
+    width: 40,
+    height: 50,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: COLORS.purpleLight,
+    backgroundColor: COLORS.bgSecondary,
+    color: COLORS.purpleDark,
+    fontSize: 24,
+    fontFamily: FONTS.black,
+    textAlign: 'center',
+    paddingVertical: 0,
+  },
+  codeBoxFilled: { borderColor: COLORS.success, backgroundColor: 'white' },
+  joinSubmitBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.purplePrimary,
+    paddingVertical: 14,
+    borderRadius: 12,
+    width: '100%',
+  },
+  joinSubmitBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 14 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   modalTitle: { fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textDark },
   modalInput: { backgroundColor: COLORS.bg, borderRadius: 12, padding: 16, fontSize: 16, marginBottom: 20, fontFamily: FONTS.regular, borderWidth: 1, borderColor: COLORS.border },
