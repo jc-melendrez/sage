@@ -3,7 +3,7 @@ import { API_BASE_URL } from '../config/api';
 import { getToken } from './authService';
 import { invalidateCachePrefix } from './apiCache';
 
-export type ActivityKind = 'quiz' | 'lesson' | 'game';
+export type ActivityKind = 'quiz' | 'lesson' | 'game' | 'task';
 export type ActivityStatus = 'draft' | 'published';
 
 export interface ClassActivity {
@@ -17,6 +17,7 @@ export interface ClassActivity {
   due_date: string | null;
   status: ActivityStatus;
   created_at: string;
+  submission_count?: number;
 }
 
 export interface CreateActivityInput {

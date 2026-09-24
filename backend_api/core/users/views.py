@@ -13,7 +13,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission
 from ai_assistant.models import Quiz, QuizAttempt
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
@@ -34,6 +34,7 @@ from .serializers import (
     SuperadminUserUpdateSerializer, SuperadminCreateUserSerializer,
     TopicSerializer, LearningNodeSerializer, NodeProgressSerializer, CoursePathTopicSerializer,
     ClassActivitySerializer,
+    TaskSubmissionSerializer, TaskSubmissionListSerializer,
 )
 from .permissions import IsSuperadmin
 from .utils.file_parser import extract_text_from_file
@@ -1449,6 +1450,106 @@ class MyClassActivitiesView(APIView):
     def get(self, request):
         activities = ClassActivity.objects.filter(course__educator=request.user)
         return Response(ClassActivitySerializer(activities, many=True).data)
+
+
+# --- Task Submissions (kind='task' activities) ---
+
+def _get_task_activity(request, activity_id):
+    """Fetch a ClassActivity and verify the user belongs to its course."""
+    try:
+        activity = ClassActivity.objects.select_related('course').get(id=activity_id)
+    except ClassActivity.DoesNotExist:
+        return None, Response({"error": "Activity not found"}, status=404)
+    if request.user != activity.course.educator and not activity.course.students.filter(id=request.user.id).exists():
+        return None, Response({"error": "You are not a member of this course"}, status=403)
+    if activity.kind != 'task':
+        return None, Response({"error": "This activity does not accept file submissions"}, status=400)
+    return activity, None
+
+
+class TaskSubmissionView(APIView):
+    """Student's own submission for a task: GET returns it, POST upserts it."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def _validate_file(self, request):
+        upload = request.FILES.get('file')
+        if not upload:
+            return None, Response({"error": "A file is required"}, status=400)
+        if upload.size > TaskSubmission.MAX_FILE_SIZE:
+            return None, Response(
+                {"error": f"File is too large (max {TaskSubmission.MAX_FILE_SIZE // (1024 * 1024)} MB)"},
+                status=400,
+            )
+        data = upload.read()
+        if not data:
+            return None, Response({"error": "File is empty"}, status=400)
+        return (upload, data), None
+
+    def get(self, request, activity_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        try:
+            submission = TaskSubmission.objects.get(activity=activity, student=request.user)
+        except TaskSubmission.DoesNotExist:
+            return Response(None)
+        return Response(TaskSubmissionSerializer(submission).data)
+
+    def post(self, request, activity_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        if request.user == activity.course.educator:
+            return Response({"error": "Only enrolled students can submit"}, status=403)
+
+        file_info, err = self._validate_file(request)
+        if err:
+            return err
+        upload, data = file_info
+
+        submission, created = TaskSubmission.objects.update_or_create(
+            activity=activity,
+            student=request.user,
+            defaults={
+                'file_name': upload.name[:255],
+                'file_mime': upload.content_type or 'application/octet-stream',
+                'file_size': len(data),
+                'file_data': data,
+            },
+        )
+        return Response(TaskSubmissionSerializer(submission).data, status=201 if created else 200)
+
+
+class TaskSubmissionsView(APIView):
+    """Educator sees all student submissions for a task (metadata only)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, activity_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        if request.user != activity.course.educator:
+            return Response({"error": "Only the course educator can view submissions"}, status=403)
+        submissions = TaskSubmission.objects.filter(activity=activity).select_related('student')
+        return Response(TaskSubmissionListSerializer(submissions, many=True).data)
+
+
+class TaskSubmissionDetailView(APIView):
+    """Educator fetches a single submission including file bytes."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, activity_id, submission_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        if request.user != activity.course.educator:
+            return Response({"error": "Only the course educator can view submissions"}, status=403)
+        try:
+            submission = TaskSubmission.objects.select_related('student').get(id=submission_id, activity=activity)
+        except TaskSubmission.DoesNotExist:
+            return Response({"error": "Submission not found"}, status=404)
+        return Response(TaskSubmissionSerializer(submission).data)
 
 
 # --- Learning Path Views ---

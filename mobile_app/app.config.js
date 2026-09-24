@@ -39,6 +39,7 @@ module.exports = {
       "expo-router",
       "expo-dev-client",
       "expo-document-picker",
+      "expo-sharing",
       [
         "expo-splash-screen",
         {

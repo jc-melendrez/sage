@@ -45,6 +45,7 @@ const ACTIVITY_META: Record<ClassActivity['kind'], { label: string; icon: any }>
   quiz: { label: 'Quiz', icon: 'help-circle' },
   lesson: { label: 'Lesson', icon: 'book' },
   game: { label: 'Live Game', icon: 'game-controller' },
+  task: { label: 'Task', icon: 'document-text' },
 };
 
 const QUIZ_TYPE_LABELS: Record<string, string> = {
@@ -116,6 +117,10 @@ export default function CourseDetailScreen() {
   };
 
   const openActivity = async (activity: ClassActivity) => {
+    if (activity.kind === 'task') {
+      router.push(`/course/task/${activity.id}?courseId=${courseId}` as any);
+      return;
+    }
     if (activity.kind !== 'quiz' || activity.ref_id == null) {
       Alert.alert(activity.title, 'Open the matching lesson or game from the educator to start.');
       return;

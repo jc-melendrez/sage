@@ -21,6 +21,7 @@ const ACTIVITY_META: Record<ActivityKind, { icon: any; color: string }> = {
   quiz: { icon: 'help-circle', color: COLORS.purpleVibrant },
   lesson: { icon: 'book', color: COLORS.accent },
   game: { icon: 'game-controller', color: COLORS.success },
+  task: { icon: 'document-text', color: COLORS.warning },
 };
 
 function relativeTime(iso: string): string {

@@ -14,7 +14,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { OfflineGame, PowerupKey } from '@/services/offlineEngine';
 import { saveOfflineGameResult } from '@/services/offlineGameService';
 import { LanPlaySurface } from '@/components/game/LanPlaySurface';
-import { lanClient, lanGame } from '@/services/lanSession';
+import { getLanClient, lanGame } from '@/services/lanSession';
 import { LanMessage, LanPlayer } from '@/services/lanProtocol';
 
 const COLORS = {
@@ -52,6 +52,10 @@ export default function LanPlayScreen() {
   const submittedRef = useRef(false);
   const savedRef = useRef(false);
   const finishCalledRef = useRef(false);
+  const lcRef = useRef<ReturnType<typeof getLanClient>>(null);
+  const [lastMsg, setLastMsg] = useState<string | null>(null);
+  const [wired, setWired] = useState(false);
+  const lc = getLanClient();
 
   useEffect(() => {
     if (engineRef.current || !lanGame.quiz) return;
@@ -59,11 +63,12 @@ export default function LanPlayScreen() {
       const g = new OfflineGame(lanGame.quiz, lanGame.timePerQuestion, { order: lanGame.order });
       engineRef.current = g;
       setEngine(g);
+      console.log('[lan-play] engine built');
     } catch (e) {
       setEngineError(e instanceof Error ? e.message : String(e));
       console.warn('OfflineGame build failed', e);
     }
-  }, [engine, quizTick]);
+  }, [engine, quizTick, waitTimer]);
 
   const finish = useCallback((reason?: string) => {
     if (finishCalledRef.current) return;
@@ -76,9 +81,9 @@ export default function LanPlayScreen() {
         saveOfflineGameResult(g);
       } catch {}
     }
-    if (g && lanClient && !submittedRef.current) {
+    if (g && lcRef.current && !submittedRef.current) {
       submittedRef.current = true;
-      lanClient.submitResult({
+      lcRef.current.submitResult({
         quizId: g.quizId,
         quizTitle: g.quizTitle,
         quizType: g.quizType,
@@ -94,6 +99,8 @@ export default function LanPlayScreen() {
 
   const onMessage = useCallback(
     (msg: LanMessage) => {
+      setLastMsg(msg.t);
+      console.log('[lan-play] msg', msg.t);
       if (msg.t === 'quiz') {
         lanGame.quiz = msg.quiz;
         lanGame.order = msg.order ?? lanGame.order;
@@ -113,11 +120,16 @@ export default function LanPlayScreen() {
   );
 
   useEffect(() => {
-    if (lanClient) lanClient.onEvent = onMessage;
+    lcRef.current = lc;
+    if (!lc) return;
+    lc.onEvent = onMessage;
+    setWired(true);
+    console.log('[lan-play] wired, connected=' + lc.connected);
     return () => {
-      if (lanClient) lanClient.onEvent = () => {};
+      lc.onEvent = () => {};
+      setWired(false);
     };
-  }, [onMessage]);
+  }, [lc, onMessage]);
 
   useEffect(() => {
     if (engine || engineError) return;
@@ -133,6 +145,10 @@ export default function LanPlayScreen() {
             <ActivityIndicator color={COLORS.purpleLight} size="large" />
             <Text style={styles.waitingTitle}>Waiting for the host to start…</Text>
             <Text style={styles.waitingSub}>The quiz will appear here in a moment</Text>
+
+            <Text style={styles.waitingDiag}>
+              diag · client={lc ? 'set' : 'none'} · wired={wired ? 'yes' : 'no'} · last={lastMsg || '—'} · quiz={lanGame.quiz ? 'yes' : 'no'}
+            </Text>
 
             {engineError && (
               <Text style={styles.waitingError}>
@@ -297,6 +313,7 @@ const styles = StyleSheet.create({
   centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 30 },
   waitingTitle: { color: COLORS.textPrimary, fontFamily: 'Montserrat-Bold', fontSize: 18, marginTop: 20, textAlign: 'center' },
   waitingSub: { color: COLORS.textMuted, fontFamily: 'Montserrat-Medium', fontSize: 13, marginTop: 6, textAlign: 'center' },
+  waitingDiag: { color: COLORS.textMuted, fontFamily: 'Montserrat-Regular', fontSize: 11, marginTop: 14, textAlign: 'center', opacity: 0.75 },
   waitingWarn: { color: COLORS.warning, fontFamily: 'Montserrat-Medium', fontSize: 13, marginTop: 16, textAlign: 'center', lineHeight: 20, marginHorizontal: 24 },
   waitingError: { color: COLORS.danger, fontFamily: 'Montserrat-Medium', fontSize: 13, marginTop: 16, textAlign: 'center', lineHeight: 20, marginHorizontal: 24 },
   backButton: { marginTop: 24, backgroundColor: COLORS.purplePrimary, paddingVertical: 12, paddingHorizontal: 32, borderRadius: 12, alignItems: 'center' },

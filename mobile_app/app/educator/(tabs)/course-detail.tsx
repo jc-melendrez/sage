@@ -34,6 +34,7 @@ const ACTIVITY_META: Record<ActivityKind, { label: string; icon: any }> = {
   quiz: { label: 'Quiz', icon: 'help-circle' },
   lesson: { label: 'Lesson', icon: 'book' },
   game: { label: 'Game', icon: 'game-controller' },
+  task: { label: 'Task', icon: 'document-text' },
 };
 
 type GeneratedNode = GenerateTopicResponse['nodes'][number];
@@ -563,6 +564,21 @@ export default function CourseDetailScreen() {
                           {activity.status === 'published' ? 'Published · tap to hide' : 'Draft · tap to publish'}
                         </Text>
                       </TouchableOpacity>
+                      {activity.kind === 'task' && (
+                        <TouchableOpacity
+                          onPress={() => router.push({
+                            pathname: '/educator/(tabs)/task-submissions',
+                            params: { taskId: activity.id, taskTitle: activity.title, courseName: courseName || activity.course_name },
+                          })}
+                          activeOpacity={0.8}
+                          style={styles.activityStatusRow}
+                        >
+                          <Ionicons name="people-outline" size={13} color={COLORS.purpleVibrant} />
+                          <Text style={[styles.activityStatusText, { color: COLORS.purpleVibrant, marginLeft: 2 }]}>
+                            View submissions ({activity.submission_count ?? 0})
+                          </Text>
+                        </TouchableOpacity>
+                      )}
                     </View>
                   );
                 })}

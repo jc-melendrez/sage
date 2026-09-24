@@ -12,7 +12,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Activity, Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, Topic, User
+from .models import Activity, Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, TaskSubmission, Topic, User
 from . import gamification
 from . import views as users_views
 
@@ -1341,6 +1341,136 @@ class ClassActivityAPITests(APITestCase):
         resp = self.client.get(reverse('my_activities'))
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data, [])
+
+
+class TaskSubmissionAPITests(APITestCase):
+    """Tasks (kind='task') with student file submissions."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='task-teacher', password='pass123', role='educator',
+            first_name='Task', last_name='Teacher',
+        )
+        self.student = User.objects.create_user(
+            username='task-student', password='pass123', role='student',
+            first_name='Task', last_name='Student',
+        )
+        self.other = User.objects.create_user(
+            username='task-outsider', password='pass123', role='student',
+        )
+        self.course = Course.objects.create(name='English', educator=self.educator)
+        self.course.students.add(self.student)
+        self.task = ClassActivity.objects.create(
+            course=self.course, kind='task', title='Essay on climate', status='published',
+            note='Write a one-page essay.',
+        )
+
+    def _submit(self, user, content=b'hello world'):
+        self.client.force_authenticate(user=user)
+        return self.client.post(
+            reverse('task_submit', args=[self.task.id]),
+            {'file': SimpleUploadedFile('essay.txt', content, content_type='text/plain')},
+            format='multipart',
+        )
+
+    def test_educator_creates_task(self):
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.post(
+            reverse('course_activities', args=[self.course.id]),
+            {'kind': 'task', 'title': 'Book report', 'note': 'Summarize chapters 1-3'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['kind'], 'task')
+        self.assertEqual(ClassActivity.objects.filter(kind='task').count(), 2)
+
+    def test_student_submits_file(self):
+        resp = self._submit(self.student)
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['file_name'], 'essay.txt')
+        self.assertEqual(resp.data['file_mime'], 'text/plain')
+        self.assertEqual(resp.data['file_size'], len(b'hello world'))
+        self.assertIn('file_data', resp.data)
+        self.assertEqual(resp.data['student_name'], 'Task Student')
+
+        # submission_count on the activity reflects it
+        self.assertEqual(self.task.submissions.count(), 1)
+
+    def test_resubmission_replaces_file(self):
+        self._submit(self.student)
+        resp = self._submit(self.student, content=b'new version')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.task.submissions.count(), 1)
+        self.assertEqual(resp.data['file_size'], len(b'new version'))
+
+    def test_student_can_read_own_submission(self):
+        self._submit(self.student)
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.get(reverse('task_submit', args=[self.task.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['file_name'], 'essay.txt')
+        self.assertIn('file_data', resp.data)
+
+    def test_no_submission_returns_null(self):
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.get(reverse('task_submit', args=[self.task.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.data)
+
+    def test_educator_lists_submissions_without_file_bytes(self):
+        self._submit(self.student)
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(reverse('task_submissions', args=[self.task.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data[0]['student_name'], 'Task Student')
+        self.assertNotIn('file_data', resp.data[0])
+
+    def test_educator_fetches_single_submission_with_file(self):
+        self._submit(self.student)
+        sub = self.task.submissions.get()
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(reverse('task_submission_detail', args=[self.task.id, sub.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('file_data', resp.data)
+        self.assertEqual(resp.data['file_name'], 'essay.txt')
+
+    def test_student_cannot_list_submissions(self):
+        self._submit(self.student)
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.get(reverse('task_submissions', args=[self.task.id]))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_non_member_cannot_submit(self):
+        resp = self._submit(self.other)
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.task.submissions.count(), 0)
+
+    def test_educator_cannot_submit_own_task(self):
+        resp = self._submit(self.educator)
+        self.assertEqual(resp.status_code, 403)
+
+    def test_submit_requires_file(self):
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.post(reverse('task_submit', args=[self.task.id]), {}, format='multipart')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_non_task_kind_rejects_submission(self):
+        quiz = ClassActivity.objects.create(course=self.course, kind='quiz', title='Q')
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.post(
+            reverse('task_submit', args=[quiz.id]),
+            {'file': SimpleUploadedFile('q.txt', b'x', content_type='text/plain')},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_oversized_file_rejected(self):
+        big = b'x' * (TaskSubmission.MAX_FILE_SIZE + 1)
+        resp = self._submit(self.student, content=big)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.task.submissions.count(), 0)
 
 
 class NodeCreateCoercionTests(APITestCase):
