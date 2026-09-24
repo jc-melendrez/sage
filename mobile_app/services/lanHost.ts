@@ -61,6 +61,7 @@ export class LanHostServer {
         socket,
         buffer: new LineBuffer(msg => this.handleClient(conn, msg)),
       };
+      this.connections.set(conn.id, conn);
       socket.setNoDelay(true);
       socket.on('data', (d: any) => conn.buffer.push(d));
       socket.on('error', () => this.drop(conn));
@@ -90,6 +91,12 @@ export class LanHostServer {
   startGame() {
     if (!this.quiz || this.started) return;
     this.started = true;
+    try {
+      const json = JSON.stringify({ t: 'quiz', quiz: this.quiz, order: this.order, timePerQuestion: this.timePerQuestion });
+      console.log(`[lanHost] startGame: broadcast quiz ${json.length} bytes to ${this.connections.size} conn(s), players=${this.players.length}`);
+    } catch (e) {
+      console.log('[lanHost] startGame: quiz SERIALIZATION error', e);
+    }
     this.broadcast({ t: 'roster', players: this.players });
     this.broadcast({ t: 'quiz', quiz: this.quiz, order: this.order, timePerQuestion: this.timePerQuestion });
     this.broadcast({ t: 'start' });

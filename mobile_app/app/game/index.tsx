@@ -27,7 +27,7 @@ import firestore from '@react-native-firebase/firestore';
 import { cacheQuizzes, getCachedQuizzes, createOfflineGame } from '@/services/offlineGameService';
 import * as Clipboard from 'expo-clipboard';
 import { LanClientSession } from '@/services/lanClient';
-import { lanGame, setLanClient, setLanHost, resetLanState } from '@/services/lanSession';
+import { lanGame, setLanClient, setLanHost, resetLanState, getLanClient } from '@/services/lanSession';
 import { LanHostServer, makeOrder } from '@/services/lanHost';
 import { LanMessage, LanPlayer, generateRoomCode } from '@/services/lanProtocol';
 import { startScanning, stopScanning, startAdvertising, stopAdvertising, DiscoveredRoom } from '@/services/lanDiscovery';
@@ -108,6 +108,13 @@ export default function GameCenterScreen() {
   const lanPlayerCountRef = useRef(0);
   const [lanPlayerCount, setLanPlayerCount] = useState(0);
   const [lanJoined, setLanJoined] = useState<LanPlayer[]>([]);
+  const [isJoinedLan, setIsJoinedLan] = useState(() => {
+    const c = getLanClient();
+    return !!c && c.connected && !lanGame.quiz;
+  });
+  const myLanIdRef = useRef<string | null>(null);
+  const lanNavPushedRef = useRef(false);
+  const lanClientMsgRef = useRef<(msg: LanMessage) => void>(() => {});
   const lanHostMsgRef = useRef<(msg: LanMessage) => void>(() => {});
 
   const onLanHostMessage = (msg: LanMessage) => {
@@ -140,12 +147,14 @@ export default function GameCenterScreen() {
     };
   }, [showJoinModal]);
 
-  // Clean up the LAN host server when Game Center unmounts.
+  // Clean up the LAN host server and any joined client when Game Center unmounts.
   useEffect(() => {
     return () => {
       lanHostRef.current?.stop();
       lanHostRef.current = null;
       setLanHost(null);
+      getLanClient()?.disconnect();
+      setLanClient(null);
       setLanJoined([]);
       stopAdvertising();
     };
@@ -314,12 +323,17 @@ export default function GameCenterScreen() {
 
   // 3. Handle Start Press -> Start Game & Countdown
   const handleStartPress = async () => {
-    if (isOffline || usingCachedQuizzes) {
-      const host = lanHostRef.current;
+    const host = lanHostRef.current;
+    // If players have joined over LAN, START must always broadcast to them,
+    // regardless of the internet/offline state toggling between INVITE and START.
+    const lanHostActive = host !== null && host.playerCount > 0;
+    if (lanHostActive || isOffline || usingCachedQuizzes) {
       if (!host) {
+        console.log('[game/index] START path: offline-solo (no LAN host)');
         startOfflineGame();
         return;
       }
+      console.log(`[game/index] START path: lan-broadcast (players=${host.playerCount})`);
       if (!selectedQuiz) {
         Alert.alert('Missing Quiz', 'Please select a quiz first.');
         return;
@@ -401,6 +415,7 @@ export default function GameCenterScreen() {
 
   const startGameSequence = async (code: string) => {
     setIsCreatingRoom(true);
+    console.log('[game/index] START path: online-firestore');
     try {
       const token = await getToken();
       // Call backend to start the game
@@ -456,6 +471,7 @@ export default function GameCenterScreen() {
       Alert.alert("Missing Quiz", "Please select a quiz first.");
       return;
     }
+    console.log('[game/index] START path: offline-solo');
     const time = parseInt(timePerQuestion, 10) || 15;
     try {
       createOfflineGame(selectedQuiz, time);
@@ -485,6 +501,57 @@ export default function GameCenterScreen() {
     }
   };
 
+  const leaveLan = () => {
+    getLanClient()?.disconnect();
+    setLanClient(null);
+    myLanIdRef.current = null;
+    lanNavPushedRef.current = false;
+    setIsJoinedLan(false);
+    setLanJoined([]);
+    setLanPlayerCount(0);
+    lanPlayerCountRef.current = 0;
+    resetLanState();
+  };
+
+  // Messages arriving from the LAN host while this screen is the joiner's lobby.
+  const handleLanClientMsg = (msg: LanMessage) => {
+    if (msg.t === 'welcome') {
+      myLanIdRef.current = msg.playerId;
+      setIsJoinedLan(true);
+    } else if (msg.t === 'roster') {
+      const connected = msg.players.filter(p => p.connected);
+      lanPlayerCountRef.current = connected.length;
+      setLanPlayerCount(connected.length);
+      setLanJoined(connected);
+    } else if (msg.t === 'quiz') {
+      lanGame.quiz = msg.quiz;
+      lanGame.order = msg.order;
+      lanGame.timePerQuestion = msg.timePerQuestion;
+      if (!lanNavPushedRef.current) {
+        lanNavPushedRef.current = true;
+        router.push('/game/lan-play' as any);
+      }
+    } else if (msg.t === 'error') {
+      Alert.alert('LAN Error', msg.message || 'Unexpected error');
+      if (!lanNavPushedRef.current) leaveLan();
+    } else if (msg.t === 'end') {
+      if (!lanNavPushedRef.current) {
+        Alert.alert('Game Ended', msg.reason || 'The host ended the game');
+        leaveLan();
+      }
+    }
+  };
+  lanClientMsgRef.current = handleLanClientMsg;
+
+  // If a live LAN client exists (screen refocused mid-session), re-attach the
+  // handler so lobby updates and game-over events keep flowing on this screen.
+  useFocusEffect(
+    useCallback(() => {
+      const c = getLanClient();
+      if (c && c.connected) c.onEvent = lanClientMsgRef.current;
+    }, [])
+  );
+
   const tryJoinLan = (code: string): Promise<boolean> =>
     new Promise<boolean>(async resolve => {
       const room = lanRoomsRef.current.find(r => r.code === code && !r.started);
@@ -493,14 +560,10 @@ export default function GameCenterScreen() {
         return;
       }
       try {
+        getLanClient()?.disconnect();
         resetLanState();
-        const client = new LanClientSession((msg: LanMessage) => {
-          if (msg.t === 'quiz') {
-            lanGame.quiz = msg.quiz;
-            lanGame.order = msg.order;
-            lanGame.timePerQuestion = msg.timePerQuestion;
-          }
-        });
+        lanNavPushedRef.current = false;
+        const client = new LanClientSession(lanClientMsgRef.current);
         setLanClient(client);
         await client.connect(room.hostIp);
         client.join(code, lanName);
@@ -510,7 +573,6 @@ export default function GameCenterScreen() {
         lanGame.role = 'player';
         setShowJoinModal(false);
         setJoinCode('');
-        router.push('/game/lan-play' as any);
         resolve(true);
       } catch {
         setLanClient(null);
@@ -585,9 +647,12 @@ export default function GameCenterScreen() {
   };
 
   // --- Render Helpers ---
-  const lanActive = !!lanHostRef.current;
+  const lanActive = !!lanHostRef.current || isJoinedLan;
+  const lanRoster = isJoinedLan && !lanHostRef.current
+    ? lanJoined.filter(p => p.id !== myLanIdRef.current)
+    : lanJoined;
   const joinedPlayers = lanActive
-    ? lanJoined.map(p => ({ id: p.id, displayName: p.name }))
+    ? lanRoster.map(p => ({ id: p.id, displayName: p.name }))
     : roomPlayers.filter(p => String(p.id) !== String(currentUserId));
   const joinedCount = joinedPlayers.length;
 
@@ -908,49 +973,86 @@ export default function GameCenterScreen() {
         {/* Bottom Action Bar */}
         <View style={[styles.bottomBar, { paddingBottom: 10 }]}>
 
+        {isJoinedLan ? (
+          <>
+            {/* Joiner lobby: LEAVE + room code, waiting for the host */}
+            <View style={styles.bottomBarRow}>
+              <TouchableOpacity
+                style={styles.actionBtnJoin}
+                onPress={leaveLan}
+              >
+                <Ionicons name="exit" size={20} color={COLORS.purplePrimary} style={{marginRight: 8}} />
+                <Text style={styles.actionBtnJoinText}>LEAVE</Text>
+              </TouchableOpacity>
+
+              <View style={styles.actionBtnInvite}>
+                <Ionicons name="wifi" size={18} color={COLORS.success} style={{marginRight: 8}} />
+                <Text style={styles.lanRoomChipText}>ROOM {lanGame.roomCode || ''}</Text>
+              </View>
+            </View>
+
+            {lanGame.quiz ? (
+              <TouchableOpacity
+                style={styles.actionBtnStart}
+                onPress={() => router.push('/game/lan-play' as any)}
+              >
+                <Ionicons name="play" size={20} color="white" style={{marginRight: 8}} />
+                <Text style={styles.actionBtnTextWhite}>RETURN TO GAME</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.lanWaitingRow}>
+                <ActivityIndicator color={COLORS.purpleLight} />
+                <Text style={styles.lanWaitingText}>Waiting for the host to start…</Text>
+              </View>
+            )}
+          </>
+        ) : (
+          <>
             {/* Row 1: JOIN + INVITE side by side */}
             <View style={styles.bottomBarRow}>
-                {/* JOIN BUTTON — enter a room code */}
-                <TouchableOpacity
-                    style={styles.actionBtnJoin}
-                    onPress={() => setShowJoinModal(true)}
-                >
-                    <Ionicons name="enter" size={20} color={COLORS.purplePrimary} style={{marginRight: 8}} />
-                    <Text style={styles.actionBtnJoinText}>JOIN</Text>
-                </TouchableOpacity>
+              {/* JOIN BUTTON — enter a room code */}
+              <TouchableOpacity
+                style={styles.actionBtnJoin}
+                onPress={() => setShowJoinModal(true)}
+              >
+                <Ionicons name="enter" size={20} color={COLORS.purplePrimary} style={{marginRight: 8}} />
+                <Text style={styles.actionBtnJoinText}>JOIN</Text>
+              </TouchableOpacity>
 
-                {/* INVITE BUTTON */}
-                <TouchableOpacity 
-                    style={styles.actionBtnInvite} 
-                    onPress={handleInvitePress}
-                    disabled={isCreatingRoom}
-                >
-                    {isCreatingRoom && !showCountdown ? (
-                        <ActivityIndicator color={COLORS.success} />
-                    ) : (
-                        <>
-                            <Ionicons name="share-social" size={20} color={COLORS.success} style={{marginRight: 8}} />
-                            <Text style={styles.actionBtnText}>INVITE</Text>
-                        </>
-                    )}
-                </TouchableOpacity>
+              {/* INVITE BUTTON */}
+              <TouchableOpacity
+                style={styles.actionBtnInvite}
+                onPress={handleInvitePress}
+                disabled={isCreatingRoom}
+              >
+                {isCreatingRoom && !showCountdown ? (
+                    <ActivityIndicator color={COLORS.success} />
+                ) : (
+                    <>
+                        <Ionicons name="share-social" size={20} color={COLORS.success} style={{marginRight: 8}} />
+                        <Text style={styles.actionBtnText}>INVITE</Text>
+                    </>
+                )}
+              </TouchableOpacity>
             </View>
 
             {/* Row 2: START full width */}
-            <TouchableOpacity 
-                style={[styles.actionBtnStart, isCreatingRoom && { opacity: 0.7 }]} 
-                onPress={handleStartPress}
-                disabled={isCreatingRoom}
+            <TouchableOpacity
+              style={[styles.actionBtnStart, isCreatingRoom && { opacity: 0.7 }]}
+              onPress={handleStartPress}
+              disabled={isCreatingRoom}
             >
-                {isCreatingRoom && !showCountdown ? (
-                    <ActivityIndicator color="white" />
-                ) : (
-                    <>
-                        <Ionicons name="play" size={20} color="white" style={{marginRight: 8}} />
-                        <Text style={styles.actionBtnTextWhite}>START</Text>
-                    </>
-                )}
+              {isCreatingRoom && !showCountdown ? (
+                  <ActivityIndicator color="white" />
+              ) : (
+                  <>
+                      <Ionicons name="play" size={20} color="white" style={{marginRight: 8}} />
+                      <Text style={styles.actionBtnTextWhite}>START</Text>
+                  </>
+              )}
             </TouchableOpacity>
+          </>
+        )}
         </View>
 
         {/* --- INVITE CODE MODAL --- */}
@@ -1352,6 +1454,25 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.extraBold,
     fontSize: 16,
     letterSpacing: 0.5,
+  },
+  lanRoomChipText: {
+    color: COLORS.success,
+    fontFamily: FONTS.extraBold,
+    fontSize: 13,
+    letterSpacing: 0.5,
+  },
+  lanWaitingRow: {
+    height: 50,
+    borderRadius: 12,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 10,
+  },
+  lanWaitingText: {
+    color: COLORS.textPrimary,
+    fontFamily: FONTS.medium,
+    fontSize: 14,
   },
   actionBtnStart: {
     width: '100%',

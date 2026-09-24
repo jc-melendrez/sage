@@ -53,8 +53,6 @@ export default function LanPlayScreen() {
   const savedRef = useRef(false);
   const finishCalledRef = useRef(false);
   const lcRef = useRef<ReturnType<typeof getLanClient>>(null);
-  const [lastMsg, setLastMsg] = useState<string | null>(null);
-  const [wired, setWired] = useState(false);
   const lc = getLanClient();
 
   useEffect(() => {
@@ -99,7 +97,6 @@ export default function LanPlayScreen() {
 
   const onMessage = useCallback(
     (msg: LanMessage) => {
-      setLastMsg(msg.t);
       console.log('[lan-play] msg', msg.t);
       if (msg.t === 'quiz') {
         lanGame.quiz = msg.quiz;
@@ -123,11 +120,9 @@ export default function LanPlayScreen() {
     lcRef.current = lc;
     if (!lc) return;
     lc.onEvent = onMessage;
-    setWired(true);
     console.log('[lan-play] wired, connected=' + lc.connected);
     return () => {
       lc.onEvent = () => {};
-      setWired(false);
     };
   }, [lc, onMessage]);
 
@@ -145,10 +140,6 @@ export default function LanPlayScreen() {
             <ActivityIndicator color={COLORS.purpleLight} size="large" />
             <Text style={styles.waitingTitle}>Waiting for the host to start…</Text>
             <Text style={styles.waitingSub}>The quiz will appear here in a moment</Text>
-
-            <Text style={styles.waitingDiag}>
-              diag · client={lc ? 'set' : 'none'} · wired={wired ? 'yes' : 'no'} · last={lastMsg || '—'} · quiz={lanGame.quiz ? 'yes' : 'no'}
-            </Text>
 
             {engineError && (
               <Text style={styles.waitingError}>
@@ -313,7 +304,6 @@ const styles = StyleSheet.create({
   centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 30 },
   waitingTitle: { color: COLORS.textPrimary, fontFamily: 'Montserrat-Bold', fontSize: 18, marginTop: 20, textAlign: 'center' },
   waitingSub: { color: COLORS.textMuted, fontFamily: 'Montserrat-Medium', fontSize: 13, marginTop: 6, textAlign: 'center' },
-  waitingDiag: { color: COLORS.textMuted, fontFamily: 'Montserrat-Regular', fontSize: 11, marginTop: 14, textAlign: 'center', opacity: 0.75 },
   waitingWarn: { color: COLORS.warning, fontFamily: 'Montserrat-Medium', fontSize: 13, marginTop: 16, textAlign: 'center', lineHeight: 20, marginHorizontal: 24 },
   waitingError: { color: COLORS.danger, fontFamily: 'Montserrat-Medium', fontSize: 13, marginTop: 16, textAlign: 'center', lineHeight: 20, marginHorizontal: 24 },
   backButton: { marginTop: 24, backgroundColor: COLORS.purplePrimary, paddingVertical: 12, paddingHorizontal: 32, borderRadius: 12, alignItems: 'center' },
