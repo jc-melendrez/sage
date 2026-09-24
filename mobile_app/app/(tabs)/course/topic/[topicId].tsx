@@ -138,7 +138,7 @@ function NodeButton({ node, status, selected, x, y, onPress, onMeasure }: NodeBu
   const R = NODE_SIZE / 2;
   const isCurrent = status === 'current';
 
-  const btnRef = useRef<ComponentRef<typeof TouchableOpacity> | null>(null);
+  const btnRef = useRef<ComponentRef<typeof Pressable> | null>(null);
   const pressed = useSharedValue(0);
   const pulse = useSharedValue(0);
   const spin = useSharedValue(0);
@@ -199,13 +199,14 @@ function NodeButton({ node, status, selected, x, y, onPress, onMeasure }: NodeBu
     : shade(color, -30);
 
   return (
-    <TouchableOpacity
+    <Pressable
       ref={(r) => { btnRef.current = r; }}
       onLayout={handleMeasure}
       onPressIn={() => { pressed.value = withTiming(1, { duration: 90 }); }}
       onPressOut={() => { pressed.value = withSpring(0, { damping: 14, stiffness: 240 }); }}
       onPress={onPress}
-      activeOpacity={1}
+      pressRetentionOffset={{ top: 24, bottom: 24, left: 24, right: 24 }}
+      hitSlop={10}
       style={[
         styles.nodeBtn,
         { left: x - R, top: y - R, shadowColor },
@@ -281,7 +282,7 @@ function NodeButton({ node, status, selected, x, y, onPress, onMeasure }: NodeBu
       {selected && (
         <View style={[styles.selectionRing, { borderColor: color }]} />
       )}
-    </TouchableOpacity>
+    </Pressable>
   );
 }
 
