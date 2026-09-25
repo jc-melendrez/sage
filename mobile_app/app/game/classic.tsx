@@ -157,6 +157,9 @@ export default function ClassicGameSetupScreen() {
   };
   const handleCodeKeyPress = (e: any, index: number) => {
     if (e.nativeEvent.key === 'Backspace' && !joinCode[index] && index > 0) {
+      const next = joinCode.split('');
+      next[index - 1] = '';
+      setJoinCode(next.join(''));
       codeRefs.current[index - 1]?.focus();
     }
   };

@@ -9,14 +9,14 @@ class QuizQuestionSerializer(serializers.ModelSerializer):
 class QuizSerializer(serializers.ModelSerializer):
     questions = QuizQuestionSerializer(many=True, read_only=True)
     course = serializers.IntegerField(source='course_id', read_only=True)
-    attempted = serializers.SerializerMethodField()
+    attempt_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Quiz
-        fields = ['id', 'title', 'created_at', 'quiz_type', 'course', 'available_until', 'questions', 'attempted']
+        fields = ['id', 'title', 'created_at', 'quiz_type', 'course', 'available_until', 'questions', 'attempt_count']
 
-    def get_attempted(self, obj):
+    def get_attempt_count(self, obj):
         request = self.context.get('request')
         if request is None or not request.user.is_authenticated:
-            return False
-        return QuizAttempt.objects.filter(quiz=obj, user=request.user).exists()
+            return 0
+        return QuizAttempt.objects.filter(quiz=obj, user=request.user).count()

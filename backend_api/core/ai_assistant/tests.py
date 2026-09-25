@@ -135,11 +135,13 @@ class QuizAttemptAPITests(APITestCase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(QuizAttempt.objects.count(), 0)
 
-    def test_take_once_enforced(self):
+    def test_unlimited_attempts_allowed(self):
         self.client.force_authenticate(user=self.student)
         QuizAttempt.objects.create(quiz=self.quiz, user=self.student)
+        # First attempt exists, second should succeed (unlimited retries)
         resp = self.client.post(self.attempt_url)
-        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(QuizAttempt.objects.filter(quiz=self.quiz, user=self.student).count(), 2)
 
     def test_deadline_passed_blocks_start(self):
         self.quiz.available_until = timezone.now() - timedelta(minutes=5)
@@ -169,9 +171,14 @@ class QuizAttemptAPITests(APITestCase):
         self.quiz.refresh_from_db()
         self.assertIsNone(self.quiz.available_until)
 
-    def test_serializer_reports_attempted(self):
+    def test_serializer_reports_attempt_count(self):
         self.client.force_authenticate(user=self.student)
         QuizAttempt.objects.create(quiz=self.quiz, user=self.student)
         resp = self.client.get(reverse('quiz_detail', args=[self.quiz.id]))
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.data['attempted'])
+        self.assertEqual(resp.data['attempt_count'], 1)
+        
+        # Add another attempt
+        QuizAttempt.objects.create(quiz=self.quiz, user=self.student)
+        resp = self.client.get(reverse('quiz_detail', args=[self.quiz.id]))
+        self.assertEqual(resp.data['attempt_count'], 2)

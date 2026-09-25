@@ -135,6 +135,7 @@ interface Message {
 interface ChatSession {
   id: number;
   title: string;
+  pinned?: boolean;
 }
 
 export default function AIAssistantScreen() {
@@ -144,6 +145,11 @@ export default function AIAssistantScreen() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [isMenuVisible, setIsMenuVisible] = useState(false);
+  
+  // Session menu & inline edit state
+  const [menuSessionId, setMenuSessionId] = useState<number | null>(null);
+  const [editingSessionId, setEditingSessionId] = useState<number | null>(null);
+  const [editTitle, setEditTitle] = useState('');
   
   // --- Message State ---
   const [messages, setMessages] = useState<Message[]>([]);
@@ -216,6 +222,90 @@ export default function AIAssistantScreen() {
       time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
     }]);
     setIsMenuVisible(false);
+  };
+
+  // Session Menu Actions
+  const toggleMenu = (sessionId: number) => {
+    setMenuSessionId(menuSessionId === sessionId ? null : sessionId);
+  };
+
+  const closeMenu = () => {
+    setMenuSessionId(null);
+  };
+
+  const handlePinSession = async (sessionId: number, currentlyPinned: boolean) => {
+    try {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ pinned: !currentlyPinned }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, pinned: data.pinned } : s));
+      }
+    } catch (err) {
+      console.error('Failed to pin session:', err);
+    }
+    closeMenu();
+  };
+
+  const startRenameSession = (sessionId: number, currentTitle: string) => {
+    setEditingSessionId(sessionId);
+    setEditTitle(currentTitle);
+    closeMenu();
+  };
+
+  const saveRenameSession = async (sessionId: number) => {
+    if (!editTitle.trim()) return;
+    try {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ title: editTitle.trim() }),
+      });
+      if (res.ok) {
+        setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: editTitle.trim() } : s));
+      }
+    } catch (err) {
+      console.error('Failed to rename session:', err);
+    }
+    setEditingSessionId(null);
+    setEditTitle('');
+  };
+
+  const handleDeleteSession = async (sessionId: number) => {
+    closeMenu();
+    Alert.alert(
+      'Delete Chat',
+      'Are you sure you want to delete this conversation?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const token = await getToken();
+              const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${token}` },
+              });
+              if (res.ok) {
+                setSessions(prev => prev.filter(s => s.id !== sessionId));
+                if (activeSessionId === sessionId) {
+                  startNewChat();
+                }
+              }
+            } catch (err) {
+              console.error('Failed to delete session:', err);
+            }
+          },
+        },
+      ],
+    );
   };
 
   // 4. Send Message
@@ -418,7 +508,7 @@ export default function AIAssistantScreen() {
             </LinearGradient>
 
             <TouchableOpacity 
-              style={styles.newChatButton} 
+              style={[styles.newChatButton, { marginTop: 16 }]} 
               onPress={startNewChat}
               activeOpacity={0.8}
             >
@@ -434,42 +524,96 @@ export default function AIAssistantScreen() {
             </TouchableOpacity>
 
             <ScrollView style={styles.sessionList} showsVerticalScrollIndicator={false}>
-              {sessions.map(session => (
-                <TouchableOpacity 
-                  key={session.id} 
-                  style={[
-                    styles.sessionItem, 
-                    activeSessionId === session.id && styles.activeSessionItem
-                  ]}
-                  onPress={() => loadHistory(session.id)}
-                  activeOpacity={0.7}
-                >
-                  <View style={[
-                    styles.sessionIconBox,
-                    activeSessionId === session.id && styles.activeSessionIconBox
-                  ]}>
-                    <Ionicons 
-                      name="chatbubble" 
-                      size={18} 
-                      color={activeSessionId === session.id ? "white" : COLORS.purpleVibrant} 
-                    />
+              {sessions.map(session => {
+                const isActive = activeSessionId === session.id;
+                const isEditing = editingSessionId === session.id;
+                const isMenuOpen = menuSessionId === session.id;
+
+                return (
+                  <View key={session.id} style={styles.sessionItemWrapper}>
+                    <TouchableOpacity 
+                      style={[
+                        styles.sessionItem, 
+                        isActive && styles.activeSessionItem
+                      ]}
+                      onPress={() => !isEditing && !isMenuOpen && loadHistory(session.id)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={[
+                        styles.sessionIconBox,
+                        isActive && styles.activeSessionIconBox
+                      ]}>
+                        <Ionicons 
+                          name="chatbubble" 
+                          size={18} 
+                          color={isActive ? "white" : COLORS.purpleVibrant} 
+                        />
+                      </View>
+                      
+                      {isEditing ? (
+                        <TextInput
+                          style={[styles.sessionText, isActive && styles.activeSessionText, styles.editInput]}
+                          value={editTitle}
+                          onChangeText={setEditTitle}
+                          onBlur={() => saveRenameSession(session.id)}
+                          onSubmitEditing={() => saveRenameSession(session.id)}
+                          autoFocus
+                          maxLength={100}
+                        />
+                      ) : (
+                        <View style={styles.sessionContent}>
+                          <View style={styles.sessionTitleRow}>
+                            {session.pinned && (
+                              <Ionicons name="pin" size={14} color={isActive ? "white" : COLORS.warning} style={styles.pinIcon} />
+                            )}
+                            <Text 
+                              style={[styles.sessionText, isActive && styles.activeSessionText]} 
+                              numberOfLines={1}
+                            >
+                              {session.title}
+                            </Text>
+                          </View>
+                        </View>
+                      )}
+
+                      <TouchableOpacity
+                        style={styles.sessionMenuButton}
+                        onPress={(e) => { e.stopPropagation(); toggleMenu(session.id); }}
+                        activeOpacity={0.7}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <Ionicons name="ellipsis-horizontal" size={22} color={isActive ? "rgba(255,255,255,0.7)" : COLORS.textMuted} />
+                      </TouchableOpacity>
+
+                      {isActive && !isEditing && (
+                        <View style={styles.activeIndicator}>
+                          <View style={styles.activeDot} />
+                        </View>
+                      )}
+                    </TouchableOpacity>
+
+                    {/* 3-dots dropdown menu */}
+                    {isMenuOpen && (
+                      <View style={styles.menuOverlay} onTouchStart={closeMenu}>
+                        <View style={[styles.menuDropdown, { top: 50 }]}>
+                          <TouchableOpacity style={styles.menuItem} onPress={() => handlePinSession(session.id, session.pinned || false)} activeOpacity={0.7}>
+                            <Ionicons name={session.pinned ? "pin-outline" : "pin"} size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
+                            <Text style={styles.menuItemText}>{session.pinned ? 'Unpin' : 'Pin'}</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={styles.menuItem} onPress={() => startRenameSession(session.id, session.title)} activeOpacity={0.7}>
+                            <Ionicons name="create-outline" size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
+                            <Text style={styles.menuItemText}>Rename</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={[styles.menuItem, styles.menuItemDanger]} onPress={() => handleDeleteSession(session.id)} activeOpacity={0.7}>
+                            <Ionicons name="trash-outline" size={18} color={COLORS.danger} style={styles.menuItemIcon} />
+                            <Text style={[styles.menuItemText, { color: COLORS.danger }]}>Delete</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    )}
                   </View>
-                  <Text 
-                    style={[
-                      styles.sessionText, 
-                      activeSessionId === session.id && styles.activeSessionText
-                    ]} 
-                    numberOfLines={1}
-                  >
-                    {session.title}
-                  </Text>
-                  {activeSessionId === session.id && (
-                    <View style={styles.activeIndicator}>
-                      <View style={styles.activeDot} />
-                    </View>
-                  )}
-                </TouchableOpacity>
-              ))}
+                );
+              })}
             </ScrollView>
           </View>
 
@@ -657,7 +801,7 @@ const styles = StyleSheet.create({
     gap: 14, 
     alignItems: 'center' 
   },
-  menuButton: { 
+sessionMenuButton: {
     padding: 6,
     borderRadius: 12,
     backgroundColor: 'rgba(255, 255, 255, 0.15)',
@@ -1000,4 +1144,74 @@ const styles = StyleSheet.create({
   removeAttachment: {
     padding: 2,
   },
+
+  // Session item new styles
+  sessionItemWrapper: {
+    marginBottom: 8,
+  },
+  sessionContent: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  sessionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flex: 1,
+  },
+  pinIcon: {
+    marginRight: 2,
+  },
+  editInput: {
+    flex: 1,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.purplePrimary,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    fontSize: 15,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+  },
+  menuButton: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: 'transparent',
+  },
+  menuOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 10,
+  },
+  menuDropdown: {
+    position: 'absolute',
+    right: 0,
+    backgroundColor: COLORS.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingVertical: 6,
+    width: 140,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  menuItemIcon: { width: 24 },
+  menuItemText: { fontSize: 14, fontFamily: FONTS.medium, fontWeight: '600', color: COLORS.textPrimary },
+  menuItemDanger: { borderTopWidth: 1, borderTopColor: COLORS.border, marginTop: 4, paddingTop: 16 },
 });

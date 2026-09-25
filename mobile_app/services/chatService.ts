@@ -37,6 +37,13 @@ export interface Attachment {
   name: string;
   mime: string;
   size: number;
+  /** Quiz embed attachment */
+  type?: 'quiz_embed';
+  quiz_id?: number;
+  title?: string;
+  question_count?: number;
+  quiz_type?: string;
+  deep_link?: string;
 }
 
 export interface LocalAttachment {

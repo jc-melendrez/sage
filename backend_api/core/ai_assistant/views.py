@@ -165,6 +165,43 @@ class SessionHistoryView(APIView):
         
         return Response(data)
 
+
+class SessionDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _get_session(self, request, session_id):
+        try:
+            return ChatSession.objects.get(id=session_id, user=request.user)
+        except ChatSession.DoesNotExist:
+            return None
+
+    def patch(self, request, session_id):
+        session = self._get_session(request, session_id)
+        if not session:
+            return Response({"error": "Session not found"}, status=404)
+
+        title = request.data.get('title')
+        pinned = request.data.get('pinned')
+
+        if title is not None:
+            title = str(title).strip()
+            if not title:
+                return Response({"error": "Title cannot be empty"}, status=400)
+            session.title = title
+
+        if pinned is not None:
+            session.pinned = bool(pinned)
+
+        session.save()
+        return Response({"id": session.id, "title": session.title, "pinned": session.pinned})
+
+    def delete(self, request, session_id):
+        session = self._get_session(request, session_id)
+        if not session:
+            return Response({"error": "Session not found"}, status=404)
+        session.delete()
+        return Response(status=204)
+
 class GenerateQuizView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -465,7 +502,7 @@ class QuizAttemptView(APIView):
         return None
 
     def post(self, request, quiz_id):
-        """Record the one-and-only take of a quiz. Server-side take-once gate."""
+        """Record a quiz attempt. Unlimited retries allowed."""
         quiz = self._get_readable_quiz(request, quiz_id)
         if not quiz:
             return Response({"error": "Quiz not found."}, status=404)
@@ -476,15 +513,31 @@ class QuizAttemptView(APIView):
                 status=403,
             )
 
-        if QuizAttempt.objects.filter(quiz=quiz, user=request.user).exists():
-            return Response(
-                {"error": "You have already taken this quiz. It can only be taken once."},
-                status=409,
-            )
-
         attempt = QuizAttempt.objects.create(quiz=quiz, user=request.user)
         return Response({
             'id': attempt.id,
             'started_at': attempt.started_at.isoformat(),
             'available_until': quiz.available_until.isoformat() if quiz.available_until else None,
+        })
+
+
+class QuizShareView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, quiz_id):
+        quiz = Quiz.objects.filter(id=quiz_id).first()
+        if not quiz:
+            return Response({"error": "Quiz not found."}, status=404)
+        if request.user != quiz.user:
+            course = quiz.course
+            if not course or not course.students.filter(id=request.user.id).exists():
+                return Response({"error": "Not authorized to share this quiz."}, status=403)
+
+        deep_link = f"sage://quiz/{quiz.id}"
+        return Response({
+            'id': quiz.id,
+            'title': quiz.title,
+            'question_count': quiz.questions.count(),
+            'quiz_type': quiz.quiz_type,
+            'deep_link': deep_link,
         })
