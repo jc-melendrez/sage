@@ -84,6 +84,13 @@ export default function TvLandingScreen() {
           <Text style={styles.buttonText}>ENTER ROOM</Text>
         </Pressable>
 
+        <Pressable
+          style={({ pressed }) => [styles.previewButton, pressed && styles.buttonPressed]}
+          onPress={() => router.replace('/demo')}
+        >
+          <Text style={styles.previewButtonText}>▶ Preview the demo round</Text>
+        </Pressable>
+
         <Text style={styles.foot}>
           Start a game in the app, then share its code here
         </Text>
@@ -156,6 +163,21 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.extraBold,
     letterSpacing: 2,
     color: COLORS.textPrimary,
+  },
+  previewButton: {
+    marginTop: 14,
+    backgroundColor: 'rgba(34, 211, 238, 0.1)',
+    borderWidth: 1,
+    borderColor: COLORS.accent,
+    borderRadius: 16,
+    paddingHorizontal: 32,
+    paddingVertical: 14,
+  },
+  previewButtonText: {
+    fontSize: 16,
+    fontFamily: FONTS.bold,
+    letterSpacing: 1,
+    color: COLORS.accent,
   },
   foot: {
     fontSize: 13,
