@@ -6,7 +6,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-import { getCourseActivities, ClassActivity } from '@/services/activityService';
+import { getCourseActivities, ClassActivity, getTaskAttachment } from '@/services/activityService';
 import { getMySubmission, submitTask, TaskSubmissionFull } from '@/services/taskService';
 
 const COLORS = {
@@ -18,6 +18,7 @@ const COLORS = {
   purpleGhost: '#DDD6FE',
   success: '#10B981',
   warning: '#F59E0B',
+  danger: '#DC2626',
   textPrimary: '#3a107a',
   textMuted: '#94A3B8',
   border: 'rgba(44, 29, 0, 0.15)',
@@ -31,6 +32,14 @@ const FONTS = {
 };
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — matches the backend cap.
+
+function getScoreColor(score: number | null | undefined, maxPoints: number): string {
+  if (score === null || score === undefined) return COLORS.textMuted;
+  const pct = (score / maxPoints) * 100;
+  if (pct >= 70) return COLORS.success;
+  if (pct >= 50) return COLORS.warning;
+  return COLORS.danger;
+}
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -137,6 +146,29 @@ export default function TaskSubmitScreen() {
     }
   };
 
+  const handleOpenAttachment = async (attachmentId: number) => {
+    setOpening(true);
+    try {
+      const attachment = await getTaskAttachment(tid, attachmentId);
+      const uri = `${FileSystem.cacheDirectory}${attachment.file_name}`;
+      const base64Body = attachment.file_data.includes('base64,')
+        ? attachment.file_data.split('base64,')[1]
+        : attachment.file_data;
+      await FileSystem.writeAsStringAsync(uri, base64Body, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, { mimeType: attachment.file_mime });
+      } else {
+        Alert.alert('Cannot open file', 'File sharing is not available on this device.');
+      }
+    } catch {
+      Alert.alert('Open failed', 'Could not open the attachment.');
+    } finally {
+      setOpening(false);
+    }
+  };
+
   if (loading) {
     return (
       <View style={styles.center}>
@@ -182,6 +214,25 @@ export default function TaskSubmitScreen() {
           ) : (
             <Text style={styles.taskNoteMuted}>No instructions provided.</Text>
           )}
+          {task.attachments && task.attachments.length > 0 && (
+            <View style={styles.attachmentSection}>
+              <Text style={styles.sectionLabel}>Materials</Text>
+              {task.attachments.map((att) => (
+                <TouchableOpacity
+                  key={att.id}
+                  style={styles.attachmentItem}
+                  activeOpacity={0.8}
+                  onPress={() => handleOpenAttachment(att.id)}
+                  disabled={opening}
+                >
+                  <Ionicons name="document-text" size={16} color={COLORS.purpleVibrant} />
+                  <Text style={styles.attachmentName} numberOfLines={1}>{att.file_name}</Text>
+                  <Text style={styles.attachmentSize}>{formatBytes(att.file_size)}</Text>
+                  <Ionicons name="share-outline" size={16} color={COLORS.textMuted} />
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
         </View>
 
         <View style={[styles.card, { marginTop: 14 }]}>
@@ -200,6 +251,22 @@ export default function TaskSubmitScreen() {
                 <Text style={styles.submittedMeta}>
                   {new Date(submission.submitted_at).toLocaleString()}
                 </Text>
+                {submission.score !== null && submission.score !== undefined && (
+                  <View style={styles.scoreRow} key="score">
+                    <Text style={[styles.scoreText, { color: getScoreColor(submission.score, submission.max_points || 100) }]}>
+                      Score: {submission.score} / {submission.max_points || 100}
+                    </Text>
+                  </View>
+                )}
+                {submission.feedback && (
+                  <View style={styles.feedbackRow} key="feedback">
+                    <Text style={styles.feedbackLabel}>Feedback:</Text>
+                    <Text style={styles.feedbackText}>{submission.feedback}</Text>
+                  </View>
+                )}
+                {(submission.score === null || submission.score === undefined) && !submission.feedback && (
+                  <Text style={styles.notGradedText}>Not graded yet</Text>
+                )}
               </View>
             </View>
           ) : (
@@ -296,6 +363,12 @@ const styles = StyleSheet.create({
   },
   submittedTitle: { fontSize: 15, fontFamily: FONTS.bold, color: COLORS.textPrimary },
   submittedMeta: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 2 },
+  scoreRow: { marginTop: 8 },
+  scoreText: { fontSize: 13, fontFamily: FONTS.bold, fontWeight: '700' },
+  feedbackRow: { marginTop: 8, gap: 4 },
+  feedbackLabel: { fontSize: 12, fontFamily: FONTS.bold, color: COLORS.textPrimary },
+  feedbackText: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textPrimary },
+  notGradedText: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 8, fontStyle: 'italic' },
   fileBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -330,4 +403,18 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   openBtnText: { color: COLORS.purpleVibrant, fontFamily: FONTS.semiBold, fontSize: 13, fontWeight: '600' },
+
+  attachmentSection: { marginTop: 14, gap: 8 },
+  attachmentItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  attachmentName: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textPrimary, flex: 1 },
+  attachmentSize: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted },
 });

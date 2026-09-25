@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
 import { getQuizzes } from '@/services/quizService';
@@ -71,6 +72,50 @@ function parseDeadlineInput(text: string): Date | null {
   return date;
 }
 
+const openDeadlinePicker = (target: 'new' | 'edit') => {
+  const current = target === 'new' ? availableUntil : draft?.available_until;
+  const parsed = current ? parseDeadlineInput(current) : new Date();
+  setDeadlineTempDate(parsed || new Date());
+  setDeadlinePickerMode('date');
+  setDeadlinePickerTarget(target);
+  setShowDeadlinePicker(true);
+};
+
+const handleDeadlineChange = ({ nativeEvent }: any) => {
+  if (nativeEvent.type === 'dismissed') {
+    setShowDeadlinePicker(false);
+    return;
+  }
+  const newDate = nativeEvent.timestamp ? new Date(nativeEvent.timestamp) : deadlineTempDate;
+  setDeadlineTempDate(newDate);
+  if (deadlinePickerMode === 'date') {
+    setDeadlinePickerMode('time');
+  } else {
+    const combined = new Date(
+      deadlineTempDate.getFullYear(),
+      deadlineTempDate.getMonth(),
+      deadlineTempDate.getDate(),
+      newDate.getHours(),
+      newDate.getMinutes()
+    );
+    const formatted = toDeadlineInput(combined);
+    if (deadlinePickerTarget === 'new') {
+      setAvailableUntil(formatted);
+    } else if (draft) {
+      setDraft({ ...draft, available_until: formatted });
+    }
+    setShowDeadlinePicker(false);
+  }
+};
+
+const clearDeadline = (target: 'new' | 'edit') => {
+  if (target === 'new') {
+    setAvailableUntil('');
+  } else if (draft) {
+    setDraft({ ...draft, available_until: '' });
+  }
+};
+
 export default function QuizManagerScreen() {
   const params = useLocalSearchParams<{ course?: string; generate?: string }>();
 
@@ -98,6 +143,12 @@ export default function QuizManagerScreen() {
   const [editingQuiz, setEditingQuiz] = useState<Quiz | null>(null);
   const [draft, setDraft] = useState<EditableQuiz | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+
+  // Deadline picker state
+  const [showDeadlinePicker, setShowDeadlinePicker] = useState(false);
+  const [deadlinePickerMode, setDeadlinePickerMode] = useState<'date' | 'time'>('date');
+  const [deadlineTempDate, setDeadlineTempDate] = useState<Date>(new Date());
+  const [deadlinePickerTarget, setDeadlinePickerTarget] = useState<'new' | 'edit'>('new');
 
   // 3-dots menu state
   const [menuQuizId, setMenuQuizId] = useState<number | null>(null);
@@ -788,15 +839,35 @@ export default function QuizManagerScreen() {
                 />
 
                 <Text style={styles.fieldLabel}>Deadline (Optional) · YYYY-MM-DD HH:MM</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="e.g. 2026-10-01 23:59"
-                  placeholderTextColor={COLORS.textMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  value={availableUntil}
-                  onChangeText={setAvailableUntil}
-                />
+                <View style={styles.deadlineRow}>
+                  <TextInput
+                    style={[styles.input, { flex: 1, marginRight: 8 }]}
+                    placeholder="e.g. 2026-10-01 23:59"
+                    placeholderTextColor={COLORS.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    value={availableUntil}
+                    onChangeText={setAvailableUntil}
+                  />
+                  <TouchableOpacity
+                    style={styles.deadlinePickerBtn}
+                    activeOpacity={0.8}
+                    onPress={() => openDeadlinePicker('new')}
+                    disabled={isGenerating}
+                  >
+                    <Ionicons name="calendar" size={24} color={COLORS.purplePrimary} />
+                  </TouchableOpacity>
+                  {availableUntil && (
+                    <TouchableOpacity
+                      style={styles.deadlineClearBtn}
+                      activeOpacity={0.8}
+                      onPress={() => clearDeadline('new')}
+                      disabled={isGenerating}
+                    >
+                      <Ionicons name="close-circle" size={24} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+                  )}
+                </View>
                 <Text style={styles.deadlineHint}>Quiz closes at this time — students can&apos;t take it after. Leave blank for no deadline.</Text>
 
                 <TouchableOpacity style={styles.generateBtn} activeOpacity={0.85} onPress={handleGenerateQuiz}>
@@ -893,15 +964,35 @@ export default function QuizManagerScreen() {
                   placeholderTextColor={COLORS.textMuted}
                 />
                 <Text style={styles.editorLabel}>Deadline (Optional) · YYYY-MM-DD HH:MM</Text>
-                <TextInput
-                  style={[styles.editorInput, { marginBottom: 4 }]}
-                  value={draft.available_until}
-                  onChangeText={updateDeadline}
-                  placeholder="e.g. 2026-10-01 23:59 — blank = no deadline"
-                  placeholderTextColor={COLORS.textMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                />
+                <View style={styles.deadlineRow}>
+                  <TextInput
+                    style={[styles.editorInput, { flex: 1, marginRight: 8 }]}
+                    value={draft.available_until}
+                    onChangeText={updateDeadline}
+                    placeholder="e.g. 2026-10-01 23:59 — blank = no deadline"
+                    placeholderTextColor={COLORS.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                  <TouchableOpacity
+                    style={styles.deadlinePickerBtn}
+                    activeOpacity={0.8}
+                    onPress={() => openDeadlinePicker('edit')}
+                    disabled={isSaving}
+                  >
+                    <Ionicons name="calendar" size={24} color={COLORS.purplePrimary} />
+                  </TouchableOpacity>
+                  {draft.available_until && (
+                    <TouchableOpacity
+                      style={styles.deadlineClearBtn}
+                      activeOpacity={0.8}
+                      onPress={() => clearDeadline('edit')}
+                      disabled={isSaving}
+                    >
+                      <Ionicons name="close-circle" size={24} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+                  )}
+                </View>
                 <Text style={styles.editorMeta}>
                   {draft.questions.length} questions Â· {draft.quiz_type} Â· Tap an option to mark the correct answer
                 </Text>
@@ -1069,6 +1160,15 @@ export default function QuizManagerScreen() {
 
       {renderMenu()}
 
+      {showDeadlinePicker && Platform.OS !== 'web' && (
+        <DateTimePicker
+          testID="deadlinePicker"
+          value={deadlineTempDate}
+          mode={deadlinePickerMode}
+          is24Hour={true}
+          onChange={handleDeadlineChange}
+        />
+      )}
     </View>
   );
 }
@@ -1465,4 +1565,7 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   shareGroupItemName: { flex: 1, fontSize: 16, fontFamily: FONTS.semiBold, color: COLORS.textPrimary },
+  deadlineRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  deadlinePickerBtn: { padding: 8 },
+  deadlineClearBtn: { padding: 8 },
 });

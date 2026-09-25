@@ -40,6 +40,7 @@ module.exports = {
       "expo-dev-client",
       "expo-document-picker",
       "expo-sharing",
+      "@react-native-community/datetimepicker",
       [
         "expo-image-picker",
         {

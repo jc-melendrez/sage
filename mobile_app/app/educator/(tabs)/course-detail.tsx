@@ -15,6 +15,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, EmptyState, Pill, FilterChip } from '@/components/educator/EducatorPrimitives';
@@ -23,6 +24,8 @@ import { getQuizzes, Quiz } from '@/services/quizService';
 import { getCourseActivities, createActivity, deleteActivity, updateActivity, ClassActivity, ActivityKind } from '@/services/activityService';
 import { CoursePathTopic, LearningNode, NODE_TYPE_CONFIG } from '@/types/learning';
 import CourseLeaderboardView from '@/components/courses/CourseLeaderboard';
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 const QUIZ_TYPE_LABELS: Record<string, string> = {
   multiple_choice: 'Multiple Choice',
@@ -73,9 +76,17 @@ export default function CourseDetailScreen() {
   const [actKind, setActKind] = useState<ActivityKind>('quiz');
   const [actTitle, setActTitle] = useState('');
   const [actNote, setActNote] = useState('');
-  const [actDue, setActDue] = useState<'none' | 'today' | '1d' | '1w'>('none');
+  const [actDue, setActDue] = useState<'none' | 'today' | '1d' | '1w' | 'custom'>('none');
+  const [actCustomDue, setActCustomDue] = useState<Date | null>(null);
   const [actStatus, setActStatus] = useState<'draft' | 'published'>('draft');
   const [actRefId, setActRefId] = useState<number | null>(null);
+  const [actMaxPoints, setActMaxPoints] = useState('100');
+  const [actAttachments, setActAttachments] = useState<DocumentPicker.DocumentPickerAsset[]>([]);
+
+  // Date picker state
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [datePickerMode, setDatePickerMode] = useState<'date' | 'time'>('date');
+  const [tempDate, setTempDate] = useState<Date>(new Date());
 
   // Add topic modal
   const [modalVisible, setModalVisible] = useState(false);
@@ -163,12 +174,85 @@ export default function CourseDetailScreen() {
     });
   };
 
+  const formatLocalDate = (date: Date): string => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
   const dueToISO = (): string | null => {
     const now = new Date();
-    if (actDue === 'today') return now.toISOString().slice(0, 10);
-    if (actDue === '1d') return new Date(now.getTime() + 86400000).toISOString().slice(0, 10);
-    if (actDue === '1w') return new Date(now.getTime() + 604800000).toISOString().slice(0, 10);
+    if (actDue === 'today') return formatLocalDate(now);
+    if (actDue === '1d') return formatLocalDate(new Date(now.getTime() + 86400000));
+    if (actDue === '1w') return formatLocalDate(new Date(now.getTime() + 604800000));
+    if (actDue === 'custom' && actCustomDue) return formatLocalDate(actCustomDue);
     return null;
+  };
+
+  const openDatePicker = () => {
+    setTempDate(actCustomDue || new Date());
+    setDatePickerMode('date');
+    setShowDatePicker(true);
+  };
+
+  const handleDateChange = ({ nativeEvent }: any) => {
+    if (nativeEvent.type === 'dismissed') {
+      setShowDatePicker(false);
+      return;
+    }
+    const newDate = nativeEvent.timestamp ? new Date(nativeEvent.timestamp) : tempDate;
+    setTempDate(newDate);
+    if (datePickerMode === 'date') {
+      setDatePickerMode('time');
+    } else {
+      const combined = new Date(
+        tempDate.getFullYear(),
+        tempDate.getMonth(),
+        tempDate.getDate(),
+        newDate.getHours(),
+        newDate.getMinutes()
+      );
+      setActCustomDue(combined);
+      setActDue('custom');
+      setShowDatePicker(false);
+    }
+  };
+
+  const clearCustomDue = () => {
+    setActCustomDue(null);
+    setActDue('none');
+  };
+
+  const pickAttachments = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        copyToCacheDirectory: true,
+        multiple: true,
+      });
+      if (result.canceled || !result.assets.length) return;
+      const newFiles = result.assets.filter((asset) => {
+        if (asset.size && asset.size > MAX_FILE_SIZE) {
+          Alert.alert('File too large', `"${asset.name}" exceeds 10 MB limit.`);
+          return false;
+        }
+        return true;
+      });
+      setActAttachments((prev) => [...prev, ...newFiles]);
+    } catch {
+      Alert.alert('Error', 'Failed to pick files.');
+    }
+  };
+
+  const removeAttachment = (index: number) => {
+    setActAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const formatBytes = (n: number): string => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   const handleCreateActivity = async () => {
@@ -176,6 +260,15 @@ export default function CourseDetailScreen() {
       Alert.alert('Title required', 'Please name the activity.');
       return;
     }
+    for (const file of actAttachments) {
+      if (file.size && file.size > MAX_FILE_SIZE) {
+        Alert.alert('File too large', `"${file.name}" exceeds 10 MB limit.`);
+        return;
+      }
+    }
+
+    const maxPoints = actMaxPoints.trim() === '' ? 100 : Math.max(1, parseInt(actMaxPoints, 10) || 100);
+
     setCreatingActivity(true);
     try {
       await createActivity(cid, {
@@ -185,14 +278,19 @@ export default function CourseDetailScreen() {
         note: actNote.trim(),
         due_date: dueToISO(),
         status: actStatus,
+        max_points: actKind === 'task' ? maxPoints : undefined,
+        attachments: actAttachments.length > 0 ? actAttachments : undefined,
       });
       setActVisible(false);
       setActTitle('');
       setActNote('');
       setActDue('none');
+      setActCustomDue(null);
       setActKind('quiz');
       setActStatus('draft');
       setActRefId(null);
+      setActMaxPoints('100');
+      setActAttachments([]);
       await loadActivities();
     } catch (err) {
       Alert.alert('Failed to create activity', err instanceof Error ? err.message : 'Something went wrong.');
@@ -653,7 +751,7 @@ export default function CourseDetailScreen() {
       {/* Add activity modal */}
       <Modal animationType="slide" transparent visible={actVisible} onRequestClose={() => !creatingActivity && setActVisible(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Add Activity</Text>
               <TouchableOpacity onPress={() => setActVisible(false)} activeOpacity={0.7} disabled={creatingActivity}>
@@ -691,23 +789,45 @@ export default function CourseDetailScreen() {
               editable={!creatingActivity}
             />
 
-            {actKind === 'quiz' && (
+            {actKind === 'task' && (
               <>
-                <Text style={styles.label}>Attach quiz {quizzes.length > 0 ? '' : '(none in this class yet)'}</Text>
-                {quizzes.length > 0 ? (
-                  <View style={styles.kindRow}>
-                    <FilterChip label="No quiz" active={actRefId === null} onPress={() => setActRefId(null)} />
-                    {quizzes.map((q) => (
-                      <FilterChip
-                        key={q.id}
-                        label={q.title}
-                        active={actRefId === q.id}
-                        onPress={() => setActRefId(q.id)}
-                      />
+                <Text style={styles.label}>Max Points</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="100"
+                  placeholderTextColor={COLORS.textMuted}
+                  value={actMaxPoints}
+                  onChangeText={(t) => setActMaxPoints(t)}
+                  keyboardType="numeric"
+                  editable={!creatingActivity}
+                />
+              </>
+            )}
+
+            {actKind === 'task' && (
+              <>
+                <Text style={styles.label}>Attachments (optional)</Text>
+                <TouchableOpacity style={styles.fileBtn} activeOpacity={0.8} onPress={pickAttachments} disabled={creatingActivity}>
+                  <Ionicons name={actAttachments.length > 0 ? 'document' : 'cloud-upload'} size={20} color={actAttachments.length > 0 ? COLORS.success : COLORS.purpleVibrant} />
+                  <Text style={[styles.fileBtnText, actAttachments.length > 0 && { color: COLORS.success }]}>
+                    {actAttachments.length > 0
+                      ? `${actAttachments.length} file${actAttachments.length > 1 ? 's' : ''} attached`
+                      : 'Add files (PDF, DOCX, images, ...)'}
+                  </Text>
+                </TouchableOpacity>
+                {actAttachments.length > 0 && (
+                  <View style={styles.attachmentList}>
+                    {actAttachments.map((file, idx) => (
+                      <View key={idx} style={styles.attachmentItem}>
+                        <Ionicons name="document-text" size={16} color={COLORS.purpleVibrant} />
+                        <Text style={styles.attachmentName} numberOfLines={1}>{file.name}</Text>
+                        <Text style={styles.attachmentSize}>{file.size ? formatBytes(file.size) : 'Unknown size'}</Text>
+                        <TouchableOpacity onPress={() => removeAttachment(idx)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} disabled={creatingActivity}>
+                          <Ionicons name="close-circle" size={18} color={COLORS.danger} />
+                        </TouchableOpacity>
+                      </View>
                     ))}
                   </View>
-                ) : (
-                  <Pill label="Create quizzes in the Quizzes section first" color={COLORS.textMuted} icon="information-circle-outline" />
                 )}
               </>
             )}
@@ -731,6 +851,7 @@ export default function CourseDetailScreen() {
                 ['today', 'Today'],
                 ['1d', 'Tomorrow'],
                 ['1w', 'In 1 week'],
+                ['custom', 'Custom…'],
               ] as const).map(([value, label]) => {
                 const active = actDue === value;
                 return (
@@ -738,7 +859,7 @@ export default function CourseDetailScreen() {
                     key={value}
                     style={[styles.kindChip, active && styles.kindChipActive]}
                     activeOpacity={0.8}
-                    onPress={() => setActDue(value as typeof actDue)}
+                    onPress={() => value === 'custom' ? openDatePicker() : setActDue(value as typeof actDue)}
                     disabled={creatingActivity}
                   >
                     <Text style={[styles.kindText, active && styles.kindTextActive]}>{label}</Text>
@@ -746,6 +867,38 @@ export default function CourseDetailScreen() {
                 );
               })}
             </View>
+            {actDue === 'custom' && actCustomDue && (
+              <View style={styles.customDueRow}>
+                <Text style={styles.customDueText}>
+                  Due: {new Date(actCustomDue).toLocaleString()}
+                </Text>
+                <TouchableOpacity onPress={clearCustomDue} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} disabled={creatingActivity}>
+                  <Ionicons name="close-circle" size={18} color={COLORS.textMuted} />
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {actKind === 'quiz' && (
+              <>
+                <Text style={styles.label}>Attach quiz {quizzes.length > 0 ? '' : '(none in this class yet)'}</Text>
+                {quizzes.length > 0 ? (
+                  <View style={styles.kindRow}>
+                    <FilterChip label="No quiz" active={actRefId === null} onPress={() => setActRefId(null)} disabled={creatingActivity} />
+                    {quizzes.map((q) => (
+                      <FilterChip
+                        key={q.id}
+                        label={q.title}
+                        active={actRefId === q.id}
+                        onPress={() => setActRefId(q.id)}
+                        disabled={creatingActivity}
+                      />
+                    ))}
+                  </View>
+                ) : (
+                  <Pill label="Create quizzes in the Quizzes section first" color={COLORS.textMuted} icon="information-circle-outline" />
+                )}
+              </>
+            )}
 
             <Text style={styles.label}>Status</Text>
             <View style={styles.kindRow}>
@@ -782,7 +935,7 @@ export default function CourseDetailScreen() {
                 </>
               )}
             </TouchableOpacity>
-          </View>
+          </ScrollView>
         </KeyboardAvoidingView>
       </Modal>
 
@@ -927,6 +1080,15 @@ export default function CourseDetailScreen() {
           </View>
         </View>
       </Modal>
+      {showDatePicker && Platform.OS !== 'web' && (
+        <DateTimePicker
+          testID="datePicker"
+          value={tempDate}
+          mode={datePickerMode}
+          is24Hour={true}
+          onChange={handleDateChange}
+        />
+      )}
     </View>
   );
 }
@@ -1135,4 +1297,30 @@ const styles = StyleSheet.create({
   },
   previewNodeTitle: { fontSize: 13, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary },
   previewNodeMeta: { fontSize: 11, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 1 },
+
+  attachmentList: { marginTop: 8, gap: 6 },
+  attachmentItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'white',
+    borderRadius: RADIUS.sm,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  attachmentName: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textPrimary, flex: 1 },
+  attachmentSize: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginRight: 8 },
+  customDueRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'white',
+    borderRadius: RADIUS.sm,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginTop: 8,
+  },
+  customDueText: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textPrimary },
 });

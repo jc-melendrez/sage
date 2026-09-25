@@ -235,6 +235,7 @@ class ClassActivity(models.Model):
     note = models.TextField(blank=True, default='')
     due_date = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
+    max_points = models.PositiveIntegerField(default=100)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -263,6 +264,10 @@ class TaskSubmission(models.Model):
     file_data = models.BinaryField()
     submitted_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
+    score = models.IntegerField(null=True, blank=True)
+    feedback = models.TextField(blank=True, default='')
+    graded_at = models.DateTimeField(null=True, blank=True)
+    graded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='graded_submissions')
 
     class Meta:
         unique_together = ('activity', 'student')
@@ -270,6 +275,25 @@ class TaskSubmission(models.Model):
 
     def __str__(self):
         return f"{self.student.username} -> {self.activity.title} ({self.file_name})"
+
+
+class ClassActivityAttachment(models.Model):
+    """Teacher-uploaded attachment for a class activity (e.g., task worksheet)."""
+
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+    activity = models.ForeignKey(ClassActivity, on_delete=models.CASCADE, related_name='attachments')
+    file_name = models.CharField(max_length=255)
+    file_mime = models.CharField(max_length=120, default='application/octet-stream')
+    file_size = models.IntegerField(default=0)
+    file_data = models.BinaryField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.activity.title} - {self.file_name}"
 
 
 # --- Lesson Progress (persisted course progression) ---

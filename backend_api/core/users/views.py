@@ -13,7 +13,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, ClassActivityAttachment
 from ai_assistant.models import Quiz, QuizAttempt
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
@@ -35,11 +35,12 @@ from .serializers import (
     TopicSerializer, LearningNodeSerializer, NodeProgressSerializer, CoursePathTopicSerializer,
     ClassActivitySerializer,
     TaskSubmissionSerializer, TaskSubmissionListSerializer,
+    ClassActivityAttachmentSerializer, ClassActivityAttachmentListSerializer,
 )
 from .permissions import IsSuperadmin
 from .utils.file_parser import extract_text_from_file
 from rest_framework.decorators import api_view, permission_classes, parser_classes
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework_simplejwt.tokens import RefreshToken  # noqa: F401 (kept for imports elsewhere)
 from .authentication import SAGERefreshToken
 from core.firebase import verify_firebase_token, create_firebase_user, set_role_claim, get_role_claim
@@ -1473,6 +1474,7 @@ class CourseLeaderboardView(APIView):
 class CourseActivitiesView(APIView):
     """List / create activities for a single course (class)."""
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get(self, request, course_id):
         course, err = _get_course_for_activity(request, course_id)
@@ -1481,7 +1483,7 @@ class CourseActivitiesView(APIView):
         if request.user != course.educator and not course.students.filter(id=request.user.id).exists():
             return Response({"error": "You are not a member of this course"}, status=403)
 
-        activities = course.activities.all()
+        activities = course.activities.prefetch_related('attachments').all()
         return Response(ClassActivitySerializer(activities, many=True).data)
 
     def post(self, request, course_id):
@@ -1496,12 +1498,35 @@ class CourseActivitiesView(APIView):
             return Response(serializer.errors, status=400)
 
         activity = serializer.save(course=course, status=request.data.get('status', 'draft'))
+
+        # Handle file attachments
+        files = request.FILES.getlist('attachments')
+        for upload in files:
+            if upload.size > ClassActivityAttachment.MAX_FILE_SIZE:
+                return Response(
+                    {"error": f"File '{upload.name}' is too large (max {ClassActivityAttachment.MAX_FILE_SIZE // (1024 * 1024)} MB)"},
+                    status=400,
+                )
+            data = upload.read()
+            if not data:
+                return Response({"error": f"File '{upload.name}' is empty"}, status=400)
+            ClassActivityAttachment.objects.create(
+                activity=activity,
+                file_name=upload.name[:255],
+                file_mime=upload.content_type or 'application/octet-stream',
+                file_size=len(data),
+                file_data=data,
+            )
+
+        # Refetch with attachments for response
+        activity = ClassActivity.objects.prefetch_related('attachments').get(id=activity.id)
         return Response(ClassActivitySerializer(activity).data, status=201)
 
 
 class ClassActivityDetailView(APIView):
     """Update / delete a single class activity (educator only)."""
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def _get_owned(self, request, activity_id):
         try:
@@ -1520,6 +1545,28 @@ class ClassActivityDetailView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
         activity = serializer.save()
+
+        # Handle file attachments (additional or replacement)
+        files = request.FILES.getlist('attachments')
+        for upload in files:
+            if upload.size > ClassActivityAttachment.MAX_FILE_SIZE:
+                return Response(
+                    {"error": f"File '{upload.name}' is too large (max {ClassActivityAttachment.MAX_FILE_SIZE // (1024 * 1024)} MB)"},
+                    status=400,
+                )
+            data = upload.read()
+            if not data:
+                return Response({"error": f"File '{upload.name}' is empty"}, status=400)
+            ClassActivityAttachment.objects.create(
+                activity=activity,
+                file_name=upload.name[:255],
+                file_mime=upload.content_type or 'application/octet-stream',
+                file_size=len(data),
+                file_data=data,
+            )
+
+        # Refetch with attachments for response
+        activity = ClassActivity.objects.prefetch_related('attachments').get(id=activity.id)
         return Response(ClassActivitySerializer(activity).data)
 
     def delete(self, request, activity_id):
@@ -1535,7 +1582,7 @@ class MyClassActivitiesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        activities = ClassActivity.objects.filter(course__educator=request.user)
+        activities = ClassActivity.objects.filter(course__educator=request.user).prefetch_related('attachments')
         return Response(ClassActivitySerializer(activities, many=True).data)
 
 
@@ -1637,6 +1684,60 @@ class TaskSubmissionDetailView(APIView):
         except TaskSubmission.DoesNotExist:
             return Response({"error": "Submission not found"}, status=404)
         return Response(TaskSubmissionSerializer(submission).data)
+
+
+class TaskSubmissionGradeView(APIView):
+    """Educator grades a submission (score + feedback)."""
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, activity_id, submission_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        if request.user != activity.course.educator:
+            return Response({"error": "Only the course educator can grade submissions"}, status=403)
+        try:
+            submission = TaskSubmission.objects.select_related('student').get(id=submission_id, activity=activity)
+        except TaskSubmission.DoesNotExist:
+            return Response({"error": "Submission not found"}, status=404)
+
+        score = request.data.get('score')
+        feedback = request.data.get('feedback', '')
+
+        if score is None:
+            return Response({"error": "Score is required"}, status=400)
+
+        try:
+            score = int(score)
+        except (TypeError, ValueError):
+            return Response({"error": "Score must be an integer"}, status=400)
+
+        max_points = activity.max_points
+        if score < 0 or score > max_points:
+            return Response({"error": f"Score must be between 0 and {max_points}"}, status=400)
+
+        submission.score = score
+        submission.feedback = feedback
+        submission.graded_at = timezone.now()
+        submission.graded_by = request.user
+        submission.save(update_fields=['score', 'feedback', 'graded_at', 'graded_by', 'updated_at'])
+
+        return Response(TaskSubmissionSerializer(submission).data)
+
+
+class TaskActivityAttachmentView(APIView):
+    """Download a teacher attachment for a task activity (course members only)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, activity_id, attachment_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        try:
+            attachment = ClassActivityAttachment.objects.get(id=attachment_id, activity=activity)
+        except ClassActivityAttachment.DoesNotExist:
+            return Response({"error": "Attachment not found"}, status=404)
+        return Response(ClassActivityAttachmentSerializer(attachment).data)
 
 
 # --- Learning Path Views ---

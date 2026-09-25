@@ -7,11 +7,11 @@ import {
   ScrollView,
   ActivityIndicator,
   TouchableOpacity,
-  Platform,
   StatusBar,
   Dimensions,
   Alert,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
   useSharedValue,
   useAnimatedScrollHandler,
@@ -137,6 +137,7 @@ function DotIndicator({ index, scrollX }: { index: number; scrollX: SharedValue<
 
 export default function Dashboard() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [user, setUser] = useState<User | null>(null);
   const [badges, setBadges] = useState<Badge[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
@@ -392,48 +393,52 @@ export default function Dashboard() {
       style={styles.mainWrapper}
     >
       <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
+      
+      {/* FIXED HEADER */}
+      <LinearGradient
+        colors={[COLORS.purpleDeep, COLORS.purpleDark]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[styles.header, { paddingTop: insets.top + 20 }]}
+      >
+        <View style={styles.headerTop}>
+          <View style={styles.logoContainer}>
+            <Text style={styles.logoText}>SAGE</Text>
+            <View style={styles.logoDot} />
+          </View>
+          <View style={styles.headerIcons}>
+            <TouchableOpacity
+              style={styles.headerIconBtn}
+              activeOpacity={0.7}
+              onPress={() => router.push('/(tabs)/activities')}
+            >
+              <Ionicons name="book" size={22} color={COLORS.textSecondary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.headerIconBtn}
+              activeOpacity={0.7}
+              onPress={() => console.log('Notifications pressed')}
+            >
+              <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </LinearGradient>
+
+      {/* SCROLLABLE CONTENT */}
       <ScrollView
         style={styles.container}
         contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
         removeClippedSubviews={true}
       >
-        {/* HEADER */}
+        {/* ERROR BANNER (inside scroll, shown when error occurs) */}
         {error ? (
           <View style={styles.refreshBanner}>
             <Ionicons name="cloud-offline-outline" size={14} color={COLORS.danger} />
             <Text style={styles.refreshBannerText}>{error}</Text>
           </View>
         ) : null}
-        <LinearGradient
-          colors={[COLORS.purpleDeep, COLORS.purpleDark]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.header}
-        >
-          <View style={styles.headerTop}>
-            <View style={styles.logoContainer}>
-              <Text style={styles.logoText}>SAGE</Text>
-              <View style={styles.logoDot} />
-            </View>
-            <View style={styles.headerIcons}>
-              <TouchableOpacity
-                style={styles.headerIconBtn}
-                activeOpacity={0.7}
-                onPress={() => router.push('/(tabs)/activities')}
-              >
-                <Ionicons name="book" size={22} color={COLORS.textSecondary} />
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.headerIconBtn}
-                activeOpacity={0.7}
-                onPress={() => console.log('Notifications pressed')}
-              >
-                <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />
-              </TouchableOpacity>
-            </View>
-          </View>
-        </LinearGradient>
 
         {/* CAROUSEL with Smooth Transitions */}
         <View style={styles.carouselWrapper}>
@@ -780,7 +785,7 @@ const styles = StyleSheet.create({
 
   header: {
     paddingHorizontal: 24,
-    paddingTop: Platform.OS === 'ios' ? 60 : 40,
+    paddingTop: 20,
     paddingBottom: 32,
     borderBottomLeftRadius: 32,
     borderBottomRightRadius: 32,
