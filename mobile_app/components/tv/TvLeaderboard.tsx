@@ -65,6 +65,7 @@ interface PlayerEntry {
   displayName: string;
   score: number;
   answeredCount: number;
+  streak: number;
   isFinished: boolean;
   teamId?: string | null;
 }
@@ -97,6 +98,7 @@ interface RankedEntry {
   name: string;
   score: number;
   answeredCount: number;
+  streak?: number;
   color?: string;
   finished?: boolean;
 }
@@ -356,6 +358,12 @@ function RankRow({
             />
           </View>
         </View>
+
+        {(entry.streak ?? 0) >= 2 && (
+          <View style={styles.streakBadge}>
+            <Text style={styles.streakText}>🔥 {entry.streak}</Text>
+          </View>
+        )}
 
         <Text style={styles.meta}>{entry.answeredCount} answered</Text>
         <CountUp value={entry.score} style={[styles.score, isLeader && styles.scoreLeader]} />
@@ -620,6 +628,7 @@ export default function TvLeaderboard() {
               name: p.displayName,
               score: p.score,
               answeredCount: p.answeredCount,
+              streak: p.streak,
               finished: p.isFinished,
             }));
       ranked.sort((x, y) => y.score - x.score);
@@ -704,6 +713,7 @@ export default function TvLeaderboard() {
             name: p.displayName,
             score: p.score,
             answeredCount: p.answeredCount,
+            streak: p.streak,
             finished: p.isFinished,
           }))
       ).sort((x, y) => y.score - x.score)
@@ -723,6 +733,7 @@ export default function TvLeaderboard() {
           name: p.displayName,
           score: p.score,
           answeredCount: p.answeredCount,
+          streak: p.streak,
           finished: p.isFinished,
         }))
     : [];
@@ -950,6 +961,18 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   progressFill: { height: 6, borderRadius: 3 },
+  streakBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: 4,
+    backgroundColor: 'rgba(249, 115, 22, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(249, 115, 22, 0.45)',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  streakText: { fontSize: 16, fontFamily: FONTS.extraBold, color: '#FB923C' },
   meta: { fontSize: 15, fontFamily: FONTS.medium, color: COLORS.textMuted },
   score: { fontSize: 30, fontFamily: FONTS.black, color: COLORS.accent, marginLeft: 16, minWidth: 92, textAlign: 'right' },
   scoreLeader: { color: COLORS.gold },

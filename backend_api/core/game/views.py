@@ -676,6 +676,7 @@ class RoomLeaderboardView(APIView):
                 'displayName': d.get('displayName', 'Player'),
                 'score': d.get('score', 0),
                 'answeredCount': d.get('answeredCount', 0),
+                'streak': d.get('streak', 0),
                 'isFinished': bool(d.get('isFinished', False)),
                 'teamId': d.get('teamId'),
             })
