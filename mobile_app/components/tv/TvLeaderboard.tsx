@@ -7,8 +7,7 @@ import {
   ActivityIndicator,
   ScrollView,
 } from 'react-native';
-import {
-  Animated as RAnimated,
+import RAnimated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
