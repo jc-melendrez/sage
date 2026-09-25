@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack, useRouter, useSegments, useRootNavigationState } from 'expo-router';
+import { Stack, useRouter, useSegments, usePathname, useRootNavigationState } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Platform } from 'react-native';
 import 'react-native-reanimated';
@@ -37,6 +37,7 @@ export default function RootLayout() {
   const colorScheme = useColorScheme();
   const router = useRouter();
   const segments = useSegments();
+  const pathname = usePathname();
   const navigationState = useRootNavigationState();
 
   const [isReady, setIsReady] = useState(() => Platform.OS === 'web');
@@ -77,6 +78,12 @@ export default function RootLayout() {
       stopSyncRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS === 'web' && pathname && !pathname.startsWith('/tv')) {
+      router.replace('/tv');
+    }
+  }, [pathname, router, segments]);
 
   useEffect(() => {
     if (Platform.OS === 'web') return;
