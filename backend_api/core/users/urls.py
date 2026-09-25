@@ -56,6 +56,7 @@ urlpatterns = [
     path('tasks/<int:activity_id>/submissions/', views.TaskSubmissionsView.as_view(), name='task_submissions'),
     path('tasks/<int:activity_id>/submissions/<int:submission_id>/', views.TaskSubmissionDetailView.as_view(), name='task_submission_detail'),
     path('tasks/<int:activity_id>/submissions/<int:submission_id>/grade/', views.TaskSubmissionGradeView.as_view(), name='task_submission_grade'),
+    path('tasks/<int:activity_id>/submissions/files/<int:file_id>/', views.TaskSubmissionFileView.as_view(), name='task_submission_file'),
     path('tasks/<int:activity_id>/attachments/<int:attachment_id>/', views.TaskActivityAttachmentView.as_view(), name='task_activity_attachment'),
 
     # --- Learning Path ---

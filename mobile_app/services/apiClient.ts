@@ -37,6 +37,12 @@ async function fetchJson<T>(url: string, options: RequestInit): Promise<T> {
     throw new Error(error.message || error.error || error.detail || `API error: ${response.status}`);
   }
 
+  // 204 No Content has no body, so parsing it would throw. The DELETE
+  // endpoints in the task/activity API answer with it.
+  if (response.status === 204 || response.headers.get('content-length') === '0') {
+    return undefined as T;
+  }
+
   return await response.json();
 }
 
@@ -89,4 +95,49 @@ export async function apiCall<T>(endpoint: string, options: ApiRequestOptions = 
   }
 
   return data;
+}
+
+/**
+ * Multipart request used for every file upload.
+ *
+ * Deliberately does NOT set Content-Type — React Native's fetch has to add the
+ * `multipart/form-data; boundary=...` header itself, and setting it by hand
+ * produces a body the server cannot parse.
+ */
+export async function apiUpload<T>(
+  endpoint: string,
+  formData: FormData,
+  method: 'POST' | 'PATCH' | 'PUT' | 'DELETE' = 'POST',
+): Promise<T> {
+  const url = `${API_BASE_URL}${endpoint}`;
+
+  const doFetch = async (tok: string | null) =>
+    fetch(url, {
+      method,
+      headers: tok ? { Authorization: `Bearer ${tok}` } : undefined,
+      body: formData,
+    });
+
+  let response = await doFetch(await getToken());
+
+  if (response.status === 401) {
+    const result = await refreshAccessToken();
+    if (!result.ok) {
+      throw new Error(
+        result.reason === 'expired'
+          ? 'Session expired. Please log in again.'
+          : 'Backend is still waking up — please try again.'
+      );
+    }
+    response = await doFetch(result.access);
+  }
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.message || error.error || error.detail || `API error: ${response.status}`);
+  }
+
+  // 204 No Content (deletes) has nothing to parse.
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
 }

@@ -2,19 +2,18 @@ import React, { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
-import * as DocumentPicker from 'expo-document-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, Pill, FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
 import {
-  getActivities, createActivity, deleteActivity, updateActivity,
-  ClassActivity, ActivityKind,
+  getActivities, createActivity, deleteActivity,
+  ClassActivity, ActivityKind, UploadFile,
 } from '@/services/activityService';
 import { getMyCourses } from '@/services/courseService';
 import { getQuizzes, Quiz } from '@/services/quizService';
-
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+import { describeDue } from '@/services/dueDate';
+import { pickDocuments } from '@/services/fileShare';
 
 const ACTIVITY_META: Record<ActivityKind, { label: string; icon: any; color: string }> = {
   quiz: { label: 'Quiz', icon: 'help-circle', color: COLORS.purpleVibrant },
@@ -52,7 +51,7 @@ export default function ActivitiesScreen() {
   const [bStatus, setBStatus] = useState<ActivityStatus>('draft');
   const [bQuizId, setBQuizId] = useState<number | null>(null);
   const [bMaxPoints, setBMaxPoints] = useState('100');
-  const [bAttachments, setBAttachments] = useState<DocumentPicker.DocumentPickerAsset[]>([]);
+  const [bAttachments, setBAttachments] = useState<UploadFile[]>([]);
   const [classQuizzes, setClassQuizzes] = useState<Quiz[]>([]);
   const [saving, setSaving] = useState(false);
 
@@ -103,19 +102,19 @@ export default function ActivitiesScreen() {
     loadClassQuizzes(courseId);
   };
 
-  const formatLocalDate = (date: Date): string => {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+  /** Quick presets land on the end of the target day; custom keeps its time. */
+  const endOfDay = (date: Date): Date => {
+    const d = new Date(date);
+    d.setHours(23, 59, 0, 0);
+    return d;
   };
 
   const dueToISO = (): string | null => {
     const now = new Date();
-    if (bDue === 'today') return formatLocalDate(now);
-    if (bDue === '1d') return formatLocalDate(new Date(now.getTime() + 86400000));
-    if (bDue === '1w') return formatLocalDate(new Date(now.getTime() + 604800000));
-    if (bDue === 'custom' && bCustomDue) return formatLocalDate(bCustomDue);
+    if (bDue === 'today') return endOfDay(now).toISOString();
+    if (bDue === '1d') return endOfDay(new Date(now.getTime() + 86400000)).toISOString();
+    if (bDue === '1w') return endOfDay(new Date(now.getTime() + 604800000)).toISOString();
+    if (bDue === 'custom' && bCustomDue) return bCustomDue.toISOString();
     return null;
   };
 
@@ -163,14 +162,6 @@ export default function ActivitiesScreen() {
       Alert.alert('Title required', 'Please name the activity.');
       return;
     }
-    // Validate attachments size
-    for (const file of bAttachments) {
-      if (file.size && file.size > MAX_FILE_SIZE) {
-        Alert.alert('File too large', `"${file.name}" exceeds 10 MB limit.`);
-        return;
-      }
-    }
-
     const maxPoints = bMaxPoints.trim() === '' ? 100 : Math.max(1, parseInt(bMaxPoints, 10) || 100);
 
     setSaving(true);
@@ -204,15 +195,6 @@ export default function ActivitiesScreen() {
     }
   };
 
-  const handleToggleStatus = async (activity: ClassActivity) => {
-    try {
-      await updateActivity(activity.id, { status: activity.status === 'published' ? 'draft' : 'published' });
-      await loadActivities();
-    } catch {
-      Alert.alert('Update failed', 'Could not update the activity.');
-    }
-  };
-
   const handleDelete = (activity: ClassActivity) => {
     Alert.alert(
       'Delete activity',
@@ -243,30 +225,17 @@ export default function ActivitiesScreen() {
     return acc;
   }, {});
 
-  const formatDue = (iso: string | null): string | null => {
-    if (!iso) return null;
-    return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const openDetail = (a: ClassActivity) => {
+    // Cast: expo-router's generated route types lag behind the new screen.
+    router.push({
+      pathname: '/educator/(tabs)/activity-detail',
+      params: { activityId: String(a.id) },
+    } as any);
   };
 
   const pickAttachments = async () => {
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: '*/*',
-        copyToCacheDirectory: true,
-        multiple: true,
-      });
-      if (result.canceled || !result.assets.length) return;
-      const newFiles = result.assets.filter((asset) => {
-        if (asset.size && asset.size > MAX_FILE_SIZE) {
-          Alert.alert('File too large', `"${asset.name}" exceeds 10 MB limit.`);
-          return false;
-        }
-        return true;
-      });
-      setBAttachments((prev) => [...prev, ...newFiles]);
-    } catch {
-      Alert.alert('Error', 'Failed to pick files.');
-    }
+    const picked = await pickDocuments({ multiple: true });
+    if (picked.length) setBAttachments((prev) => [...prev, ...picked]);
   };
 
   const removeAttachment = (index: number) => {
@@ -472,19 +441,32 @@ export default function ActivitiesScreen() {
                   <View style={{ gap: 12 }}>
                     {grouped[courseName].map((a) => {
                       const meta = ACTIVITY_META[a.kind] || ACTIVITY_META.quiz;
+                      const due = describeDue(a.due_date);
                       return (
                         <View key={a.id} style={styles.card}>
                           <View style={styles.cardTop}>
                             <View style={[styles.kindIconBg, { backgroundColor: tint(meta.color) }]}>
                               <Ionicons name={meta.icon} size={18} color={meta.color} />
                             </View>
-                            <View style={{ flex: 1 }}>
+                            <TouchableOpacity
+                              style={{ flex: 1 }}
+                              activeOpacity={0.75}
+                              onPress={() => openDetail(a)}
+                            >
                               <Text style={styles.cardTitle}>{a.title}</Text>
                               <Text style={styles.cardMeta}>
                                 {meta.label}
-                                {a.due_date ? ` · Due ${formatDue(a.due_date)}` : ''}
+                                {a.max_points ? ` · ${a.max_points} pts` : ''}
                               </Text>
-                            </View>
+                              <Text
+                                style={[
+                                  styles.dueLine,
+                                  due.isOverdue && { color: COLORS.danger },
+                                ]}
+                              >
+                                {due.label}
+                              </Text>
+                            </TouchableOpacity>
                             <TouchableOpacity onPress={() => handleDelete(a)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                               <Ionicons name="trash-outline" size={18} color={COLORS.textMuted} />
                             </TouchableOpacity>
@@ -492,35 +474,50 @@ export default function ActivitiesScreen() {
                           {a.note ? (
                             <Text style={styles.cardNote} numberOfLines={2}>{a.note}</Text>
                           ) : null}
-                          <TouchableOpacity
-                            style={styles.statusRow}
-                            activeOpacity={0.8}
-                            onPress={() => handleToggleStatus(a)}
-                          >
+                          <View style={styles.statusRow}>
                             <Pill
                               label={a.status === 'published' ? 'Published' : 'Draft'}
                               color={a.status === 'published' ? COLORS.success : COLORS.warning}
                               icon={a.status === 'published' ? 'eye' : 'eye-off'}
                             />
-                            <Text style={styles.statusHint}>
-                              {a.status === 'published' ? 'tap to hide' : 'tap to publish'}
-                            </Text>
-                          </TouchableOpacity>
-                          {a.kind === 'task' && (
+                            {a.kind === 'task' && (
+                              <Pill
+                                label={`${a.submission_count ?? 0} in`}
+                                color={COLORS.purpleVibrant}
+                                icon="people-outline"
+                              />
+                            )}
+                          </View>
+                          <View style={styles.cardActions}>
                             <TouchableOpacity
-                              style={styles.submissionsBtn}
+                              style={styles.cardActionBtn}
                               activeOpacity={0.8}
-                              onPress={() => router.push({
-                                pathname: '/educator/(tabs)/task-submissions',
-                                params: { taskId: a.id, taskTitle: a.title, courseName: a.course_name },
-                              })}
+                              onPress={() => openDetail(a)}
                             >
-                              <Ionicons name="people-outline" size={15} color={COLORS.purpleVibrant} />
-                              <Text style={styles.submissionsBtnText}>
-                                View submissions ({a.submission_count ?? 0})
-                              </Text>
+                              <Ionicons name="create-outline" size={15} color={COLORS.purpleVibrant} />
+                              <Text style={styles.cardActionText}>Edit</Text>
                             </TouchableOpacity>
-                          )}
+                            {a.kind === 'task' && (
+                              <TouchableOpacity
+                                style={styles.cardActionBtn}
+                                activeOpacity={0.8}
+                                onPress={() => router.push({
+                                  pathname: '/educator/(tabs)/task-submissions',
+                                  params: {
+                                    taskId: a.id,
+                                    taskTitle: a.title,
+                                    courseName: a.course_name,
+                                    maxPoints: String(a.max_points),
+                                  },
+                                })}
+                              >
+                                <Ionicons name="people-outline" size={15} color={COLORS.purpleVibrant} />
+                                <Text style={styles.cardActionText}>
+                                  Submissions ({a.submission_count ?? 0})
+                                </Text>
+                              </TouchableOpacity>
+                            )}
+                          </View>
                         </View>
                       );
                     })}
@@ -573,18 +570,19 @@ const styles = StyleSheet.create({
   cardMeta: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textSecondary },
   cardNote: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, lineHeight: 17, marginTop: 10 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12 },
-  statusHint: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted },
-  submissionsBtn: {
+  dueLine: { fontSize: 12, fontFamily: FONTS.semiBold, color: COLORS.purpleVibrant, marginTop: 3 },
+  cardActions: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  cardActionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    marginTop: 12,
+    flex: 1,
     paddingVertical: 11,
     borderRadius: RADIUS.sm,
     backgroundColor: tint(COLORS.purpleVibrant),
   },
-  submissionsBtnText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.purpleVibrant },
+  cardActionText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.purpleVibrant },
 
   fileBtn: {
     flexDirection: 'row',

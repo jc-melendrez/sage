@@ -22,6 +22,7 @@ import { SectionHeader, EmptyState, Pill, FilterChip } from '@/components/educat
 import { getCoursePath, createTopic, createNode, generateTopic, GenerateTopicResponse, getCourseLeaderboard, CourseLeaderboard, LeaderboardSort } from '@/services/courseService';
 import { getQuizzes, Quiz } from '@/services/quizService';
 import { getCourseActivities, createActivity, deleteActivity, updateActivity, ClassActivity, ActivityKind } from '@/services/activityService';
+import { describeDue } from '@/services/dueDate';
 import { CoursePathTopic, LearningNode, NODE_TYPE_CONFIG } from '@/types/learning';
 import CourseLeaderboardView from '@/components/courses/CourseLeaderboard';
 
@@ -174,19 +175,19 @@ export default function CourseDetailScreen() {
     });
   };
 
-  const formatLocalDate = (date: Date): string => {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+  /** Quick presets land on the end of the target day; custom keeps its time. */
+  const endOfDay = (date: Date): Date => {
+    const d = new Date(date);
+    d.setHours(23, 59, 0, 0);
+    return d;
   };
 
   const dueToISO = (): string | null => {
     const now = new Date();
-    if (actDue === 'today') return formatLocalDate(now);
-    if (actDue === '1d') return formatLocalDate(new Date(now.getTime() + 86400000));
-    if (actDue === '1w') return formatLocalDate(new Date(now.getTime() + 604800000));
-    if (actDue === 'custom' && actCustomDue) return formatLocalDate(actCustomDue);
+    if (actDue === 'today') return endOfDay(now).toISOString();
+    if (actDue === '1d') return endOfDay(new Date(now.getTime() + 86400000)).toISOString();
+    if (actDue === '1w') return endOfDay(new Date(now.getTime() + 604800000)).toISOString();
+    if (actDue === 'custom' && actCustomDue) return actCustomDue.toISOString();
     return null;
   };
 
@@ -328,11 +329,6 @@ export default function CourseDetailScreen() {
         },
       ],
     );
-  };
-
-  const formatDue = (iso: string | null): string | null => {
-    if (!iso) return null;
-    return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
 
   const handleCreate = async () => {
@@ -625,8 +621,19 @@ export default function CourseDetailScreen() {
               <View style={{ gap: 12 }}>
                 {activities.map((activity) => {
                   const meta = ACTIVITY_META[activity.kind] || ACTIVITY_META.quiz;
+                  const due = describeDue(activity.due_date);
                   return (
-                    <View key={activity.id} style={styles.activityCard}>
+                    <TouchableOpacity
+                      key={activity.id}
+                      style={styles.activityCard}
+                      activeOpacity={0.85}
+                      onPress={() =>
+                        router.push({
+                          pathname: '/educator/(tabs)/activity-detail',
+                          params: { activityId: String(activity.id) },
+                        } as any)
+                      }
+                    >
                       <View style={styles.activityTop}>
                         <View style={[styles.activityIconBg, { backgroundColor: tint(activity.status === 'published' ? COLORS.success : COLORS.purpleVibrant) }]}>
                           <Ionicons name={meta.icon} size={18} color={activity.status === 'published' ? COLORS.success : COLORS.purpleVibrant} />
@@ -635,7 +642,10 @@ export default function CourseDetailScreen() {
                           <Text style={styles.activityTitle}>{activity.title}</Text>
                           <Text style={styles.activityMeta}>
                             {meta.label}
-                            {activity.due_date ? ` · Due ${formatDue(activity.due_date)}` : ''}
+                            {activity.due_date ? ` · ${due.short}` : ''}
+                            {activity.attachments && activity.attachments.length > 0
+                              ? ` · ${activity.attachments.length} file${activity.attachments.length === 1 ? '' : 's'}`
+                              : ''}
                           </Text>
                         </View>
                         <TouchableOpacity
@@ -648,38 +658,40 @@ export default function CourseDetailScreen() {
                       {activity.note ? (
                         <Text style={styles.activityNote} numberOfLines={2}>{activity.note}</Text>
                       ) : null}
-                      <TouchableOpacity
-                        onPress={() => handleToggleActivityStatus(activity)}
-                        activeOpacity={0.8}
-                        style={styles.activityStatusRow}
-                      >
-                        <Ionicons
-                          name={activity.status === 'published' ? 'eye' : 'eye-off'}
-                          size={13}
-                          color={activity.status === 'published' ? COLORS.success : COLORS.warning}
-                        />
-                        <Text
-                          style={[styles.activityStatusText, { color: activity.status === 'published' ? COLORS.success : COLORS.warning }]}
-                        >
-                          {activity.status === 'published' ? 'Published · tap to hide' : 'Draft · tap to publish'}
-                        </Text>
-                      </TouchableOpacity>
-                      {activity.kind === 'task' && (
+                      <View style={styles.activityBadges}>
                         <TouchableOpacity
-                          onPress={() => router.push({
-                            pathname: '/educator/(tabs)/task-submissions',
-                            params: { taskId: activity.id, taskTitle: activity.title, courseName: courseName || activity.course_name },
-                          })}
+                          onPress={() => handleToggleActivityStatus(activity)}
                           activeOpacity={0.8}
                           style={styles.activityStatusRow}
                         >
-                          <Ionicons name="people-outline" size={13} color={COLORS.purpleVibrant} />
-                          <Text style={[styles.activityStatusText, { color: COLORS.purpleVibrant, marginLeft: 2 }]}>
-                            View submissions ({activity.submission_count ?? 0})
+                          <Ionicons
+                            name={activity.status === 'published' ? 'eye' : 'eye-off'}
+                            size={13}
+                            color={activity.status === 'published' ? COLORS.success : COLORS.warning}
+                          />
+                          <Text
+                            style={[styles.activityStatusText, { color: activity.status === 'published' ? COLORS.success : COLORS.warning }]}
+                          >
+                            {activity.status === 'published' ? 'Published · tap to hide' : 'Draft · tap to publish'}
                           </Text>
                         </TouchableOpacity>
-                      )}
-                    </View>
+                        {activity.kind === 'task' && (
+                          <TouchableOpacity
+                            onPress={() => router.push({
+                              pathname: '/educator/(tabs)/task-submissions',
+                              params: { taskId: activity.id, taskTitle: activity.title, courseName: courseName || activity.course_name },
+                            } as any)}
+                            activeOpacity={0.8}
+                            style={styles.activityStatusRow}
+                          >
+                            <Ionicons name="people-outline" size={13} color={COLORS.purpleVibrant} />
+                            <Text style={[styles.activityStatusText, { color: COLORS.purpleVibrant, marginLeft: 2 }]}>
+                              {activity.submission_count ?? 0}/{activity.graded_count ?? 0} graded
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </TouchableOpacity>
                   );
                 })}
               </View>
@@ -1146,6 +1158,7 @@ const styles = StyleSheet.create({
   activityMeta: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 2 },
   activityNote: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, lineHeight: 17, marginTop: 10 },
   activityStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 12 },
+  activityBadges: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', columnGap: 16 },
   activityStatusText: { fontSize: 12, fontFamily: FONTS.semiBold, fontWeight: '600' },
 
   kindRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },

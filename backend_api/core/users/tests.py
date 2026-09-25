@@ -1641,29 +1641,38 @@ class TaskSubmissionAPITests(APITestCase):
     def test_student_submits_file(self):
         resp = self._submit(self.student)
         self.assertEqual(resp.status_code, 201)
-        self.assertEqual(resp.data['file_name'], 'essay.txt')
-        self.assertEqual(resp.data['file_mime'], 'text/plain')
-        self.assertEqual(resp.data['file_size'], len(b'hello world'))
-        self.assertIn('file_data', resp.data)
+        self.assertEqual(len(resp.data['files']), 1)
+        submitted = resp.data['files'][0]
+        self.assertEqual(submitted['file_name'], 'essay.txt')
+        self.assertEqual(submitted['file_mime'], 'text/plain')
+        self.assertEqual(submitted['file_size'], len(b'hello world'))
         self.assertEqual(resp.data['student_name'], 'Task Student')
 
         # submission_count on the activity reflects it
         self.assertEqual(self.task.submissions.count(), 1)
 
-    def test_resubmission_replaces_file(self):
+    def test_second_upload_extends_the_turn_in(self):
         self._submit(self.student)
         resp = self._submit(self.student, content=b'new version')
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self.task.submissions.count(), 1)
-        self.assertEqual(resp.data['file_size'], len(b'new version'))
+        self.assertEqual(len(resp.data['files']), 2)
+        self.assertEqual(resp.data['files'][1]['file_size'], len(b'new version'))
 
     def test_student_can_read_own_submission(self):
         self._submit(self.student)
         self.client.force_authenticate(user=self.student)
         resp = self.client.get(reverse('task_submit', args=[self.task.id]))
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data['file_name'], 'essay.txt')
-        self.assertIn('file_data', resp.data)
+        self.assertEqual(resp.data['files'][0]['file_name'], 'essay.txt')
+
+        # The bytes come from the per-file endpoint, not the turn-in payload.
+        file_id = resp.data['files'][0]['id']
+        file_resp = self.client.get(
+            reverse('task_submission_file', args=[self.task.id, file_id]))
+        self.assertEqual(file_resp.status_code, 200)
+        self.assertIn('file_data', file_resp.data)
+        self.assertEqual(file_resp.data['file_data'], 'aGVsbG8gd29ybGQ=')
 
     def test_no_submission_returns_null(self):
         self.client.force_authenticate(user=self.student)
@@ -1679,6 +1688,7 @@ class TaskSubmissionAPITests(APITestCase):
         self.assertEqual(len(resp.data), 1)
         self.assertEqual(resp.data[0]['student_name'], 'Task Student')
         self.assertNotIn('file_data', resp.data[0])
+        self.assertNotIn('file_data', resp.data[0]['files'][0])
 
     def test_educator_fetches_single_submission_with_file(self):
         self._submit(self.student)
@@ -1686,8 +1696,13 @@ class TaskSubmissionAPITests(APITestCase):
         self.client.force_authenticate(user=self.educator)
         resp = self.client.get(reverse('task_submission_detail', args=[self.task.id, sub.id]))
         self.assertEqual(resp.status_code, 200)
-        self.assertIn('file_data', resp.data)
-        self.assertEqual(resp.data['file_name'], 'essay.txt')
+        self.assertEqual(len(resp.data['files']), 1)
+
+        file_resp = self.client.get(
+            reverse('task_submission_file', args=[self.task.id, resp.data['files'][0]['id']]))
+        self.assertEqual(file_resp.status_code, 200)
+        self.assertIn('file_data', file_resp.data)
+        self.assertEqual(file_resp.data['file_name'], 'essay.txt')
 
     def test_student_cannot_list_submissions(self):
         self._submit(self.student)

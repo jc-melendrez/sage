@@ -1,5 +1,8 @@
+from datetime import timedelta
+
+from django.utils import timezone
 from rest_framework import serializers
-from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, TaskSubmission, ClassActivityAttachment
+from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
 # --- Your Related Serializers (Unchanged, these are great!) ---
 from django.contrib.auth import get_user_model
 
@@ -161,12 +164,35 @@ class ClassActivityAttachmentSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-# --- Class Activities (teacher-set academic tasks, no grading) ---
+class TaskSubmissionFileListSerializer(serializers.ModelSerializer):
+    """Submission-file metadata only (no file bytes) for list views."""
+
+    class Meta:
+        model = TaskSubmissionFile
+        fields = [
+            'id', 'file_name', 'file_mime', 'file_size', 'created_at',
+        ]
+        read_only_fields = fields
+
+
+class TaskSubmissionFileSerializer(serializers.ModelSerializer):
+    """Full submission file, including bytes (base64 over the wire)."""
+
+    class Meta:
+        model = TaskSubmissionFile
+        fields = [
+            'id', 'file_name', 'file_mime', 'file_size', 'file_data', 'created_at',
+        ]
+        read_only_fields = fields
+
+
+# --- Class Activities (teacher-set academic tasks) ---
 
 class ClassActivitySerializer(serializers.ModelSerializer):
     course = serializers.IntegerField(source='course_id', read_only=True)
     course_name = serializers.SerializerMethodField()
     submission_count = serializers.SerializerMethodField()
+    graded_count = serializers.SerializerMethodField()
     attachments = ClassActivityAttachmentListSerializer(many=True, read_only=True)
 
     class Meta:
@@ -174,17 +200,48 @@ class ClassActivitySerializer(serializers.ModelSerializer):
         fields = [
             'id', 'course', 'course_name', 'kind', 'title',
             'ref_id', 'note', 'due_date', 'status', 'created_at',
-            'max_points',
-            'submission_count',
+            'max_points', 'allow_multiple_files',
+            'submission_count', 'graded_count',
             'attachments',
         ]
-        read_only_fields = ['id', 'course', 'course_name', 'created_at', 'submission_count', 'attachments']
+        read_only_fields = [
+            'id', 'course', 'course_name', 'created_at',
+            'submission_count', 'graded_count', 'attachments',
+        ]
 
     def get_course_name(self, obj):
         return obj.course.name
 
     def get_submission_count(self, obj):
         return obj.submissions.count()
+
+    def get_graded_count(self, obj):
+        return obj.submissions.exclude(score__isnull=True).count()
+
+    def to_internal_value(self, data):
+        # A multipart form can only send strings, so a client that wants to
+        # clear an optional field has to send a blank value. Treat that as
+        # null instead of failing validation on an empty datetime.
+        if hasattr(data, 'dict'):
+            data = data.dict()
+        if isinstance(data, dict):
+            data = data.copy()
+            for field in ('due_date', 'ref_id'):
+                if data.get(field) == '':
+                    data[field] = None
+        return super().to_internal_value(data)
+
+    def validate_due_date(self, value):
+        if value is None:
+            return value
+        if value < timezone.now() - timedelta(days=365):
+            raise serializers.ValidationError('Due date is too far in the past.')
+        return value
+
+    def validate_max_points(self, value):
+        if value < 1:
+            raise serializers.ValidationError('Points must be at least 1.')
+        return value
 
 
 class TaskSubmissionSerializer(serializers.ModelSerializer):
@@ -194,12 +251,14 @@ class TaskSubmissionSerializer(serializers.ModelSerializer):
     student_name = serializers.SerializerMethodField()
     max_points = serializers.IntegerField(source='activity.max_points', read_only=True)
     graded_by_name = serializers.SerializerMethodField()
+    is_late = serializers.BooleanField(read_only=True)
+    files = TaskSubmissionFileListSerializer(many=True, read_only=True)
 
     class Meta:
         model = TaskSubmission
         fields = [
             'id', 'activity', 'student_id', 'student_name',
-            'file_name', 'file_mime', 'file_size', 'file_data',
+            'description', 'files', 'is_late',
             'submitted_at',
             'score', 'feedback', 'graded_at', 'graded_by', 'graded_by_name', 'max_points',
         ]
@@ -222,12 +281,14 @@ class TaskSubmissionListSerializer(serializers.ModelSerializer):
     student_id = serializers.IntegerField(read_only=True)
     student_name = serializers.SerializerMethodField()
     max_points = serializers.IntegerField(source='activity.max_points', read_only=True)
+    is_late = serializers.BooleanField(read_only=True)
+    files = TaskSubmissionFileListSerializer(many=True, read_only=True)
 
     class Meta:
         model = TaskSubmission
         fields = [
             'id', 'activity', 'student_id', 'student_name',
-            'file_name', 'file_mime', 'file_size',
+            'description', 'files', 'is_late',
             'submitted_at',
             'score', 'feedback', 'graded_at', 'graded_by', 'max_points',
         ]
