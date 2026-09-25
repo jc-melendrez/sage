@@ -9,7 +9,7 @@
       "distribution": "internal",
       "env": {
         "EXPO_PUBLIC_API_URL": "https://sage-28kp.onrender.com/api",
-        "EXPO_PUBLIC_WEB_URL": "https://sage-web.onrender.com"
+        "EXPO_PUBLIC_WEB_URL": "https://sage-web-cdep.onrender.com"
       }
     },
     "preview": {
@@ -19,14 +19,14 @@
       },
       "env": {
         "EXPO_PUBLIC_API_URL": "https://sage-28kp.onrender.com/api",
-        "EXPO_PUBLIC_WEB_URL": "https://sage-web.onrender.com"
+        "EXPO_PUBLIC_WEB_URL": "https://sage-web-cdep.onrender.com"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_API_URL": "https://sage-28kp.onrender.com/api",
-        "EXPO_PUBLIC_WEB_URL": "https://sage-web.onrender.com"
+        "EXPO_PUBLIC_WEB_URL": "https://sage-web-cdep.onrender.com"
       }
     }
   },
