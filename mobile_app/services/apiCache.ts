@@ -1,6 +1,13 @@
 import * as SQLite from 'expo-sqlite';
+import { Platform } from 'react-native';
 
-const db = SQLite.openDatabaseSync('sage_cache.db');
+let db: SQLite.SQLiteDatabase | null = null;
+
+function getDb(): SQLite.SQLiteDatabase | null {
+  if (Platform.OS === 'web') return null;
+  if (!db) db = SQLite.openDatabaseSync('sage_cache.db');
+  return db;
+}
 
 export interface ApiCacheHit {
   body: string;
@@ -21,7 +28,9 @@ export function getCacheUserId(): number | null {
 }
 
 export function initApiCache() {
-  db.execSync(`
+  const d = getDb();
+  if (!d) return;
+  d.execSync(`
     CREATE TABLE IF NOT EXISTS http_cache (
       cache_key TEXT PRIMARY KEY,
       body TEXT NOT NULL,
@@ -30,7 +39,7 @@ export function initApiCache() {
     );
   `);
   // Prune expired rows on startup so the DB never balloons.
-  db.runSync('DELETE FROM http_cache WHERE fetched_at + (ttl_seconds * 1000) < ?', [Date.now()]);
+  d.runSync('DELETE FROM http_cache WHERE fetched_at + (ttl_seconds * 1000) < ?', [Date.now()]);
   initialized = true;
 }
 
@@ -40,8 +49,10 @@ function ensureInitialized() {
 }
 
 export function getCachedResponse(key: string): ApiCacheHit | null {
+  const d = getDb();
+  if (!d) return null;
   ensureInitialized();
-  const row = db.getFirstSync<{ body: string; fetched_at: number; ttl_seconds: number }>(
+  const row = d.getFirstSync<{ body: string; fetched_at: number; ttl_seconds: number }>(
     'SELECT body, fetched_at, ttl_seconds FROM http_cache WHERE cache_key = ?',
     [key]
   );
@@ -50,8 +61,10 @@ export function getCachedResponse(key: string): ApiCacheHit | null {
 }
 
 export function setCachedResponse(key: string, body: string, ttlSeconds: number) {
+  const d = getDb();
+  if (!d) return;
   ensureInitialized();
-  db.runSync(
+  d.runSync(
     `INSERT INTO http_cache (cache_key, body, fetched_at, ttl_seconds) VALUES (?, ?, ?, ?)
      ON CONFLICT(cache_key) DO UPDATE SET
        body = excluded.body,
@@ -63,13 +76,17 @@ export function setCachedResponse(key: string, body: string, ttlSeconds: number)
 
 /** Drop cached rows whose URL contains prefix (used to invalidate after writes). */
 export function invalidateCachePrefix(prefix: string) {
+  const d = getDb();
+  if (!d) return;
   ensureInitialized();
-  db.runSync('DELETE FROM http_cache WHERE cache_key LIKE ?', [`%${prefix}%`]);
+  d.runSync('DELETE FROM http_cache WHERE cache_key LIKE ?', [`%${prefix}%`]);
 }
 
 export function clearApiCache() {
+  const d = getDb();
+  if (!d) return;
   ensureInitialized();
-  db.runSync('DELETE FROM http_cache');
+  d.runSync('DELETE FROM http_cache');
 }
 
 /** Parse a stored body, returning null for corrupt rows so callers fall through to the network. */
@@ -107,14 +124,12 @@ function chatCacheKey(groupId: string): string {
 }
 
 export function getChatCache(groupId: string): ChatCacheDoc | null {
-  ensureInitialized();
   const hit = getCachedResponse(chatCacheKey(groupId));
   if (!hit) return null;
   return parseCached<ChatCacheDoc>(hit.body);
 }
 
 export function setChatCache(groupId: string, doc: ChatCacheDoc) {
-  ensureInitialized();
   const key = chatCacheKey(groupId);
   const existing = getChatCache(groupId);
   const next: ChatCacheDoc = {
@@ -134,6 +149,8 @@ export function setChatCache(groupId: string, doc: ChatCacheDoc) {
 }
 
 export function clearChatCache(groupId: string) {
+  const d = getDb();
+  if (!d) return;
   ensureInitialized();
-  db.runSync('DELETE FROM http_cache WHERE cache_key = ?', [chatCacheKey(groupId)]);
+  d.runSync('DELETE FROM http_cache WHERE cache_key = ?', [chatCacheKey(groupId)]);
 }

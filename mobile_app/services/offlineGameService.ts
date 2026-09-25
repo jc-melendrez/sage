@@ -1,7 +1,14 @@
 import * as SQLite from 'expo-sqlite';
+import { Platform } from 'react-native';
 import { OfflineGame, QuizPayload, OfflineGameOptions } from './offlineEngine';
 
-const db = SQLite.openDatabaseSync('sage_offline.db');
+let db: SQLite.SQLiteDatabase | null = null;
+
+function getDb(): SQLite.SQLiteDatabase | null {
+  if (Platform.OS === 'web') return null;
+  if (!db) db = SQLite.openDatabaseSync('sage_offline.db');
+  return db;
+}
 
 export interface OfflineGameRow {
   id: number;
@@ -21,7 +28,9 @@ export interface OfflineGameRow {
 let currentOfflineGame: OfflineGame | null = null;
 
 export function initOfflineGameDb() {
-  db.execSync(`
+  const d = getDb();
+  if (!d) return;
+  d.execSync(`
     CREATE TABLE IF NOT EXISTS cached_quizzes (
       quiz_id INTEGER PRIMARY KEY,
       data TEXT NOT NULL,
@@ -45,12 +54,14 @@ export function initOfflineGameDb() {
 }
 
 export function cacheQuizzes(quizzes: QuizPayload[]): number {
+  const d = getDb();
+  if (!d) return 0;
   if (!Array.isArray(quizzes)) return 0;
   const now = new Date().toISOString();
   let count = 0;
   for (const quiz of quizzes) {
     if (!quiz || quiz.id == null) continue;
-    db.runSync(
+    d.runSync(
       `INSERT INTO cached_quizzes (quiz_id, data, cached_at) VALUES (?, ?, ?)
        ON CONFLICT(quiz_id) DO UPDATE SET data = excluded.data, cached_at = excluded.cached_at`,
       [quiz.id, JSON.stringify(quiz), now]
@@ -61,7 +72,9 @@ export function cacheQuizzes(quizzes: QuizPayload[]): number {
 }
 
 export function getCachedQuizzes(): QuizPayload[] {
-  const rows = db.getAllSync<{ data: string }>(
+  const d = getDb();
+  if (!d) return [];
+  const rows = d.getAllSync<{ data: string }>(
     'SELECT data FROM cached_quizzes ORDER BY cached_at DESC'
   );
   const out: QuizPayload[] = [];
@@ -76,7 +89,9 @@ export function getCachedQuizzes(): QuizPayload[] {
 }
 
 export function getCachedQuiz(quizId: number): QuizPayload | null {
-  const row = db.getFirstSync<{ data: string }>(
+  const d = getDb();
+  if (!d) return null;
+  const row = d.getFirstSync<{ data: string }>(
     'SELECT data FROM cached_quizzes WHERE quiz_id = ?',
     [quizId]
   );
@@ -89,7 +104,9 @@ export function getCachedQuiz(quizId: number): QuizPayload | null {
 }
 
 export function clearCachedQuizzes() {
-  db.runSync('DELETE FROM cached_quizzes');
+  const d = getDb();
+  if (!d) return;
+  d.runSync('DELETE FROM cached_quizzes');
 }
 
 export function createOfflineGame(quiz: QuizPayload, timePerQuestion: number, opts?: OfflineGameOptions): OfflineGame {
@@ -107,8 +124,10 @@ export function clearCurrentOfflineGame() {
 }
 
 export function saveOfflineGameResult(game: OfflineGame): number {
+  const d = getDb();
+  if (!d) return 0;
   const sessionKey = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-  db.runSync(
+  d.runSync(
     `INSERT INTO offline_games (
        session_key, quiz_id, quiz_title, quiz_type, time_per_question,
        score, correct_count, answered_count, total_questions, completed_at, is_synced
@@ -126,16 +145,20 @@ export function saveOfflineGameResult(game: OfflineGame): number {
       new Date().toISOString(),
     ]
   );
-  const id = db.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;
+  const id = d.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;
   return id;
 }
 
 export function getPendingOfflineGames(): OfflineGameRow[] {
-  return db.getAllSync<OfflineGameRow>(
+  const d = getDb();
+  if (!d) return [];
+  return d.getAllSync<OfflineGameRow>(
     'SELECT * FROM offline_games WHERE is_synced = 0 ORDER BY id'
   );
 }
 
 export function markOfflineGameSynced(id: number) {
-  db.runSync('UPDATE offline_games SET is_synced = 1 WHERE id = ?', [id]);
+  const d = getDb();
+  if (!d) return;
+  d.runSync('UPDATE offline_games SET is_synced = 1 WHERE id = ?', [id]);
 }

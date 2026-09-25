@@ -1,4 +1,5 @@
 import * as SQLite from 'expo-sqlite';
+import { Platform } from 'react-native';
 import {
   CardState,
   Rating,
@@ -9,7 +10,13 @@ import {
   newCardState,
 } from './srs';
 
-const db = SQLite.openDatabaseSync('sage_flashcards.db');
+let db: SQLite.SQLiteDatabase | null = null;
+
+function getDb(): SQLite.SQLiteDatabase | null {
+  if (Platform.OS === 'web') return null;
+  if (!db) db = SQLite.openDatabaseSync('sage_flashcards.db');
+  return db;
+}
 
 export interface Deck {
   id: number;
@@ -63,7 +70,9 @@ export interface CardSearchMatch {
 }
 
 export function initFlashcardDb() {
-  db.execSync(`
+  const d = getDb();
+  if (!d) return;
+  d.execSync(`
     CREATE TABLE IF NOT EXISTS decks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -114,13 +123,17 @@ const nowIso = () => new Date().toISOString();
 // ---------- Decks ----------
 
 export function getDecks(): Deck[] {
-  return db
+  const d = getDb();
+  if (!d) return [];
+  return d
     .getAllSync<Deck>('SELECT * FROM decks WHERE deleted = 0 ORDER BY updated_at DESC')
-    .map((d) => ({ ...d, source_quiz_id: d.source_quiz_id ?? null }));
+    .map((deck) => ({ ...deck, source_quiz_id: deck.source_quiz_id ?? null }));
 }
 
 export function getDeck(id: number): Deck | null {
-  return db.getFirstSync<Deck>('SELECT * FROM decks WHERE id = ? AND deleted = 0', [id]) ?? null;
+  const d = getDb();
+  if (!d) return null;
+  return d.getFirstSync<Deck>('SELECT * FROM decks WHERE id = ? AND deleted = 0', [id]) ?? null;
 }
 
 export function createDeck(
@@ -131,23 +144,29 @@ export function createDeck(
   const subject = opts?.subject ?? '';
   const color = opts?.color ?? '#7F77DD';
   const sourceQuizId = opts?.sourceQuizId ?? null;
-  db.runSync(
+  const d = getDb();
+  if (!d) {
+    return { id: 0, name, subject, color, source_quiz_id: sourceQuizId, created_at: ts, updated_at: ts, deleted: 0 };
+  }
+  d.runSync(
     `INSERT INTO decks (name, subject, color, source_quiz_id, created_at, updated_at, deleted)
      VALUES (?, ?, ?, ?, ?, ?, 0)`,
     [name, subject, color, sourceQuizId, ts, ts]
   );
-  const id = db.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;
+  const id = d.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;
   return { id, name, subject, color, source_quiz_id: sourceQuizId, created_at: ts, updated_at: ts, deleted: 0 };
 }
 
 export function updateDeck(id: number, fields: { name?: string; subject?: string; color?: string }): void {
+  const d = getDb();
+  if (!d) return;
   const ts = nowIso();
   const deck = getDeck(id);
   if (!deck) return;
   const name = fields.name ?? deck.name;
   const subject = fields.subject ?? deck.subject;
   const color = fields.color ?? deck.color;
-  db.runSync('UPDATE decks SET name = ?, subject = ?, color = ?, updated_at = ? WHERE id = ?', [
+  d.runSync('UPDATE decks SET name = ?, subject = ?, color = ?, updated_at = ? WHERE id = ?', [
     name,
     subject,
     color,
@@ -157,37 +176,47 @@ export function updateDeck(id: number, fields: { name?: string; subject?: string
 }
 
 export function deleteDeck(id: number): void {
+  const d = getDb();
+  if (!d) return;
   const ts = nowIso();
-  db.runSync('UPDATE decks SET deleted = 1, updated_at = ? WHERE id = ?', [ts, id]);
+  d.runSync('UPDATE decks SET deleted = 1, updated_at = ? WHERE id = ?', [ts, id]);
   const cards = getCards(id);
   for (const card of cards) {
-    db.runSync('DELETE FROM card_state WHERE card_id = ?', [card.id]);
+    d.runSync('DELETE FROM card_state WHERE card_id = ?', [card.id]);
   }
-  db.runSync('DELETE FROM review_log WHERE deck_id = ?', [id]);
+  d.runSync('DELETE FROM review_log WHERE deck_id = ?', [id]);
 }
 
 // ---------- Cards ----------
 
 export function getCards(deckId: number): Card[] {
-  return db
+  const d = getDb();
+  if (!d) return [];
+  return d
     .getAllSync<Card>('SELECT * FROM cards WHERE deck_id = ? AND deleted = 0 ORDER BY position, id', [deckId])
     .map((c) => ({ ...c, explanation: c.explanation ?? '' }));
 }
 
 export function getCard(id: number): Card | null {
-  return db.getFirstSync<Card>('SELECT * FROM cards WHERE id = ? AND deleted = 0', [id]) ?? null;
+  const d = getDb();
+  if (!d) return null;
+  return d.getFirstSync<Card>('SELECT * FROM cards WHERE id = ? AND deleted = 0', [id]) ?? null;
 }
 
 export function addCard(deckId: number, front: string, back: string, explanation = ''): Card {
   const ts = nowIso();
-  const pos = (db.getFirstSync<{ n: number }>('SELECT COUNT(*) AS n FROM cards WHERE deck_id = ?', [deckId])?.n ?? 0) + 1;
-  db.runSync(
+  const d = getDb();
+  if (!d) {
+    return { id: 0, deck_id: deckId, front, back, explanation, position: 1, created_at: ts, updated_at: ts, deleted: 0 };
+  }
+  const pos = (d.getFirstSync<{ n: number }>('SELECT COUNT(*) AS n FROM cards WHERE deck_id = ?', [deckId])?.n ?? 0) + 1;
+  d.runSync(
     `INSERT INTO cards (deck_id, front, back, explanation, position, created_at, updated_at, deleted)
      VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
     [deckId, front, back, explanation, pos, ts, ts]
   );
-  const id = db.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;
-  db.runSync('UPDATE decks SET updated_at = ? WHERE id = ?', [ts, deckId]);
+  const id = d.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;
+  d.runSync('UPDATE decks SET updated_at = ? WHERE id = ?', [ts, deckId]);
   return { id, deck_id: deckId, front, back, explanation, position: pos, created_at: ts, updated_at: ts, deleted: 0 };
 }
 
@@ -195,28 +224,32 @@ export function updateCard(
   id: number,
   fields: { front?: string; back?: string; explanation?: string }
 ): void {
+  const d = getDb();
+  if (!d) return;
   const ts = nowIso();
   const card = getCard(id);
   if (!card) return;
   const front = fields.front ?? card.front;
   const back = fields.back ?? card.back;
   const explanation = fields.explanation ?? card.explanation;
-  db.runSync('UPDATE cards SET front = ?, back = ?, explanation = ?, updated_at = ? WHERE id = ?', [
+  d.runSync('UPDATE cards SET front = ?, back = ?, explanation = ?, updated_at = ? WHERE id = ?', [
     front,
     back,
     explanation,
     ts,
     id,
   ]);
-  db.runSync('UPDATE decks SET updated_at = ? WHERE id = ?', [ts, card.deck_id]);
+  d.runSync('UPDATE decks SET updated_at = ? WHERE id = ?', [ts, card.deck_id]);
 }
 
 export function deleteCard(id: number): void {
+  const d = getDb();
+  if (!d) return;
   const ts = nowIso();
   const card = getCard(id);
-  db.runSync('UPDATE cards SET deleted = 1, updated_at = ? WHERE id = ?', [ts, id]);
-  db.runSync('DELETE FROM card_state WHERE card_id = ?', [id]);
-  if (card) db.runSync('UPDATE decks SET updated_at = ? WHERE id = ?', [ts, card.deck_id]);
+  d.runSync('UPDATE cards SET deleted = 1, updated_at = ? WHERE id = ?', [ts, id]);
+  d.runSync('DELETE FROM card_state WHERE card_id = ?', [id]);
+  if (card) d.runSync('UPDATE decks SET updated_at = ? WHERE id = ?', [ts, card.deck_id]);
 }
 
 export interface CardEntryInput {
@@ -226,11 +259,13 @@ export interface CardEntryInput {
 }
 
 export function addCardsBulk(deckId: number, entries: CardEntryInput[]): number {
+  const d = getDb();
+  if (!d) return 0;
   let count = 0;
   for (const entry of entries) {
     if (!entry.front.trim() || !entry.back.trim()) continue;
-    addCard(deckId, entry.front.trim(), entry.back.trim(), (entry.explanation ?? '').trim());
-    count += 1;
+    const card = addCard(deckId, entry.front.trim(), entry.back.trim(), (entry.explanation ?? '').trim());
+    if (card.id !== 0) count += 1;
   }
   return count;
 }
@@ -270,7 +305,9 @@ export function parseBulkInput(text: string): CardEntryInput[] {
 // ---------- SRS state ----------
 
 export function getCardState(cardId: number): CardState {
-  const row = db.getFirstSync<any>('SELECT * FROM card_state WHERE card_id = ?', [cardId]);
+  const d = getDb();
+  if (!d) return newCardState();
+  const row = d.getFirstSync<any>('SELECT * FROM card_state WHERE card_id = ?', [cardId]);
   if (!row) return newCardState();
   return {
     reps: row.reps,
@@ -284,7 +321,9 @@ export function getCardState(cardId: number): CardState {
 }
 
 function upsertCardState(cardId: number, state: CardState): void {
-  db.runSync(
+  const d = getDb();
+  if (!d) return;
+  d.runSync(
     `INSERT INTO card_state (card_id, reps, lapses, interval_days, ease, due, state, last_review)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(card_id) DO UPDATE SET
@@ -322,22 +361,28 @@ export function recordReview(
 ): ReviewResult {
   const prev = getCardState(cardId);
   const next = gradeCard(prev, rating, now);
+  const d = getDb();
+  if (!d) return { reviewId: 0, prevState: prev, newState: next };
   upsertCardState(cardId, next);
-  db.runSync(
+  d.runSync(
     'INSERT INTO review_log (card_id, deck_id, rating, reviewed_at) VALUES (?, ?, ?, ?)',
     [cardId, deckId, rating, now.toISOString()]
   );
-  const reviewId = db.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;
+  const reviewId = d.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;
   return { reviewId, prevState: prev, newState: next };
 }
 
 export function revertReview(cardId: number, reviewId: number, prevState: CardState): void {
+  const d = getDb();
+  if (!d) return;
   upsertCardState(cardId, prevState);
-  db.runSync('DELETE FROM review_log WHERE id = ?', [reviewId]);
+  d.runSync('DELETE FROM review_log WHERE id = ?', [reviewId]);
 }
 
 export function deleteReviewLog(reviewId: number): void {
-  db.runSync('DELETE FROM review_log WHERE id = ?', [reviewId]);
+  const d = getDb();
+  if (!d) return;
+  d.runSync('DELETE FROM review_log WHERE id = ?', [reviewId]);
 }
 
 // ---------- Session queue ----------
@@ -374,7 +419,9 @@ const dayKey = (date: Date) => {
 };
 
 export function getReviewCountOn(date: Date): number {
-  const row = db.getFirstSync<{ n: number }>(
+  const d = getDb();
+  if (!d) return 0;
+  const row = d.getFirstSync<{ n: number }>(
     'SELECT COUNT(*) AS n FROM review_log WHERE substr(reviewed_at, 1, 10) = ?',
     [dayKey(date)]
   );
@@ -406,8 +453,10 @@ export function getDailyCounts(days: number, now: Date = new Date()): { day: str
 }
 
 export function getRatingTotals(): Record<Rating, number> {
+  const d = getDb();
   const totals: Record<Rating, number> = { again: 0, hard: 0, good: 0, easy: 0 };
-  const rows = db.getAllSync<{ rating: string; n: number }>(
+  if (!d) return totals;
+  const rows = d.getAllSync<{ rating: string; n: number }>(
     'SELECT rating, COUNT(*) AS n FROM review_log GROUP BY rating'
   );
   for (const row of rows) {
@@ -418,17 +467,21 @@ export function getRatingTotals(): Record<Rating, number> {
 }
 
 export function getTotalReviews(): number {
-  const row = db.getFirstSync<{ n: number }>('SELECT COUNT(*) AS n FROM review_log');
+  const d = getDb();
+  if (!d) return 0;
+  const row = d.getFirstSync<{ n: number }>('SELECT COUNT(*) AS n FROM review_log');
   return row?.n ?? 0;
 }
 
 // ---------- Search ----------
 
 export function searchCards(query: string): CardSearchMatch[] {
+  const d = getDb();
+  if (!d) return [];
   const q = query.trim();
   if (!q) return [];
   const like = `%${q}%`;
-  const rows = db.getAllSync<Card>(
+  const rows = d.getAllSync<Card>(
     `SELECT c.* FROM cards c
      JOIN decks d ON d.id = c.deck_id
      WHERE c.deleted = 0 AND d.deleted = 0

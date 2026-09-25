@@ -1,17 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, useRouter, useSegments, useRootNavigationState } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { Platform } from 'react-native';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { isAuthenticated, getCurrentUser, roleHomePath, getRoleFromToken } from '@/services/authService';
-import { testFirebase } from "@/services/firebaseTest";
-import { startSyncManager } from '@/services/syncManager';
-import { initOfflineQueue } from '@/services/offlineQueue';
-import { initOfflineGameDb } from '@/services/offlineGameService';
-import { initApiCache } from '@/services/apiCache';
-
 import {
   useFonts,
   Montserrat_400Regular,
@@ -27,14 +21,15 @@ export const unstable_settings = {
 };
 
 async function fetchRoleHome() {
+  const auth = await import('@/services/authService');
   try {
-    const user = await getCurrentUser();
-    return roleHomePath(user);
+    const user = await auth.getCurrentUser();
+    return auth.roleHomePath(user);
   } catch {
     // Backend fetch failed (offline, waking up, transient 401). Fall back to the
     // role embedded in the stored JWT instead of silently defaulting to student.
-    const tokenRole = await getRoleFromToken();
-    return roleHomePath(null, tokenRole);
+    const tokenRole = await auth.getRoleFromToken();
+    return auth.roleHomePath(null, tokenRole);
   }
 }
 
@@ -44,7 +39,8 @@ export default function RootLayout() {
   const segments = useSegments();
   const navigationState = useRootNavigationState();
 
-  const [isReady, setIsReady] = useState(false);
+  const [isReady, setIsReady] = useState(() => Platform.OS === 'web');
+  const stopSyncRef = useRef<(() => void) | null>(null);
 
   const [fontsLoaded] = useFonts({
     'Montserrat-Regular': Montserrat_400Regular,
@@ -56,18 +52,43 @@ export default function RootLayout() {
   });
 
   useEffect(() => {
-    initOfflineQueue();
-    initOfflineGameDb();
-    initApiCache();
-    const stop = startSyncManager();
-    return () => stop();
+    if (Platform.OS === 'web') return;
+
+    let stopped = false;
+
+    (async () => {
+      const [{ initOfflineQueue }, { initOfflineGameDb }, { initApiCache }, { startSyncManager }] =
+        await Promise.all([
+          import('@/services/offlineQueue'),
+          import('@/services/offlineGameService'),
+          import('@/services/apiCache'),
+          import('@/services/syncManager'),
+        ]);
+      if (stopped) return;
+      initOfflineQueue();
+      initOfflineGameDb();
+      initApiCache();
+      stopSyncRef.current = startSyncManager();
+    })();
+
+    return () => {
+      stopped = true;
+      stopSyncRef.current?.();
+      stopSyncRef.current = null;
+    };
   }, []);
+
   useEffect(() => {
-    testFirebase();
+    if (Platform.OS === 'web') return;
+
     const verifyAuth = async () => {
       if (!navigationState?.key) return;
 
-      const loggedIn = await isAuthenticated();
+      const fbTest = await import('@/services/firebaseTest');
+      fbTest.testFirebase();
+
+      const auth = await import('@/services/authService');
+      const loggedIn = await auth.isAuthenticated();
       const inAuthGroup = segments[0] === '(tabs)' || segments.length === 0;
 
       if (!loggedIn && inAuthGroup) {
