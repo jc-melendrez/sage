@@ -140,6 +140,7 @@ interface ChatSession {
 
 export default function AIAssistantScreen() {
   const scrollViewRef = useRef<ScrollView>(null);
+  const userScrolledRef = useRef(false);
 
   // --- Multi-Thread State ---
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -158,6 +159,22 @@ export default function AIAssistantScreen() {
   const [isTyping, setIsTyping] = useState(false);
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
   const [attachedFile, setAttachedFile] = useState<any>(null);
+
+  const handleScroll = (event: any) => {
+    const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
+    const isAtBottom = contentOffset.y >= contentSize.height - layoutMeasurement.height - 50;
+    userScrolledRef.current = !isAtBottom;
+  };
+
+  const handleContentSizeChange = () => {
+    if (!userScrolledRef.current) {
+      scrollViewRef.current?.scrollToEnd({ animated: true });
+    }
+  };
+
+  const resetUserScrolled = () => {
+    userScrolledRef.current = false;
+  };
 
   const quickActions = [
     { id: 1, label: 'Study Plan', icon: 'book', color: COLORS.warning },
@@ -195,6 +212,7 @@ export default function AIAssistantScreen() {
   const loadHistory = async (sessionId: number) => {
     setActiveSessionId(sessionId);
     setIsMenuVisible(false);
+    resetUserScrolled();
     setMessages([]); 
     
     try {
@@ -205,7 +223,6 @@ export default function AIAssistantScreen() {
       if (res.ok) {
         const history = await res.json();
         setMessages(history);
-        setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: false }), 100);
       }
     } catch (err) {
       console.error("Failed to load history", err);
@@ -215,6 +232,7 @@ export default function AIAssistantScreen() {
   // 3. Start a Blank Canvas
   const startNewChat = () => {
     setActiveSessionId(null); 
+    resetUserScrolled();
     setMessages([{
       id: 1,
       type: 'ai',
@@ -314,6 +332,7 @@ export default function AIAssistantScreen() {
     if (!textToSend.trim() || isLoading || isTyping) return;
 
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    resetUserScrolled();
 
     const userMessage: Message = {
       id: Date.now(),
@@ -325,7 +344,6 @@ export default function AIAssistantScreen() {
     setMessages((prev) => [...prev, userMessage]);
     setInputValue('');
     setIsLoading(true);
-    setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
 
     // 🌟 Capture the file locally and clear state immediately
     const fileToProcess = attachedFile;
@@ -396,7 +414,6 @@ export default function AIAssistantScreen() {
         text: fullReply || "Sorry, I didn't get a response. Please try again.",
         time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
       }]);
-      setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: false }), 50);
 
     } catch (error) {
       console.error("AI Chat Error:", error);
@@ -411,7 +428,6 @@ export default function AIAssistantScreen() {
       setIsTyping(false);
       setAttachedFileName(null);
       setAttachedFile(null); // Clear the attachment after sending
-      setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
     }
   };
 
@@ -630,6 +646,8 @@ export default function AIAssistantScreen() {
         style={styles.messagesContainer} 
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.messagesContent}
+        onScroll={handleScroll}
+        onContentSizeChange={handleContentSizeChange}
       >
         {messages.map((message) => (
           <View 
