@@ -265,7 +265,10 @@ export async function generateTopic(
   try {
     data = raw ? JSON.parse(raw) : {};
   } catch {
-    if ([502, 503, 504].includes(response.status)) {
+    // 502/503/504 come from gunicorn; 524 is Cloudflare's own "origin timed out"
+    // and is served as an HTML page, so it has to be recognised here too or it
+    // falls through to the useless "unreadable response" message below.
+    if ([502, 503, 504, 524].includes(response.status)) {
       throw new Error(
         `Generation timed out (server returned ${response.status}). Try fewer nodes or a smaller file.`,
       );
