@@ -354,7 +354,12 @@ export default function ActivitiesScreen() {
     const char = t.slice(-1).toUpperCase();
     const next = joinCodeInput.split('').slice(0, 6);
     while (next.length < i) next.push('');
-    next[i] = char;
+    if (!char) {
+      next[i] = '';
+      if (i > 0) next[i - 1] = '';
+    } else {
+      next[i] = char;
+    }
     setJoinCodeInput(next.join('').slice(0, 6));
     if (char && i < 5) groupCodeRefs.current[i + 1]?.focus();
     else if (!char && i > 0) groupCodeRefs.current[i - 1]?.focus();
@@ -371,7 +376,12 @@ export default function ActivitiesScreen() {
     const char = t.slice(-1).toUpperCase();
     const next = classCodeInput.split('').slice(0, 6);
     while (next.length < i) next.push('');
-    next[i] = char;
+    if (!char) {
+      next[i] = '';
+      if (i > 0) next[i - 1] = '';
+    } else {
+      next[i] = char;
+    }
     setClassCodeInput(next.join('').slice(0, 6));
     if (char && i < 5) classCodeRefs.current[i + 1]?.focus();
     else if (!char && i > 0) classCodeRefs.current[i - 1]?.focus();

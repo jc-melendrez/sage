@@ -662,7 +662,11 @@ export default function QuizManagerScreen() {
               {quizzes.map((q) => (
                 <View key={q.id} style={styles.quizCard}>
                   <View style={styles.quizCardTop}>
-                    <View style={{ flex: 1 }}>
+                    <TouchableOpacity
+                      style={{ flex: 1 }}
+                      onPress={() => setPreviewQuiz(q)}
+                      activeOpacity={0.7}
+                    >
                       <Text style={styles.quizCardTitle}>{q.title}</Text>
                       <Text style={styles.quizCardMeta}>
                         {q.questions?.length || 0} questions · {q.quiz_type}
@@ -677,7 +681,7 @@ export default function QuizManagerScreen() {
                           {courses.find((c) => c.id === q.course)?.name ?? `Class #${q.course}`}
                         </Text>
                       )}
-                    </View>
+                    </TouchableOpacity>
                     <TouchableOpacity style={styles.quizActionBtn} onPress={() => setPreviewQuiz(q)}>
                       <Ionicons name="eye-outline" size={16} color={COLORS.purplePrimary} />
                       <Text style={styles.quizActionText}>Preview</Text>
@@ -895,9 +899,36 @@ export default function QuizManagerScreen() {
                   {previewQuiz?.questions?.length || 0} questions Â· {previewQuiz?.quiz_type}
                 </Text>
               </View>
-              <TouchableOpacity onPress={() => setPreviewQuiz(null)}>
-                <Ionicons name="close" size={24} color={COLORS.textPrimary} />
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                <TouchableOpacity
+                  style={styles.previewActionBtn}
+                  onPress={() => {
+                    setPreviewQuiz(null);
+                    setTimeout(() => {
+                      // Navigate to quiz taking screen
+                      // This would need router navigation
+                    }, 100);
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="play-circle" size={18} color={COLORS.success} />
+                  <Text style={styles.previewActionBtnText}>Start</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.previewActionBtn}
+                  onPress={() => {
+                    setPreviewQuiz(null);
+                    openEditor(previewQuiz!);
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="create-outline" size={18} color={COLORS.purplePrimary} />
+                  <Text style={styles.previewActionBtnText}>Edit</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setPreviewQuiz(null)}>
+                  <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+                </TouchableOpacity>
+              </View>
             </View>
 
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 24 }}>
@@ -1568,4 +1599,16 @@ const styles = StyleSheet.create({
   deadlineRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   deadlinePickerBtn: { padding: 8 },
   deadlineClearBtn: { padding: 8 },
+  previewActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: RADIUS.sm,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  previewActionBtnText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textPrimary },
 });

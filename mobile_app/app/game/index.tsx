@@ -775,7 +775,12 @@ export default function GameCenterScreen() {
     const char = t.slice(-1).toUpperCase();
     const next = joinCode.split('').slice(0, 6);
     while (next.length < i) next.push('');
-    next[i] = char;
+    if (!char) {
+      next[i] = '';
+      if (i > 0) next[i - 1] = '';
+    } else {
+      next[i] = char;
+    }
     const clean = next.join('').slice(0, 6);
     setJoinCode(clean);
     if (char && i < 5) codeBoxRefs.current[i + 1]?.focus();

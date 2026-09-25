@@ -610,8 +610,8 @@ export default function AIAssistantScreen() {
 
                     {/* 3-dots dropdown menu */}
                     {isMenuOpen && (
-                      <View style={styles.menuOverlay} onTouchStart={closeMenu}>
-                        <View style={[styles.menuDropdown, { top: 50 }]}>
+                      <View style={styles.menuOverlay} onPress={closeMenu}>
+                        <View style={[styles.menuDropdown, { top: 50 }]} pointerEvents="box-only">
                           <TouchableOpacity style={styles.menuItem} onPress={() => handlePinSession(session.id, session.pinned || false)} activeOpacity={0.7}>
                             <Ionicons name={session.pinned ? "pin-outline" : "pin"} size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
                             <Text style={styles.menuItemText}>{session.pinned ? 'Unpin' : 'Pin'}</Text>
