@@ -255,8 +255,27 @@ export async function generateTopic(
     body: formData,
   });
 
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Generation failed');
+  // Generation is a long blocking request, so the origin can die before Django
+  // replies (gunicorn --timeout 90 in the Procfile, Cloudflare's 100s origin
+  // cap in front of it). That surfaces an HTML/plain-text error page, and a
+  // bare response.json() would throw "JSON Parse error: Unexpected character: <"
+  // instead of the real HTTP status. Read text, then parse defensively.
+  const raw = await response.text();
+  let data: any;
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    if ([502, 503, 504].includes(response.status)) {
+      throw new Error(
+        `Generation timed out (server returned ${response.status}). Try fewer nodes or a smaller file.`,
+      );
+    }
+    throw new Error(`Generation failed: server returned an unreadable ${response.status} response.`);
+  }
+
+  if (!response.ok) {
+    throw new Error(data.error || data.message || data.detail || `Generation failed (${response.status})`);
+  }
   invalidateCourseContent();
   return data as GenerateTopicResponse;
 }

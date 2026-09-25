@@ -447,33 +447,72 @@ def _validate_provenance(nodes):
     return True, 'ok'
 
 
-def deepseek_chat_completion(payload, api_key, max_retries=3):
-    """POST to DeepSeek and retry transient failures."""
+# Total wall-clock budget for one AI generation request. Stays under the
+# Procfile's `gunicorn --timeout 90` (and Cloudflare's 100s origin cap) so a
+# slow model or a retry storm fails as a clean HTTP error instead of an HTML
+# error page the client can't parse.
+AI_GEN_BUDGET_SECONDS = float(os.getenv('AI_GEN_BUDGET_SECONDS', '70'))
+
+
+def deepseek_chat_completion(payload, api_key, max_retries=3, deadline_seconds=None):
+    """POST to DeepSeek and retry transient failures.
+
+    When deadline_seconds is given, the whole call (every attempt plus backoff)
+    is bounded by that wall-clock budget. Without it a retry storm can run
+    120s x 3 attempts plus Retry-After sleeps, which outlives any front-end
+    timeout and gets the request killed mid-flight.
+    """
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    started = time.monotonic()
+
+    def remaining():
+        if deadline_seconds is None:
+            return None
+        return deadline_seconds - (time.monotonic() - started)
+
+    def budget_exhausted(reserve=5):
+        left = remaining()
+        return left is not None and left <= reserve
+
+    def clamp_wait(wait):
+        """Never sleep past the deadline."""
+        left = remaining()
+        if left is None:
+            return wait
+        return max(0.0, min(wait, left - 1))
+
     last_response = None
     for attempt in range(1, max_retries + 1):
+        if budget_exhausted():
+            print(f"[DeepSeek] deadline of {deadline_seconds}s exhausted before attempt {attempt}")
+            return last_response
+
+        left = remaining()
+        read_timeout = 120 if left is None else max(5.0, min(120.0, left))
         try:
             last_response = requests.post(
                 "https://api.deepseek.com/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=120,
+                # (connect, read): never hang on connect, cap the read so a
+                # stalled generation still returns inside the budget.
+                timeout=(10, read_timeout),
             )
         except requests.exceptions.RequestException as e:
             print(f"[DeepSeek] attempt {attempt} request error: {e}")
             last_response = None
-            if attempt < max_retries:
-                time.sleep(2 * attempt)
+            if attempt < max_retries and not budget_exhausted():
+                time.sleep(clamp_wait(2 * attempt))
             continue
 
         if last_response.status_code == 200:
             return last_response
 
         print(f"[DeepSeek] attempt {attempt} status {last_response.status_code}: {last_response.text[:300]}")
-        if attempt < max_retries:
+        if attempt < max_retries and not budget_exhausted():
             # Honor DeepSeek's suggested wait time (rate limits) when present.
             wait = 2 * attempt
             retry_after = last_response.headers.get('Retry-After')
@@ -486,7 +525,7 @@ def deepseek_chat_completion(payload, api_key, max_retries=3):
                 match = re.search(r"Please try again in\s+([\d.]+)\s*s", last_response.text)
                 if match:
                     wait = max(wait, float(match.group(1)))
-            time.sleep(wait)
+            time.sleep(clamp_wait(wait))
     return last_response
 
 PALETTE = ['#7F77DD', '#1D9E75', '#D85A30', '#D4537E', '#378ADD', '#639922']
@@ -2151,7 +2190,7 @@ def sync_user_to_firestore(user):
 @parser_classes([MultiPartParser, FormParser])
 def generate_lesson(request):
     """
-    Generate an AI-powered multi‑level course using Groq API.
+    Generate an AI-powered multi‑level course using the DeepSeek API.
     File upload ONLY (PDF, DOCX, TXT)
     """
 
@@ -2253,6 +2292,10 @@ Each level must have:
 
         payload = {
             "model": model_name,
+            # DeepSeek V4 thinks by default; that hidden reasoning pass burns
+            # the token budget and latency budget for no benefit here.
+            # Matches AskSAGEView in ai_assistant/views.py.
+            "thinking": {"type": "disabled"},
             "messages": [
                 {
                     "role": "system",
@@ -2274,17 +2317,24 @@ Each level must have:
 
         print("🧠 Sending request to DeepSeek...")
 
-        response = deepseek_chat_completion(payload, api_key)
+        response = deepseek_chat_completion(payload, api_key, deadline_seconds=AI_GEN_BUDGET_SECONDS)
 
         if response is None or response.status_code != 200:
             print("❌ DeepSeek error:", getattr(response, 'text', 'no response'))
             return Response(
-                {"error": "AI generation failed. Please try again."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "AI generation timed out. Please try again with a smaller file."},
+                status=status.HTTP_504_GATEWAY_TIMEOUT
             )
 
         data = response.json()
-        lesson_content = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        if choice.get("finish_reason") == "length":
+            print("❌ DEEPSEEK RESPONSE TRUNCATED (finish_reason=length)")
+            return Response(
+                {"error": "AI response was cut off. Please try again with a smaller file."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        lesson_content = choice["message"]["content"]
 
         print("🔥 DEEPSEEK RAW OUTPUT:")
         print(lesson_content[:1000])
@@ -2324,7 +2374,7 @@ Each level must have:
 
 
 class GenerateTopicView(APIView):
-    """Generate a full topic with nodes from a file using Groq AI."""
+    """Generate a full topic with nodes from a file using DeepSeek AI."""
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
@@ -2473,26 +2523,43 @@ A practice question must be answerable from its cited Learn block without requir
 
         model_name = os.getenv('DEEPSEEK_GEN_MODEL', 'deepseek-v4-pro')
 
+        # DeepSeek V4 thinks by default. That hidden reasoning pass eats the
+        # token budget, adds tens of seconds of latency, and was the reason
+        # generation ran past the gunicorn timeout. Disable it here, matching
+        # ai_assistant/views.py (AskSAGEView).
+        #
+        # With thinking off, max_tokens only has to cover the visible JSON, so
+        # bound it from node_count instead of always asking for 12000. A smaller
+        # ceiling also caps the worst-case generation time.
+        max_tokens = min(12000, 1500 + node_count * 1100)
+
         payload = {
             'model': model_name,
+            'thinking': {'type': 'disabled'},
             'messages': [
                 {'role': 'system', 'content': 'You are an expert educator. Return ONLY valid JSON. No markdown. No explanations.'},
                 {'role': 'user', 'content': prompt},
             ],
             'temperature': 0.5,
-            'max_tokens': 12000,
+            'max_tokens': max_tokens,
             'response_format': {'type': 'json_object'},
         }
 
         try:
-            response = deepseek_chat_completion(payload, api_key)
+            response = deepseek_chat_completion(payload, api_key, deadline_seconds=AI_GEN_BUDGET_SECONDS)
 
             if response is None or response.status_code != 200:
                 print(f"[GenerateTopicView] DeepSeek error: {getattr(response, 'text', 'no response')}")
-                return Response({'error': 'AI generation failed. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return Response({'error': 'AI generation timed out. Please try again with fewer nodes or a smaller file.'}, status=status.HTTP_504_GATEWAY_TIMEOUT)
 
             data = response.json()
-            raw_content = data['choices'][0]['message']['content']
+            choice = data['choices'][0]
+            # A truncated response would otherwise fail safe_json_parse and get
+            # reported as the misleading "AI returned invalid structure".
+            if choice.get('finish_reason') == 'length':
+                print(f"[GenerateTopicView] response truncated at max_tokens={max_tokens}")
+                return Response({'error': 'AI response was cut off. Please try again with fewer nodes or a smaller file.'}, status=status.HTTP_400_BAD_REQUEST)
+            raw_content = choice['message']['content']
             topic_data = safe_json_parse(raw_content)
 
             if not topic_data or 'title' not in topic_data or 'nodes' not in topic_data:

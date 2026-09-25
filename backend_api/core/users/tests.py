@@ -2101,24 +2101,38 @@ class GenerateTopicViewTests(APITestCase):
         self.client.force_authenticate(user=self.educator)
         self.course = Course.objects.create(name='Gen Course', educator=self.educator, description='material')
 
-    class FakeGroqResponse:
-        def __init__(self, content, status_code=200):
+    class FakeDeepSeekResponse:
+        def __init__(self, content, status_code=200, finish_reason='stop'):
             self.status_code = status_code
             self.text = content
             self._content = content
+            self._finish_reason = finish_reason
 
         def json(self):
-            return {'choices': [{'message': {'content': self._content}}]}
+            return {
+                'choices': [{
+                    'finish_reason': self._finish_reason,
+                    'message': {'content': self._content},
+                }]
+            }
 
-    def _post(self, raw_content):
-        fake = lambda payload, api_key, max_retries=3: self.FakeGroqResponse(raw_content)
+    def _post(self, raw_content, finish_reason='stop', **extra_fields):
+        captured = {}
+
+        def fake(payload, api_key, **kwargs):
+            captured['payload'] = payload
+            captured['kwargs'] = kwargs
+            return self.FakeDeepSeekResponse(raw_content, finish_reason=finish_reason)
+
         upload = SimpleUploadedFile('material.txt', b'Water evaporates into vapor.', content_type='text/plain')
         with patch.object(users_views, 'deepseek_chat_completion', side_effect=fake):
-            return self.client.post(
+            resp = self.client.post(
                 reverse('generate_topic', args=[self.course.id]),
-                {'file': upload},
+                {'file': upload, **extra_fields},
                 format='multipart',
             )
+        self.captured = captured
+        return resp
 
     def _valid_topic(self):
         return {
@@ -2222,3 +2236,43 @@ class GenerateTopicViewTests(APITestCase):
     def test_empty_nodes_rejected(self):
         resp = self._post(json.dumps({'title': 'Water', 'nodes': []}))
         self.assertEqual(resp.status_code, 400)
+
+    # --- Latency budget: generation must finish inside the gunicorn timeout ---
+
+    def test_thinking_mode_disabled(self):
+        """DeepSeek V4 reasons by default; that hidden pass is what pushed
+        generation past the Procfile's 90s gunicorn timeout (and Cloudflare's
+        100s origin cap), which returned an HTML error page the client could
+        not JSON.parse."""
+        self._post(json.dumps(self._valid_topic()))
+        self.assertEqual(self.captured['payload']['thinking'], {'type': 'disabled'})
+
+    def test_generation_bounded_by_deadline(self):
+        """Every attempt plus backoff must fit in one wall-clock budget."""
+        self._post(json.dumps(self._valid_topic()))
+        self.assertEqual(
+            self.captured['kwargs'].get('deadline_seconds'),
+            users_views.AI_GEN_BUDGET_SECONDS,
+        )
+        # Must stay under the Procfile's `gunicorn --timeout 90`.
+        self.assertLess(users_views.AI_GEN_BUDGET_SECONDS, 90)
+
+    def test_max_tokens_scales_with_node_count(self):
+        small = self._post(json.dumps(self._valid_topic()), node_count='2')
+        self.assertEqual(small.status_code, 200)
+        small_tokens = self.captured['payload']['max_tokens']
+
+        large = self._post(json.dumps(self._valid_topic()), node_count='6')
+        self.assertEqual(large.status_code, 200)
+        large_tokens = self.captured['payload']['max_tokens']
+
+        self.assertLess(small_tokens, large_tokens)
+        self.assertLessEqual(large_tokens, 12000)
+
+    def test_truncated_response_rejected(self):
+        """finish_reason=length means max_tokens cut the JSON off. Surface that
+        directly instead of letting safe_json_parse fail and reporting the
+        misleading 'AI returned invalid structure'."""
+        resp = self._post(json.dumps(self._valid_topic()), finish_reason='length')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('cut off', resp.json()['error'].lower())
