@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, TaskSubmission
+from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, TaskSubmission, ClassActivityAttachment
 # --- Your Related Serializers (Unchanged, these are great!) ---
 from django.contrib.auth import get_user_model
 
@@ -137,21 +137,48 @@ class CourseRosterSerializer(CourseSerializer):
     students = UserSerializer(many=True, read_only=True)
 
 
+class ClassActivityAttachmentListSerializer(serializers.ModelSerializer):
+    """Attachment metadata only (no file bytes) for list views."""
+    activity = serializers.IntegerField(source='activity_id', read_only=True)
+
+    class Meta:
+        model = ClassActivityAttachment
+        fields = [
+            'id', 'activity', 'file_name', 'file_mime', 'file_size', 'created_at',
+        ]
+        read_only_fields = fields
+
+
+class ClassActivityAttachmentSerializer(serializers.ModelSerializer):
+    """Full attachment, including file bytes (base64 over the wire)."""
+    activity = serializers.IntegerField(source='activity_id', read_only=True)
+
+    class Meta:
+        model = ClassActivityAttachment
+        fields = [
+            'id', 'activity', 'file_name', 'file_mime', 'file_size', 'file_data', 'created_at',
+        ]
+        read_only_fields = fields
+
+
 # --- Class Activities (teacher-set academic tasks, no grading) ---
 
 class ClassActivitySerializer(serializers.ModelSerializer):
     course = serializers.IntegerField(source='course_id', read_only=True)
     course_name = serializers.SerializerMethodField()
     submission_count = serializers.SerializerMethodField()
+    attachments = ClassActivityAttachmentListSerializer(many=True, read_only=True)
 
     class Meta:
         model = ClassActivity
         fields = [
             'id', 'course', 'course_name', 'kind', 'title',
             'ref_id', 'note', 'due_date', 'status', 'created_at',
+            'max_points',
             'submission_count',
+            'attachments',
         ]
-        read_only_fields = ['id', 'course', 'course_name', 'created_at', 'submission_count']
+        read_only_fields = ['id', 'course', 'course_name', 'created_at', 'submission_count', 'attachments']
 
     def get_course_name(self, obj):
         return obj.course.name
@@ -165,6 +192,8 @@ class TaskSubmissionSerializer(serializers.ModelSerializer):
     activity = serializers.IntegerField(source='activity_id', read_only=True)
     student_id = serializers.IntegerField(read_only=True)
     student_name = serializers.SerializerMethodField()
+    max_points = serializers.IntegerField(source='activity.max_points', read_only=True)
+    graded_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = TaskSubmission
@@ -172,6 +201,7 @@ class TaskSubmissionSerializer(serializers.ModelSerializer):
             'id', 'activity', 'student_id', 'student_name',
             'file_name', 'file_mime', 'file_size', 'file_data',
             'submitted_at',
+            'score', 'feedback', 'graded_at', 'graded_by', 'graded_by_name', 'max_points',
         ]
         read_only_fields = fields
 
@@ -179,12 +209,19 @@ class TaskSubmissionSerializer(serializers.ModelSerializer):
         display_name = f"{obj.student.first_name} {obj.student.last_name}".strip()
         return display_name or obj.student.username
 
+    def get_graded_by_name(self, obj):
+        if obj.graded_by:
+            display_name = f"{obj.graded_by.first_name} {obj.graded_by.last_name}".strip()
+            return display_name or obj.graded_by.username
+        return None
+
 
 class TaskSubmissionListSerializer(serializers.ModelSerializer):
     """Submission metadata only (no file bytes) for list views."""
     activity = serializers.IntegerField(source='activity_id', read_only=True)
     student_id = serializers.IntegerField(read_only=True)
     student_name = serializers.SerializerMethodField()
+    max_points = serializers.IntegerField(source='activity.max_points', read_only=True)
 
     class Meta:
         model = TaskSubmission
@@ -192,6 +229,7 @@ class TaskSubmissionListSerializer(serializers.ModelSerializer):
             'id', 'activity', 'student_id', 'student_name',
             'file_name', 'file_mime', 'file_size',
             'submitted_at',
+            'score', 'feedback', 'graded_at', 'graded_by', 'max_points',
         ]
         read_only_fields = fields
 

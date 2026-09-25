@@ -13,11 +13,17 @@ export interface TaskSubmission {
   file_mime: string;
   file_size: number;
   submitted_at: string;
+  score?: number | null;
+  feedback?: string;
+  graded_at?: string | null;
+  graded_by?: number | null;
+  max_points?: number;
 }
 
 /** Full submission payload — includes file_bytes as base64. */
 export interface TaskSubmissionFull extends TaskSubmission {
   file_data: string;
+  graded_by_name?: string | null;
 }
 
 export interface CreateTaskInput {
@@ -25,6 +31,12 @@ export interface CreateTaskInput {
   note?: string;
   due_date?: string | null;
   status?: ActivityStatus;
+  max_points?: number;
+}
+
+export interface GradeSubmissionInput {
+  score: number;
+  feedback?: string;
 }
 
 export interface UploadFile {
@@ -80,6 +92,28 @@ export async function submitTask(
 
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Submission failed');
+  invalidateCachePrefix('/activities');
+  return data as TaskSubmissionFull;
+}
+
+/** Educator: grade a submission (score + feedback). */
+export async function gradeTaskSubmission(
+  activityId: number,
+  submissionId: number,
+  input: GradeSubmissionInput,
+): Promise<TaskSubmissionFull> {
+  const token = await getToken();
+  const response = await fetch(`${API_BASE_URL}/users/tasks/${activityId}/submissions/${submissionId}/grade/`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Grading failed');
   invalidateCachePrefix('/activities');
   return data as TaskSubmissionFull;
 }

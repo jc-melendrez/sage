@@ -2,6 +2,8 @@ import React, { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
+import * as DocumentPicker from 'expo-document-picker';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, Pill, FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
@@ -11,6 +13,8 @@ import {
 } from '@/services/activityService';
 import { getMyCourses } from '@/services/courseService';
 import { getQuizzes, Quiz } from '@/services/quizService';
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 const ACTIVITY_META: Record<ActivityKind, { label: string; icon: any; color: string }> = {
   quiz: { label: 'Quiz', icon: 'help-circle', color: COLORS.purpleVibrant },
@@ -23,7 +27,7 @@ const BUILDER_KINDS: ActivityKind[] = ['quiz', 'task'];
 
 type Filter = 'all' | ActivityStatus;
 type ActivityStatus = 'draft' | 'published';
-type DueQuick = 'none' | 'today' | '1d' | '1w';
+type DueQuick = 'none' | 'today' | '1d' | '1w' | 'custom';
 
 interface CourseOption {
   id: number;
@@ -44,10 +48,18 @@ export default function ActivitiesScreen() {
   const [bTitle, setBTitle] = useState('');
   const [bNote, setBNote] = useState('');
   const [bDue, setBDue] = useState<DueQuick>('none');
+  const [bCustomDue, setBCustomDue] = useState<Date | null>(null);
   const [bStatus, setBStatus] = useState<ActivityStatus>('draft');
   const [bQuizId, setBQuizId] = useState<number | null>(null);
+  const [bMaxPoints, setBMaxPoints] = useState('100');
+  const [bAttachments, setBAttachments] = useState<DocumentPicker.DocumentPickerAsset[]>([]);
   const [classQuizzes, setClassQuizzes] = useState<Quiz[]>([]);
   const [saving, setSaving] = useState(false);
+
+  // Date picker state
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [datePickerMode, setDatePickerMode] = useState<'date' | 'time'>('date');
+  const [tempDate, setTempDate] = useState<Date>(new Date());
 
   const loadActivities = useCallback(async () => {
     try {
@@ -91,12 +103,55 @@ export default function ActivitiesScreen() {
     loadClassQuizzes(courseId);
   };
 
+  const formatLocalDate = (date: Date): string => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
   const dueToISO = (): string | null => {
     const now = new Date();
-    if (bDue === 'today') return now.toISOString().slice(0, 10);
-    if (bDue === '1d') return new Date(now.getTime() + 86400000).toISOString().slice(0, 10);
-    if (bDue === '1w') return new Date(now.getTime() + 604800000).toISOString().slice(0, 10);
+    if (bDue === 'today') return formatLocalDate(now);
+    if (bDue === '1d') return formatLocalDate(new Date(now.getTime() + 86400000));
+    if (bDue === '1w') return formatLocalDate(new Date(now.getTime() + 604800000));
+    if (bDue === 'custom' && bCustomDue) return formatLocalDate(bCustomDue);
     return null;
+  };
+
+  const openDatePicker = () => {
+    setTempDate(bCustomDue || new Date());
+    setDatePickerMode('date');
+    setShowDatePicker(true);
+  };
+
+  const handleDateChange = ({ nativeEvent }: any) => {
+    if (nativeEvent.type === 'dismissed') {
+      setShowDatePicker(false);
+      return;
+    }
+    const newDate = nativeEvent.timestamp ? new Date(nativeEvent.timestamp) : tempDate;
+    setTempDate(newDate);
+    if (datePickerMode === 'date') {
+      setDatePickerMode('time');
+    } else {
+      // Time picked - combine date and time
+      const combined = new Date(
+        tempDate.getFullYear(),
+        tempDate.getMonth(),
+        tempDate.getDate(),
+        newDate.getHours(),
+        newDate.getMinutes()
+      );
+      setBCustomDue(combined);
+      setBDue('custom');
+      setShowDatePicker(false);
+    }
+  };
+
+  const clearCustomDue = () => {
+    setBCustomDue(null);
+    setBDue('none');
   };
 
   const handleCreate = async () => {
@@ -108,6 +163,16 @@ export default function ActivitiesScreen() {
       Alert.alert('Title required', 'Please name the activity.');
       return;
     }
+    // Validate attachments size
+    for (const file of bAttachments) {
+      if (file.size && file.size > MAX_FILE_SIZE) {
+        Alert.alert('File too large', `"${file.name}" exceeds 10 MB limit.`);
+        return;
+      }
+    }
+
+    const maxPoints = bMaxPoints.trim() === '' ? 100 : Math.max(1, parseInt(bMaxPoints, 10) || 100);
+
     setSaving(true);
     try {
       const title = bTitle.trim();
@@ -118,12 +183,17 @@ export default function ActivitiesScreen() {
         note: bNote.trim(),
         due_date: dueToISO(),
         status: bStatus,
+        max_points: bKind === 'task' ? maxPoints : undefined,
+        attachments: bAttachments.length > 0 ? bAttachments : undefined,
       });
       setCreating(false);
       setBTitle('');
       setBNote('');
       setBDue('none');
+      setBCustomDue(null);
       setBQuizId(null);
+      setBMaxPoints('100');
+      setBAttachments([]);
       setBKind('quiz');
       setBStatus('draft');
       await loadActivities();
@@ -178,6 +248,37 @@ export default function ActivitiesScreen() {
     return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
 
+  const pickAttachments = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        copyToCacheDirectory: true,
+        multiple: true,
+      });
+      if (result.canceled || !result.assets.length) return;
+      const newFiles = result.assets.filter((asset) => {
+        if (asset.size && asset.size > MAX_FILE_SIZE) {
+          Alert.alert('File too large', `"${asset.name}" exceeds 10 MB limit.`);
+          return false;
+        }
+        return true;
+      });
+      setBAttachments((prev) => [...prev, ...newFiles]);
+    } catch {
+      Alert.alert('Error', 'Failed to pick files.');
+    }
+  };
+
+  const removeAttachment = (index: number) => {
+    setBAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const formatBytes = (n: number): string => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <View style={styles.container}>
@@ -230,6 +331,48 @@ export default function ActivitiesScreen() {
                   onChangeText={setBTitle}
                 />
 
+                {bKind === 'task' && (
+                  <>
+                    <Text style={styles.fieldLabel}>Max Points</Text>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="100"
+                      placeholderTextColor={COLORS.textMuted}
+                      value={bMaxPoints}
+                      onChangeText={(t) => setBMaxPoints(t)}
+                      keyboardType="numeric"
+                    />
+                  </>
+                )}
+
+                {bKind === 'task' && (
+                  <>
+                    <Text style={styles.fieldLabel}>Attachments (optional)</Text>
+                    <TouchableOpacity style={styles.fileBtn} activeOpacity={0.8} onPress={pickAttachments}>
+                      <Ionicons name={bAttachments.length > 0 ? 'document' : 'cloud-upload'} size={20} color={bAttachments.length > 0 ? COLORS.success : COLORS.purpleVibrant} />
+                      <Text style={[styles.fileBtnText, bAttachments.length > 0 && { color: COLORS.success }]}>
+                        {bAttachments.length > 0
+                          ? `${bAttachments.length} file${bAttachments.length > 1 ? 's' : ''} attached`
+                          : 'Add files (PDF, DOCX, images, ...)'}
+                      </Text>
+                    </TouchableOpacity>
+                    {bAttachments.length > 0 && (
+                      <View style={styles.attachmentList}>
+                        {bAttachments.map((file, idx) => (
+                          <View key={idx} style={styles.attachmentItem}>
+                            <Ionicons name="document-text" size={16} color={COLORS.purpleVibrant} />
+                            <Text style={styles.attachmentName} numberOfLines={1}>{file.name}</Text>
+                            <Text style={styles.attachmentSize}>{file.size ? formatBytes(file.size) : 'Unknown size'}</Text>
+                            <TouchableOpacity onPress={() => removeAttachment(idx)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                              <Ionicons name="close-circle" size={18} color={COLORS.danger} />
+                            </TouchableOpacity>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+                  </>
+                )}
+
                 <Text style={styles.fieldLabel}>Note (optional)</Text>
                 <TextInput
                   style={[styles.input, styles.textArea]}
@@ -248,15 +391,26 @@ export default function ActivitiesScreen() {
                     ['today', 'Today'],
                     ['1d', 'Tomorrow'],
                     ['1w', 'In 1 week'],
+                    ['custom', 'Custom…'],
                   ] as const).map(([value, label]) => (
                     <FilterChip
                       key={value}
                       label={label}
                       active={bDue === value}
-                      onPress={() => setBDue(value as DueQuick)}
+                      onPress={() => value === 'custom' ? openDatePicker() : setBDue(value as DueQuick)}
                     />
                   ))}
                 </View>
+                {bDue === 'custom' && bCustomDue && (
+                  <View style={styles.customDueRow}>
+                    <Text style={styles.customDueText}>
+                      Due: {new Date(bCustomDue).toLocaleString()}
+                    </Text>
+                    <TouchableOpacity onPress={clearCustomDue} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <Ionicons name="close-circle" size={18} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+                  </View>
+                )}
 
                 {bKind === 'quiz' && classQuizzes.length > 0 && (
                   <>
@@ -383,6 +537,15 @@ export default function ActivitiesScreen() {
           </View>
         </ScrollView>
       </View>
+      {showDatePicker && Platform.OS !== 'web' && (
+        <DateTimePicker
+          testID="datePicker"
+          value={tempDate}
+          mode={datePickerMode}
+          is24Hour={true}
+          onChange={handleDateChange}
+        />
+      )}
     </KeyboardAvoidingView>
   );
 }
@@ -422,4 +585,41 @@ const styles = StyleSheet.create({
     backgroundColor: tint(COLORS.purpleVibrant),
   },
   submissionsBtnText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.purpleVibrant },
+
+  fileBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: 'white',
+    borderRadius: RADIUS.sm,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  fileBtnText: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textMuted, flex: 1 },
+  attachmentList: { marginTop: 8, gap: 6 },
+  attachmentItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'white',
+    borderRadius: RADIUS.sm,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  attachmentName: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textPrimary, flex: 1 },
+  attachmentSize: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginRight: 8 },
+  customDueRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'white',
+    borderRadius: RADIUS.sm,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginTop: 8,
+  },
+  customDueText: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textPrimary },
 });
