@@ -71,6 +71,9 @@ export default function CourseDetailScreen() {
   const [leaderboardLoading, setLeaderboardLoading] = useState(true);
   const [leaderboardSort, setLeaderboardSort] = useState<LeaderboardSort>('points');
 
+  // Reused as the denominator for "N/M attempted" on quizzes and tasks.
+  const studentTotal = leaderboard?.total_students ?? 0;
+
   // Add activity modal
   const [actVisible, setActVisible] = useState(false);
   const [creatingActivity, setCreatingActivity] = useState(false);
@@ -170,7 +173,7 @@ export default function CourseDetailScreen() {
 
   const openQuizManager = (generate: boolean) => {
     router.push({
-      pathname: '/educator/(tabs)/quiz-manager',
+      pathname: '/educator/quiz-manager',
       params: { course: String(cid), ...(generate ? { generate: '1' } : {}) },
     });
   };
@@ -599,6 +602,30 @@ export default function CourseDetailScreen() {
                         color={COLORS.purpleVibrant}
                       />
                     </View>
+                    <View style={styles.activityBadges}>
+                      <TouchableOpacity
+                        onPress={() => router.push({
+                          pathname: '/educator/(tabs)/quiz-attempts',
+                          params: {
+                            quizId: String(quiz.id),
+                            quizTitle: quiz.title,
+                            courseId: String(cid),
+                          },
+                        } as any)}
+                        activeOpacity={0.8}
+                        style={styles.activityStatusRow}
+                      >
+                        <Ionicons name="analytics-outline" size={13} color={COLORS.purpleVibrant} />
+                        <Text style={[styles.activityStatusText, { color: COLORS.purpleVibrant, marginLeft: 2 }]}>
+                          {quiz.class_attempted_count ?? 0}/{studentTotal} attempted
+                        </Text>
+                      </TouchableOpacity>
+                      {quiz.class_average_percent != null && (
+                        <Text style={[styles.activityStatusText, { color: COLORS.textSecondary }]}>
+                          avg {quiz.class_average_percent}%
+                        </Text>
+                      )}
+                    </View>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -686,7 +713,31 @@ export default function CourseDetailScreen() {
                           >
                             <Ionicons name="people-outline" size={13} color={COLORS.purpleVibrant} />
                             <Text style={[styles.activityStatusText, { color: COLORS.purpleVibrant, marginLeft: 2 }]}>
-                              {activity.submission_count ?? 0}/{activity.graded_count ?? 0} graded
+                              {activity.submission_count ?? 0}/{studentTotal} submitted
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+                        {activity.kind === 'task' && (activity.graded_count ?? 0) > 0 && (
+                          <Text style={[styles.activityStatusText, { color: COLORS.textSecondary }]}>
+                            {activity.graded_count} graded
+                          </Text>
+                        )}
+                        {activity.kind === 'quiz' && activity.ref_id != null && (
+                          <TouchableOpacity
+                            onPress={() => router.push({
+                              pathname: '/educator/(tabs)/quiz-attempts',
+                              params: {
+                                quizId: String(activity.ref_id),
+                                quizTitle: activity.title,
+                                courseId: String(cid),
+                              },
+                            } as any)}
+                            activeOpacity={0.8}
+                            style={styles.activityStatusRow}
+                          >
+                            <Ionicons name="analytics-outline" size={13} color={COLORS.purpleVibrant} />
+                            <Text style={[styles.activityStatusText, { color: COLORS.purpleVibrant, marginLeft: 2 }]}>
+                              View results
                             </Text>
                           </TouchableOpacity>
                         )}

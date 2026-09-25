@@ -517,6 +517,23 @@ export default function ActivitiesScreen() {
                                 </Text>
                               </TouchableOpacity>
                             )}
+                            {a.kind === 'quiz' && a.ref_id != null && (
+                              <TouchableOpacity
+                                style={styles.cardActionBtn}
+                                activeOpacity={0.8}
+                                onPress={() => router.push({
+                                  pathname: '/educator/(tabs)/quiz-attempts',
+                                  params: {
+                                    quizId: String(a.ref_id),
+                                    quizTitle: a.title,
+                                    courseId: a.course != null ? String(a.course) : undefined,
+                                  },
+                                } as any)}
+                              >
+                                <Ionicons name="analytics-outline" size={15} color={COLORS.purpleVibrant} />
+                                <Text style={styles.cardActionText}>Results</Text>
+                              </TouchableOpacity>
+                            )}
                           </View>
                         </View>
                       );
