@@ -404,14 +404,85 @@ def _learn_node_blocks(learn_node):
 _BASED_ON_RE = re.compile(r'^Learn\s+(\d+)\s*[-–—]\s*(.+)$', re.IGNORECASE)
 
 
+def _normalize_title(value):
+    """Loose comparison key for a block title: casefolded, punctuation dropped,
+    whitespace collapsed. Lets 'Light-Dependent Reactions' and
+    'light dependent reactions' compare equal."""
+    text = re.sub(r'[^0-9a-z]+', ' ', str(value or '').lower())
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _split_cited_title(value):
+    """Split a citation that glues several block titles together.
+
+    Models routinely cite 'Light-Dependent Reactions and The Calvin Cycle' when
+    those are two separate blocks, so the conjunction is treated as a
+    separator rather than as part of a single title."""
+    parts = re.split(r'\s+(?:and|&)\s+|,\s*|\s*;\s*|\s+/\s+', str(value or ''), flags=re.IGNORECASE)
+    return [p for p in (s.strip() for s in parts) if p]
+
+
+def _resolve_cited_block(blocks, cited):
+    """Find the block a `based_on` citation refers to, tolerating the ways a
+    model drifts from a verbatim title. Returns (block, canonical_title) or
+    (None, None) when the citation genuinely points at nothing real.
+
+    The safety property this preserves is that a question may only cite a block
+    that actually exists in the learn node - citation *spelling* is repaired,
+    citation *substance* is not."""
+    candidates = [(b, str(b.get('title', '')).strip()) for b in blocks]
+    cited_raw = str(cited or '').strip()
+    if not cited_raw:
+        return None, None
+
+    # A citation that reads as several titles must resolve completely: every
+    # part has to be a real block. If any part is unknown the whole citation is
+    # ungrounded, and we deliberately do NOT fall through to the looser
+    # substring match below (that would launder 'Real Block and Invented Thing'
+    # into a pass on the strength of its first half).
+    parts = _split_cited_title(cited_raw)
+    if len(parts) > 1:
+        resolved = []
+        for part in parts:
+            pkey = _normalize_title(part)
+            hit = next(
+                ((b, t) for b, t in candidates
+                 if _normalize_title(t) == pkey or pkey in _normalize_title(t) or _normalize_title(t) in pkey),
+                None,
+            )
+            if hit is None:
+                return None, None
+            resolved.append(hit)
+        return resolved[0][0], resolved[0][1]
+
+    # Single title: verbatim, then punctuation/case-insensitive.
+    for block, title in candidates:
+        if title.lower() == cited_raw.lower():
+            return block, title
+    key = _normalize_title(cited_raw)
+    for block, title in candidates:
+        if _normalize_title(title) == key:
+            return block, title
+
+    # One real title contains the other (a clipped or over-long citation).
+    if key:
+        for block, title in candidates:
+            tkey = _normalize_title(title)
+            if tkey and (tkey in key or key in tkey):
+                return block, title
+
+    return None, None
+
+
 def _validate_provenance(nodes):
     """Strict provenance check for every practice/mastery question.
 
-    `based_on` must match "Learn N — <exact block title>" where N is the ORDINAL
+    `based_on` must match "Learn N — <block title>" where N is the ORDINAL
     learn node (1 = first learn node in the sequence, not a raw array position)
-    and the title exactly matches the `title` of a non-empty concept/example block
-    of that learn node. Returns (ok, detail); on failure the whole topic is
-    rejected so corrupted questions are never delivered."""
+    and the title must resolve to a non-empty concept/example block of that
+    learn node. Cosmetic title drift is repaired in place (the citation is
+    rewritten to the block's verbatim title); only a citation that resolves to
+    nothing real is rejected. Returns (ok, detail)."""
     learn_nodes = [n for n in nodes if n.get('node_type') == 'learn']
     for node in nodes:
         if node.get('node_type') not in ('practice', 'mastery'):
@@ -439,11 +510,15 @@ def _validate_provenance(nodes):
             blocks = _learn_node_blocks(learn_nodes[idx - 1])
             if not blocks:
                 return False, f"based_on '{based_on}' references a learn node with no concept/example content"
-            cited = next((b for b in blocks if str(b.get('title', '')).strip().lower() == title.lower()), None)
+            cited, canonical = _resolve_cited_block(blocks, title)
             if cited is None:
                 return False, f"based_on '{based_on}' references unknown block title '{title}'"
             if not str(cited.get('content', '') or '').strip():
                 return False, f"based_on '{based_on}' references an empty block"
+            # Store the verbatim title so the provenance shown to students (and
+            # any later re-validation) refers to the block that actually exists.
+            if canonical and canonical != title:
+                q['based_on'] = f"Learn {idx} — {canonical}"
     return True, 'ok'
 
 

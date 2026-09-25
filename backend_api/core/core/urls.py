@@ -25,3 +25,21 @@ urlpatterns = [
     path('api/ai/', include('ai_assistant.urls')),
     path('api/game/', include('game.urls')),
 ]
+
+
+def json_500(request):
+    """Render unhandled exceptions as JSON instead of Django's HTML error page.
+
+    Every mobile client parses API responses as JSON, so an HTML 500 surfaces as
+    an opaque "Unexpected character: <" that hides the real status and message.
+    Views already convert their own failures to JSON; this catches anything that
+    escapes them (middleware, DRF authentication/throttling, response rendering).
+    The traceback still goes to the logs via django.request logger.
+    """
+    return JsonResponse(
+        {'error': 'Internal server error. Please try again.'},
+        status=500,
+    )
+
+
+handler500 = 'core.urls.json_500'

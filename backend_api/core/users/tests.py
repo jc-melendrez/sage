@@ -2276,3 +2276,35 @@ class GenerateTopicViewTests(APITestCase):
         resp = self._post(json.dumps(self._valid_topic()), finish_reason='length')
         self.assertEqual(resp.status_code, 400)
         self.assertIn('cut off', resp.json()['error'].lower())
+
+    # --- Provenance citation repair: cosmetic title drift is fixed, not rejected ---
+
+    def _cited(self, resp, node_index, question_index=0):
+        return resp.json()['nodes'][node_index]['content_json']['questions'][question_index]['based_on']
+
+    def test_merged_citation_repaired_to_verbatim_title(self):
+        """A model that cites two real blocks in one string is making a cosmetic
+        error, not an ungrounded question. Repair it instead of discarding a
+        whole otherwise-valid topic."""
+        topic = self._valid_topic()
+        topic['nodes'][2]['content_json']['questions'][0]['based_on'] = \
+            'Learn 1 — The Water Cycle and Boiling Pots'
+        resp = self._post(json.dumps(topic))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._cited(resp, 2), 'Learn 1 — The Water Cycle')
+
+    def test_case_and_punctuation_drift_repaired(self):
+        topic = self._valid_topic()
+        topic['nodes'][2]['content_json']['questions'][0]['based_on'] = 'Learn 1 — the water cycle'
+        resp = self._post(json.dumps(topic))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._cited(resp, 2), 'Learn 1 — The Water Cycle')
+
+    def test_merge_with_one_unknown_part_still_rejected(self):
+        """Repair must not launder a half-real citation: if any merged part
+        resolves to nothing, the question is still ungrounded."""
+        topic = self._valid_topic()
+        topic['nodes'][2]['content_json']['questions'][0]['based_on'] = \
+            'Learn 1 — The Water Cycle and Evaporation'
+        resp = self._post(json.dumps(topic))
+        self.assertEqual(resp.status_code, 400)
