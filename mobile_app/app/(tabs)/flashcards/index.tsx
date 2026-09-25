@@ -12,10 +12,9 @@ import {
   Platform,
   KeyboardAvoidingView,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, FONTS, DECK_COLORS, GRADIENT_COLORS, PURPLE_HEADER_GRADIENT } from '@/constants/gameTheme';
 import FlashBanner, { BannerType } from '@/components/FlashBanner';
@@ -27,7 +26,6 @@ import {
   getDecks,
   getDeckSummary,
   getReviewCountOn,
-  getTotalReviews,
   getRatingTotals,
   createDeck,
   searchCards,
@@ -35,7 +33,6 @@ import {
   importDeckFromQuiz,
   QuizPayload,
 } from '@/services/flashcardService';
-import { maturityOf } from '@/services/srs';
 
 export default function FlashcardsHome() {
   const router = useRouter();
@@ -46,7 +43,6 @@ export default function FlashcardsHome() {
   const [loaded, setLoaded] = useState(false);
 
   const [reviewsToday, setReviewsToday] = useState(0);
-  const [totalReviews, setTotalReviews] = useState(0);
   const [totals, setTotals] = useState<Record<string, number>>({});
 
   const [query, setQuery] = useState('');
@@ -71,15 +67,19 @@ export default function FlashcardsHome() {
     for (const d of all) map[d.id] = getDeckSummary(d.id);
     setSummaries(map);
     setReviewsToday(getReviewCountOn(new Date()));
-    setTotalReviews(getTotalReviews());
     setTotals(getRatingTotals());
     setLoaded(true);
   }, []);
 
   useEffect(() => {
     initFlashcardDb();
-    refresh();
-  }, [refresh]);
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      refresh();
+    }, [refresh])
+  );
 
   useEffect(() => {
     if (query.trim()) setMatches(searchCards(query));
@@ -147,7 +147,6 @@ export default function FlashcardsHome() {
   }, [decks, query, matches]);
 
   const totalCards = decks.reduce((sum, d) => sum + (summaries[d.id]?.total ?? 0), 0);
-  const totalDue = decks.reduce((sum, d) => sum + (summaries[d.id]?.dueCount ?? 0), 0);
 
   return (
     <KeyboardAvoidingView style={styles.keyboardWrap} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
@@ -221,23 +220,6 @@ export default function FlashcardsHome() {
             )}
           </View>
 
-          {totalDue > 0 && (
-            <TouchableOpacity
-              style={styles.reviewNowBtn}
-              activeOpacity={0.85}
-              onPress={() => openStudy(decks.find((d) => (summaries[d.id]?.dueCount ?? 0) > 0)!.id)}
-            >
-              <View>
-                <Text style={styles.reviewNowTitle}>{totalDue} cards due for review</Text>
-                <Text style={styles.reviewNowSub}>Tap to start your session</Text>
-              </View>
-              <View style={styles.reviewNowCta}>
-                <Ionicons name="play" size={16} color="#fff" />
-                <Text style={styles.reviewNowCtaText}>Study</Text>
-              </View>
-            </TouchableOpacity>
-          )}
-
           {matches.length > 0 && (
             <View style={styles.searchResults}>
               <Text style={styles.sectionLabel}>CARD RESULTS ({matches.reduce((s, m) => s + m.cards.length, 0)})</Text>
@@ -285,7 +267,7 @@ export default function FlashcardsHome() {
               <>
                 <Text style={styles.sectionLabel}>YOUR DECKS</Text>
                 {filteredDecks.map((deck) => {
-                  const s = summaries[deck.id] ?? { total: 0, newCount: 0, learningCount: 0, matureCount: 0, dueCount: 0 };
+                  const s = summaries[deck.id] ?? { total: 0, newCount: 0, learningCount: 0, matureCount: 0 };
                   const statusColors = {
                     new: COLORS.accentBright,
                     learning: COLORS.warning,
@@ -329,11 +311,10 @@ export default function FlashcardsHome() {
                         </View>
                       </View>
                       <View style={styles.deckActions}>
-                        {s.dueCount > 0 && (
-                          <View style={styles.dueBadge}>
-                            <Text style={styles.dueBadgeText}>{s.dueCount}</Text>
-                          </View>
-                        )}
+                        <View style={styles.studyBadge}>
+                          <Ionicons name="play" size={12} color={COLORS.purplePrimary} />
+                          <Text style={styles.studyBadgeText}>Study</Text>
+                        </View>
                         <TouchableOpacity onPress={() => openEdit(deck.id)} activeOpacity={0.7} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                           <Ionicons name="create-outline" size={20} color={COLORS.textMuted} />
                         </TouchableOpacity>
@@ -477,7 +458,11 @@ export default function FlashcardsHome() {
 const styles = StyleSheet.create({
   keyboardWrap: { flex: 1 },
   root: { flex: 1 },
-  headerBand: { overflow: 'hidden' },
+  headerBand: {
+    overflow: 'hidden',
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
+  },
   gradient: { flex: 1 },
   container: { flex: 1, paddingHorizontal: 20 },
   header: {
@@ -497,7 +482,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.3)',
   },
-  headerTitleWrap: { alignItems: 'center' },
+  headerTitleWrap: { flex: 1, alignItems: 'center', paddingHorizontal: 8 },
   headerTitle: {
     color: '#fff',
     fontSize: 18,
@@ -539,30 +524,6 @@ const styles = StyleSheet.create({
   },
   searchInput: { flex: 1, color: COLORS.textPrimary, fontFamily: FONTS.medium, paddingVertical: Platform.OS === 'ios' ? 12 : 8 },
 
-  reviewNowBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: 'rgba(16,185,129,0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(16,185,129,0.45)',
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
-  },
-  reviewNowTitle: { color: COLORS.success, fontSize: 15, fontFamily: FONTS.bold },
-  reviewNowSub: { color: COLORS.textMuted, fontSize: 12, fontFamily: FONTS.medium, marginTop: 2 },
-  reviewNowCta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: COLORS.success,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  reviewNowCtaText: { color: '#fff', fontSize: 13, fontFamily: FONTS.bold },
-
   sectionLabel: {
     color: COLORS.textMuted,
     fontSize: 11,
@@ -600,16 +561,16 @@ const styles = StyleSheet.create({
   maturityDot: { width: 7, height: 7, borderRadius: 3.5 },
   maturityText: { color: COLORS.textSecondary, fontSize: 11, fontFamily: FONTS.semiBold },
   deckActions: { alignItems: 'center', gap: 8 },
-  dueBadge: {
-    minWidth: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: COLORS.purpleVibrant,
-    justifyContent: 'center',
+  studyBadge: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 6,
+    gap: 4,
+    backgroundColor: 'rgba(124,58,237,0.1)',
+    borderRadius: 10,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
   },
-  dueBadgeText: { color: '#fff', fontSize: 12, fontFamily: FONTS.bold },
+  studyBadgeText: { color: COLORS.purplePrimary, fontSize: 11, fontFamily: FONTS.bold },
 
   emptyWrap: { alignItems: 'center', paddingTop: 40 },
   emptyIconWrap: {

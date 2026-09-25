@@ -48,7 +48,11 @@ export default function FlashBanner({ visible, message, type = 'info', onHide }:
   const color = COLORS_BY_TYPE[type];
 
   return (
-    <Animated.View style={[styles.wrap, { opacity }]}>
+    <Animated.View
+      style={[styles.wrap, { opacity }]}
+      accessibilityRole="alert"
+      accessibilityLiveRegion="polite"
+    >
       <TouchableOpacity
         style={[styles.banner, { borderColor: color }]}
         activeOpacity={1}
@@ -63,12 +67,8 @@ export default function FlashBanner({ visible, message, type = 'info', onHide }:
 
 const styles = StyleSheet.create({
   wrap: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    zIndex: 100,
-    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 4,
   },
   banner: {
     flexDirection: 'row',

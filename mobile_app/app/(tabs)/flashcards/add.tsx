@@ -115,13 +115,6 @@ export default function AddCardScreen() {
     <LinearGradient colors={PURPLE_HEADER_GRADIENT} style={styles.headerBand}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
 
-      <FlashBanner
-        visible={!!banner}
-        message={banner?.message ?? ''}
-        type={banner?.type ?? 'info'}
-        onHide={() => setBanner(null)}
-      />
-
       {/* HEADER */}
       <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
         <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.7}>
@@ -139,6 +132,13 @@ export default function AddCardScreen() {
 
     <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
     <View style={styles.container}>
+      <FlashBanner
+        visible={!!banner}
+        message={banner?.message ?? ''}
+        type={banner?.type ?? 'info'}
+        onHide={() => setBanner(null)}
+      />
+
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         {recent > 0 && (
           <View style={styles.recentBanner}>
@@ -260,7 +260,11 @@ export default function AddCardScreen() {
 const styles = StyleSheet.create({
   keyboardWrap: { flex: 1 },
   root: { flex: 1 },
-  headerBand: { overflow: 'hidden' },
+  headerBand: {
+    overflow: 'hidden',
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
+  },
   gradient: { flex: 1 },
   container: { flex: 1, paddingHorizontal: 20 },
   header: {

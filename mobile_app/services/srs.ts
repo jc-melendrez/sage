@@ -137,10 +137,6 @@ export function gradeCard(state: CardState, rating: Rating, now: Date = new Date
   return next;
 }
 
-export function isDue(state: CardState, now: Date = new Date()): boolean {
-  return state.state === 'new' || new Date(state.due).getTime() <= now.getTime();
-}
-
 export function maturityOf(state: CardState): Maturity {
   if (state.state === 'new') return 'new';
   return state.intervalDays >= MATURE_DAYS ? 'mature' : 'learning';

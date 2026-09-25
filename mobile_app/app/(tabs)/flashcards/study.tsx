@@ -203,39 +203,38 @@ export default function StudyScreen() {
   const accuracy = totalReviewed > 0 ? Math.round(((counts.good + counts.easy) / totalReviewed) * 100) : 0;
 
   return (
-    <LinearGradient colors={PURPLE_HEADER_GRADIENT} style={styles.headerBand}>
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
 
-      <FlashBanner
-        visible={!!banner}
-        message={banner?.message ?? ''}
-        type={banner?.type ?? 'info'}
-        onHide={() => setBanner(null)}
-      />
-
-      {/* HEADER */}
-      <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
-        <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.7}>
-          <Ionicons name="chevron-back" size={22} color="#fff" />
-        </TouchableOpacity>
-        <View style={styles.headerTitleWrap}>
-          <Text style={styles.headerTitle} numberOfLines={1}>{deck?.name ?? 'Study'}</Text>
-          <Text style={styles.headerSub}>
-            {phase === 'study' ? `Card ${Math.min(pos + 1, cards.length)} of ${cards.length}` : phase === 'results' ? 'Session complete' : 'Ready to study'}
-          </Text>
-        </View>
-        {phase === 'study' ? (
-          <TouchableOpacity style={styles.headerBtn} onPress={openEdit} activeOpacity={0.7}>
-            <Ionicons name="create-outline" size={18} color="#fff" />
+      <LinearGradient colors={PURPLE_HEADER_GRADIENT} style={styles.headerBand}>
+        <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.7}>
+            <Ionicons name="chevron-back" size={22} color="#fff" />
           </TouchableOpacity>
-        ) : (
-          <View style={styles.headerBtnPlaceholder} />
-        )}
-      </View>
+          <View style={styles.headerTitleWrap}>
+            <Text style={styles.headerTitle} numberOfLines={1}>{deck?.name ?? 'Study'}</Text>
+            <Text style={styles.headerSub}>
+              {phase === 'study' ? `Card ${Math.min(pos + 1, cards.length)} of ${cards.length}` : phase === 'results' ? 'Session complete' : 'Ready to study'}
+            </Text>
+          </View>
+          {phase === 'study' ? (
+            <TouchableOpacity style={styles.headerBtn} onPress={openEdit} activeOpacity={0.7}>
+              <Ionicons name="create-outline" size={18} color="#fff" />
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.headerBtnPlaceholder} />
+          )}
+        </View>
+      </LinearGradient>
 
       <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
       <View style={styles.container}>
+        <FlashBanner
+          visible={!!banner}
+          message={banner?.message ?? ''}
+          type={banner?.type ?? 'info'}
+          onHide={() => setBanner(null)}
+        />
 
       {phase === 'setup' && deck ? (
         <View style={styles.setupWrap}>
@@ -249,8 +248,8 @@ export default function StudyScreen() {
 
           <View style={styles.setupStats}>
             <View style={styles.setupStat}>
-              <Text style={[styles.setupStatValue, { color: COLORS.success }]}>{summary?.dueCount ?? 0}</Text>
-              <Text style={styles.setupStatLabel}>DUE</Text>
+              <Text style={[styles.setupStatValue, { color: COLORS.purplePrimary }]}>{summary?.total ?? 0}</Text>
+              <Text style={styles.setupStatLabel}>TOTAL</Text>
             </View>
             <View style={styles.setupStat}>
               <Text style={[styles.setupStatValue, { color: COLORS.accentBright }]}>{summary?.newCount ?? 0}</Text>
@@ -266,14 +265,19 @@ export default function StudyScreen() {
             </View>
           </View>
 
-          <TouchableOpacity style={styles.startBtn} onPress={startSession} activeOpacity={0.85}>
+          <TouchableOpacity
+            style={[styles.startBtn, (summary?.total ?? 0) === 0 && styles.startBtnDisabled]}
+            onPress={startSession}
+            disabled={(summary?.total ?? 0) === 0}
+            activeOpacity={0.85}
+          >
             <Ionicons name="play" size={18} color="#fff" />
-            <Text style={styles.startBtnText}>Start session</Text>
+            <Text style={styles.startBtnText}>Practice all</Text>
           </TouchableOpacity>
 
-          {(summary?.dueCount ?? 0) === 0 && (summary?.newCount ?? 0) === 0 && (
-            <Text style={styles.nothingDueText}>
-              Nothing due right now — come back later.
+          {(summary?.total ?? 0) === 0 && (
+            <Text style={styles.emptySessionText}>
+              Add at least one card before starting a session.
             </Text>
           )}
         </View>
@@ -315,7 +319,7 @@ export default function StudyScreen() {
               >
                 <View style={styles.cardHighlight} />
                 <View style={[styles.qTab, styles.answerTab]}>
-                  <Text style={styles.qTabText}>ANSWER</Text>
+                  <Text style={[styles.qTabText, styles.answerTabText]}>ANSWER</Text>
                 </View>
                 <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.cardScrollContent}>
                   <Text style={styles.answerText}>{currentCard.back}</Text>
@@ -399,10 +403,10 @@ export default function StudyScreen() {
           )}
 
           <View style={[styles.resultsActions, { paddingBottom: insets.bottom + 16 }]}>
-            {counts.again > 0 && (
+            {cards.length > 0 && (
               <TouchableOpacity style={[styles.actionBtn, styles.reviewAgainBtn]} onPress={startSession} activeOpacity={0.8}>
                 <Ionicons name="refresh" size={18} color={COLORS.warning} />
-                <Text style={[styles.actionBtnText, { color: COLORS.warning }]}>Review again</Text>
+                <Text style={[styles.actionBtnText, { color: COLORS.warning }]}>Practice again</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity style={[styles.actionBtn, styles.doneBtn]} onPress={() => router.back()} activeOpacity={0.8}>
@@ -465,13 +469,16 @@ export default function StudyScreen() {
       </View>
       </LinearGradient>
     </View>
-    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  headerBand: { flex: 1 },
+  headerBand: {
+    overflow: 'hidden',
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
+  },
   gradient: { flex: 1 },
   container: { flex: 1, paddingHorizontal: 20 },
   header: {
@@ -531,7 +538,8 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
   },
   startBtnText: { color: '#fff', fontSize: 16, fontFamily: FONTS.bold },
-  nothingDueText: {
+  startBtnDisabled: { opacity: 0.45 },
+  emptySessionText: {
     color: COLORS.textMuted,
     fontSize: 13,
     fontFamily: FONTS.medium,
@@ -591,12 +599,13 @@ const styles = StyleSheet.create({
   },
   answerTab: { backgroundColor: COLORS.success },
   qTabText: {
-    color: COLORS.accentBright,
+    color: '#fff',
     fontSize: 11,
     fontFamily: FONTS.extraBold,
     letterSpacing: 1,
     textAlign: 'center',
   },
+  answerTabText: { color: COLORS.textPrimary },
   cardScrollContent: { flexGrow: 1, justifyContent: 'center' },
   questionText: { color: COLORS.textPrimary, fontSize: 21, fontFamily: FONTS.bold, lineHeight: 30, textAlign: 'center' },
   answerText: { color: COLORS.purpleDark, fontSize: 24, fontFamily: FONTS.extraBold, lineHeight: 33, textAlign: 'center' },
