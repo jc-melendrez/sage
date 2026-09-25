@@ -1,11 +1,14 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
+  Animated,
+  Platform,
   View,
   Text,
   StyleSheet,
   ActivityIndicator,
   ScrollView,
 } from 'react-native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useLocalSearchParams } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
@@ -86,6 +89,99 @@ export default function TvLeaderboardScreen() {
   const [room, setRoom] = useState<RoomData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const isWeb = Platform.OS === 'web';
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [hintOpacity] = useState(() => new Animated.Value(1));
+
+  const requestFullscreen = useCallback(() => {
+    if (!isWeb || typeof document === 'undefined') return;
+    const el = document.documentElement as any;
+    try {
+      if (el.requestFullscreen) return el.requestFullscreen();
+      if (el.webkitRequestFullscreen) return el.webkitRequestFullscreen();
+      if (el.msRequestFullscreen) return el.msRequestFullscreen();
+    } catch {}
+  }, [isWeb]);
+
+  const exitFullscreen = useCallback(() => {
+    if (!isWeb || typeof document === 'undefined') return;
+    const d = document as any;
+    try {
+      if (d.exitFullscreen) return d.exitFullscreen();
+      if (d.webkitExitFullscreen) return d.webkitExitFullscreen();
+      if (d.msExitFullscreen) return d.msExitFullscreen();
+    } catch {}
+  }, [isWeb]);
+
+  const toggleFullscreen = useCallback(() => {
+    if (!isWeb || typeof document === 'undefined') return;
+    const el = document.fullscreenElement || (document as any).webkitFullscreenElement;
+    if (el) exitFullscreen();
+    else requestFullscreen();
+  }, [exitFullscreen, requestFullscreen, isWeb]);
+
+  const handleFirstClick = useCallback(() => {
+    if (!isWeb || typeof document === 'undefined') return;
+    const el = document.fullscreenElement || (document as any).webkitFullscreenElement;
+    if (el) return;
+    requestFullscreen();
+  }, [requestFullscreen, isWeb]);
+
+  const handleButtonClick = useCallback(
+    (e: any) => {
+      e?.stopPropagation?.();
+      toggleFullscreen();
+    },
+    [toggleFullscreen]
+  );
+
+  useEffect(() => {
+    if (!isWeb || typeof document === 'undefined') return;
+    const sync = () => {
+      setIsFullscreen(
+        !!(document.fullscreenElement || (document as any).webkitFullscreenElement)
+      );
+    };
+    document.addEventListener('fullscreenchange', sync);
+    document.addEventListener('webkitfullscreenchange', sync);
+    return () => {
+      document.removeEventListener('fullscreenchange', sync);
+      document.removeEventListener('webkitfullscreenchange', sync);
+    };
+  }, [isWeb]);
+
+  useEffect(() => {
+    if (!isWeb || typeof window === 'undefined') return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleFullscreen();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isWeb, toggleFullscreen]);
+
+  useEffect(() => {
+    if (!isWeb) return;
+    if (isFullscreen) {
+      Animated.timing(hintOpacity, {
+        toValue: 0,
+        duration: 300,
+        useNativeDriver: true,
+      }).start();
+      return;
+    }
+    const t = setTimeout(() => {
+      Animated.timing(hintOpacity, {
+        toValue: 0,
+        duration: 600,
+        useNativeDriver: true,
+      }).start();
+    }, 6000);
+    return () => clearTimeout(t);
+  }, [isWeb, isFullscreen, hintOpacity]);
+
   const load = useCallback(async () => {
     if (!code) {
       setRoom(null);
@@ -120,14 +216,18 @@ export default function TvLeaderboardScreen() {
     room?.players.filter((p) => p.id !== room.hostId) ?? [];
   const rankedTeams = room?.teams ?? [];
 
+  const webClickProps = isWeb ? { onClick: handleFirstClick } : {};
+  const webButtonProps = isWeb ? { onClick: handleButtonClick } : {};
+
   return (
-    <LinearGradient
-      colors={[COLORS.bg, COLORS.bgSecondary]}
-      start={{ x: 0, y: 0 }}
-      end={{ x: 0, y: 1 }}
-      style={styles.root}
-    >
-      <StatusBar style="light" />
+    <View style={styles.root} {...(webClickProps as any)}>
+      <LinearGradient
+        colors={[COLORS.bg, COLORS.bgSecondary]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={styles.gradient}
+      >
+        <StatusBar style="light" />
 
       <View style={styles.header}>
         <View style={styles.headerLeft}>
@@ -215,12 +315,34 @@ export default function TvLeaderboardScreen() {
           {room?.hostName ? `Hosted by ${room.hostName}` : `Room ${code}`}
         </Text>
       </View>
-    </LinearGradient>
+      </LinearGradient>
+
+      {isWeb && (
+        <>
+          <Animated.View
+            pointerEvents="none"
+            style={[styles.hintWrap, { opacity: hintOpacity }]}
+          >
+            <Text style={styles.hintText}>
+              Tap anywhere · Press F for fullscreen
+            </Text>
+          </Animated.View>
+          <View style={styles.fsButton} {...(webButtonProps as any)}>
+            <MaterialCommunityIcons
+              name={isFullscreen ? 'fullscreen-exit' : 'fullscreen'}
+              size={26}
+              color={COLORS.textPrimary}
+            />
+          </View>
+        </>
+      )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: COLORS.bg },
+  gradient: { flex: 1 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -298,4 +420,21 @@ const styles = StyleSheet.create({
   emptySub: { fontSize: 16, fontFamily: FONTS.regular, color: COLORS.textMuted, textAlign: 'center', marginTop: 10 },
   footer: { paddingHorizontal: 40, paddingTop: 12, paddingBottom: 28, alignItems: 'center' },
   footerText: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.textMuted },
+  fsButton: {
+    position: 'absolute',
+    right: 24,
+    bottom: 20,
+    backgroundColor: 'rgba(20, 18, 60, 0.85)',
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    borderRadius: 12,
+    padding: 12,
+  },
+  hintWrap: { position: 'absolute', right: 84, bottom: 32 },
+  hintText: {
+    fontSize: 13,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+    textAlign: 'right',
+  },
 });
