@@ -116,7 +116,7 @@ export default function RootLayout() {
 
       const auth = await import('@/services/authService');
       const loggedIn = await auth.isAuthenticated();
-      const inAuthGroup = segments[0] === '(tabs)' || segments.length === 0;
+      const inAuthGroup = segments[0] === '(tabs)' || !segments.length;
 
       if (!loggedIn && inAuthGroup) {
         router.replace('/login');

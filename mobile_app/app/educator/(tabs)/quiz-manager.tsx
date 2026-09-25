@@ -72,50 +72,6 @@ function parseDeadlineInput(text: string): Date | null {
   return date;
 }
 
-const openDeadlinePicker = (target: 'new' | 'edit') => {
-  const current = target === 'new' ? availableUntil : draft?.available_until;
-  const parsed = current ? parseDeadlineInput(current) : new Date();
-  setDeadlineTempDate(parsed || new Date());
-  setDeadlinePickerMode('date');
-  setDeadlinePickerTarget(target);
-  setShowDeadlinePicker(true);
-};
-
-const handleDeadlineChange = ({ nativeEvent }: any) => {
-  if (nativeEvent.type === 'dismissed') {
-    setShowDeadlinePicker(false);
-    return;
-  }
-  const newDate = nativeEvent.timestamp ? new Date(nativeEvent.timestamp) : deadlineTempDate;
-  setDeadlineTempDate(newDate);
-  if (deadlinePickerMode === 'date') {
-    setDeadlinePickerMode('time');
-  } else {
-    const combined = new Date(
-      deadlineTempDate.getFullYear(),
-      deadlineTempDate.getMonth(),
-      deadlineTempDate.getDate(),
-      newDate.getHours(),
-      newDate.getMinutes()
-    );
-    const formatted = toDeadlineInput(combined);
-    if (deadlinePickerTarget === 'new') {
-      setAvailableUntil(formatted);
-    } else if (draft) {
-      setDraft({ ...draft, available_until: formatted });
-    }
-    setShowDeadlinePicker(false);
-  }
-};
-
-const clearDeadline = (target: 'new' | 'edit') => {
-  if (target === 'new') {
-    setAvailableUntil('');
-  } else if (draft) {
-    setDraft({ ...draft, available_until: '' });
-  }
-};
-
 export default function QuizManagerScreen() {
   const params = useLocalSearchParams<{ course?: string; generate?: string }>();
 
@@ -149,6 +105,50 @@ export default function QuizManagerScreen() {
   const [deadlinePickerMode, setDeadlinePickerMode] = useState<'date' | 'time'>('date');
   const [deadlineTempDate, setDeadlineTempDate] = useState<Date>(new Date());
   const [deadlinePickerTarget, setDeadlinePickerTarget] = useState<'new' | 'edit'>('new');
+
+  const openDeadlinePicker = (target: 'new' | 'edit') => {
+    const current = target === 'new' ? availableUntil : draft?.available_until;
+    const parsed = current ? parseDeadlineInput(current) : new Date();
+    setDeadlineTempDate(parsed || new Date());
+    setDeadlinePickerMode('date');
+    setDeadlinePickerTarget(target);
+    setShowDeadlinePicker(true);
+  };
+
+  const handleDeadlineChange = ({ nativeEvent }: any) => {
+    if (nativeEvent.type === 'dismissed') {
+      setShowDeadlinePicker(false);
+      return;
+    }
+    const newDate = nativeEvent.timestamp ? new Date(nativeEvent.timestamp) : deadlineTempDate;
+    setDeadlineTempDate(newDate);
+    if (deadlinePickerMode === 'date') {
+      setDeadlinePickerMode('time');
+    } else {
+      const combined = new Date(
+        deadlineTempDate.getFullYear(),
+        deadlineTempDate.getMonth(),
+        deadlineTempDate.getDate(),
+        newDate.getHours(),
+        newDate.getMinutes()
+      );
+      const formatted = toDeadlineInput(combined);
+      if (deadlinePickerTarget === 'new') {
+        setAvailableUntil(formatted);
+      } else if (draft) {
+        setDraft({ ...draft, available_until: formatted });
+      }
+      setShowDeadlinePicker(false);
+    }
+  };
+
+  const clearDeadline = (target: 'new' | 'edit') => {
+    if (target === 'new') {
+      setAvailableUntil('');
+    } else if (draft) {
+      setDraft({ ...draft, available_until: '' });
+    }
+  };
 
   // 3-dots menu state
   const [menuQuizId, setMenuQuizId] = useState<number | null>(null);
@@ -689,8 +689,7 @@ export default function QuizManagerScreen() {
                     <TouchableOpacity
                       style={styles.menuBtn}
                       onPress={(e) => {
-                        const layout = e.nativeEvent.layout;
-                        toggleMenu(q.id, { x: layout.x + layout.width, y: layout.y });
+                        toggleMenu(q.id, { x: e.nativeEvent.pageX, y: e.nativeEvent.pageY });
                       }}
                     >
                       <Ionicons name="ellipsis-horizontal" size={24} color={COLORS.textMuted} />

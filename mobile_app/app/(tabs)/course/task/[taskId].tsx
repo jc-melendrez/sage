@@ -29,6 +29,7 @@ const FONTS = {
   bold: 'Montserrat-Bold',
   semiBold: 'Montserrat-SemiBold',
   medium: 'Montserrat-Medium',
+  regular: 'Montserrat-Regular',
 };
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — matches the backend cap.

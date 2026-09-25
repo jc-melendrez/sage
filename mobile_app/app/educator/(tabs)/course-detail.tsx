@@ -455,7 +455,7 @@ export default function CourseDetailScreen() {
         title={courseName || 'Course'}
         subtitle={`${topics.length} topic${topics.length === 1 ? '' : 's'} · ${totalNodes} node${totalNodes === 1 ? '' : 's'}`}
         showBack
-        rightIcon={section === 'leaderboard' ? undefined : 'add'}
+        rightIcon="add"
         onRightPress={() => {
           if (section === 'quizzes') openQuizManager(true);
           else if (section === 'activities') setActVisible(true);

@@ -83,12 +83,14 @@ interface FilterChipProps {
   label: string;
   active: boolean;
   onPress: () => void;
+  disabled?: boolean;
 }
-export function FilterChip({ label, active, onPress }: FilterChipProps) {
+export function FilterChip({ label, active, onPress, disabled = false }: FilterChipProps) {
   return (
     <TouchableOpacity
       onPress={onPress}
-      style={[styles.filterChip, active && styles.filterChipActive]}
+      disabled={disabled}
+      style={[styles.filterChip, active && styles.filterChipActive, disabled && styles.filterChipDisabled]}
       activeOpacity={0.8}
     >
       <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>{label}</Text>
@@ -165,6 +167,7 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   filterChipActive: { backgroundColor: COLORS.purplePrimary, borderColor: COLORS.purplePrimary },
+  filterChipDisabled: { opacity: 0.5 },
   filterChipText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textPrimary },
   filterChipTextActive: { color: 'white' },
 
