@@ -1,11 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, Alert, TouchableOpacity, Modal, FlatList, BackHandler } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, Alert, TouchableOpacity, Modal, BackHandler } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { getQuiz, Quiz, startQuizAttempt, getQuizShare } from '@/services/quizService';
+import { getQuiz, Quiz, startQuizAttempt } from '@/services/quizService';
 import { completeQuiz } from '@/services/gamificationService';
-import { API_BASE_URL } from '@/config/api';
-import { getToken } from '@/services/authService';
 import TakeQuiz from '../../../../components/TakeQuiz';
 
 export default function CourseQuizScreen() {
@@ -17,8 +15,6 @@ export default function CourseQuizScreen() {
   const [starting, setStarting] = useState(false);
   const [started, setStarted] = useState(false);
   const [showIntroModal, setShowIntroModal] = useState(false);
-  const [showShareModal, setShowShareModal] = useState(false);
-  const [userGroups, setUserGroups] = useState<{ id: string; name: string }[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -52,14 +48,10 @@ export default function CourseQuizScreen() {
         router.back();
         return true;
       }
-      if (showShareModal) {
-        setShowShareModal(false);
-        return true;
-      }
       return false;
     });
     return () => backHandler.remove();
-  }, [showIntroModal, showShareModal, router]);
+  }, [showIntroModal, router]);
 
   const handleBegin = async () => {
     if (!quiz) return;
@@ -78,67 +70,6 @@ export default function CourseQuizScreen() {
       setStarting(false);
     }
   };
-
-  const handleShare = useCallback(async () => {
-    try {
-      const token = await getToken();
-      if (!token) return;
-      
-      // Fetch user's groups
-      const res = await fetch(`${API_BASE_URL}/users/groups/mine/`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const groups = await res.json();
-        setUserGroups(groups.map((g: any) => ({ id: String(g.id), name: g.name })));
-        setShowShareModal(true);
-      }
-    } catch {
-      Alert.alert('Error', 'Failed to load groups');
-    }
-  }, []);
-
-  const handleShareToGroup = useCallback(async (groupId: string) => {
-    try {
-      const shareData = await getQuizShare(Number(quizId));
-      const token = await getToken();
-      if (!token) return;
-
-      await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          text: `📝 Quiz Shared: "${shareData.title}"`,
-          attachments: [{
-            type: 'quiz_embed',
-            quiz_id: shareData.id,
-            title: shareData.title,
-            question_count: shareData.question_count,
-            quiz_type: shareData.quiz_type,
-            deep_link: shareData.deep_link,
-          }],
-        }),
-      });
-      setShowShareModal(false);
-      Alert.alert('Shared!', 'Quiz sent to group chat.');
-    } catch (err) {
-      Alert.alert('Failed to share', err instanceof Error ? err.message : 'Please try again.');
-    }
-  }, [quizId]);
-
-  const renderGroupItem = ({ item }: { item: { id: string; name: string } }) => (
-    <TouchableOpacity
-      style={styles.groupItem}
-      onPress={() => handleShareToGroup(item.id)}
-      activeOpacity={0.7}
-    >
-      <View style={styles.groupItemIcon}>
-        <Ionicons name="people-outline" size={20} color="#6D28D9" />
-      </View>
-      <Text style={styles.groupItemName}>{item.name}</Text>
-      <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
-    </TouchableOpacity>
-  );
 
   if (loading) {
     return (
@@ -175,9 +106,6 @@ export default function CourseQuizScreen() {
             <View style={styles.blockedIconCircle}>
               <Ionicons name="document-text-outline" size={40} color="#6D28D9" />
             </View>
-            <TouchableOpacity style={styles.shareBtn} onPress={handleShare} activeOpacity={0.7}>
-              <Ionicons name="share-outline" size={22} color="#6D28D9" />
-            </TouchableOpacity>
           </View>
           <Text style={styles.blockedTitle}>{quiz.title}</Text>
           <Text style={styles.blockedText}>
@@ -287,40 +215,6 @@ export default function CourseQuizScreen() {
           </View>
         </View>
       </Modal>
-
-      {/* Share Modal */}
-      <Modal
-        visible={showShareModal}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowShareModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Share Quiz</Text>
-              <TouchableOpacity onPress={() => setShowShareModal(false)}>
-                <Ionicons name="close" size={24} color="#6B7280" />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.modalSubtitle}>Select a study group to share this quiz with</Text>
-            {userGroups.length === 0 ? (
-              <View style={styles.emptyGroups}>
-                <Ionicons name="people-outline" size={32} color="#9CA3AF" />
-                <Text style={styles.emptyGroupsText}>No study groups found</Text>
-                <Text style={styles.emptyGroupsSub}>Create or join a group first</Text>
-              </View>
-            ) : (
-              <FlatList
-                data={userGroups}
-                renderItem={renderGroupItem}
-                keyExtractor={(item) => item.id}
-                contentContainerStyle={styles.groupList}
-              />
-            )}
-          </View>
-        </View>
-      </Modal>
     </>
   );
 }
@@ -345,9 +239,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     width: '100%',
     marginBottom: 8,
-  },
-  shareBtn: {
-    padding: 8,
   },
   blockedIcon: { fontSize: 44, marginBottom: 12 },
   blockedIconCircle: {
@@ -417,45 +308,4 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   introMetaText: { fontSize: 14, color: '#374151' },
-
-  modalContent: {
-    backgroundColor: 'white',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 24,
-    paddingBottom: 40,
-    maxHeight: '80%',
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#1F2937' },
-  modalSubtitle: { fontSize: 14, color: '#6B7280', marginBottom: 20 },
-  emptyGroups: { alignItems: 'center', paddingVertical: 40 },
-  emptyGroupsText: { fontSize: 16, fontWeight: '600', color: '#374151', marginTop: 12 },
-  emptyGroupsSub: { fontSize: 14, color: '#9CA3AF', marginTop: 4 },
-  groupList: { gap: 8 },
-  groupItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    backgroundColor: '#F9FAFB',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-  },
-  groupItemIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#EEF2FF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  groupItemName: { flex: 1, fontSize: 16, fontWeight: '500', color: '#1F2937' },
 });

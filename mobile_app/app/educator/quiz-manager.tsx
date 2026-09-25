@@ -7,7 +7,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
-import { getQuizzes } from '@/services/quizService';
+import { getQuizzes, parseDeadlineInput } from '@/services/quizService';
 import { getMyCourses } from '@/services/courseService';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
@@ -54,24 +54,6 @@ function toDeadlineInput(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-/** Parse a "YYYY-MM-DD HH:MM" string into a Date, or null if invalid/empty. */
-function parseDeadlineInput(text: string): Date | null {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  const m = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  const [, y, mo, d, h, mi] = m;
-  const date = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi));
-  if (
-    date.getFullYear() !== Number(y) ||
-    date.getMonth() !== Number(mo) - 1 ||
-    date.getDate() !== Number(d)
-  ) {
-    return null;
-  }
-  return date;
-}
-
 export default function QuizManagerScreen() {
   const params = useLocalSearchParams<{ course?: string; generate?: string }>();
 
@@ -81,9 +63,13 @@ export default function QuizManagerScreen() {
 
   // Class scoping
   const [courses, setCourses] = useState<CourseOption[]>([]);
-  const [selectedCourse, setSelectedCourse] = useState<number | null>(
-    params.course ? Number(params.course) : null,
-  );
+  // NOT seeded from params.course here: a useState initializer only runs on
+  // first mount, and this screen lives in (tabs), so pushing here with a
+  // different course reused the stale value. That silently sent no `course`
+  // (saving the quiz with course=NULL, invisible to the course's filtered
+  // list) and loaded every quiz instead of this course's. params.course is
+  // synced in an effect below; the chips still let the user override it.
+  const [selectedCourse, setSelectedCourse] = useState<number | null>(null);
 
   const [selectedFile, setSelectedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [difficulty, setDifficulty] = useState('Medium');
@@ -194,6 +180,15 @@ export default function QuizManagerScreen() {
   useEffect(() => {
     if (params.generate === '1') setCreating(true);
   }, [params.generate]);
+
+  // Keep the course in sync with the route param (see the note on
+  // selectedCourse). Only applied when the param is present, so a deliberate
+  // chip selection isn't clobbered by opening the screen without a course.
+  useEffect(() => {
+    if (!params.course) return;
+    const fromParam = Number(params.course);
+    if (!Number.isNaN(fromParam)) setSelectedCourse(fromParam);
+  }, [params.course]);
 
   useEffect(() => {
     loadQuizzes();
@@ -618,6 +613,7 @@ export default function QuizManagerScreen() {
     <View style={styles.container}>
       <EducatorHeader
         title="Quiz & Content"
+        showBack
         subtitle={selectedCourse && courses.length > 0
           ? `${quizzes.length} quizzes · ${courses.find((c) => c.id === selectedCourse)?.name ?? ''}`
           : `${quizzes.length} quizzes · all classes`}

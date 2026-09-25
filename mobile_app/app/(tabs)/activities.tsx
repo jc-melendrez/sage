@@ -16,7 +16,7 @@ import { invalidateCachePrefix } from '@/services/apiCache';
 import { completeQuiz } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
-import { deleteQuiz, startQuizAttempt } from '@/services/quizService';
+import { deleteQuiz, startQuizAttempt, getQuizShare, updateQuiz, parseDeadlineInput } from '@/services/quizService';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
@@ -88,6 +88,113 @@ export default function ActivitiesScreen() {
   const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
   const [quizGenerationStatus, setQuizGenerationStatus] = useState('');
   const questionTypeOptions = ['Multiple Choice', 'True/False', 'Short Answer', 'Fill-in-the-Blank'];
+
+  // --- Own-quiz share / edit ---
+  // This tab only ever lists the caller's own quizzes: the backend
+  // GET /ai/quizzes/ with no ?course= returns Quiz.objects.filter(user=request.user).
+  // Sharing and editing therefore only ever apply to quizzes the user created,
+  // never to an educator's course quizzes.
+  const [shareTarget, setShareTarget] = useState<Quiz | null>(null);
+  const [shareGroups, setShareGroups] = useState<{ id: string; name: string }[]>([]);
+  const [isShareOpen, setIsShareOpen] = useState(false);
+  const [isSharing, setIsSharing] = useState<string | null>(null);
+  const [editTarget, setEditTarget] = useState<Quiz | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDeadline, setEditDeadline] = useState('');
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  const handleShareQuiz = async (quiz: Quiz) => {
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const res = await fetch(`${API_BASE_URL}/users/groups/mine/`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('Failed to load groups');
+      const groups = await res.json();
+      setShareGroups(groups.map((g: any) => ({ id: String(g.id), name: g.name })));
+      setShareTarget(quiz);
+      setIsShareOpen(true);
+    } catch (err) {
+      Alert.alert('Error', err instanceof Error ? err.message : 'Failed to load groups');
+    }
+  };
+
+  const handleShareToGroup = async (groupId: string) => {
+    if (!shareTarget) return;
+    try {
+      setIsSharing(groupId);
+      const shareData = await getQuizShare(shareTarget.id);
+      const token = await getToken();
+      if (!token) return;
+      const res = await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          text: `📝 Quiz Shared: "${shareData.title}"`,
+          attachments: [{
+            type: 'quiz_embed',
+            quiz_id: shareData.id,
+            title: shareData.title,
+            question_count: shareData.question_count,
+            quiz_type: shareData.quiz_type,
+            deep_link: shareData.deep_link,
+          }],
+        }),
+      });
+      if (!res.ok) throw new Error('Could not send to that group');
+      setIsShareOpen(false);
+      Alert.alert('Shared!', `"${shareData.title}" was sent to the group chat.`);
+    } catch (err) {
+      Alert.alert('Failed to share', err instanceof Error ? err.message : 'Please try again.');
+    } finally {
+      setIsSharing(null);
+    }
+  };
+
+  const handleOpenEdit = (quiz: Quiz) => {
+    setEditTarget(quiz);
+    setEditTitle(quiz.title);
+    setEditDeadline(
+      quiz.available_until
+        ? new Date(quiz.available_until).toISOString().slice(0, 16).replace('T', ' ')
+        : '',
+    );
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editTarget) return;
+    const title = editTitle.trim();
+    if (!title) {
+      Alert.alert('Title Required', 'Please enter a title for your quiz.');
+      return;
+    }
+    let available_until: string | null = null;
+    if (editDeadline.trim()) {
+      const parsed = parseDeadlineInput(editDeadline);
+      if (!parsed) {
+        Alert.alert('Invalid Deadline', 'Enter the deadline as YYYY-MM-DD HH:MM (24-hour), or leave it blank.');
+        return;
+      }
+      if (parsed.getTime() <= Date.now()) {
+        Alert.alert('Invalid Deadline', 'The deadline must be in the future.');
+        return;
+      }
+      available_until = parsed.toISOString();
+    }
+    try {
+      setIsSavingEdit(true);
+      const updated = await updateQuiz(editTarget.id, { title, available_until });
+      setQuizzes((prev) => prev.map((q) => (q.id === updated.id ? { ...q, ...updated } : q)));
+      invalidateCachePrefix('/ai/quizzes');
+      setEditTarget(null);
+      Alert.alert('Saved', 'Your quiz was updated.');
+    } catch (err) {
+      Alert.alert('Save failed', err instanceof Error ? err.message : 'Could not update the quiz.');
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
 
   const pickQuizFile = async () => {
     try {
@@ -535,13 +642,29 @@ export default function ActivitiesScreen() {
                       </Text>
                     )}
                   </View>
-                  <TouchableOpacity
-                    style={styles.deleteQuizBtn}
-                    onPress={() => handleDeleteQuiz(quiz)}
-                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                  >
-                    <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
-                  </TouchableOpacity>
+                  <View style={styles.quizCardActions}>
+                    <TouchableOpacity
+                      style={styles.quizCardIconBtn}
+                      onPress={() => handleOpenEdit(quiz)}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    >
+                      <Ionicons name="create-outline" size={18} color={COLORS.purpleVibrant} />
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.quizCardIconBtn}
+                      onPress={() => handleShareQuiz(quiz)}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    >
+                      <Ionicons name="share-outline" size={18} color={COLORS.purpleVibrant} />
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.quizCardIconBtn}
+                      onPress={() => handleDeleteQuiz(quiz)}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    >
+                      <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
+                    </TouchableOpacity>
+                  </View>
                   {quiz.attempted ? (
                     <View style={[styles.takeQuizBtn, { backgroundColor: COLORS.success, opacity: 0.8 }]}>
                       <Ionicons name="checkmark-outline" size={16} color="white" />
@@ -874,6 +997,117 @@ export default function ActivitiesScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
+      {/* Share own quiz to a study group */}
+      <Modal
+        visible={isShareOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setIsShareOpen(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.shareSheet}
+          >
+            <View style={styles.shareSheetHeader}>
+              <Text style={styles.shareSheetTitle}>Share Quiz</Text>
+              <TouchableOpacity onPress={() => setIsShareOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={24} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.shareSheetSubtitle} numberOfLines={1}>
+              {shareTarget ? `Send "${shareTarget.title}" to a study group` : ''}
+            </Text>
+            {shareGroups.length === 0 ? (
+              <View style={styles.shareSheetEmpty}>
+                <Ionicons name="people-outline" size={32} color={COLORS.textMuted} />
+                <Text style={styles.shareSheetEmptyText}>No study groups yet</Text>
+                <Text style={styles.shareSheetEmptySub}>Create or join a group on the Groups tab first.</Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.shareGroupList} contentContainerStyle={{ gap: 8 }}>
+                {shareGroups.map((g) => (
+                  <TouchableOpacity
+                    key={g.id}
+                    style={styles.shareGroupItem}
+                    onPress={() => handleShareToGroup(g.id)}
+                    disabled={isSharing !== null}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.shareGroupIcon}>
+                      <Ionicons name="people-outline" size={18} color={COLORS.purpleVibrant} />
+                    </View>
+                    <Text style={styles.shareGroupName} numberOfLines={1}>{g.name}</Text>
+                    {isSharing === g.id ? (
+                      <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
+                    ) : (
+                      <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
+
+      {/* Edit own quiz (title + deadline) */}
+      <Modal
+        visible={editTarget !== null}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setEditTarget(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.shareSheet}
+          >
+            <View style={styles.shareSheetHeader}>
+              <Text style={styles.shareSheetTitle}>Edit Quiz</Text>
+              <TouchableOpacity onPress={() => setEditTarget(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={24} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.quizGenLabel}>Title</Text>
+            <TextInput
+              style={styles.quizGenInput}
+              placeholder="Quiz title"
+              placeholderTextColor="#9CA3AF"
+              value={editTitle}
+              onChangeText={setEditTitle}
+              editable={!isSavingEdit}
+            />
+
+            <Text style={styles.quizGenLabel}>Deadline (optional)</Text>
+            <TextInput
+              style={styles.quizGenInput}
+              placeholder="YYYY-MM-DD HH:MM"
+              placeholderTextColor="#9CA3AF"
+              value={editDeadline}
+              onChangeText={setEditDeadline}
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!isSavingEdit}
+            />
+            <Text style={styles.shareSheetHint}>
+              24-hour time. Leave blank for no deadline. This quiz has {editTarget?.questions?.length || 0} question(s); questions cannot be edited here.
+            </Text>
+
+            <TouchableOpacity
+              style={[styles.quizGenGenerateButton, isSavingEdit && { opacity: 0.7 }]}
+              onPress={handleSaveEdit}
+              disabled={isSavingEdit}
+            >
+              {isSavingEdit ? <ActivityIndicator color="white" /> : (
+                <Text style={styles.quizGenGenerateButtonText}>Save Changes</Text>
+              )}
+            </TouchableOpacity>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
+
       {/* FAB — contextual per tab (not on Courses; students join instead of creating) */}
       {selectedTab === 'quizzes' && (
         <TouchableOpacity
@@ -1065,7 +1299,39 @@ const styles = StyleSheet.create({
   badgePill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.bgSecondary },
   badgePillText: { fontSize: 10, color: COLORS.textMuted, fontFamily: FONTS.semiBold },
   takeQuizBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.purplePrimary, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, gap: 6, alignSelf: 'center', shadowColor: COLORS.purpleDeep, shadowOffset: {width:0, height:2}, shadowOpacity: 0.2, shadowRadius: 4, elevation: 3 },
-  deleteQuizBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 8, borderRadius: 12, alignSelf: 'center' },
+  quizCardActions: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start' },
+  quizCardIconBtn: {
+    width: 34, height: 34, borderRadius: 12,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: COLORS.bg,
+  },
+  shareSheet: {
+    backgroundColor: COLORS.surface,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 24,
+    paddingBottom: 40,
+    maxHeight: '80%',
+  },
+  shareSheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  shareSheetTitle: { fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textPrimary },
+  shareSheetSubtitle: { fontSize: 14, color: COLORS.textMuted, marginTop: 6, marginBottom: 16 },
+  shareSheetHint: { fontSize: 12, color: COLORS.textMuted, marginTop: 8, lineHeight: 17 },
+  shareSheetEmpty: { alignItems: 'center', paddingVertical: 40 },
+  shareSheetEmptyText: { fontSize: 16, fontFamily: FONTS.semiBold, color: COLORS.textSecondary, marginTop: 12 },
+  shareSheetEmptySub: { fontSize: 13, color: COLORS.textMuted, marginTop: 4, textAlign: 'center', paddingHorizontal: 20 },
+  shareGroupList: { maxHeight: 340 },
+  shareGroupItem: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 14, paddingHorizontal: 16,
+    backgroundColor: COLORS.bg, borderRadius: 14,
+    borderWidth: 1, borderColor: COLORS.border,
+  },
+  shareGroupIcon: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: COLORS.surface, alignItems: 'center', justifyContent: 'center',
+  },
+  shareGroupName: { flex: 1, fontSize: 15, fontFamily: FONTS.medium, color: COLORS.textPrimary },
   takeQuizBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 13 },
 
   inboxContainer: { paddingTop: 8 },
