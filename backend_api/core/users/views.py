@@ -677,16 +677,23 @@ class CompleteQuizView(APIView):
                     status=403,
                 )
 
-            try:
-                attempt = QuizAttempt.objects.get(quiz=quiz, user=request.user)
-            except QuizAttempt.DoesNotExist:
+            # Retries are unlimited, so a learner can legitimately have several
+            # attempt rows. Use the most recent one instead of .get(), which
+            # would raise MultipleObjectsReturned and 500 on a second attempt.
+            attempt = (
+                QuizAttempt.objects
+                .filter(quiz=quiz, user=request.user)
+                .order_by('-started_at')
+                .first()
+            )
+            if attempt is None:
                 return Response(
                     {'error': 'Take quiz cannot be completed because you did not start it.'},
                     status=409,
                 )
             if attempt.completed_at is not None:
                 return Response(
-                    {'error': 'You have already completed this quiz. It can only be taken once.'},
+                    {'error': 'You have already completed the latest attempt. Start a new attempt to try again.'},
                     status=409,
                 )
 
