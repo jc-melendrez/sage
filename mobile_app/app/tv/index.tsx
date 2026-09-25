@@ -41,7 +41,7 @@ export default function TvLandingScreen() {
       return;
     }
     setError(null);
-    router.replace(`/tv/${clean}`);
+    router.replace(`/${clean}`);
   };
 
   const onChangeCode = (value: string) => {

@@ -715,7 +715,7 @@ export default function HostSessionScreen() {
   const tvBase = getTvPageBaseUrl();
   const copyTvUrl = () => {
     if (!tvBase) return;
-    const url = `${tvBase}/tv/${code}`;
+    const url = `${tvBase}/${code}`;
     Clipboard.setStringAsync(url)
       .then(() => Alert.alert('TV link copied', url))
       .catch(() => {});
@@ -797,7 +797,7 @@ export default function HostSessionScreen() {
       <View style={styles.tvLinkRow}>
         <Ionicons name="tv" size={14} color={COLORS.accent} />
         <Text style={styles.tvLinkText} numberOfLines={1}>
-          {tvBase ? `Open on a TV: ${tvBase}/tv/${code}` : 'Show the leaderboard on a TV with the TV link'}
+          {tvBase ? `Open on a TV: ${tvBase}/${code}` : 'Show the leaderboard on a TV with the TV link'}
         </Text>
         {tvBase ? (
           <TouchableOpacity

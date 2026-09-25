@@ -20,6 +20,19 @@ export const unstable_settings = {
   initialRouteName: '(tabs)',
 };
 
+const APP_ROOT_SEGMENTS = new Set([
+  '(tabs)',
+  'chat',
+  'edit-profile',
+  'educator',
+  'game',
+  'login',
+  'modal',
+  'settings',
+  'superadmin',
+  'tv',
+]);
+
 async function fetchRoleHome() {
   const auth = await import('@/services/authService');
   try {
@@ -80,10 +93,17 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => {
-    if (Platform.OS === 'web' && pathname && !pathname.startsWith('/tv')) {
-      router.replace('/tv');
-    }
-  }, [pathname, router, segments]);
+  if (Platform.OS !== 'web' || !pathname) return;
+  const isTvPath = pathname.startsWith('/tv');
+  const firstSegment = pathname.split('/').filter(Boolean)[0]?.toLowerCase() ?? '';
+  const isRootRoomCode =
+    pathname.split('/').filter(Boolean).length === 1 &&
+    /^[a-z0-9]+$/i.test(firstSegment) &&
+    !APP_ROOT_SEGMENTS.has(firstSegment);
+  if (!isTvPath && !isRootRoomCode) {
+    router.replace('/tv');
+  }
+}, [pathname, router]);
 
   useEffect(() => {
     if (Platform.OS === 'web') return;
@@ -127,6 +147,7 @@ export default function RootLayout() {
         <Stack.Screen name="superadmin" options={{ headerShown: false }} />
         <Stack.Screen name="educator" options={{ headerShown: false }} />
         <Stack.Screen name="tv" options={{ headerShown: false }} />
+        <Stack.Screen name="[roomCode]" options={{ headerShown: false }} />
         <Stack.Screen name="chat/[groupId]" options={{ headerShown: false, presentation: 'card' }} />
       </Stack>
       <StatusBar style="auto" />
