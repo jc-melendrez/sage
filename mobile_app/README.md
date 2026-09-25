@@ -48,7 +48,7 @@ The educator host-session leaderboard (`app/educator/(tabs)/host-session.tsx`) i
 
 **How the link is resolved**
 - In dev (`npx expo start --web` / Metro web), the link uses the dev machine's LAN IP and port 8081, so any TV on the same Wi-Fi can open it. The backend must be reachable too (`API_BASE_URL`; dev default is the LAN IP on port 8000).
-- In production, the web build is hosted at `https://sage-web.onrender.com` (Render static site, deployed from `mobile_app/dist` via `npx expo export --platform web`), and the app points to it through `EXPO_PUBLIC_WEB_URL` (set in `eas.json` for native builds). Because the web page polls the global API (`sage-28kp.onrender.com`) and the room lives in Firestore, the link works from **any** internet-connected TV or laptop — no same-Wi-Fi or IP knowledge required.
+- In production, the web build is hosted at `https://sage-web-cdep.onrender.com` (Render static site, deployed from `mobile_app/dist` via `npx expo export --platform web`), and the app points to it through `EXPO_PUBLIC_WEB_URL` (set in `eas.json` for native builds). Because the web page polls the global API (`sage-28kp.onrender.com`) and the room lives in Firestore, the link works from **any** internet-connected TV or laptop — no same-Wi-Fi or IP knowledge required.
 - The endpoint is intentionally **unauthenticated read-only** (room code is the access key, same as joining); it only exposes names + live scores for players in that room.
 
 ## Learn more
