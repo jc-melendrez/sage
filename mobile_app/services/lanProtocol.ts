@@ -18,6 +18,7 @@ export interface GameQuestionPick {
 export interface LanPlayer {
   id: string;
   name: string;
+  avatar?: string;
   connected: boolean;
   finished: boolean;
   score: number;
@@ -39,10 +40,10 @@ export interface LanResultPayload {
 
 export type LanMessage =
   | { t: 'chunk'; id: string; seq: number; total: number; data: string }
-  | { t: 'hello'; code: string; name: string }
+  | { t: 'hello'; code: string; name: string; avatar?: string }
   | { t: 'ping' }
   | { t: 'result'; data: LanResultPayload }
-  | { t: 'welcome'; roomCode: string; playerId: string }
+  | { t: 'welcome'; roomCode: string; playerId: string; hostName?: string; hostAvatar?: string }
   | { t: 'roster'; players: LanPlayer[] }
   | { t: 'quiz'; quiz: QuizPayload; order: number[]; timePerQuestion: number }
   | { t: 'start' }

@@ -22,7 +22,7 @@ import { buildQuestions, QuizPayload } from '@/services/offlineEngine';
 import { getCachedQuizzes } from '@/services/offlineGameService';
 import { getCurrentUser } from '@/services/authService';
 import { generateRoomCode, LanMessage, LanPlayer } from '@/services/lanProtocol';
-import { lanGame, setLanHost, setLanClient, resetLanState } from '@/services/lanSession';
+import { lanGame, setLanHost, setLanClient, resetLanState, setLanPlayerId } from '@/services/lanSession';
 import { startAdvertising, stopAdvertising } from '@/services/lanDiscovery';
 
 const COLORS = {
@@ -51,6 +51,7 @@ export default function LanHostScreen() {
   const [ipManual, setIpManual] = useState('');
   const [detectedIp, setDetectedIp] = useState('');
   const [hostName, setHostName] = useState('');
+const [hostAvatar, setHostAvatar] = useState('');
   const [role, setRole] = useState('student');
   const [selfPlay, setSelfPlay] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -68,8 +69,10 @@ export default function LanHostScreen() {
     (async () => {
       const user = await getCurrentUser();
       if (user?.first_name) setHostName(user.first_name);
+      if (user?.avatar) setHostAvatar(user.avatar);
       if (user?.role === 'student') setSelfPlay(true);
       setRole(user?.role || 'student');
+      hostRef.current?.setHostInfo({ name: user?.first_name || 'Host', avatar: user?.avatar });
     })();
     try {
       Network.getIpAddressAsync().then(ip => {
@@ -179,7 +182,7 @@ export default function LanHostScreen() {
     stopAdvertising();
     setAdvertising(false);
     const order = makeOrder(count);
-    const host = hostRef.current ?? new LanHostServer(code);
+    const host = hostRef.current ?? new LanHostServer(code, { name: hostName || 'Host', avatar: hostAvatar });
     if (!hostRef.current) {
       hostRef.current = host;
       host.onMessage(msg => onMessageRef.current(msg));
@@ -187,6 +190,7 @@ export default function LanHostScreen() {
         host.start();
       } catch {}
     }
+    host.setHostInfo({ name: hostName || 'Host', avatar: hostAvatar });
     host.setQuiz(quiz, order, 30);
     setLanHost(host);
 
@@ -194,6 +198,7 @@ export default function LanHostScreen() {
     lanGame.order = order;
     lanGame.timePerQuestion = 30;
     lanGame.playerName = hostName || 'Host';
+    lanGame.playerAvatar = hostAvatar;
     lanGame.role = role;
     lanGame.selfPlay = selfPlay;
     lanGame.hostIp = ipManual.trim();
@@ -201,11 +206,24 @@ export default function LanHostScreen() {
 
     if (selfPlay) {
       selfRef.current = true;
-      const client = new LanClientSession(() => {});
+      // The host must be registered as a player BEFORE the game starts, or the
+      // server rejects its own hello as "already started" and the host never
+      // shows up on the leaderboard.
+      let hostJoined = false;
+      const client = new LanClientSession(msg => {
+        if (msg.t === 'welcome') {
+          hostJoined = true;
+          setLanPlayerId(msg.playerId);
+        }
+      });
       setLanClient(client);
       try {
         await client.connect('127.0.0.1');
-        client.join(code, hostName || 'Host');
+        client.join(code, hostName || 'Host', hostAvatar);
+        const deadline = Date.now() + 3000;
+        while (!hostJoined && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 25));
+        }
         host.startGame();
       } catch {
         Alert.alert(
@@ -215,7 +233,7 @@ export default function LanHostScreen() {
         host.startGame();
       }
       setStarted(true);
-      router.push('/game/lan-play' as any);
+      router.push({ pathname: '/game/question', params: { lan: 'true', roomCode: code } } as any);
     } else {
       host.startGame();
       setStarted(true);

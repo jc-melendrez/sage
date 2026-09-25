@@ -51,8 +51,8 @@ export class LanClientSession {
     } catch {}
   }
 
-  join(code: string, name: string) {
-    this.send({ t: 'hello', code, name });
+  join(code: string, name: string, avatar?: string) {
+    this.send({ t: 'hello', code, name, avatar });
   }
 
   submitResult(data: LanResultPayload) {

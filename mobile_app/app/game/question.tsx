@@ -12,6 +12,7 @@ import {
   ActivityIndicator,
   Platform,
   KeyboardAvoidingView,
+  Image,
 } from 'react-native';
 // ✨ NEW: Reanimated imports for timer shake/pulse
 import Animated, {
@@ -24,12 +25,16 @@ import Animated, {
   interpolate,
 } from 'react-native-reanimated';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import firestore from '@react-native-firebase/firestore';
 import * as Haptics from 'expo-haptics';
 import { getToken, getCurrentUser } from '@/services/authService';
-import { getCurrentOfflineGame, saveOfflineGameResult, clearCurrentOfflineGame } from '@/services/offlineGameService';
+import { createOfflineGame, getCurrentOfflineGame, saveOfflineGameResult, clearCurrentOfflineGame } from '@/services/offlineGameService';
+import { getLanClient, lanGame, getLanPlayerId, setLanPlayerId, setLanFinalStandings, getLastLanRoster } from '@/services/lanSession';
+import type { LanMessage, LanPlayer } from '@/services/lanProtocol';
 import { API_BASE_URL } from '@/config/api';
 import TeamRevealOverlay from '@/components/TeamRevealOverlay';
+import { pfpSource } from '@/constants/pfps';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -100,6 +105,13 @@ function StandingsRow({ player, index, isYou }: { player: any; index: number; is
       ]}
     >
       <Text style={styles.srRank}>{medal || `${index + 1}`}</Text>
+      {pfpSource(player.avatar) ? (
+        <Image source={pfpSource(player.avatar)!} style={styles.srAvatar} resizeMode="cover" />
+      ) : (
+        <View style={styles.srAvatar}>
+          <Text style={styles.srAvatarText}>{(player.displayName || '?').charAt(0).toUpperCase()}</Text>
+        </View>
+      )}
       <View style={styles.srNameWrap}>
         <Text style={[styles.srName, isYou && styles.srNameYou]}>
           {player.displayName}
@@ -127,9 +139,11 @@ const POWERUP_ITEMS = [
 
 export default function QuestionScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ roomCode: string; offline?: string; quizTitle?: string }>();
+  const insets = useSafeAreaInsets();
+  const params = useLocalSearchParams<{ roomCode: string; offline?: string; lan?: string; quizTitle?: string }>();
   const roomCode = params.roomCode;
   const isOffline = params.offline === 'true';
+  const isLan = params.lan === 'true';
   const [questions, setQuestions] = useState<any[]>([]);
   const [questionOrder, setQuestionOrder] = useState<number[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -161,6 +175,8 @@ export default function QuestionScreen() {
   const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const [teamAssignments, setTeamAssignments] = useState<any[] | null>(null);
   const [showTeamReveal, setShowTeamReveal] = useState(false);
+  const [waitTimer, setWaitTimer] = useState(0);
+  const [engineError, setEngineError] = useState<string | null>(null);
 
   // ✨ UPDATED: RNAnimated refs
   const standingsAnim = useRef(new RNAnimated.Value(0)).current;
@@ -174,6 +190,12 @@ export default function QuestionScreen() {
   const lastFlushAtRef = useRef<number>(0);
   const bootedRef = useRef(false);
   const navigatedRef = useRef(false);
+  const lanPlayersRef = useRef<LanPlayer[]>([]);
+  const lanPrevStandingsRef = useRef<Record<string, { rank: number; score: number }>>({});
+  const lanSubmittedRef = useRef(false);
+  const lcRef = useRef<ReturnType<typeof getLanClient>>(null);
+  const applyLanLeaderboardRef = useRef<(players: LanPlayer[]) => void>(() => {});
+  const finalizeLanGameRef = useRef<() => void>(() => {});
 
   // ✨ UPDATED: RNAnimated refs for card/result/timerBar
   const cardTranslateX = useRef(new RNAnimated.Value(0)).current;
@@ -208,6 +230,91 @@ export default function QuestionScreen() {
     };
   });
 
+  /* ── LAN helpers (live leaderboard + wrap-up) ── */
+  const applyLanLeaderboard = (players: LanPlayer[]) => {
+    lanPlayersRef.current = players;
+    const sorted = [...players].sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || a.name.localeCompare(b.name));
+    const myId = getLanPlayerId();
+    const rows = sorted.map((p, i) => {
+      const prev = lanPrevStandingsRef.current[p.id];
+      const isMe = myId ? p.id === myId : p.name === lanGame.playerName;
+      return {
+        id: isMe ? 'me' : p.id,
+        displayName: p.name,
+        avatar: p.avatar,
+        score: p.score ?? 0,
+        streak: 0,
+        movement: 0,
+        prevScore: prev ? prev.score : 0,
+      };
+    });
+    lanPrevStandingsRef.current = Object.fromEntries(
+      sorted.map((p, i) => [p.id, { rank: i, score: p.score ?? 0 }])
+    );
+    setStandings(rows);
+    const top = rows
+      .filter(r => r.movement >= 2)
+      .sort((a, b) => b.movement - a.movement)[0];
+    setBiggestMover(top ? { name: top.id === 'me' ? 'You' : top.displayName, jump: top.movement } : null);
+  };
+
+  const finalizeLanGame = async () => {
+    if (navigatedRef.current) return;
+    navigatedRef.current = true;
+    const game = getCurrentOfflineGame();
+    const lc = lcRef.current ?? getLanClient();
+    if (game && lc && !lanSubmittedRef.current) {
+      lanSubmittedRef.current = true;
+      lc.submitResult({
+        quizId: game.quizId,
+        quizTitle: game.quizTitle,
+        quizType: game.quizType,
+        timePerQuestion: game.timePerQuestion,
+        score: game.score,
+        correctCount: game.correctCount,
+        answeredCount: game.answeredCount,
+        totalQuestions: game.totalQuestions,
+      });
+      // Give the host a moment to broadcast the updated leaderboard so the
+      // final screen shows every player, not just the local one.
+      await new Promise(r => setTimeout(r, 500));
+    }
+    const myId = getLanPlayerId();
+    const list = [...lanPlayersRef.current];
+    if (game) {
+      const me = {
+        id: myId || 'me',
+        name: lanGame.playerName || 'You',
+        avatar: lanGame.playerAvatar || undefined,
+        connected: true,
+        finished: true,
+        score: game.score ?? 0,
+        correctCount: game.correctCount,
+        answeredCount: game.answeredCount,
+        totalQuestions: game.totalQuestions,
+      };
+      const idx = myId
+        ? list.findIndex(p => p.id === myId)
+        : list.findIndex(p => p.name === me.name);
+      if (idx >= 0) list[idx] = me;
+      else list.push(me);
+    }
+    setLanFinalStandings(list);
+    if (game) {
+      try {
+        saveOfflineGameResult(game);
+      } catch {}
+      clearCurrentOfflineGame();
+    }
+    router.replace({
+      pathname: '/game/final',
+      params: { roomCode: lanGame.roomCode || 'LAN', lan: 'true', playerId: myId || '' },
+    } as any);
+  };
+
+  applyLanLeaderboardRef.current = applyLanLeaderboard;
+  finalizeLanGameRef.current = finalizeLanGame;
+
   /* ── all useEffects below ── */
 
   // ✨ NEW: Trigger shake/pulse when timeLeft <= 5 and not frozen
@@ -228,8 +335,16 @@ export default function QuestionScreen() {
 
   useEffect(() => {
     const init = async () => {
-      if (isOffline) {
-        const game = getCurrentOfflineGame();
+      if (isOffline || isLan) {
+        let game = getCurrentOfflineGame();
+        if (!game && isLan && lanGame.quiz) {
+          try {
+            game = createOfflineGame(lanGame.quiz, lanGame.timePerQuestion, { order: lanGame.order });
+          } catch (e) {
+            setEngineError(e instanceof Error ? e.message : String(e));
+            return;
+          }
+        }
         if (!game) return;
         setQuestions(game.questions);
         setQuestionOrder(game.questionOrder);
@@ -238,14 +353,24 @@ export default function QuestionScreen() {
         setRoomStatus('active');
         setUserId('me');
         setPowerups({ ...game.powerups });
-        setStandings([{
-          id: 'me',
-          displayName: 'You',
-          score: game.score,
-          streak: game.streak,
-          movement: 0,
-          prevScore: 0,
-        }]);
+        if (isOffline) {
+          setStandings([{
+            id: 'me',
+            displayName: 'You',
+            score: game.score,
+            streak: game.streak,
+            movement: 0,
+            prevScore: 0,
+          }]);
+        } else {
+          const roster = getLastLanRoster();
+          // Seed the LAN player list so the final standings show everyone,
+          // even if no leaderboard broadcast has been received yet.
+          lanPlayersRef.current = roster;
+          setStandings(roster.length
+            ? roster.map(p => ({ id: p.id, displayName: p.name, avatar: p.avatar, score: 0, streak: 0, movement: 0, prevScore: 0 }))
+            : []);
+        }
         return;
       }
       const user = await getCurrentUser();
@@ -258,6 +383,38 @@ export default function QuestionScreen() {
       if (pPowerups) setPowerups(pPowerups);
     };
     init();
+
+    if (isOffline || isLan) {
+      if (isLan) {
+        const lc = getLanClient();
+        lcRef.current = lc;
+        if (lc) {
+          lc.onEvent = (msg: LanMessage) => {
+            if (msg.t === 'welcome') {
+              setLanPlayerId(msg.playerId);
+            } else if (msg.t === 'quiz') {
+              if (lanGame.quiz && !getCurrentOfflineGame()) {
+                try {
+                  const g = createOfflineGame(lanGame.quiz, lanGame.timePerQuestion, { order: lanGame.order });
+                  setQuestions(g.questions);
+                  setQuestionOrder(g.questionOrder);
+                  setTimePerQuestion(g.timePerQuestion);
+                  setTimeLeft(g.timePerQuestion);
+                  setPowerups({ ...g.powerups });
+                } catch (e) {
+                  setEngineError(e instanceof Error ? e.message : String(e));
+                }
+              }
+            } else if (msg.t === 'leaderboard') {
+              applyLanLeaderboardRef.current(msg.players);
+            } else if (msg.t === 'end') {
+              finalizeLanGameRef.current();
+            }
+          };
+        }
+      }
+      return;
+    }
 
     /* ── single room listener: boots the game + navigates when the host ends it ── */
     const roomUnsub = firestore()
@@ -305,6 +462,7 @@ export default function QuestionScreen() {
           .map(d => ({
             id: d.id,
             displayName: d.data().displayName,
+            avatar: d.data().avatar,
             score: d.data().score || 0,
             streak: d.data().streak || 0,
           }))
@@ -353,6 +511,22 @@ export default function QuestionScreen() {
       });
     return () => { unsub(); };
   }, [userId]);
+
+  /* ── LAN: live ticker while waiting for quiz/engine ── */
+  useEffect(() => {
+    if (!isLan || (questions.length > 0 && questionOrder.length > 0)) return;
+    const t = setInterval(() => setWaitTimer(w => w + 1), 1000);
+    return () => clearInterval(t);
+  }, [isLan, questions.length, questionOrder.length]);
+
+  /* ── LAN: detach client handler when leaving the screen ── */
+  useEffect(() => {
+    if (!isLan) return;
+    return () => {
+      const c = getLanClient();
+      if (c) c.onEvent = () => {};
+    };
+  }, [isLan]);
 
   /* ── teams subscription (team mode only) ── */
   useEffect(() => {
@@ -507,7 +681,7 @@ export default function QuestionScreen() {
   const handleFreeze = async () => {
     if (powerups.freeze <= 0 || selected || isFrozen) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
-    if (isOffline) {
+    if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game || !game.consumePowerup('freeze')) return;
       clearInterval(timerRef.current);
@@ -527,7 +701,7 @@ export default function QuestionScreen() {
   const handleHint = async () => {
     if (powerups.hint <= 0 || selected || activePowerups.hint) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
-    if (isOffline) {
+    if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game || !game.consumePowerup('hint')) return;
       setPowerups({ ...game.powerups });
@@ -557,7 +731,7 @@ export default function QuestionScreen() {
   const handleDoublePoints = async () => {
     if (powerups.doublePoints <= 0 || selected || activePowerups.doublePoints) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
-    if (isOffline) {
+    if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game || !game.consumePowerup('doublePoints')) return;
       setPowerups({ ...game.powerups });
@@ -575,7 +749,7 @@ export default function QuestionScreen() {
   const handleShield = async () => {
     if (powerups.shield <= 0 || selected || activePowerups.shield) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
-    if (isOffline) {
+    if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game || !game.consumePowerup('shield')) return;
       setPowerups({ ...game.powerups });
@@ -598,7 +772,7 @@ export default function QuestionScreen() {
     setError(null);
     const timeTaken = (Date.now() - startTimeRef.current) / 1000;
     const actualIndex = questionOrder[currentIndex];
-    if (isOffline) {
+    if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game) return;
       const outcome = game.answer(actualIndex, answer || '', timeTaken, {
@@ -608,14 +782,16 @@ export default function QuestionScreen() {
       });
       setResult({ correct: outcome.correct, correctAnswer: outcome.correctAnswer, points: outcome.pointsAwarded });
       setPowerups({ ...game.powerups });
-      setStandings([{
-        id: 'me',
-        displayName: 'You',
-        score: game.score,
-        streak: game.streak,
-        movement: 0,
-        prevScore: 0,
-      }]);
+      if (isOffline) {
+        setStandings([{
+          id: 'me',
+          displayName: 'You',
+          score: game.score,
+          streak: game.streak,
+          movement: 0,
+          prevScore: 0,
+        }]);
+      }
       if (outcome.powerupEarned) {
         setShowRoulette(true);
         setRouletteTarget(outcome.powerupEarned);
@@ -681,6 +857,10 @@ export default function QuestionScreen() {
 
   const handleNext = async () => {
     if (currentIndex + 1 >= questionOrder.length) {
+      if (isLan) {
+        finalizeLanGameRef.current();
+        return;
+      }
       if (isOffline) {
         const game = getCurrentOfflineGame();
         if (game) saveOfflineGameResult(game);
@@ -739,7 +919,32 @@ export default function QuestionScreen() {
   if (questions.length === 0 || questionOrder.length === 0) {
     return (
       <View style={styles.container}>
-        <Text style={styles.loadingText}>Loading questions...</Text>
+        {isLan ? (
+          <View style={styles.centerBox}>
+            <ActivityIndicator size="large" color={COLORS.purplePrimary} />
+            <Text style={styles.waitingTitle}>
+              {engineError ? 'Could not start the game' : `Waiting for host (${waitTimer}s)`}
+            </Text>
+            <Text style={styles.waitingSub}>
+              {engineError ? 'Ask the host to start, then rejoin.' : 'Receiving the quiz…'}
+            </Text>
+            {engineError && <Text style={styles.waitingError}>{engineError}</Text>}
+            {waitTimer >= 12 && !engineError && (
+              <Text style={styles.waitingWarn}>Still waiting — check everyone is on the same Wi-Fi.</Text>
+            )}
+            <TouchableOpacity
+              style={styles.backButton}
+              onPress={() => {
+                navigatedRef.current = true;
+                router.replace('/(tabs)' as any);
+              }}
+            >
+              <Text style={styles.backButtonText}>Back to Game Center</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <Text style={styles.loadingText}>Loading questions...</Text>
+        )}
       </View>
     );
   }
@@ -763,7 +968,7 @@ export default function QuestionScreen() {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <View style={styles.container}>
+      <View style={[styles.container, styles.containerSafe, { paddingTop: insets.top + 16 }]}>
       {/* ── frozen screen tint ── */}
       {isFrozen && <View style={styles.frozenTint} pointerEvents="none" />}
 
@@ -1200,9 +1405,8 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.bg,
-    paddingHorizontal: 24,
-    paddingTop: 60,
   },
+  containerSafe: { paddingHorizontal: 20 },
   loadingText: {
     color: COLORS.textMuted,
     fontSize: 16,
@@ -1806,6 +2010,15 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(34,211,238,0.3)',
   },
   srRank: { width: 32, fontSize: 18, textAlign: 'center', fontFamily: FONTS.bold, color: COLORS.textMuted },
+  srAvatar: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'rgba(124,58,237,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  srAvatarText: { fontSize: 14, fontFamily: FONTS.bold, color: '#E2E8F0' },
   srNameWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 4 },
   srName: { fontSize: 14, fontFamily: FONTS.bold, color: '#E2E8F0' },
   srNameYou: { color: COLORS.accent },
@@ -1815,4 +2028,13 @@ const styles = StyleSheet.create({
   srMoveDown: { fontSize: 11, fontFamily: FONTS.extraBold, color: '#F87171', width: 36, textAlign: 'center' },
   srMoveSame: { fontSize: 11, fontFamily: FONTS.extraBold, color: '#64748B', width: 36, textAlign: 'center' },
   srScore: { fontSize: 16, fontFamily: FONTS.black, color: '#fff', minWidth: 52, textAlign: 'right' },
+
+  /* LAN waiting screen */
+  centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 30 },
+  waitingTitle: { color: COLORS.textPrimary, fontFamily: FONTS.bold, fontSize: 18, marginTop: 20, textAlign: 'center' },
+  waitingSub: { color: COLORS.textMuted, fontFamily: FONTS.medium, fontSize: 13, marginTop: 6, textAlign: 'center' },
+  waitingWarn: { color: '#FBBF24', fontFamily: FONTS.medium, fontSize: 13, marginTop: 16, textAlign: 'center', lineHeight: 20, marginHorizontal: 24 },
+  waitingError: { color: '#F87171', fontFamily: FONTS.medium, fontSize: 13, marginTop: 16, textAlign: 'center', lineHeight: 20, marginHorizontal: 24 },
+  backButton: { marginTop: 24, backgroundColor: COLORS.purplePrimary, paddingVertical: 12, paddingHorizontal: 32, borderRadius: 12, alignItems: 'center' },
+  backButtonText: { color: COLORS.textPrimary, fontFamily: FONTS.semiBold, fontSize: 14 },
 });
