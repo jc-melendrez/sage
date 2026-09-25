@@ -884,6 +884,33 @@ const renderAttachments = () => {
   return (
     <View style={styles.attachmentList}>
       {msg.attachments.map((att, i) => {
+        // Quiz embed attachment
+        if (att.type === 'quiz_embed' && att.quiz_id) {
+          return (
+            <TouchableOpacity
+              key={`quiz-${att.quiz_id}`}
+              style={styles.quizEmbedCard}
+              onPress={() => router.push(`/course/quiz/${att.quiz_id}`)}
+              activeOpacity={0.85}
+              accessibilityLabel={`Open quiz ${att.title}`}
+            >
+              <View style={styles.quizEmbedHeader}>
+                <Ionicons name="document-text-outline" size={24} color={COLORS.purplePrimary} />
+                <Text style={styles.quizEmbedTitle}>{att.title || 'Quiz'}</Text>
+              </View>
+              <View style={styles.quizEmbedMeta}>
+                <Text style={styles.quizEmbedMetaText}>
+                  {att.question_count} questions · {att.quiz_type}
+                </Text>
+              </View>
+              <View style={styles.quizEmbedAction}>
+                <Text style={styles.quizEmbedActionText}>Take Quiz</Text>
+                <Ionicons name="chevron-forward" size={16} color={COLORS.purplePrimary} />
+              </View>
+            </TouchableOpacity>
+          );
+        }
+
         // Uploaded attachments carry an S3 `key` that needs resolving to a
         // short-lived presigned URL; the optimistic echo carries a local uri.
         const uri = att.key ? resolvedLinks[att.key] : att.url;
@@ -1520,6 +1547,50 @@ const styles = StyleSheet.create({
   attachmentDoc: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'transparent', borderWidth: 0, borderColor: 'rgba(76, 29, 149, 0.15)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 8, maxWidth: 260 },
   attachmentDocName: { flexShrink: 1, flexGrow: 1, fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textDark },
   attachmentDocSize: { fontSize: 11, fontFamily: FONTS.regular, color: COLORS.textMuted },
+
+  quizEmbedCard: {
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    padding: 12,
+    maxWidth: 280,
+    minWidth: 220,
+  },
+  quizEmbedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  quizEmbedTitle: {
+    fontSize: 15,
+    fontFamily: FONTS.bold,
+    color: COLORS.textDark,
+    flex: 1,
+  },
+  quizEmbedMeta: {
+    marginBottom: 8,
+  },
+  quizEmbedMetaText: {
+    fontSize: 12,
+    fontFamily: FONTS.regular,
+    color: COLORS.textMuted,
+  },
+  quizEmbedAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 6,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  quizEmbedActionText: {
+    fontSize: 13,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.purplePrimary,
+  },
 
   attachSheetRow: { flexDirection: 'row', gap: 22 },
   attachOption: { alignItems: 'center', gap: 8 },

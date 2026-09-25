@@ -20,8 +20,16 @@ export interface Quiz {
   /** ISO datetime deadline — quiz can't be taken after this. null = always open. */
   available_until?: string | null;
   questions: QuizQuestion[];
-  /** True if the current user has already taken this quiz (take-once). */
-  attempted?: boolean;
+  /** Number of times the current user has attempted this quiz. */
+  attempt_count?: number;
+}
+
+export interface QuizShareData {
+  id: number;
+  title: string;
+  question_count: number;
+  quiz_type: string;
+  deep_link: string;
 }
 
 export interface GenerateQuizInput {
@@ -48,6 +56,11 @@ export async function getQuiz(quizId: number): Promise<Quiz> {
   return apiCall<Quiz>(`/ai/quizzes/${quizId}/`);
 }
 
+/** Get shareable data for a quiz (title, question count, deep link). */
+export async function getQuizShare(quizId: number): Promise<QuizShareData> {
+  return apiCall<QuizShareData>(`/ai/quizzes/${quizId}/share/`);
+}
+
 /** Generate a quiz from a file (base64 JSON body) and optionally attach it to a class. */
 export async function generateQuiz(input: GenerateQuizInput): Promise<Quiz> {
   const token = await getToken();
@@ -65,8 +78,7 @@ export async function generateQuiz(input: GenerateQuizInput): Promise<Quiz> {
   return data as Quiz;
 }
 
-/** Record the one-and-only "take" of a quiz. Server-side take-once + deadline gate.
- *  Throws when the quiz was already taken (or its deadline passed). */
+/** Record a quiz attempt. Unlimited retries allowed. */
 export async function startQuizAttempt(quizId: number): Promise<void> {
   await apiCall<{ id: number }>(`/ai/quizzes/${quizId}/attempts/`, {
     method: 'POST',

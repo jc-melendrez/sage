@@ -361,7 +361,7 @@ export default function ActivitiesScreen() {
   };
   const handleGroupCodeKeyPress = (e: any, i: number) => {
     if (e.nativeEvent.key === 'Backspace' && !joinCodeInput[i] && i > 0) {
-      const next = joinCodeInput.split('').slice(0, 6);
+      const next = joinCodeInput.split('');
       next[i - 1] = '';
       setJoinCodeInput(next.join(''));
       groupCodeRefs.current[i - 1]?.focus();
@@ -378,7 +378,7 @@ export default function ActivitiesScreen() {
   };
   const handleClassCodeKeyPress = (e: any, i: number) => {
     if (e.nativeEvent.key === 'Backspace' && !classCodeInput[i] && i > 0) {
-      const next = classCodeInput.split('').slice(0, 6);
+      const next = classCodeInput.split('');
       next[i - 1] = '';
       setClassCodeInput(next.join(''));
       classCodeRefs.current[i - 1]?.focus();

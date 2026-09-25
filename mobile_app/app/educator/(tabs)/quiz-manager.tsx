@@ -1,5 +1,5 @@
 ﻿import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, Modal, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, Modal, KeyboardAvoidingView, Platform, FlatList } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
@@ -98,6 +98,19 @@ export default function QuizManagerScreen() {
   const [editingQuiz, setEditingQuiz] = useState<Quiz | null>(null);
   const [draft, setDraft] = useState<EditableQuiz | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+
+  // 3-dots menu state
+  const [menuQuizId, setMenuQuizId] = useState<number | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
+
+  // Rename modal
+  const [renameQuizId, setRenameQuizId] = useState<number | null>(null);
+  const [renameTitle, setRenameTitle] = useState('');
+
+  // Share modal
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [shareQuizId, setShareQuizId] = useState<number | null>(null);
+  const [userGroups, setUserGroups] = useState<{ id: string; name: string }[]>([]);
 
   const loadQuizzes = useCallback(async () => {
     try {
@@ -413,6 +426,143 @@ export default function QuizManagerScreen() {
     }
   };
 
+  // --- 3-dots menu functions ---
+  const toggleMenu = (quizId: number, position: { x: number; y: number }) => {
+    if (menuQuizId === quizId) {
+      setMenuQuizId(null);
+      setMenuPosition(null);
+    } else {
+      setMenuQuizId(quizId);
+      setMenuPosition(position);
+    }
+  };
+
+  const closeMenu = () => {
+    setMenuQuizId(null);
+    setMenuPosition(null);
+  };
+
+  // --- Rename quiz ---
+  const openRenameModal = (quiz: Quiz) => {
+    setRenameQuizId(quiz.id);
+    setRenameTitle(quiz.title);
+    closeMenu();
+  };
+
+  const handleRenameQuiz = async () => {
+    if (!renameQuizId || !renameTitle.trim()) return;
+    try {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/ai/quizzes/${renameQuizId}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ title: renameTitle.trim() }),
+      });
+      if (!res.ok) throw new Error('Failed to rename quiz');
+      await loadQuizzes();
+      setRenameQuizId(null);
+      setRenameTitle('');
+      Alert.alert('Renamed', 'Quiz title updated.');
+    } catch (err) {
+      Alert.alert('Error', err instanceof Error ? err.message : 'Failed to rename quiz');
+    }
+  };
+
+  // --- Share quiz ---
+  const openShareModal = async (quiz: Quiz) => {
+    closeMenu();
+    setShareQuizId(quiz.id);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const res = await fetch(`${API_BASE_URL}/users/groups/mine/`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const groups = await res.json();
+        setUserGroups(groups.map((g: any) => ({ id: String(g.id), name: g.name })));
+        setShowShareModal(true);
+      }
+    } catch {
+      Alert.alert('Error', 'Failed to load groups');
+    }
+  };
+
+  const handleShareToGroup = async (groupId: string) => {
+    if (!shareQuizId) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+      // Get quiz share data
+      const shareRes = await fetch(`${API_BASE_URL}/ai/quizzes/${shareQuizId}/share/`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!shareRes.ok) throw new Error('Failed to get share data');
+      const shareData = await shareRes.json();
+
+      await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          text: `📝 Quiz Shared: "${shareData.title}"`,
+          attachments: [{
+            type: 'quiz_embed',
+            quiz_id: shareData.id,
+            title: shareData.title,
+            question_count: shareData.question_count,
+            quiz_type: shareData.quiz_type,
+            deep_link: shareData.deep_link,
+          }],
+        }),
+      });
+      setShowShareModal(false);
+      setShareQuizId(null);
+      Alert.alert('Shared!', 'Quiz sent to group chat.');
+    } catch (err) {
+      Alert.alert('Failed to share', err instanceof Error ? err.message : 'Please try again.');
+    }
+  };
+
+  // --- Delete from menu ---
+  const handleDeleteFromMenu = (quiz: Quiz) => {
+    closeMenu();
+    handleDeleteQuiz(quiz);
+  };
+
+  const renderMenu = () => {
+    if (!menuQuizId || !menuPosition) return null;
+    const quiz = quizzes.find(q => q.id === menuQuizId);
+    if (!quiz) return null;
+
+    return (
+      <TouchableOpacity style={styles.menuOverlay} onPress={closeMenu} activeOpacity={1}>
+        <View
+          style={[
+            styles.menuDropdown,
+            { left: menuPosition.x - 160, top: menuPosition.y + 36 },
+          ]}
+        >
+          <TouchableOpacity style={styles.menuItem} onPress={() => openEditor(quiz)}>
+            <Ionicons name="create-outline" size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
+            <Text style={styles.menuItemText}>Edit</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.menuItem} onPress={() => openRenameModal(quiz)}>
+            <Ionicons name="pencil-outline" size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
+            <Text style={styles.menuItemText}>Rename</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.menuItem} onPress={() => openShareModal(quiz)}>
+            <Ionicons name="share-outline" size={18} color={COLORS.purplePrimary} style={styles.menuItemIcon} />
+            <Text style={styles.menuItemText}>Share</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.menuItem, styles.menuItemDanger]} onPress={() => handleDeleteFromMenu(quiz)}>
+            <Ionicons name="trash-outline" size={18} color={COLORS.danger} style={styles.menuItemIcon} />
+            <Text style={[styles.menuItemText, { color: COLORS.danger }]}>Delete</Text>
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
   return (
     <View style={styles.container}>
       <EducatorHeader
@@ -481,15 +631,14 @@ export default function QuizManagerScreen() {
                       <Ionicons name="eye-outline" size={16} color={COLORS.purplePrimary} />
                       <Text style={styles.quizActionText}>Preview</Text>
                     </TouchableOpacity>
-                  </View>
-                  <View style={styles.quizCardActions}>
-                    <TouchableOpacity style={styles.quizActionBtn} onPress={() => openEditor(q)}>
-                      <Ionicons name="create-outline" size={16} color={COLORS.purplePrimary} />
-                      <Text style={styles.quizActionText}>Edit</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.quizActionBtn} onPress={() => handleDeleteQuiz(q)}>
-                      <Ionicons name="trash-outline" size={16} color={COLORS.danger} />
-                      <Text style={[styles.quizActionText, { color: COLORS.danger }]}>Delete</Text>
+                    <TouchableOpacity
+                      style={styles.menuBtn}
+                      onPress={(e) => {
+                        const layout = e.nativeEvent.layout;
+                        toggleMenu(q.id, { x: layout.x + layout.width, y: layout.y });
+                      }}
+                    >
+                      <Ionicons name="ellipsis-horizontal" size={24} color={COLORS.textMuted} />
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -841,6 +990,85 @@ export default function QuizManagerScreen() {
           </ScrollView>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* Rename Modal */}
+      <Modal
+        visible={renameQuizId !== null}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => { setRenameQuizId(null); setRenameTitle(''); }}
+      >
+        <View style={styles.renameModalOverlay}>
+          <View style={styles.renameModalContent}>
+            <Text style={styles.renameModalTitle}>Rename Quiz</Text>
+            <TextInput
+              style={styles.renameModalInput}
+              value={renameTitle}
+              onChangeText={setRenameTitle}
+              placeholder="Quiz title"
+              placeholderTextColor={COLORS.textMuted}
+              autoFocus
+            />
+            <View style={styles.renameModalActions}>
+              <TouchableOpacity style={styles.renameModalCancel} onPress={() => { setRenameQuizId(null); setRenameTitle(''); }}>
+                <Text style={styles.renameModalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.renameModalConfirm} onPress={handleRenameQuiz}>
+                <Text style={styles.renameModalConfirmText}>Rename</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Share Modal */}
+      <Modal
+        visible={showShareModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => { setShowShareModal(false); setShareQuizId(null); setUserGroups([]); }}
+      >
+        <View style={styles.shareModalOverlay}>
+          <View style={styles.shareModalContent}>
+            <View style={styles.shareModalHeader}>
+              <Text style={styles.shareModalTitle}>Share Quiz</Text>
+              <TouchableOpacity onPress={() => { setShowShareModal(false); setShareQuizId(null); setUserGroups([]); }}>
+                <Ionicons name="close" size={24} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.shareModalSubtitle}>Select a study group to share this quiz with</Text>
+            {userGroups.length === 0 ? (
+              <View style={styles.shareEmptyGroups}>
+                <Ionicons name="people-outline" size={32} color={COLORS.textMuted} />
+                <Text style={styles.shareEmptyGroupsText}>No study groups found</Text>
+                <Text style={styles.shareEmptyGroupsSub}>Create or join a group first</Text>
+              </View>
+            ) : (
+              <FlatList
+                data={userGroups}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.shareGroupItem}
+                    onPress={() => handleShareToGroup(item.id)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.shareGroupItemIcon}>
+                      <Ionicons name="people-outline" size={20} color={COLORS.purplePrimary} />
+                    </View>
+                    <Text style={styles.shareGroupItemName}>{item.name}</Text>
+                    <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                )}
+                keyExtractor={(item) => item.id}
+                contentContainerStyle={styles.shareGroupList}
+              />
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {renderMenu()}
+
     </View>
   );
 }
@@ -1125,4 +1353,116 @@ const styles = StyleSheet.create({
     backgroundColor: tint(COLORS.purplePrimary),
   },
   addQuestionText: { fontSize: 14, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.purplePrimary },
+
+  menuBtn: { padding: 8 },
+  menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100 },
+  menuDropdown: {
+    position: 'absolute',
+    backgroundColor: 'white',
+    borderRadius: RADIUS.lg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingVertical: 8,
+    width: 160,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  menuItemIcon: { width: 24 },
+  menuItemText: { fontSize: 14, fontFamily: FONTS.medium, fontWeight: '600' },
+  menuItemDanger: { borderTopWidth: 1, borderTopColor: COLORS.border, marginTop: 4, paddingTop: 16 },
+
+  // Rename modal
+  renameModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  renameModalContent: {
+    backgroundColor: 'white',
+    borderRadius: RADIUS.xl,
+    padding: 24,
+    width: '85%',
+    maxWidth: 360,
+  },
+  renameModalTitle: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginBottom: 16, textAlign: 'center' },
+  renameModalInput: {
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: RADIUS.sm,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+    marginBottom: 16,
+  },
+  renameModalActions: { flexDirection: 'row', gap: 12 },
+  renameModalCancel: {
+    flex: 1,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: RADIUS.sm,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  renameModalCancelText: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.textSecondary },
+  renameModalConfirm: {
+    flex: 1,
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: RADIUS.sm,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  renameModalConfirmText: { fontSize: 14, fontFamily: FONTS.bold, color: 'white' },
+
+  // Share modal
+  shareModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  shareModalContent: {
+    backgroundColor: 'white',
+    borderTopLeftRadius: RADIUS.xl,
+    borderTopRightRadius: RADIUS.xl,
+    padding: 24,
+    paddingBottom: 40,
+    maxHeight: '80%',
+  },
+  shareModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  shareModalTitle: { fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textPrimary },
+  shareModalSubtitle: { fontSize: 14, color: COLORS.textMuted, marginBottom: 20 },
+  shareEmptyGroups: { alignItems: 'center', paddingVertical: 40 },
+  shareEmptyGroupsText: { fontSize: 16, fontFamily: FONTS.semiBold, color: COLORS.textSecondary, marginTop: 12 },
+  shareEmptyGroupsSub: { fontSize: 14, color: COLORS.textMuted, marginTop: 4 },
+  shareGroupList: { gap: 8 },
+  shareGroupItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  shareGroupItemIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: tint(COLORS.purplePrimary),
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  shareGroupItemName: { flex: 1, fontSize: 16, fontFamily: FONTS.semiBold, color: COLORS.textPrimary },
 });

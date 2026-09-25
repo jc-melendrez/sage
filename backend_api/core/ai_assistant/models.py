@@ -6,9 +6,10 @@ class ChatSession(models.Model):
     title = models.CharField(max_length=255, default="New Conversation")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    pinned = models.BooleanField(default=False)
 
     class Meta:
-        ordering = ['-updated_at']
+        ordering = ['-pinned', '-updated_at']
 
     def __str__(self):
         return f"{self.user.username} - {self.title}"
@@ -51,8 +52,6 @@ class Quiz(models.Model):
         return self.title
 
 class QuizAttempt(models.Model):
-    # Tracks the one-and-only take of a quiz. unique_together(quiz, user) means
-    # each student can start a given quiz exactly once.
     quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE, related_name='attempts')
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='quiz_attempts')
     started_at = models.DateTimeField(auto_now_add=True)
@@ -61,7 +60,7 @@ class QuizAttempt(models.Model):
     total = models.IntegerField(null=True, blank=True)
 
     class Meta:
-        unique_together = ('quiz', 'user')
+        ordering = ['-started_at']
 
 class QuizQuestion(models.Model):
     quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE, related_name='questions')
