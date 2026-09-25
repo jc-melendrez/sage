@@ -27,7 +27,7 @@ import firestore from '@react-native-firebase/firestore';
 import { cacheQuizzes, getCachedQuizzes, createOfflineGame } from '@/services/offlineGameService';
 import * as Clipboard from 'expo-clipboard';
 import { LanClientSession } from '@/services/lanClient';
-import { lanGame, setLanClient, setLanHost, resetLanState, getLanClient } from '@/services/lanSession';
+import { lanGame, setLanClient, setLanHost, resetLanState, getLanClient, getLanHostInfo, setLanHostInfo, setLastLanRoster, setLanPlayerId } from '@/services/lanSession';
 import { LanHostServer, makeOrder } from '@/services/lanHost';
 import { LanMessage, LanPlayer, generateRoomCode } from '@/services/lanProtocol';
 import { startScanning, stopScanning, startAdvertising, stopAdvertising, DiscoveredRoom } from '@/services/lanDiscovery';
@@ -130,6 +130,7 @@ export default function GameCenterScreen() {
       lanPlayerCountRef.current = connected.length;
       setLanPlayerCount(connected.length);
       setLanJoined(connected);
+      setLastLanRoster(connected);
     } else if (msg.t === 'error') {
       Alert.alert('LAN Error', msg.message || 'Unexpected error');
     }
@@ -368,7 +369,14 @@ export default function GameCenterScreen() {
       if (!lanHostRef.current) {
         setLanJoined([]);
         const code = generateRoomCode();
-        const host = new LanHostServer(code);
+        let hostName = 'Host';
+        let hostAvatar = currentUserAvatar;
+        try {
+          const user = await getCurrentUser();
+          if (user?.first_name) hostName = user.first_name;
+          hostAvatar = user?.avatar ?? currentUserAvatar;
+        } catch {}
+        const host = new LanHostServer(code, { name: hostName || 'Host', avatar: hostAvatar });
         host.onMessage(msg => lanHostMsgRef.current(msg));
         try {
           host.start();
@@ -466,19 +474,33 @@ export default function GameCenterScreen() {
       lanGame.order = order;
       lanGame.timePerQuestion = time;
       lanGame.playerName = hostName;
+      lanGame.playerAvatar = currentUserAvatar;
       lanGame.role = 'student';
       lanGame.selfPlay = true;
       lanGame.hostIp = '';
       lanGame.roomCode = roomCode || '';
       stopAdvertising();
-      const client = new LanClientSession(() => {});
+      // The host must be registered as a player BEFORE the game starts, or the
+      // server rejects its own hello as "already started" and the host never
+      // shows up on the leaderboard.
+      let hostJoined = false;
+      const client = new LanClientSession(msg => {
+        if (msg.t === 'welcome') {
+          hostJoined = true;
+          setLanPlayerId(msg.playerId);
+        }
+      });
       setLanClient(client);
       try {
         await client.connect('127.0.0.1');
-        client.join(lanGame.roomCode, hostName);
+        client.join(lanGame.roomCode, hostName, currentUserAvatar);
+        const deadline = Date.now() + 3000;
+        while (!hostJoined && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 25));
+        }
       } catch {}
       host.startGame();
-      router.push('/game/lan-play' as any);
+      router.push({ pathname: '/game/question', params: { lan: 'true', roomCode: lanGame.roomCode } } as any);
       return;
     }
 
@@ -589,7 +611,7 @@ export default function GameCenterScreen() {
       Alert.alert("Can't Play Offline", error.message);
       return;
     }
-    runCountdown('OFFLINE', { offline: 'true', quizTitle: selectedQuiz.title }, '/game/offline-play' as any);
+    runCountdown('OFFLINE', { offline: 'true', quizTitle: selectedQuiz.title }, '/game/question' as any);
   };
 
   const copyCode = async () => {
@@ -615,19 +637,24 @@ export default function GameCenterScreen() {
   const handleLanClientMsg = (msg: LanMessage) => {
     if (msg.t === 'welcome') {
       myLanIdRef.current = msg.playerId;
+      setLanPlayerId(msg.playerId);
       setIsJoinedLan(true);
+      setLanHostInfo({ name: msg.hostName, avatar: msg.hostAvatar });
+      // Stay on the Play tab (like online joins) — the waiting/LEAVE bar and
+      // roster slots render here in the joined-LAN view.
     } else if (msg.t === 'roster') {
       const connected = msg.players.filter(p => p.connected);
       lanPlayerCountRef.current = connected.length;
       setLanPlayerCount(connected.length);
       setLanJoined(connected);
+      setLastLanRoster(connected);
     } else if (msg.t === 'quiz') {
       lanGame.quiz = msg.quiz;
       lanGame.order = msg.order;
       lanGame.timePerQuestion = msg.timePerQuestion;
       if (!lanNavPushedRef.current) {
         lanNavPushedRef.current = true;
-        router.push('/game/lan-play' as any);
+        router.push({ pathname: '/game/question', params: { lan: 'true', roomCode: lanGame.roomCode } } as any);
       }
     } else if (msg.t === 'error') {
       Alert.alert('LAN Error', msg.message || 'Unexpected error');
@@ -643,10 +670,26 @@ export default function GameCenterScreen() {
 
   // If a live LAN client exists (screen refocused mid-session), re-attach the
   // handler so lobby updates and game-over events keep flowing on this screen.
+  // If a finished/abandoned LAN game is leftover, tear the session down so the
+  // next INVITE/START/JOIN builds a fresh room instead of reusing a stale one.
   useFocusEffect(
     useCallback(() => {
       const c = getLanClient();
-      if (c && c.connected) c.onEvent = lanClientMsgRef.current;
+      if (c && c.connected && !lanGame.quiz) {
+        c.onEvent = lanClientMsgRef.current;
+      } else if (lanGame.quiz) {
+        lanHostRef.current?.stop();
+        lanHostRef.current = null;
+        getLanClient()?.disconnect();
+        setLanClient(null);
+        myLanIdRef.current = null;
+        lanNavPushedRef.current = false;
+        setIsJoinedLan(false);
+        setLanJoined([]);
+        setLanPlayerCount(0);
+        lanPlayerCountRef.current = 0;
+        resetLanState();
+      }
     }, [])
   );
 
@@ -664,8 +707,9 @@ export default function GameCenterScreen() {
         const client = new LanClientSession(lanClientMsgRef.current);
         setLanClient(client);
         await client.connect(room.hostIp);
-        client.join(code, lanName);
+        client.join(code, lanName, currentUserAvatar);
         lanGame.playerName = lanName;
+        lanGame.playerAvatar = currentUserAvatar;
         lanGame.hostIp = room.hostIp;
         lanGame.roomCode = code;
         lanGame.role = 'player';
@@ -821,9 +865,15 @@ export default function GameCenterScreen() {
     ? lanJoined.filter(p => p.id !== myLanIdRef.current)
     : lanJoined;
   const joinedPlayers = lanActive
-    ? lanRoster.map(p => ({ id: p.id, displayName: p.name }))
+    ? lanRoster.map(p => ({ id: p.id, displayName: p.name, avatar: p.avatar }))
     : roomPlayers.filter(p => String(p.id) !== String(currentUserId));
   const joinedCount = joinedPlayers.length;
+
+  // While waiting in a LAN game, the host is only a roster player once they tap
+  // START — until then, show a dedicated HOST slot so joiners can see them.
+  // Skip it if the host already appears in the roster (selfPlay loopback).
+  const lanHostInfo = getLanHostInfo();
+  const showLanHostSlot = isJoinedLan && !!lanHostInfo.name && !lanJoined.some(p => p.name === lanHostInfo.name);
 
   const gameModes = [
     {
@@ -896,6 +946,23 @@ export default function GameCenterScreen() {
                     <Text style={styles.avatarName}>YOU</Text>
                 </View>
 
+                {/* LAN Host (joined view, before the host taps START) */}
+                {showLanHostSlot && (
+                    <View style={styles.avatarContainer}>
+                        <View style={styles.avatarCircleJoined}>
+                            {pfpSource(lanHostInfo.avatar) ? (
+                                <Image source={pfpSource(lanHostInfo.avatar)!} style={styles.avatarImage} resizeMode="cover" />
+                            ) : (
+                                <Text style={styles.avatarCircleJoinedText}>{(lanHostInfo.name || 'H').charAt(0).toUpperCase()}</Text>
+                            )}
+                        </View>
+                        <View style={styles.hostBadges}>
+                            <View style={[styles.badgeIcon, {backgroundColor: COLORS.purpleVibrant}]}><Ionicons name="star" size={10} color="white" /></View>
+                        </View>
+                        <Text style={styles.avatarName} numberOfLines={1}>{lanHostInfo.name}</Text>
+                    </View>
+                )}
+
                 {/* Joined Players */}
                 {joinedPlayers.slice(0, 4).map((p) => (
                     <View key={p.id} style={styles.avatarContainer}>
@@ -916,7 +983,7 @@ export default function GameCenterScreen() {
                 ))}
 
                 {/* Empty Slots */}
-                {Array.from({ length: Math.max(0, 4 - joinedCount) }).map((_, i) => (
+                {Array.from({ length: Math.max(0, 4 - joinedCount - (showLanHostSlot ? 1 : 0)) }).map((_, i) => (
                     <View key={`empty-${i}`} style={styles.avatarContainer}>
                         <View style={styles.avatarCircleEmpty}>
                             <Ionicons name="person" size={24} color={COLORS.purpleLight} style={{opacity: 0.5}} />
@@ -957,15 +1024,6 @@ export default function GameCenterScreen() {
                     </Text>
                 </View>
             )}
-
-            <TouchableOpacity
-                style={styles.offlineBanner}
-                onPress={() => router.push('/game/discovery-test' as any)}
-                activeOpacity={0.7}
-            >
-                <Ionicons name="pulse-outline" size={14} color={COLORS.purplePale} style={{ marginRight: 6 }} />
-                <Text style={styles.offlineBannerText}>DISCOVERY TEST (temp) — UDP beacon spike</Text>
-            </TouchableOpacity>
 
             {activeTab === 'presets' ? (
             <ScrollView 
@@ -1213,7 +1271,7 @@ export default function GameCenterScreen() {
             {lanGame.quiz ? (
               <TouchableOpacity
                 style={styles.actionBtnStart}
-                onPress={() => router.push('/game/lan-play' as any)}
+                onPress={() => router.push({ pathname: '/game/question', params: { lan: 'true', roomCode: lanGame.roomCode } } as any)}
               >
                 <Ionicons name="play" size={20} color="white" style={{marginRight: 8}} />
                 <Text style={styles.actionBtnTextWhite}>RETURN TO GAME</Text>

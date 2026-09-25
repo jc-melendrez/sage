@@ -12,6 +12,7 @@ import type { QuizPayload } from './offlineEngine';
 interface Connection {
   id: string;
   name: string;
+  avatar?: string;
   socket: any;
   buffer: LineBuffer;
 }
@@ -19,6 +20,7 @@ interface Connection {
 export class LanHostServer {
   readonly roomCode: string;
   players: LanPlayer[] = [];
+  private hostInfo: { name?: string; avatar?: string };
   private connections = new Map<string, Connection>();
   private nameSet = new Set<string>();
   private server: any = null;
@@ -27,10 +29,17 @@ export class LanHostServer {
   private timePerQuestion = 30;
   private started = false;
   private stopped = false;
+  private endedOnce = false;
   private listener: ((msg: LanMessage) => void) | null = null;
 
-  constructor(roomCode: string) {
+  constructor(roomCode: string, hostInfo?: { name?: string; avatar?: string }) {
     this.roomCode = roomCode;
+    this.hostInfo = hostInfo ?? {};
+  }
+
+  /** Update host identity shown to joiners (e.g. once profile data loads). */
+  setHostInfo(info: { name?: string; avatar?: string }) {
+    this.hostInfo = { ...this.hostInfo, ...info };
   }
 
   onMessage(fn: (msg: LanMessage) => void) {
@@ -54,6 +63,7 @@ export class LanHostServer {
   start() {
     if (this.server) return;
     this.stopped = false;
+    this.endedOnce = false;
     this.server = TcpSocket.createServer((socket: any) => {
       const conn: Connection = {
         id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -74,6 +84,7 @@ export class LanHostServer {
   stop() {
     this.stopped = true;
     this.started = false;
+    this.endedOnce = false;
     this.connections.forEach(c => {
       try {
         c.socket.destroy();
@@ -153,10 +164,12 @@ export class LanHostServer {
         i += 1;
       }
       conn.name = unique;
+      conn.avatar = msg.avatar;
       this.nameSet.add(unique.toLowerCase());
       this.players.push({
         id: conn.id,
         name: unique,
+        avatar: msg.avatar,
         connected: true,
         finished: false,
         score: 0,
@@ -164,7 +177,7 @@ export class LanHostServer {
         answeredCount: 0,
         totalQuestions: 0,
       });
-      this.send(conn, { t: 'welcome', roomCode: this.roomCode, playerId: conn.id });
+      this.send(conn, { t: 'welcome', roomCode: this.roomCode, playerId: conn.id, hostName: this.hostInfo.name, hostAvatar: this.hostInfo.avatar });
       this.broadcast({ t: 'roster', players: this.players });
       return;
     }
@@ -191,6 +204,13 @@ export class LanHostServer {
     p.totalQuestions = data.totalQuestions;
     p.finished = true;
     this.broadcast({ t: 'leaderboard', players: this.sortedPlayers(), final: this.allFinished() });
+    if (this.allFinished() && !this.endedOnce) {
+      this.endedOnce = true;
+      // Let the final leaderboard round-trip, then close the server so a
+      // "play again" session starts fresh instead of reusing a stale one.
+      this.broadcast({ t: 'end', reason: 'All players have finished' });
+      setTimeout(() => this.stop(), 800);
+    }
   }
 
   private drop(conn: Connection) {

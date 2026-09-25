@@ -3,6 +3,7 @@ import { View, Text, FlatList, TouchableOpacity, StyleSheet, Animated } from 're
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getCurrentUser } from '@/services/authService';
+import { getLanFinalStandings, lanGame } from '@/services/lanSession';
 
 const PLACEMENT_XP: Record<number, number> = { 1: 100, 2: 60, 3: 40 };
 
@@ -12,9 +13,10 @@ function placementXpFor(rank: number) {
 
 export default function FinalScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ roomCode: string; offline?: string; quizTitle?: string; score?: string; correctCount?: string; totalQuestions?: string }>();
+  const params = useLocalSearchParams<{ roomCode: string; offline?: string; lan?: string; playerId?: string; quizTitle?: string; score?: string; correctCount?: string; totalQuestions?: string }>();
   const roomCode = params.roomCode;
   const isOffline = params.offline === 'true';
+  const isLan = params.lan === 'true';
   const [players, setPlayers] = useState<any[]>([]);
   const [myRank, setMyRank] = useState<number | null>(null);
   const [teams, setTeams] = useState<any[]>([]);
@@ -22,7 +24,7 @@ export default function FinalScreen() {
   const podiumAnim = useState(new Animated.Value(0))[0];
 
   useEffect(() => {
-    if (isOffline) return;
+    if (isOffline || isLan) return;
     let mounted = true;
     getCurrentUser()
       .then(user => {
@@ -46,7 +48,7 @@ export default function FinalScreen() {
   }, []);
 
   useEffect(() => {
-    if (isOffline) return;
+    if (isOffline || isLan) return;
     const unsub = firestore()
       .collection('gameRooms').doc(roomCode)
       .collection('players')
@@ -81,14 +83,28 @@ export default function FinalScreen() {
   const offlinePlayers = isOffline
     ? [{ id: 'me', displayName: 'You', score: Number(params.score ?? 0) }]
     : null;
-  const playersList = isOffline ? offlinePlayers! : players;
+  const lanRows = isLan
+    ? getLanFinalStandings().map(p => ({
+        id: p.id || 'me',
+        displayName: p.name || 'You',
+        score: Number(p.score ?? 0),
+      }))
+    : [];
+  const playersList = isOffline ? offlinePlayers! : isLan ? lanRows : players;
 
   useEffect(() => {
     if (teamMode ? teams.length === 0 : playersList.length === 0) return;
     Animated.spring(podiumAnim, { toValue: 1, friction: 6, tension: 60, useNativeDriver: true }).start();
   }, [teamMode, playersList.length > 0, teams.length > 0]);
 
-  const finalRank = isOffline ? 1 : myRank;
+  const lanMyId = params.playerId || '';
+  const lanYouIndex = isLan
+    ? lanRows.findIndex(
+        p => (lanMyId && p.id === lanMyId) || (!lanMyId && p.displayName === lanGame.playerName)
+      )
+    : -1;
+  const lanMyScore = lanYouIndex >= 0 ? lanRows[lanYouIndex].score : 0;
+  const finalRank = isOffline ? 1 : isLan ? (lanYouIndex >= 0 ? lanYouIndex + 1 : null) : myRank;
   const showPodium = teamMode ? teams.length >= 3 : playersList.length >= 3;
   const podiumSecond = teamMode ? teams[1] : playersList[1];
   const podiumFirst = teamMode ? teams[0] : playersList[0];
@@ -104,12 +120,14 @@ export default function FinalScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Game Over!</Text>
-      <Text style={styles.subtitle}>{teamMode ? 'Team Battle Results' : isOffline ? 'Offline Practice Complete' : 'Final Leaderboard'}</Text>
+      <Text style={styles.subtitle}>{teamMode ? 'Team Battle Results' : isOffline ? 'Offline Practice Complete' : isLan ? 'Friend Game Results' : 'Final Leaderboard'}</Text>
       {finalRank !== null && (
         <View style={styles.youBanner}>
           <Text style={styles.youBannerText}>
             {isOffline ? (
               <>You scored <Text style={styles.youBannerRank}>{Number(params.score ?? 0).toLocaleString()}</Text> pts · saved locally</>
+            ) : isLan ? (
+              <>You finished <Text style={styles.youBannerRank}>#{finalRank}</Text> with <Text style={styles.youBannerRank}>{lanMyScore.toLocaleString()}</Text> pts · saved locally</>
             ) : (
               <>You finished <Text style={styles.youBannerRank}>#{finalRank}</Text> · +{placementXpFor(finalRank)} XP</>
             )}

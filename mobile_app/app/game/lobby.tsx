@@ -10,6 +10,8 @@ import { API_BASE_URL } from '@/config/api';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { pfpSource } from '@/constants/pfps';
+import { getLanClient, lanGame, getLastLanRoster, setLastLanRoster, setLanPlayerId } from '@/services/lanSession';
+import type { LanMessage } from '@/services/lanProtocol';
 
 const COLORS = {
   bg: '#0f0c29',
@@ -41,7 +43,10 @@ const FONTS = {
 
 export default function LobbyScreen() {
   const router = useRouter();
-  const { roomCode, isHost, topic } = useLocalSearchParams<{ roomCode: string; isHost: string; topic: string }>();
+  const { roomCode, isHost, topic, lan: lanParam, myId: myIdParam } = useLocalSearchParams<{ roomCode: string; isHost: string; topic: string; lan?: string; myId?: string }>();
+  // LAN (offline hotspot) lobbies share this screen with online rooms.
+  const isLAN = lanParam === 'true';
+  const [myLanId, setMyLanId] = useState<string | null>(myIdParam || null);
   const [players, setPlayers] = useState<any[]>([]);
   const [teams, setTeams] = useState<any[]>([]);
   const [roomStatus, setRoomStatus] = useState('waiting');
@@ -61,6 +66,7 @@ export default function LobbyScreen() {
   }, []);
 
   useEffect(() => {
+    if (isLAN) return;
     const unsub = firestore()
       .collection('gameRooms')
       .doc(roomCode)
@@ -83,7 +89,7 @@ export default function LobbyScreen() {
       });
 
     return () => { unsub(); roomUnsub(); };
-  }, [roomCode]);
+  }, [roomCode, isLAN]);
 
   const startJoinerCountdown = () => {
     setShowCountdown(true);
@@ -94,7 +100,14 @@ export default function LobbyScreen() {
         setCountdownValue(1);
         animateCountdownNumber(() => {
           setShowCountdown(false);
-          router.replace({ pathname: '/game/question', params: { roomCode, isHost } });
+          router.replace({
+            pathname: '/game/question',
+            params: {
+              roomCode,
+              isHost,
+              ...(isLAN ? { lan: 'true' } : {}),
+            },
+          } as any);
         });
       });
     });
@@ -124,12 +137,57 @@ export default function LobbyScreen() {
 
   /* ── additive UI-only: read hostId once (existing listeners stay untouched) ── */
   useEffect(() => {
+    if (isLAN) return;
     let live = true;
     firestore().collection('gameRooms').doc(roomCode).get().then(s => {
       if (live) setHostId(s.data()?.hostId ?? null);
     });
     return () => { live = false; };
-  }, [roomCode]);
+  }, [roomCode, isLAN]);
+
+  /* ── LAN mode: roster + game start come from the LAN client, not Firestore ── */
+  const lanStartedRef = useRef(false);
+  useEffect(() => {
+    if (!isLAN) return;
+    const client = getLanClient();
+    if (!client) return;
+    // Seed with the latest roster so players who joined before this screen
+    // mounted (e.g. between welcome and navigation) are visible immediately.
+    const seed = getLastLanRoster();
+    if (seed.length > 0) {
+      setPlayers(seed.map(p => ({ id: p.id, displayName: p.name, avatar: p.avatar, connected: p.connected })));
+    }
+    client.onEvent = (msg: LanMessage) => {
+      if (msg.t === 'welcome') {
+        setMyLanId(msg.playerId);
+        setLanPlayerId(msg.playerId);
+      } else if (msg.t === 'roster') {
+        const connected = msg.players.filter(p => p.connected);
+        setLastLanRoster(connected);
+        setPlayers(connected.map(p => ({ id: p.id, displayName: p.name, avatar: p.avatar, connected: p.connected })));
+      } else if (msg.t === 'quiz') {
+        lanGame.quiz = msg.quiz;
+        lanGame.order = msg.order ?? lanGame.order;
+        lanGame.timePerQuestion = msg.timePerQuestion ?? lanGame.timePerQuestion;
+        setRoomStatus('active');
+        if (!lanStartedRef.current) {
+          lanStartedRef.current = true;
+          startJoinerCountdown();
+        }
+      } else if (msg.t === 'error') {
+        Alert.alert('LAN Error', msg.message || 'Unexpected error');
+        router.back();
+      } else if (msg.t === 'end') {
+        if (!lanStartedRef.current) {
+          Alert.alert('Game Ended', msg.reason || 'The host ended the game');
+          router.back();
+        }
+      }
+    };
+    return () => {
+      client.onEvent = () => {};
+    };
+  }, [isLAN]);
 
   /* ── UI-only animation refs ── */
   const headerAnim = useRef(new Animated.Value(0)).current;
@@ -372,7 +430,9 @@ export default function LobbyScreen() {
           </View>
 
           {players.map((item) => {
-            const isYou = String(item.id) === String(currentUserId);
+            const isYou = isLAN
+              ? String(item.id) === String(myLanId)
+              : String(item.id) === String(currentUserId);
             const isHostRow = hostId != null && String(item.id) === String(hostId);
             const teamInfo = teamMode ? teams.find(t => t.id === item.teamId) : null;
             const initial = (item.displayName || '?').charAt(0).toUpperCase();

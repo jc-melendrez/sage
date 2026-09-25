@@ -1,5 +1,6 @@
 import { Tabs } from 'expo-router';
-import React, { useEffect } from 'react'; // ✅ added useEffect
+import React, { useEffect, useState } from 'react'; // ✅ added useEffect
+import NetInfo from '@react-native-community/netinfo';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as NavigationBar from 'expo-navigation-bar'; // ✅ import
 
@@ -20,6 +21,21 @@ export default function TabLayout() {
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
   const insets = useSafeAreaInsets();
+  const [isOffline, setIsOffline] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    NetInfo.fetch().then(state => {
+      if (mounted) setIsOffline(state.isConnected === false || state.isInternetReachable === false);
+    });
+    const unsub = NetInfo.addEventListener(state => {
+      setIsOffline(state.isConnected === false || state.isInternetReachable === false);
+    });
+    return () => {
+      mounted = false;
+      unsub();
+    };
+  }, []);
 
   // ✅ Set system navigation bar color (Android only) – different from tab bar
   useEffect(() => {
@@ -38,8 +54,11 @@ export default function TabLayout() {
     setNavBar();
   }, []);
 
+  if (isOffline === null) return null;
+
   return (
     <Tabs
+      initialRouteName={isOffline ? 'games' : 'index'}
       screenOptions={{
         tabBarActiveTintColor: '#ffe081',
         tabBarInactiveTintColor: isDark ? '#f6f0ff' : '#c0a7e7',
@@ -83,6 +102,7 @@ export default function TabLayout() {
         options={{
           title: 'Play',
           tabBarIcon: ({ color }) => <IconDeviceGamepad2 size={24} color={color} />,
+          ...(isOffline ? { tabBarStyle: { display: 'none' as const } } : {}),
         }}
       />
       <Tabs.Screen
