@@ -695,16 +695,17 @@ export default function QuizManagerScreen() {
                           </Text>
                         )}
                       </View>
+                      <TouchableOpacity
+                        style={styles.menuBtn}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          const layout = e.nativeEvent.layout;
+                          toggleMenu(q.id, { x: layout.x + layout.width, y: layout.y });
+                        }}
+                      >
+                        <Ionicons name="ellipsis-horizontal" size={24} color={COLORS.textMuted} />
+                      </TouchableOpacity>
                     </View>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.menuBtn}
-                    onPress={(e) => {
-                      const layout = e.nativeEvent.layout;
-                      toggleMenu(q.id, { x: layout.x + layout.width, y: layout.y });
-                    }}
-                  >
-                    <Ionicons name="ellipsis-horizontal" size={24} color={COLORS.textMuted} />
                   </TouchableOpacity>
                 </View>
               ))}
