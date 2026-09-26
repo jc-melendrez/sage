@@ -29,6 +29,15 @@ def get_display_name(user):
     return f"{user.first_name} {user.last_name}".strip() or user.username
 
 
+def _is_teacher_host(room_data):
+    """Return True when the host is an educator/superadmin (i.e. not a student)."""
+    host_id = room_data.get('hostId')
+    if not host_id:
+        return False
+    role = User.objects.filter(id=host_id).values_list('role', flat=True).first()
+    return role != 'student'
+
+
 def snapshot_team_results(room_ref, room_data):
     """Additive: persist final team standings to room.teamResults (team mode only)."""
     if not room_data.get('teamMode', False):
@@ -120,6 +129,7 @@ class CreateGameView(APIView):
             'status': 'waiting',
             'hostId': request.user.id,
             'hostName': get_display_name(request.user),
+            'hostIsStudent': request.user.role == 'student',
             'topic': topic,
             'questionCount': question_count,
             'timePerQuestion': time_per_question,
@@ -161,6 +171,8 @@ class CreateGameView(APIView):
         if team_mode:
             player_data['teamId'] = None
 
+        # Store educator/student flags so the mobile final screen can filter
+        # out the teacher from the leaderboard without a DB round‑trip.
         db.collection('gameRooms').document(room_code)\
           .collection('players').document(str(request.user.id)).set(player_data)
 
@@ -614,14 +626,21 @@ class FinishGameView(APIView):
             print(f'[FinishGame Error] {e}')
             return Response({'error': 'Failed to finish game'}, status=500)
 
-    def _get_standings(self, room_ref):
-        """Sorted (rank-ordered) players by score, descending."""
+    def _get_standings(self, room_ref, room_data):
+        """Sorted (rank-ordered) players by score, descending.
+        The host is excluded if they are an educator (so they do not shift
+        students' placement ranks or appear on the final leaderboard)."""
         players = room_ref.collection('players').stream()
         entries = []
         for p in players:
             data = p.to_dict() or {}
+            user_id = int(p.id)
+            # Exclude the host if they are an educator; students who host
+            # remain on the leaderboard as real participants.
+            if _is_teacher_host(room_data) and user_id == room_data.get('hostId'):
+                continue
             entries.append({
-                'user_id': int(p.id),
+                'user_id': user_id,
                 'display_name': data.get('displayName', 'Player'),
                 'score': data.get('score', 0),
             })
@@ -671,6 +690,8 @@ class RoomLeaderboardView(APIView):
         players = []
         for p in room_ref.collection('players').stream():
             d = p.to_dict() or {}
+            if _is_teacher_host(room_data) and str(p.id) == str(room_data.get('hostId')):
+                continue
             players.append({
                 'id': p.id,
                 'displayName': d.get('displayName', 'Player'),
