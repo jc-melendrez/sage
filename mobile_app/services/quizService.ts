@@ -111,3 +111,21 @@ export async function deleteQuiz(quizId: number): Promise<void> {
   }
   invalidateCachePrefix('/ai/quizzes');
 }
+
+/** Save a shared quiz to the user's account with deduplication.
+ * If the user already has this quiz, returns the existing quiz.
+ * Otherwise, saves the shared quiz to their account. */
+export async function saveSharedQuiz(quizId: number): Promise<{ quiz: Quiz; isNew: boolean }> {
+  const token = await getToken();
+  const response = await fetch(`${API_BASE_URL}/ai/quizzes/${quizId}/save-shared/`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Failed to save shared quiz');
+  invalidateCachePrefix('/ai/quizzes');
+  return data as { quiz: Quiz; isNew: boolean };
+}

@@ -143,6 +143,7 @@ export default function QuizManagerScreen() {
   const [editingQuiz, setEditingQuiz] = useState<Quiz | null>(null);
   const [draft, setDraft] = useState<EditableQuiz | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [infoModalQuiz, setInfoModalQuiz] = useState<Quiz | null>(null);
 
   // Deadline picker state
   const [showDeadlinePicker, setShowDeadlinePicker] = useState(false);
@@ -661,41 +662,39 @@ export default function QuizManagerScreen() {
             <View style={{ gap: 12 }}>
               {quizzes.map((q) => (
                 <View key={q.id} style={styles.quizCard}>
-                  <View style={styles.quizCardTop}>
-                    <TouchableOpacity
-                      style={{ flex: 1 }}
-                      onPress={() => setPreviewQuiz(q)}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={styles.quizCardTitle}>{q.title}</Text>
-                      <Text style={styles.quizCardMeta}>
-                        {q.questions?.length || 0} questions · {q.quiz_type}
-                      </Text>
-                      {q.available_until ? (
-                        <Text style={[styles.quizCardMeta, { color: COLORS.warning }]}>
-                          Closes {new Date(q.available_until).toLocaleString()}
-                        </Text>
-                      ) : null}
-                      {q.course != null && (
+                  <TouchableOpacity
+                    style={{ flex: 1 }}
+                    onPress={() => setInfoModalQuiz(q)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.quizCardTop}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.quizCardTitle}>{q.title}</Text>
                         <Text style={styles.quizCardMeta}>
-                          {courses.find((c) => c.id === q.course)?.name ?? `Class #${q.course}`}
+                          {q.questions?.length || 0} questions · {q.quiz_type}
                         </Text>
-                      )}
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.quizActionBtn} onPress={() => setPreviewQuiz(q)}>
-                      <Ionicons name="eye-outline" size={16} color={COLORS.purplePrimary} />
-                      <Text style={styles.quizActionText}>Preview</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.menuBtn}
-                      onPress={(e) => {
-                        const layout = e.nativeEvent.layout;
-                        toggleMenu(q.id, { x: layout.x + layout.width, y: layout.y });
-                      }}
-                    >
-                      <Ionicons name="ellipsis-horizontal" size={24} color={COLORS.textMuted} />
-                    </TouchableOpacity>
-                  </View>
+                        {q.available_until ? (
+                          <Text style={[styles.quizCardMeta, { color: COLORS.warning }]}>
+                            Closes {new Date(q.available_until).toLocaleString()}
+                          </Text>
+                        ) : null}
+                        {q.course != null && (
+                          <Text style={styles.quizCardMeta}>
+                            {courses.find((c) => c.id === q.course)?.name ?? `Class #${q.course}`}
+                          </Text>
+                        )}
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.menuBtn}
+                    onPress={(e) => {
+                      const layout = e.nativeEvent.layout;
+                      toggleMenu(q.id, { x: layout.x + layout.width, y: layout.y });
+                    }}
+                  >
+                    <Ionicons name="ellipsis-horizontal" size={24} color={COLORS.textMuted} />
+                  </TouchableOpacity>
                 </View>
               ))}
             </View>
@@ -958,6 +957,65 @@ export default function QuizManagerScreen() {
                   )}
                 </View>
               ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Quiz Info Modal (for educator) */}
+      <Modal
+        visible={!!infoModalQuiz}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setInfoModalQuiz(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalSheet}>
+            <View style={styles.sheetHeader}>
+              <View style={{ flex: 1, paddingRight: 16 }}>
+                <Text style={styles.sheetTitle} numberOfLines={1}>{infoModalQuiz?.title}</Text>
+                <Text style={styles.previewMeta}>
+                  {infoModalQuiz?.questions?.length || 0} questions Â· {infoModalQuiz?.quiz_type}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setInfoModalQuiz(null)}>
+                <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 24 }}>
+              <View style={styles.infoModalMeta}>
+                <View style={styles.infoMetaItem}>
+                  <Ionicons name="help-circle-outline" size={16} color={COLORS.textMuted} />
+                  <Text style={styles.infoMetaText}>{infoModalQuiz?.questions?.length || 0} questions</Text>
+                </View>
+                <View style={styles.infoMetaItem}>
+                  <Ionicons name="document-text-outline" size={16} color={COLORS.textMuted} />
+                  <Text style={styles.infoMetaText}>{infoModalQuiz?.quiz_type}</Text>
+                </View>
+                {infoModalQuiz?.available_until && (
+                  <View style={styles.infoMetaItem}>
+                    <Ionicons name="time-outline" size={16} color={COLORS.warning} />
+                    <Text style={styles.infoMetaText}>Closes {new Date(infoModalQuiz?.available_until).toLocaleString()}</Text>
+                  </View>
+                )}
+                <View style={styles.infoMetaItem}>
+                  <Ionicons name="star-outline" size={16} color={COLORS.warning} />
+                  <Text style={styles.infoMetaText}>25 XP reward</Text>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                style={styles.infoActionBtn}
+                onPress={() => {
+                  setInfoModalQuiz(null);
+                  openEditor(infoModalQuiz!);
+                }}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="create-outline" size={18} color={COLORS.purplePrimary} />
+                <Text style={styles.infoActionBtnText}>Edit Quiz</Text>
+              </TouchableOpacity>
             </ScrollView>
           </View>
         </View>
@@ -1611,4 +1669,27 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
   },
   previewActionBtnText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textPrimary },
+
+  infoModalMeta: { gap: 10, marginBottom: 24 },
+  infoMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: 12,
+  },
+  infoMetaText: { fontSize: 14, color: COLORS.textSecondary },
+  infoActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: RADIUS.md,
+    paddingVertical: 14,
+    marginTop: 8,
+  },
+  infoActionBtnText: { color: 'white', fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700' },
 });
