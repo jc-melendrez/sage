@@ -43,6 +43,21 @@ interface Quiz {
   questions: any[];
 }
 
+interface EditQuestion {
+  id?: number;
+  question_text: string;
+  options: string[];
+  correct_answer: string;
+  explanation: string;
+}
+
+interface EditDraft {
+  id: number;
+  title: string;
+  available_until: string;
+  questions: EditQuestion[];
+}
+
 export default function ActivitiesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -99,8 +114,10 @@ export default function ActivitiesScreen() {
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isSharing, setIsSharing] = useState<string | null>(null);
   const [editTarget, setEditTarget] = useState<Quiz | null>(null);
-  const [editTitle, setEditTitle] = useState('');
-  const [editDeadline, setEditDeadline] = useState('');
+  const [editDraft, setEditDraft] = useState<EditDraft | null>(null);
+  const [editOriginal, setEditOriginal] = useState<string | null>(null);
+  const [editView, setEditView] = useState<'list' | 'question'>('list');
+  const [editQIndex, setEditQIndex] = useState<number | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   // --- 3-dots menu state ---
@@ -163,26 +180,188 @@ export default function ActivitiesScreen() {
     }
   };
 
-  const handleOpenEdit = (quiz: Quiz) => {
-    setEditTarget(quiz);
-    setEditTitle(quiz.title);
-    setEditDeadline(
-      quiz.available_until
+  const openEditor = (quiz: Quiz) => {
+    const draft: EditDraft = {
+      id: quiz.id,
+      title: quiz.title,
+      available_until: quiz.available_until
         ? new Date(quiz.available_until).toISOString().slice(0, 16).replace('T', ' ')
         : '',
+      questions: (quiz.questions || []).map((q) => ({
+        id: q.id,
+        question_text: q.question_text || '',
+        options: [...(q.options || [])],
+        correct_answer: q.correct_answer || '',
+        explanation: q.explanation || '',
+      })),
+    };
+    setEditTarget(quiz);
+    setEditDraft(draft);
+    setEditOriginal(JSON.stringify(draft));
+    setEditView('list');
+    setEditQIndex(null);
+  };
+
+  const closeEditor = () => {
+    setEditTarget(null);
+    setEditDraft(null);
+    setEditOriginal(null);
+    setEditView('list');
+    setEditQIndex(null);
+  };
+
+  const requestCloseEditor = () => {
+    if (isSavingEdit) return;
+    const dirty = editOriginal !== null && editDraft && JSON.stringify(editDraft) !== editOriginal;
+    if (!dirty) {
+      closeEditor();
+      return;
+    }
+    Alert.alert(
+      'Unsaved Changes',
+      'You have unsaved changes to this quiz. What would you like to do?',
+      [
+        { text: 'Don\'t Save', style: 'destructive', onPress: closeEditor },
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Save', onPress: () => handleSaveEdit() },
+      ],
+      { cancelable: true },
     );
   };
 
+  const openQuestion = (index: number) => {
+    setEditQIndex(index);
+    setEditView('question');
+  };
+
+  const goToList = () => {
+    setEditView('list');
+    setEditQIndex(null);
+  };
+
+  const updateDraftTitle = (title: string) => setEditDraft((d) => (d ? { ...d, title } : d));
+
+  const updateDraftDeadline = (text: string) => setEditDraft((d) => (d ? { ...d, available_until: text } : d));
+
+  const updateEditQuestion = (index: number, field: 'question_text' | 'correct_answer' | 'explanation', value: string) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const questions = d.questions.map((q, i) => (i === index ? { ...q, [field]: value } : q));
+      return { ...d, questions };
+    });
+  };
+
+  const updateEditOption = (qIndex: number, oIndex: number, text: string) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const questions = d.questions.map((q, i) => {
+        if (i !== qIndex) return q;
+        const options = q.options.map((opt, oi) => (oi === oIndex ? text : opt));
+        const correct_answer = q.correct_answer === q.options[oIndex] ? text : q.correct_answer;
+        return { ...q, options, correct_answer };
+      });
+      return { ...d, questions };
+    });
+  };
+
+  const addEditOption = (qIndex: number) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const questions = d.questions.map((q, i) => (i === qIndex ? { ...q, options: [...q.options, ''] } : q));
+      return { ...d, questions };
+    });
+  };
+
+  const removeEditOption = (qIndex: number, oIndex: number) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const questions = d.questions.map((q, i) => {
+        if (i !== qIndex) return q;
+        const removed = q.options[oIndex];
+        const options = q.options.filter((_, oi) => oi !== oIndex);
+        const correct_answer = q.correct_answer === removed ? '' : q.correct_answer;
+        return { ...q, options, correct_answer };
+      });
+      return { ...d, questions };
+    });
+  };
+
+  const setEditCorrect = (qIndex: number, optionText: string) => {
+    updateEditQuestion(qIndex, 'correct_answer', optionText);
+  };
+
+  const removeEditQuestion = (qIndex: number) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      return { ...d, questions: d.questions.filter((_, i) => i !== qIndex) };
+    });
+  };
+
+  const removeActiveQuestion = () => {
+    if (editQIndex === null) return;
+    const index = editQIndex;
+    Alert.alert(
+      'Delete Question',
+      `Remove Question ${index + 1} from this quiz?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            removeEditQuestion(index);
+            goToList();
+          },
+        },
+      ],
+    );
+  };
+
+  const addEditQuestion = () => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const hasOptions = d.questions.length > 0 && d.questions[0].options.length > 0;
+      return {
+        ...d,
+        questions: [...d.questions, { question_text: '', options: hasOptions ? ['', ''] : [], correct_answer: '', explanation: '' }],
+      };
+    });
+    setEditQIndex((editDraft?.questions.length ?? 0));
+    setEditView('question');
+  };
+
   const handleSaveEdit = async () => {
-    if (!editTarget) return;
-    const title = editTitle.trim();
+    if (!editDraft) return;
+    const title = editDraft.title.trim();
     if (!title) {
       Alert.alert('Title Required', 'Please enter a title for your quiz.');
       return;
     }
+    for (let i = 0; i < editDraft.questions.length; i++) {
+      const q = editDraft.questions[i];
+      if (!q.question_text.trim()) {
+        Alert.alert('Incomplete Question', `Question ${i + 1} needs question text.`);
+        return;
+      }
+      if (q.options.length > 0) {
+        const nonEmpty = q.options.filter((o) => o.trim());
+        if (nonEmpty.length < 2) {
+          Alert.alert('Incomplete Question', `Question ${i + 1} needs at least two options.`);
+          return;
+        }
+        if (!q.correct_answer) {
+          Alert.alert('Missing Correct Answer', `Pick the correct answer for Question ${i + 1}.`);
+          return;
+        }
+      } else if (!q.correct_answer.trim()) {
+        Alert.alert('Missing Answer', `Question ${i + 1} needs an answer.`);
+        return;
+      }
+    }
+
     let available_until: string | null = null;
-    if (editDeadline.trim()) {
-      const parsed = parseDeadlineInput(editDeadline);
+    if (editDraft.available_until.trim()) {
+      const parsed = parseDeadlineInput(editDraft.available_until);
       if (!parsed) {
         Alert.alert('Invalid Deadline', 'Enter the deadline as YYYY-MM-DD HH:MM (24-hour), or leave it blank.');
         return;
@@ -193,12 +372,23 @@ export default function ActivitiesScreen() {
       }
       available_until = parsed.toISOString();
     }
+
     try {
       setIsSavingEdit(true);
-      const updated = await updateQuiz(editTarget.id, { title, available_until });
-      setQuizzes((prev) => prev.map((q) => (q.id === updated.id ? { ...q, ...updated } : q)));
+      const updated = await updateQuiz(editDraft.id, {
+        title,
+        available_until,
+        questions: editDraft.questions.map((q) => ({
+          id: q.id,
+          question_text: q.question_text.trim(),
+          options: q.options.map((o) => o.trim()).filter((o) => o !== ''),
+          correct_answer: q.correct_answer,
+          explanation: q.explanation.trim(),
+        })),
+      });
+      setQuizzes((prev) => prev.map((quiz) => (quiz.id === updated.id ? { ...quiz, ...updated } : quiz)));
       invalidateCachePrefix('/ai/quizzes');
-      setEditTarget(null);
+      closeEditor();
       Alert.alert('Saved', 'Your quiz was updated.');
     } catch (err) {
       Alert.alert('Save failed', err instanceof Error ? err.message : 'Could not update the quiz.');
@@ -238,32 +428,6 @@ export default function ActivitiesScreen() {
     } finally {
       setIsRenaming(false);
     }
-  };
-
-  const renderQuizMenu = (quiz: Quiz) => {
-    if (menuQuizId !== quiz.id) return null;
-    return (
-      <TouchableOpacity style={styles.menuOverlay} onPress={closeMenu} activeOpacity={1}>
-        <View style={[styles.menuDropdown, styles.menuDropdownInCard]} pointerEvents="box-only">
-          <TouchableOpacity style={styles.menuItem} onPress={() => { closeMenu(); openRenameModal(quiz); }} activeOpacity={0.7}>
-            <Ionicons name="pencil-outline" size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
-            <Text style={styles.menuItemText}>Rename</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.menuItem} onPress={() => { closeMenu(); handleOpenEdit(quiz); }} activeOpacity={0.7}>
-            <Ionicons name="create-outline" size={18} color={COLORS.purpleVibrant} style={styles.menuItemIcon} />
-            <Text style={styles.menuItemText}>Edit</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.menuItem} onPress={() => { closeMenu(); handleShareQuiz(quiz); }} activeOpacity={0.7}>
-            <Ionicons name="share-outline" size={18} color={COLORS.purpleVibrant} style={styles.menuItemIcon} />
-            <Text style={styles.menuItemText}>Share</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.menuItem, styles.menuItemDanger]} onPress={() => { closeMenu(); handleDeleteQuiz(quiz); }} activeOpacity={0.7}>
-            <Ionicons name="trash-outline" size={18} color={COLORS.danger} style={styles.menuItemIcon} />
-            <Text style={[styles.menuItemText, { color: COLORS.danger }]}>Delete</Text>
-          </TouchableOpacity>
-        </View>
-      </TouchableOpacity>
-    );
   };
 
   const pickQuizFile = async () => {
@@ -727,7 +891,6 @@ export default function ActivitiesScreen() {
                     <Ionicons name="ellipsis-vertical" size={22} color={COLORS.textMuted} />
                   </TouchableOpacity>
                 </TouchableOpacity>
-                {renderQuizMenu(quiz)}
               </View>
             ))}
           </View>
@@ -1092,61 +1255,203 @@ export default function ActivitiesScreen() {
         </View>
       </Modal>
 
-      {/* Edit own quiz (title + deadline) */}
+      {/* Edit own quiz — question list + per-question editor */}
       <Modal
         visible={editTarget !== null}
         animationType="slide"
-        transparent
-        onRequestClose={() => setEditTarget(null)}
+        onRequestClose={requestCloseEditor}
       >
-        <View style={styles.modalOverlay}>
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            style={styles.shareSheet}
-          >
-            <View style={styles.shareSheetHeader}>
-              <Text style={styles.shareSheetTitle}>Edit Quiz</Text>
-              <TouchableOpacity onPress={() => setEditTarget(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                <Ionicons name="close" size={24} color={COLORS.textMuted} />
+        <KeyboardAvoidingView style={styles.editorRoot} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          {editView === 'list' ? (
+            <View style={styles.editorHeader}>
+              <TouchableOpacity onPress={requestCloseEditor} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+              </TouchableOpacity>
+              <Text style={styles.editorHeaderTitle}>Edit Quiz</Text>
+              <TouchableOpacity
+                style={[styles.editorSaveBtn, isSavingEdit && { opacity: 0.6 }]}
+                onPress={handleSaveEdit}
+                disabled={isSavingEdit}
+              >
+                {isSavingEdit ? <ActivityIndicator size="small" color="white" /> : <Text style={styles.editorSaveText}>Save</Text>}
               </TouchableOpacity>
             </View>
+          ) : (
+            <View style={styles.editorHeader}>
+              <TouchableOpacity onPress={goToList} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                <Ionicons name="arrow-back" size={24} color={COLORS.textPrimary} />
+              </TouchableOpacity>
+              <Text style={styles.editorHeaderTitle}>
+                {editQIndex !== null ? `Question ${editQIndex + 1}` : 'Question'}
+              </Text>
+              <TouchableOpacity onPress={removeActiveQuestion} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                <Ionicons name="trash-outline" size={22} color={COLORS.danger} />
+              </TouchableOpacity>
+            </View>
+          )}
 
-            <Text style={styles.quizGenLabel}>Title</Text>
-            <TextInput
-              style={styles.quizGenInput}
-              placeholder="Quiz title"
-              placeholderTextColor="#9CA3AF"
-              value={editTitle}
-              onChangeText={setEditTitle}
-              editable={!isSavingEdit}
-            />
+          <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.editorContent}>
+            {editDraft && editView === 'list' && (
+              <>
+                <Text style={styles.editorLabel}>Quiz Title</Text>
+                <TextInput
+                  style={styles.editorTitleInput}
+                  value={editDraft.title}
+                  onChangeText={updateDraftTitle}
+                  placeholder="Quiz title"
+                  placeholderTextColor={COLORS.textMuted}
+                  editable={!isSavingEdit}
+                />
 
-            <Text style={styles.quizGenLabel}>Deadline (optional)</Text>
-            <TextInput
-              style={styles.quizGenInput}
-              placeholder="YYYY-MM-DD HH:MM"
-              placeholderTextColor="#9CA3AF"
-              value={editDeadline}
-              onChangeText={setEditDeadline}
-              autoCapitalize="none"
-              autoCorrect={false}
-              editable={!isSavingEdit}
-            />
-            <Text style={styles.shareSheetHint}>
-              24-hour time. Leave blank for no deadline. This quiz has {editTarget?.questions?.length || 0} question(s); questions cannot be edited here.
-            </Text>
+                <Text style={styles.editorLabel}>Deadline (Optional) · YYYY-MM-DD HH:MM</Text>
+                <View style={styles.editorDeadlineRow}>
+                  <TextInput
+                    style={[styles.editorInput, { flex: 1 }]}
+                    value={editDraft.available_until}
+                    onChangeText={updateDraftDeadline}
+                    placeholder="e.g. 2026-10-01 23:59 — blank = no deadline"
+                    placeholderTextColor={COLORS.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    editable={!isSavingEdit}
+                  />
+                  {editDraft.available_until !== '' && (
+                    <TouchableOpacity
+                      style={styles.editorDeadlineClear}
+                      onPress={() => updateDraftDeadline('')}
+                      disabled={isSavingEdit}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    >
+                      <Ionicons name="close-circle" size={24} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+                  )}
+                </View>
+                <Text style={styles.editorMeta}>
+                  {editDraft.questions.length} {editDraft.questions.length === 1 ? 'question' : 'questions'} · {editTarget?.quiz_type || 'quiz'} · Tap a question to edit it
+                </Text>
 
-            <TouchableOpacity
-              style={[styles.quizGenGenerateButton, isSavingEdit && { opacity: 0.7 }]}
-              onPress={handleSaveEdit}
-              disabled={isSavingEdit}
-            >
-              {isSavingEdit ? <ActivityIndicator color="white" /> : (
-                <Text style={styles.quizGenGenerateButtonText}>Save Changes</Text>
-              )}
-            </TouchableOpacity>
-          </KeyboardAvoidingView>
-        </View>
+                {editDraft.questions.length === 0 && (
+                  <View style={styles.editorEmpty}>
+                    <Ionicons name="help-circle-outline" size={40} color={COLORS.textMuted} />
+                    <Text style={styles.editorEmptyText}>No questions yet — tap {"\u201CAdd Question\u201D"} below.</Text>
+                  </View>
+                )}
+
+                {editDraft.questions.map((question, qIndex) => (
+                  <TouchableOpacity
+                    key={question.id ?? `new-${qIndex}`}
+                    style={styles.questionRow}
+                    onPress={() => openQuestion(qIndex)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.questionRowNum}>
+                      <Text style={styles.questionRowNumText}>{qIndex + 1}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.questionRowText} numberOfLines={2}>
+                        {question.question_text.trim() || 'Untitled question'}
+                      </Text>
+                      <Text style={styles.questionRowMeta} numberOfLines={1}>
+                        Answer: {question.correct_answer.trim() || 'not set'}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                ))}
+
+                <TouchableOpacity style={styles.addQuestionBtn} onPress={addEditQuestion} disabled={isSavingEdit}>
+                  <Ionicons name="add-circle-outline" size={18} color={COLORS.purplePrimary} />
+                  <Text style={styles.addQuestionText}>Add Question</Text>
+                </TouchableOpacity>
+              </>
+            )}
+
+            {editDraft && editView === 'question' && editQIndex !== null && editDraft.questions[editQIndex] && (
+              (() => {
+                const question = editDraft.questions[editQIndex];
+                const qIndex = editQIndex;
+                return (
+                  <>
+                    <Text style={styles.editorLabel}>Question</Text>
+                    <TextInput
+                      style={[styles.editorInput, styles.questionTextInput]}
+                      value={question.question_text}
+                      onChangeText={(text) => updateEditQuestion(qIndex, 'question_text', text)}
+                      placeholder="Enter the question"
+                      placeholderTextColor={COLORS.textMuted}
+                      multiline
+                      editable={!isSavingEdit}
+                    />
+
+                    {question.options.length > 0 ? (
+                      <>
+                        <Text style={styles.editorLabel}>Options</Text>
+                        {question.options.map((option, oIndex) => {
+                          const isCorrect = option === question.correct_answer && !!option;
+                          return (
+                            <View key={oIndex} style={styles.optionRow}>
+                              <TouchableOpacity onPress={() => setEditCorrect(qIndex, option)} style={styles.optionCheck}>
+                                <Ionicons
+                                  name={isCorrect ? 'checkmark-circle' : 'ellipse-outline'}
+                                  size={20}
+                                  color={isCorrect ? COLORS.success : COLORS.textMuted}
+                                />
+                              </TouchableOpacity>
+                              <TextInput
+                                style={styles.optionInput}
+                                value={option}
+                                onChangeText={(text) => updateEditOption(qIndex, oIndex, text)}
+                                placeholder={`Option ${oIndex + 1}`}
+                                placeholderTextColor={COLORS.textMuted}
+                                editable={!isSavingEdit}
+                              />
+                              <TouchableOpacity onPress={() => removeEditOption(qIndex, oIndex)} style={styles.optionRemove} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                                <Ionicons name="close-circle" size={20} color={COLORS.textMuted} />
+                              </TouchableOpacity>
+                            </View>
+                          );
+                        })}
+                        <TouchableOpacity style={styles.addOptionBtn} onPress={() => addEditOption(qIndex)} disabled={isSavingEdit}>
+                          <Ionicons name="add" size={16} color={COLORS.purplePrimary} />
+                          <Text style={styles.addOptionText}>Add Option</Text>
+                        </TouchableOpacity>
+                        <Text style={styles.editorHint}>Tap the circle next to an option to mark it as the correct answer.</Text>
+                      </>
+                    ) : (
+                      <>
+                        <Text style={styles.editorLabel}>Answer</Text>
+                        <TextInput
+                          style={styles.editorInput}
+                          value={question.correct_answer}
+                          onChangeText={(text) => updateEditQuestion(qIndex, 'correct_answer', text)}
+                          placeholder="Enter the correct answer"
+                          placeholderTextColor={COLORS.textMuted}
+                          editable={!isSavingEdit}
+                        />
+                      </>
+                    )}
+
+                    <Text style={styles.editorLabel}>Explanation (Optional)</Text>
+                    <TextInput
+                      style={[styles.editorInput, styles.explanationInput]}
+                      value={question.explanation}
+                      onChangeText={(text) => updateEditQuestion(qIndex, 'explanation', text)}
+                      placeholder="Brief explanation why"
+                      placeholderTextColor={COLORS.textMuted}
+                      multiline
+                      editable={!isSavingEdit}
+                    />
+
+                    <TouchableOpacity style={styles.qDoneBtn} onPress={goToList} disabled={isSavingEdit}>
+                      <Ionicons name="checkmark" size={18} color="white" />
+                      <Text style={styles.qDoneBtnText}>Done</Text>
+                    </TouchableOpacity>
+                  </>
+                );
+              })()
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* Quiz Info Modal */}
@@ -1213,6 +1518,44 @@ export default function ActivitiesScreen() {
             </View>
           )}
         </View>
+      </Modal>
+
+      {/* Quiz 3-dots menu — modal action sheet (Rename / Edit / Share / Delete) */}
+      <Modal
+        visible={menuQuizId !== null}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={closeMenu}
+      >
+        <Pressable style={styles.menuSheetOverlay} onPress={closeMenu}>
+          <Pressable style={styles.menuSheetCard} onPress={() => {}}>
+            {(() => {
+              const quiz = quizzes.find((q) => q.id === menuQuizId);
+              if (!quiz) return null;
+              return (
+                <>
+                  <Text style={styles.menuSheetTitle} numberOfLines={2}>{quiz.title}</Text>
+                  <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); openRenameModal(quiz); }} activeOpacity={0.7}>
+                    <Ionicons name="pencil-outline" size={20} color={COLORS.textPrimary} style={styles.menuSheetIcon} />
+                    <Text style={styles.menuSheetRowText}>Rename</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); openEditor(quiz); }} activeOpacity={0.7}>
+                    <Ionicons name="create-outline" size={20} color={COLORS.purpleVibrant} style={styles.menuSheetIcon} />
+                    <Text style={styles.menuSheetRowText}>Edit questions</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); handleShareQuiz(quiz); }} activeOpacity={0.7}>
+                    <Ionicons name="share-outline" size={20} color={COLORS.purpleVibrant} style={styles.menuSheetIcon} />
+                    <Text style={styles.menuSheetRowText}>Share</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.menuSheetRow, styles.menuSheetDanger]} onPress={() => { closeMenu(); handleDeleteQuiz(quiz); }} activeOpacity={0.7}>
+                    <Ionicons name="trash-outline" size={20} color={COLORS.danger} style={styles.menuSheetIcon} />
+                    <Text style={[styles.menuSheetRowText, { color: COLORS.danger }]}>Delete</Text>
+                  </TouchableOpacity>
+                </>
+              );
+            })()}
+          </Pressable>
+        </Pressable>
       </Modal>
 
       {/* Rename Quiz Modal */}
@@ -1445,32 +1788,36 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bg,
   },
   menuBtn: { padding: 8 },
-  menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100 },
-  menuDropdown: {
-    position: 'absolute',
+  menuSheetOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24 },
+  menuSheetCard: {
     backgroundColor: COLORS.surface,
-    borderRadius: 16,
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    width: '100%',
+    maxWidth: 360,
     borderWidth: 1,
     borderColor: COLORS.border,
-    paddingVertical: 8,
-    width: 160,
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 10,
   },
-  menuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 14,
+  menuSheetTitle: {
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textMutedStrong,
+    paddingHorizontal: 16,
     paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    marginBottom: 4,
   },
-  menuItemIcon: { width: 24 },
-  menuItemText: { fontSize: 14, fontFamily: FONTS.medium, fontWeight: '600', color: COLORS.textPrimary },
-  menuItemDanger: { borderTopWidth: 1, borderTopColor: COLORS.border, marginTop: 4, paddingTop: 16 },
-  menuDropdownInCard: { right: 8, top: 44 },
+  menuSheetRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderRadius: 12 },
+  menuSheetIcon: { width: 24 },
+  menuSheetRowText: { fontSize: 15, fontFamily: FONTS.medium, fontWeight: '600', color: COLORS.textPrimary },
+  menuSheetDanger: { marginTop: 4, borderTopWidth: 1, borderTopColor: COLORS.border, paddingTop: 16 },
 
   // Quiz info modal
   infoModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24 },
@@ -1510,6 +1857,138 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   infoModalStartBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 15 },
+
+  // Quiz editor (Edit own quiz)
+  editorRoot: { flex: 1, backgroundColor: COLORS.bg },
+  editorHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    backgroundColor: COLORS.surface,
+  },
+  editorHeaderBtn: { padding: 8 },
+  editorHeaderTitle: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary },
+  editorSaveBtn: {
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    minWidth: 64,
+    alignItems: 'center',
+  },
+  editorSaveText: { color: 'white', fontFamily: FONTS.bold, fontSize: 14 },
+  editorContent: { padding: 20, paddingBottom: 48 },
+  editorLabel: {
+    fontSize: 13,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textMutedStrong,
+    marginTop: 14,
+    marginBottom: 6,
+  },
+  editorInput: {
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+  },
+  editorTitleInput: {
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textPrimary,
+  },
+  editorDeadlineRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  editorDeadlineClear: { padding: 4 },
+  editorMeta: { fontSize: 12, color: COLORS.textMuted, marginTop: 10, fontFamily: FONTS.regular, lineHeight: 17 },
+  editorHint: { fontSize: 12, color: COLORS.textMuted, marginTop: 8, fontFamily: FONTS.regular, lineHeight: 17 },
+  editorEmpty: { alignItems: 'center', paddingVertical: 36, gap: 10 },
+  editorEmptyText: { fontSize: 13, color: COLORS.textMuted, fontFamily: FONTS.regular },
+  questionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    marginTop: 10,
+  },
+  questionRowNum: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.purpleGhost,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  questionRowNumText: { fontSize: 14, fontFamily: FONTS.bold, color: COLORS.purplePrimary },
+  questionRowText: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.textPrimary },
+  questionRowMeta: { fontSize: 12, color: COLORS.textMuted, marginTop: 3, fontFamily: FONTS.regular },
+  questionTextInput: { minHeight: 60, textAlignVertical: 'top' },
+  qDoneBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: 14,
+    paddingVertical: 14,
+    marginTop: 22,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  qDoneBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 15 },
+  optionRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
+  optionCheck: { padding: 4 },
+  optionInput: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+  },
+  optionRemove: { padding: 4 },
+  addOptionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, alignSelf: 'flex-start' },
+  addOptionText: { fontSize: 13, fontFamily: FONTS.semiBold, color: COLORS.purplePrimary },
+  explanationInput: { minHeight: 70, textAlignVertical: 'top' },
+  addQuestionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 18,
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: COLORS.purpleLight,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  addQuestionText: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.purplePrimary },
 
   // Rename modal
   renameModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },

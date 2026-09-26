@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar, KeyboardAvoidingView } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar, KeyboardAvoidingView, Pressable } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Ionicons } from '@expo/vector-icons';
@@ -543,7 +543,6 @@ export default function AIAssistantScreen() {
               {sessions.map(session => {
                 const isActive = activeSessionId === session.id;
                 const isEditing = editingSessionId === session.id;
-                const isMenuOpen = menuSessionId === session.id;
 
                 return (
                   <View key={session.id} style={styles.sessionItemWrapper}>
@@ -607,26 +606,6 @@ export default function AIAssistantScreen() {
                         </View>
                       )}
                     </TouchableOpacity>
-
-                    {/* 3-dots dropdown menu */}
-                    {isMenuOpen && (
-                      <View style={styles.menuOverlay} onPress={closeMenu}>
-                        <View style={[styles.menuDropdown, { top: 50 }]} pointerEvents="box-only">
-                          <TouchableOpacity style={styles.menuItem} onPress={() => handlePinSession(session.id, session.pinned || false)} activeOpacity={0.7}>
-                            <Ionicons name={session.pinned ? "pin-outline" : "pin"} size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
-                            <Text style={styles.menuItemText}>{session.pinned ? 'Unpin' : 'Pin'}</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity style={styles.menuItem} onPress={() => startRenameSession(session.id, session.title)} activeOpacity={0.7}>
-                            <Ionicons name="create-outline" size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
-                            <Text style={styles.menuItemText}>Rename</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity style={[styles.menuItem, styles.menuItemDanger]} onPress={() => handleDeleteSession(session.id)} activeOpacity={0.7}>
-                            <Ionicons name="trash-outline" size={18} color={COLORS.danger} style={styles.menuItemIcon} />
-                            <Text style={[styles.menuItemText, { color: COLORS.danger }]}>Delete</Text>
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    )}
                   </View>
                 );
               })}
@@ -638,6 +617,40 @@ export default function AIAssistantScreen() {
             onPress={() => setIsMenuVisible(false)} 
           />
         </View>
+      </Modal>
+
+      {/* Chat 3-dots menu — modal action sheet (Pin / Rename / Delete) */}
+      <Modal
+        visible={menuSessionId !== null}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={closeMenu}
+      >
+        <Pressable style={styles.menuSheetOverlay} onPress={closeMenu}>
+          <Pressable style={styles.menuSheetCard} onPress={() => {}}>
+            {(() => {
+              const session = sessions.find((s) => s.id === menuSessionId);
+              if (!session) return null;
+              return (
+                <>
+                  <Text style={styles.menuSheetTitle} numberOfLines={2}>{session.title}</Text>
+                  <TouchableOpacity style={styles.menuSheetRow} onPress={() => handlePinSession(session.id, session.pinned || false)} activeOpacity={0.7}>
+                    <Ionicons name={session.pinned ? "pin-outline" : "pin"} size={20} color={COLORS.textPrimary} style={styles.menuSheetIcon} />
+                    <Text style={styles.menuSheetRowText}>{session.pinned ? 'Unpin' : 'Pin'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.menuSheetRow} onPress={() => startRenameSession(session.id, session.title)} activeOpacity={0.7}>
+                    <Ionicons name="create-outline" size={20} color={COLORS.textPrimary} style={styles.menuSheetIcon} />
+                    <Text style={styles.menuSheetRowText}>Rename</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.menuSheetRow, styles.menuSheetDanger]} onPress={() => handleDeleteSession(session.id)} activeOpacity={0.7}>
+                    <Ionicons name="trash-outline" size={20} color={COLORS.danger} style={styles.menuSheetIcon} />
+                    <Text style={[styles.menuSheetRowText, { color: COLORS.danger }]}>Delete</Text>
+                  </TouchableOpacity>
+                </>
+              );
+            })()}
+          </Pressable>
+        </Pressable>
       </Modal>
 
       {/* Messages Scroll Area */}
@@ -1199,37 +1212,34 @@ sessionMenuButton: {
     borderRadius: 8,
     backgroundColor: 'transparent',
   },
-  menuOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 10,
-  },
-  menuDropdown: {
-    position: 'absolute',
-    right: 0,
+  menuSheetOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24 },
+  menuSheetCard: {
     backgroundColor: COLORS.surface,
-    borderRadius: 12,
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    width: '100%',
+    maxWidth: 360,
     borderWidth: 1,
     borderColor: COLORS.border,
-    paddingVertical: 6,
-    width: 140,
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 10,
   },
-  menuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 14,
+  menuSheetTitle: {
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textPrimary,
+    paddingHorizontal: 16,
     paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    marginBottom: 4,
   },
-  menuItemIcon: { width: 24 },
-  menuItemText: { fontSize: 14, fontFamily: FONTS.medium, fontWeight: '600', color: COLORS.textPrimary },
-  menuItemDanger: { borderTopWidth: 1, borderTopColor: COLORS.border, marginTop: 4, paddingTop: 16 },
+  menuSheetRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderRadius: 12 },
+  menuSheetIcon: { width: 24 },
+  menuSheetRowText: { fontSize: 15, fontFamily: FONTS.medium, fontWeight: '600', color: COLORS.textPrimary },
+  menuSheetDanger: { marginTop: 4, borderTopWidth: 1, borderTopColor: COLORS.border, paddingTop: 16 },
 });
