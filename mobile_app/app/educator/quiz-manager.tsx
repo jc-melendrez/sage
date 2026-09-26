@@ -153,7 +153,6 @@ export default function QuizManagerScreen() {
 
   // 3-dots menu state
   const [menuQuizId, setMenuQuizId] = useState<number | null>(null);
-  const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
 
   // Rename modal
   const [renameQuizId, setRenameQuizId] = useState<number | null>(null);
@@ -479,19 +478,12 @@ export default function QuizManagerScreen() {
   };
 
   // --- 3-dots menu functions ---
-  const toggleMenu = (quizId: number, position: { x: number; y: number }) => {
-    if (menuQuizId === quizId) {
-      setMenuQuizId(null);
-      setMenuPosition(null);
-    } else {
-      setMenuQuizId(quizId);
-      setMenuPosition(position);
-    }
+  const toggleMenu = (quizId: number) => {
+    setMenuQuizId(menuQuizId === quizId ? null : quizId);
   };
 
   const closeMenu = () => {
     setMenuQuizId(null);
-    setMenuPosition(null);
   };
 
   // --- Rename quiz ---
@@ -592,28 +584,20 @@ export default function QuizManagerScreen() {
     handleDeleteQuiz(quiz);
   };
 
-  const renderMenu = () => {
-    if (!menuQuizId || !menuPosition) return null;
-    const quiz = quizzes.find(q => q.id === menuQuizId);
-    if (!quiz) return null;
-
+  const renderQuizMenu = (quiz: Quiz) => {
+    if (menuQuizId !== quiz.id) return null;
     return (
       <TouchableOpacity style={styles.menuOverlay} onPress={closeMenu} activeOpacity={1}>
-        <View
-          style={[
-            styles.menuDropdown,
-            { left: menuPosition.x - 160, top: menuPosition.y + 36 },
-          ]}
-        >
-          <TouchableOpacity style={styles.menuItem} onPress={() => openEditor(quiz)}>
+        <View style={[styles.menuDropdown, styles.menuDropdownInCard]} pointerEvents="box-only">
+          <TouchableOpacity style={styles.menuItem} onPress={() => { closeMenu(); openEditor(quiz); }}>
             <Ionicons name="create-outline" size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
             <Text style={styles.menuItemText}>Edit</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.menuItem} onPress={() => openRenameModal(quiz)}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => { closeMenu(); openRenameModal(quiz); }}>
             <Ionicons name="pencil-outline" size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
             <Text style={styles.menuItemText}>Rename</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.menuItem} onPress={() => openShareModal(quiz)}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => { closeMenu(); openShareModal(quiz); }}>
             <Ionicons name="share-outline" size={18} color={COLORS.purplePrimary} style={styles.menuItemIcon} />
             <Text style={styles.menuItemText}>Share</Text>
           </TouchableOpacity>
@@ -675,7 +659,7 @@ export default function QuizManagerScreen() {
                 <View key={q.id} style={styles.quizCard}>
                   <TouchableOpacity
                     style={{ flex: 1 }}
-                    onPress={() => setInfoModalQuiz(q)}
+                    onPress={() => { closeMenu(); setInfoModalQuiz(q); }}
                     activeOpacity={0.7}
                   >
                     <View style={styles.quizCardTop}>
@@ -699,14 +683,14 @@ export default function QuizManagerScreen() {
                         style={styles.menuBtn}
                         onPress={(e) => {
                           e.stopPropagation();
-                          const layout = e.nativeEvent.layout;
-                          toggleMenu(q.id, { x: layout.x + layout.width, y: layout.y });
+                          toggleMenu(q.id);
                         }}
                       >
-                        <Ionicons name="ellipsis-horizontal" size={24} color={COLORS.textMuted} />
+                        <Ionicons name="ellipsis-vertical" size={24} color={COLORS.textMuted} />
                       </TouchableOpacity>
                     </View>
                   </TouchableOpacity>
+                  {renderQuizMenu(q)}
                 </View>
               ))}
             </View>
@@ -1259,8 +1243,6 @@ export default function QuizManagerScreen() {
         </View>
       </Modal>
 
-      {renderMenu()}
-
       {showDeadlinePicker && Platform.OS !== 'web' && (
         <DateTimePicker
           testID="deadlinePicker"
@@ -1421,7 +1403,7 @@ const styles = StyleSheet.create({
   linkTitle: { fontSize: 14, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textPrimary, marginBottom: 2 },
   linkSub: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textSecondary },
 
-  quizCard: { backgroundColor: COLORS.surface, borderRadius: RADIUS.lg, padding: 16, borderWidth: 1, borderColor: COLORS.border },
+  quizCard: { backgroundColor: COLORS.surface, borderRadius: RADIUS.lg, padding: 16, borderWidth: 1, borderColor: COLORS.border, position: 'relative' },
   quizCardTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
   quizCardTitle: { fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary, marginBottom: 3 },
   quizCardMeta: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textSecondary },
@@ -1571,6 +1553,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.15,
     shadowRadius: 12,
   },
+  menuDropdownInCard: { right: 8, top: 40 },
   menuItem: {
     flexDirection: 'row',
     alignItems: 'center',

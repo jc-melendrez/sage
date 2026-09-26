@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
   TextInput, ActivityIndicator, Alert, Platform, StatusBar, RefreshControl,
-  KeyboardAvoidingView
+  KeyboardAvoidingView, Pressable
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
@@ -103,6 +103,17 @@ export default function ActivitiesScreen() {
   const [editDeadline, setEditDeadline] = useState('');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
+  // --- 3-dots menu state ---
+  const [menuQuizId, setMenuQuizId] = useState<number | null>(null);
+
+  // --- Quiz info modal state ---
+  const [infoModalQuiz, setInfoModalQuiz] = useState<Quiz | null>(null);
+
+  // --- Rename modal state ---
+  const [renameQuizId, setRenameQuizId] = useState<number | null>(null);
+  const [renameTitle, setRenameTitle] = useState('');
+  const [isRenaming, setIsRenaming] = useState(false);
+
   const handleShareQuiz = async (quiz: Quiz) => {
     try {
       const token = await getToken();
@@ -194,6 +205,65 @@ export default function ActivitiesScreen() {
     } finally {
       setIsSavingEdit(false);
     }
+  };
+
+  // --- 3-dots menu functions ---
+  const toggleMenu = (quizId: number) => {
+    setMenuQuizId(menuQuizId === quizId ? null : quizId);
+  };
+
+  const closeMenu = () => {
+    setMenuQuizId(null);
+  };
+
+  // --- Rename quiz ---
+  const openRenameModal = (quiz: Quiz) => {
+    setRenameQuizId(quiz.id);
+    setRenameTitle(quiz.title);
+    closeMenu();
+  };
+
+  const handleRenameQuiz = async () => {
+    if (!renameQuizId || !renameTitle.trim()) return;
+    try {
+      setIsRenaming(true);
+      const updated = await updateQuiz(renameQuizId, { title: renameTitle.trim() });
+      setQuizzes((prev) => prev.map((q) => (q.id === updated.id ? { ...q, ...updated } : q)));
+      invalidateCachePrefix('/ai/quizzes');
+      setRenameQuizId(null);
+      setRenameTitle('');
+      Alert.alert('Renamed', 'Quiz title updated.');
+    } catch (err) {
+      Alert.alert('Rename failed', err instanceof Error ? err.message : 'Could not rename the quiz.');
+    } finally {
+      setIsRenaming(false);
+    }
+  };
+
+  const renderQuizMenu = (quiz: Quiz) => {
+    if (menuQuizId !== quiz.id) return null;
+    return (
+      <TouchableOpacity style={styles.menuOverlay} onPress={closeMenu} activeOpacity={1}>
+        <View style={[styles.menuDropdown, styles.menuDropdownInCard]} pointerEvents="box-only">
+          <TouchableOpacity style={styles.menuItem} onPress={() => { closeMenu(); openRenameModal(quiz); }} activeOpacity={0.7}>
+            <Ionicons name="pencil-outline" size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
+            <Text style={styles.menuItemText}>Rename</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.menuItem} onPress={() => { closeMenu(); handleOpenEdit(quiz); }} activeOpacity={0.7}>
+            <Ionicons name="create-outline" size={18} color={COLORS.purpleVibrant} style={styles.menuItemIcon} />
+            <Text style={styles.menuItemText}>Edit</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.menuItem} onPress={() => { closeMenu(); handleShareQuiz(quiz); }} activeOpacity={0.7}>
+            <Ionicons name="share-outline" size={18} color={COLORS.purpleVibrant} style={styles.menuItemIcon} />
+            <Text style={styles.menuItemText}>Share</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.menuItem, styles.menuItemDanger]} onPress={() => { closeMenu(); handleDeleteQuiz(quiz); }} activeOpacity={0.7}>
+            <Ionicons name="trash-outline" size={18} color={COLORS.danger} style={styles.menuItemIcon} />
+            <Text style={[styles.menuItemText, { color: COLORS.danger }]}>Delete</Text>
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    );
   };
 
   const pickQuizFile = async () => {
@@ -626,7 +696,11 @@ export default function ActivitiesScreen() {
             )}
             {quizzes.map((quiz) => (
               <View key={quiz.id} style={styles.card}>
-                <View style={styles.cardHeader}>
+                <TouchableOpacity
+                  style={styles.quizCardPress}
+                  onPress={() => { closeMenu(); setInfoModalQuiz(quiz); }}
+                  activeOpacity={0.9}
+                >
                   <View style={{ flex: 1 }}>
                     <View style={styles.badgesRow}>
                       <View style={styles.badgePill}><Text style={styles.badgePillText}>{quiz.questions?.length || 0} Qs</Text></View>
@@ -642,51 +716,18 @@ export default function ActivitiesScreen() {
                       </Text>
                     )}
                   </View>
-                  <View style={styles.quizCardActions}>
-                    <TouchableOpacity
-                      style={styles.quizCardIconBtn}
-                      onPress={() => handleOpenEdit(quiz)}
-                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    >
-                      <Ionicons name="create-outline" size={18} color={COLORS.purpleVibrant} />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.quizCardIconBtn}
-                      onPress={() => handleShareQuiz(quiz)}
-                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    >
-                      <Ionicons name="share-outline" size={18} color={COLORS.purpleVibrant} />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.quizCardIconBtn}
-                      onPress={() => handleDeleteQuiz(quiz)}
-                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    >
-                      <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
-                    </TouchableOpacity>
-                  </View>
-                  {quiz.attempted ? (
-                    <View style={[styles.takeQuizBtn, { backgroundColor: COLORS.success, opacity: 0.8 }]}>
-                      <Ionicons name="checkmark-outline" size={16} color="white" />
-                      <Text style={styles.takeQuizBtnText}>Taken</Text>
-                    </View>
-                  ) : (
-                    <TouchableOpacity
-                      style={styles.takeQuizBtn}
-                      onPress={() => handleTakeQuiz(quiz)}
-                      disabled={isQuizStarting}
-                    >
-                      {isQuizStarting ? (
-                        <ActivityIndicator size="small" color="white" />
-                      ) : (
-                        <>
-                          <Ionicons name="play-outline" size={16} color="white" />
-                          <Text style={styles.takeQuizBtnText}>Take</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
-                  )}
-                </View>
+                  <TouchableOpacity
+                    style={styles.menuBtn}
+                    onPress={(e) => {
+                      e.stopPropagation();
+                      toggleMenu(quiz.id);
+                    }}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <Ionicons name="ellipsis-vertical" size={22} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                </TouchableOpacity>
+                {renderQuizMenu(quiz)}
               </View>
             ))}
           </View>
@@ -1108,6 +1149,102 @@ export default function ActivitiesScreen() {
         </View>
       </Modal>
 
+      {/* Quiz Info Modal */}
+      <Modal
+        visible={infoModalQuiz !== null}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setInfoModalQuiz(null)}
+      >
+        <View style={styles.infoModalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setInfoModalQuiz(null)} />
+          {infoModalQuiz && (
+            <View style={styles.infoModalCard}>
+              <View style={styles.infoModalHeader}>
+                <View style={[styles.badgePill, styles.infoModalBadge]}>
+                  <Ionicons name={infoModalQuiz.quiz_type === 't/f' ? 'checkmark-outline' : 'list-outline'} size={14} color={COLORS.purpleVibrant} />
+                  <Text style={styles.badgePillText}>{infoModalQuiz.quiz_type || 'quiz'}</Text>
+                </View>
+                <Pressable style={styles.closeBtn} onPress={() => setInfoModalQuiz(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                  <Ionicons name="close" size={20} color={COLORS.textMuted} />
+                </Pressable>
+              </View>
+              <Text style={styles.infoModalTitle}>{infoModalQuiz.title}</Text>
+              <View style={styles.infoModalMetaRow}>
+                <Ionicons name="help-circle-outline" size={16} color={COLORS.purpleVibrant} />
+                <Text style={styles.infoModalMetaText}>{infoModalQuiz.questions?.length || 0} questions</Text>
+              </View>
+              <View style={styles.infoModalMetaRow}>
+                <Ionicons name="star-outline" size={16} color={COLORS.warning} />
+                <Text style={styles.infoModalMetaText}>25 XP reward</Text>
+              </View>
+              {infoModalQuiz.available_until && (
+                <View style={styles.infoModalMetaRow}>
+                  <Ionicons name="time-outline" size={16} color={new Date(infoModalQuiz.available_until).getTime() <= Date.now() ? COLORS.danger : COLORS.warning} />
+                  <Text style={[styles.infoModalMetaText, { color: new Date(infoModalQuiz.available_until).getTime() <= Date.now() ? COLORS.danger : COLORS.warning }]}>
+                    {new Date(infoModalQuiz.available_until).getTime() <= Date.now()
+                      ? `Closed ${new Date(infoModalQuiz.available_until).toLocaleString()}`
+                      : `Closes ${new Date(infoModalQuiz.available_until).toLocaleString()}`}
+                  </Text>
+                </View>
+              )}
+              {infoModalQuiz.attempted ? (
+                <View style={[styles.infoModalStartBtn, { backgroundColor: COLORS.success }]}>
+                  <Ionicons name="checkmark-circle-outline" size={18} color="white" />
+                  <Text style={styles.infoModalStartBtnText}>Already Taken</Text>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  style={styles.infoModalStartBtn}
+                  onPress={() => { const q = infoModalQuiz; setInfoModalQuiz(null); handleTakeQuiz(q); }}
+                  disabled={isQuizStarting}
+                  activeOpacity={0.8}
+                >
+                  {isQuizStarting ? (
+                    <ActivityIndicator size="small" color="white" />
+                  ) : (
+                    <>
+                      <Ionicons name="play-outline" size={18} color="white" />
+                      <Text style={styles.infoModalStartBtnText}>Start Quiz</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+        </View>
+      </Modal>
+
+      {/* Rename Quiz Modal */}
+      <Modal
+        visible={renameQuizId !== null}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => { setRenameQuizId(null); setRenameTitle(''); }}
+      >
+        <View style={styles.renameModalOverlay}>
+          <View style={styles.renameModalContent}>
+            <Text style={styles.renameModalTitle}>Rename Quiz</Text>
+            <TextInput
+              style={styles.renameModalInput}
+              value={renameTitle}
+              onChangeText={setRenameTitle}
+              placeholder="Quiz title"
+              placeholderTextColor={COLORS.textMuted}
+              autoFocus
+            />
+            <View style={styles.renameModalActions}>
+              <TouchableOpacity style={styles.renameModalCancel} onPress={() => { setRenameQuizId(null); setRenameTitle(''); }}>
+                <Text style={styles.renameModalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.renameModalConfirm, isRenaming && { opacity: 0.7 }]} onPress={handleRenameQuiz} disabled={isRenaming}>
+                {isRenaming ? <ActivityIndicator color="white" size="small" /> : <Text style={styles.renameModalConfirmText}>Rename</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* FAB — contextual per tab (not on Courses; students join instead of creating) */}
       {selectedTab === 'quizzes' && (
         <TouchableOpacity
@@ -1272,12 +1409,14 @@ const styles = StyleSheet.create({
     marginBottom: 16, 
     borderWidth: 1, 
     borderColor: COLORS.border,
+    position: 'relative',
     shadowColor: COLORS.purpleDeep,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.1,
     shadowRadius: 8,
     elevation: 2,
   },
+  quizCardPress: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 0 },
   colorDot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
   subjectBadge: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
@@ -1305,6 +1444,117 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: COLORS.bg,
   },
+  menuBtn: { padding: 8 },
+  menuOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100 },
+  menuDropdown: {
+    position: 'absolute',
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingVertical: 8,
+    width: 160,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  menuItemIcon: { width: 24 },
+  menuItemText: { fontSize: 14, fontFamily: FONTS.medium, fontWeight: '600', color: COLORS.textPrimary },
+  menuItemDanger: { borderTopWidth: 1, borderTopColor: COLORS.border, marginTop: 4, paddingTop: 16 },
+  menuDropdownInCard: { right: 8, top: 44 },
+
+  // Quiz info modal
+  infoModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24 },
+  infoModalCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 24,
+    padding: 24,
+    width: '100%',
+    maxWidth: 380,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  infoModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  infoModalBadge: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  closeBtn: { padding: 4 },
+  infoModalTitle: { fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginBottom: 16 },
+  infoModalMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 },
+  infoModalMetaText: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.textPrimary, flexShrink: 1 },
+  infoModalStartBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: 14,
+    paddingVertical: 14,
+    marginTop: 8,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  infoModalStartBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 15 },
+
+  // Rename modal
+  renameModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  renameModalContent: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    padding: 24,
+    width: '85%',
+    maxWidth: 360,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  renameModalTitle: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginBottom: 16, textAlign: 'center' },
+  renameModalInput: {
+    backgroundColor: COLORS.bg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+    marginBottom: 16,
+  },
+  renameModalActions: { flexDirection: 'row', gap: 12 },
+  renameModalCancel: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  renameModalCancelText: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.textSecondary },
+  renameModalConfirm: {
+    flex: 1,
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  renameModalConfirmText: { fontSize: 14, fontFamily: FONTS.bold, color: 'white' },
+
   shareSheet: {
     backgroundColor: COLORS.surface,
     borderTopLeftRadius: 24,
