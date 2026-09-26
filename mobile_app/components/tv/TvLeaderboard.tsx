@@ -7,8 +7,7 @@ import {
   ActivityIndicator,
   ScrollView,
 } from 'react-native';
-import {
-  Animated as RAnimated,
+import RAnimated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
@@ -110,6 +109,61 @@ const STATUS_META: Record<RoomStatus, { label: string; color: string }> = {
   active: { label: 'LIVE', color: COLORS.success },
   finished: { label: 'FINISHED', color: COLORS.gold },
 };
+
+const AVATAR_COLORS = ['#22D3EE', '#A78BFA', '#FBBF24', '#34D399', '#FB7185', '#60A5FA'];
+
+// ── demo mode: scripted snapshots fed through the same diff pipeline ────
+const DEMO_TICK = 2200;
+const DEMO_PLAYERS = ['Aura', 'Ben', 'Cale', 'Dia', 'Eli', 'Finn'];
+
+const DEMO_SCRIPT: { status: RoomStatus; rows: ([number, number, number] | null)[] }[] = [
+  { status: 'waiting', rows: [[0, 0, 0], [0, 0, 0], [0, 0, 0], null, null, null] },
+  { status: 'waiting', rows: [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]] },
+  { status: 'active', rows: [[200, 1, 1], [100, 1, 0], [100, 1, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]] },
+  { status: 'active', rows: [[500, 2, 2], [200, 2, 0], [300, 2, 0], [200, 1, 0], [100, 1, 0], [0, 1, 0]] },
+  { status: 'active', rows: [[800, 3, 3], [400, 3, 0], [300, 3, 0], [400, 2, 0], [200, 2, 0], [0, 1, 0]] },
+  { status: 'active', rows: [[900, 4, 4], [600, 4, 0], [500, 4, 0], [700, 3, 0], [300, 3, 0], [100, 2, 0]] },
+  { status: 'active', rows: [[1000, 5, 4], [700, 5, 0], [600, 5, 0], [1400, 4, 3], [500, 4, 0], [100, 2, 0]] },
+  { status: 'active', rows: [[1200, 6, 4], [900, 6, 0], [800, 6, 0], [1500, 5, 4], [600, 5, 0], [200, 4, 0]] },
+  { status: 'active', rows: [[1400, 7, 4], [1000, 7, 0], [1000, 7, 0], [1600, 6, 5], [800, 6, 0], [300, 5, 0]] },
+  { status: 'active', rows: [[1650, 8, 5], [1100, 8, 0], [1100, 8, 0], [1750, 7, 4], [900, 7, 0], [400, 6, 0]] },
+  { status: 'active', rows: [[1850, 9, 6], [1200, 9, 0], [1200, 9, 0], [2150, 8, 5], [1100, 8, 0], [600, 7, 0]] },
+  { status: 'active', rows: [[2050, 10, 7], [1300, 10, 0], [1300, 10, 0], [2450, 9, 6], [1200, 9, 0], [700, 8, 0]] },
+  { status: 'finished', rows: [[2050, 10, 7], [1300, 10, 0], [1300, 10, 0], [2450, 9, 6], [1200, 9, 0], [700, 8, 0]] },
+  { status: 'finished', rows: [[2050, 10, 7], [1300, 10, 0], [1300, 10, 0], [2450, 9, 6], [1200, 9, 0], [700, 8, 0]] },
+  { status: 'finished', rows: [[2050, 10, 7], [1300, 10, 0], [1300, 10, 0], [2450, 9, 6], [1200, 9, 0], [700, 8, 0]] },
+];
+
+function buildDemoRoom(index: number): RoomData {
+  const step = DEMO_SCRIPT[index % DEMO_SCRIPT.length];
+  const players: PlayerEntry[] = [];
+  DEMO_PLAYERS.forEach((name, slot) => {
+    const row = step.rows[slot];
+    if (!row) return;
+    const [score, answeredCount, streak] = row;
+    players.push({
+      id: name.toLowerCase(),
+      displayName: name,
+      score,
+      answeredCount,
+      streak,
+      isFinished: step.status === 'finished',
+      teamId: null,
+    });
+  });
+  return {
+    roomCode: 'DEMO',
+    status: step.status,
+    topic: 'Demo Round',
+    questionCount: 10,
+    timePerQuestion: 15,
+    teamMode: false,
+    hostId: 'host',
+    hostName: 'Demo Host',
+    players,
+    teams: [],
+  };
+}
 
 // ── tiny score count-up, dependency-free ────────────────────────────────
 function CountUp({
@@ -485,9 +539,86 @@ function AmbientGlow() {
   );
 }
 
-export default function TvLeaderboard() {
+function WaitingScene({ room, code }: { room: RoomData; code: string }) {
+  const joiners = room.players.filter((p) => p.id !== room.hostId);
+  const pulse = useSharedValue(1);
+
+  useEffect(() => {
+    pulse.value = withRepeat(
+      withTiming(1.05, { duration: 900, easing: Easing.inOut(Easing.sin) }),
+      -1,
+      true
+    );
+  }, [pulse]);
+
+  const codeStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: pulse.value }],
+  }));
+
+  return (
+    <View style={styles.waitingWrap}>
+      <RAnimated.View entering={FadeInDown.duration(450)} style={styles.waitingKickerWrap}>
+        <View style={[styles.pulseDot, { backgroundColor: COLORS.warning }]} />
+        <Text style={styles.waitingKicker}>GET READY</Text>
+      </RAnimated.View>
+
+      <RAnimated.View entering={ZoomIn.duration(550).delay(120)}>
+        <RAnimated.Text style={[styles.waitingCode, codeStyle]}>
+          {room.roomCode || code}
+        </RAnimated.Text>
+      </RAnimated.View>
+
+      <RAnimated.View entering={FadeIn.duration(550).delay(260)}>
+        <Text style={styles.waitingSub}>Players are joining the room…</Text>
+      </RAnimated.View>
+
+      <RAnimated.View
+        entering={FadeInUp.duration(550).delay(380)}
+        style={styles.rosterCard}
+      >
+        <Text style={styles.rosterTitle}>
+          {joiners.length === 0
+            ? 'WAITING FOR PLAYERS'
+            : `ON BOARD · ${joiners.length} ${joiners.length === 1 ? 'PLAYER' : 'PLAYERS'}`}
+        </Text>
+        {joiners.length === 0 ? (
+          <Text style={styles.rosterEmpty}>
+            Join with {room.roomCode || code} on the Play tab
+          </Text>
+        ) : (
+          <View style={styles.rosterGrid}>
+            {joiners.map((p, i) => (
+              <RAnimated.View
+                key={p.id}
+                entering={FadeInDown.delay(420 + i * 90).springify().damping(16)}
+                style={styles.rosterChip}
+              >
+                <View
+                  style={[
+                    styles.avatar,
+                    { backgroundColor: AVATAR_COLORS[i % AVATAR_COLORS.length] },
+                  ]}
+                >
+                  <Text style={styles.avatarText}>
+                    {p.displayName.charAt(0).toUpperCase()}
+                  </Text>
+                </View>
+                <Text style={styles.rosterName} numberOfLines={1}>
+                  {p.displayName}
+                </Text>
+              </RAnimated.View>
+            ))}
+          </View>
+        )}
+      </RAnimated.View>
+    </View>
+  );
+}
+
+export default function TvLeaderboard({ mode = 'live' }: { mode?: 'live' | 'demo' } = {}) {
   const { roomCode } = useLocalSearchParams<{ roomCode: string }>();
   const code = String(roomCode || '').toUpperCase();
+  const isDemo = mode === 'demo';
 
   const [room, setRoom] = useState<RoomData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -596,6 +727,72 @@ export default function TvLeaderboard() {
 
   const hintStyle = useAnimatedStyle(() => ({ opacity: hintOpacity.value }));
 
+  const applySnapshot = useCallback((data: RoomData) => {
+    // ── diff previous poll vs this one ──
+    const ranked: RankedEntry[] = data.teamMode
+      ? (data.teams ?? []).map((t) => ({
+          id: t.id,
+          name: t.name,
+          score: t.score,
+          answeredCount: t.answeredCount,
+          color: t.color,
+        }))
+      : (data.players ?? [])
+          .filter((p) => p.id !== data.hostId)
+          .map((p) => ({
+            id: p.id,
+            name: p.displayName,
+            score: p.score,
+            answeredCount: p.answeredCount,
+            streak: p.streak,
+            finished: p.isFinished,
+          }));
+    ranked.sort((x, y) => y.score - x.score);
+
+    const newBumps: Record<string, { delta: number; answered: boolean; seq: number }> = {};
+    if (!firstPollRef.current) {
+      bumpSeqRef.current += 1;
+      const seq = bumpSeqRef.current;
+      for (const e of ranked) {
+        const prevScore = prevScoresRef.current[e.id] ?? 0;
+        const scoreDelta = e.score - prevScore;
+        const prevAnswered = prevAnsweredRef.current[e.id] ?? 0;
+        const answerDelta = e.answeredCount - prevAnswered;
+        if (scoreDelta > 0) {
+          newBumps[e.id] = { delta: scoreDelta, answered: false, seq };
+        } else if (answerDelta > 0) {
+          newBumps[e.id] = { delta: 0, answered: true, seq };
+        }
+      }
+      const newLeader = ranked[0]?.id ?? null;
+      if (prevLeaderRef.current && newLeader && newLeader !== prevLeaderRef.current) {
+        setBurstKey((k) => k + 1);
+        setLeaderFlash({ name: ranked[0].name, key: Date.now() });
+      }
+      prevLeaderRef.current = newLeader;
+    } else {
+      firstPollRef.current = false;
+      prevLeaderRef.current = ranked[0]?.id ?? null;
+    }
+
+    // store new baselines
+    for (const e of ranked) {
+      prevScoresRef.current[e.id] = e.score;
+      prevAnsweredRef.current[e.id] = e.answeredCount;
+    }
+
+    if (Object.keys(newBumps).length > 0) setBumps(newBumps);
+    if (data.status === 'finished' && !finishedBurstRef.current) {
+      finishedBurstRef.current = true;
+      setBurstKey((k) => k + 1);
+    } else if (data.status !== 'finished' && finishedBurstRef.current) {
+      finishedBurstRef.current = false;
+    }
+
+    setRoom(data);
+    setError(null);
+  }, []);
+
   const load = useCallback(async () => {
     if (!code) {
       setRoom(null);
@@ -611,80 +808,40 @@ export default function TvLeaderboard() {
       }
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = (await res.json()) as RoomData;
-
-      // ── diff previous poll vs this one ──
-      const ranked: RankedEntry[] = data.teamMode
-        ? (data.teams ?? []).map((t) => ({
-            id: t.id,
-            name: t.name,
-            score: t.score,
-            answeredCount: t.answeredCount,
-            color: t.color,
-          }))
-        : (data.players ?? [])
-            .filter((p) => p.id !== data.hostId)
-            .map((p) => ({
-              id: p.id,
-              name: p.displayName,
-              score: p.score,
-              answeredCount: p.answeredCount,
-              streak: p.streak,
-              finished: p.isFinished,
-            }));
-      ranked.sort((x, y) => y.score - x.score);
-
-      const newBumps: Record<string, { delta: number; answered: boolean; seq: number }> = {};
-      if (!firstPollRef.current) {
-        bumpSeqRef.current += 1;
-        const seq = bumpSeqRef.current;
-        for (const e of ranked) {
-          const prevScore = prevScoresRef.current[e.id] ?? 0;
-          const scoreDelta = e.score - prevScore;
-          const prevAnswered = prevAnsweredRef.current[e.id] ?? 0;
-          const answerDelta = e.answeredCount - prevAnswered;
-          if (scoreDelta > 0) {
-            newBumps[e.id] = { delta: scoreDelta, answered: false, seq };
-          } else if (answerDelta > 0) {
-            newBumps[e.id] = { delta: 0, answered: true, seq };
-          }
-        }
-        const newLeader = ranked[0]?.id ?? null;
-        if (prevLeaderRef.current && newLeader && newLeader !== prevLeaderRef.current) {
-          setBurstKey((k) => k + 1);
-          setLeaderFlash({ name: ranked[0].name, key: Date.now() });
-        }
-        prevLeaderRef.current = newLeader;
-      } else {
-        firstPollRef.current = false;
-        prevLeaderRef.current = ranked[0]?.id ?? null;
-      }
-
-      // store new baselines
-      for (const e of ranked) {
-        prevScoresRef.current[e.id] = e.score;
-        prevAnsweredRef.current[e.id] = e.answeredCount;
-      }
-
-      if (Object.keys(newBumps).length > 0) setBumps(newBumps);
-      if (data.status === 'finished' && !finishedBurstRef.current) {
-        finishedBurstRef.current = true;
-        setBurstKey((k) => k + 1);
-      } else if (data.status !== 'finished' && finishedBurstRef.current) {
-        finishedBurstRef.current = false;
-      }
-
-      setRoom(data);
-      setError(null);
+      applySnapshot(data);
     } catch (e: any) {
       setError(e?.message || 'Cannot reach server');
     }
-  }, [code]);
+  }, [code, applySnapshot]);
 
   useEffect(() => {
+    if (isDemo) return;
     load();
     const timer = setInterval(load, POLL_INTERVAL);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [isDemo, load]);
+
+  // ── demo mode: scripted snapshots through the exact same diff pipeline ──
+  useEffect(() => {
+    if (!isDemo) return;
+    let i = 1;
+    const tick = () => {
+      if (i % DEMO_SCRIPT.length === 0) {
+        firstPollRef.current = true;
+        prevScoresRef.current = {};
+        prevAnsweredRef.current = {};
+        prevLeaderRef.current = null;
+        finishedBurstRef.current = false;
+        setBumps({});
+        setLeaderFlash(null);
+      }
+      applySnapshot(buildDemoRoom(i));
+      i += 1;
+    };
+    applySnapshot(buildDemoRoom(0));
+    const timer = setInterval(tick, DEMO_TICK);
+    return () => clearInterval(timer);
+  }, [isDemo, applySnapshot]);
 
   useEffect(() => {
     if (Object.keys(bumps).length === 0) return;
@@ -797,6 +954,8 @@ export default function TvLeaderboard() {
           <View style={styles.finishedWrap}>
             <PodiumCeremony entries={rankedEntries} />
           </View>
+        ) : status === 'waiting' ? (
+          <WaitingScene room={room} code={code} />
         ) : (
           <ScrollView contentContainerStyle={styles.list} showsVerticalScrollIndicator={false}>
             {liveEntries.length === 0 ? (
@@ -825,11 +984,20 @@ export default function TvLeaderboard() {
 
         <View style={styles.footer}>
           <Text style={styles.footerText}>
-            Auto-refreshing every few seconds ·{' '}
-            {room?.hostName ? `Hosted by ${room.hostName}` : `Room ${code}`}
+            {isDemo
+              ? 'Demo preview · auto-restarts'
+              : `Auto-refreshing every few seconds · ${
+                  room?.hostName ? `Hosted by ${room.hostName}` : `Room ${code}`
+                }`}
           </Text>
         </View>
       </LinearGradient>
+
+      {isDemo && (
+        <View pointerEvents="none" style={styles.demoBadge}>
+          <Text style={styles.demoBadgeText}>DEMO PREVIEW</Text>
+        </View>
+      )}
 
       <Confetti burstKey={burstKey} />
 
@@ -1102,4 +1270,107 @@ const styles = StyleSheet.create({
   podiumRestRank: { width: 40, fontSize: 20, fontFamily: FONTS.extraBold, color: COLORS.textMuted },
   podiumRestName: { flex: 1, fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textPrimary },
   podiumRestScore: { fontSize: 20, fontFamily: FONTS.black, color: COLORS.accent },
+  waitingWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 40,
+    paddingBottom: 30,
+  },
+  waitingKickerWrap: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
+  waitingKicker: {
+    fontSize: 18,
+    fontFamily: FONTS.extraBold,
+    letterSpacing: 6,
+    color: COLORS.warning,
+  },
+  waitingCode: {
+    fontSize: 116,
+    fontFamily: FONTS.black,
+    letterSpacing: 10,
+    color: COLORS.textPrimary,
+    textShadowColor: 'rgba(124, 58, 237, 0.55)',
+    textShadowRadius: 30,
+    textAlign: 'center',
+  },
+  waitingSub: {
+    fontSize: 17,
+    fontFamily: FONTS.medium,
+    color: COLORS.textSecondary,
+    marginTop: 8,
+  },
+  rosterCard: {
+    marginTop: 46,
+    backgroundColor: 'rgba(35, 32, 82, 0.72)',
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    borderRadius: 24,
+    paddingHorizontal: 26,
+    paddingVertical: 22,
+    width: '100%',
+    maxWidth: 760,
+  },
+  rosterTitle: {
+    fontSize: 14,
+    fontFamily: FONTS.extraBold,
+    letterSpacing: 2,
+    color: COLORS.gold,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  rosterEmpty: {
+    fontSize: 16,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+  },
+  rosterGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  rosterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    borderRadius: 999,
+    paddingLeft: 6,
+    paddingRight: 16,
+    paddingVertical: 6,
+  },
+  avatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarText: { fontSize: 16, fontFamily: FONTS.extraBold, color: COLORS.bg },
+  rosterName: {
+    fontSize: 15,
+    fontFamily: FONTS.bold,
+    color: COLORS.textPrimary,
+    maxWidth: 140,
+  },
+  demoBadge: {
+    position: 'absolute',
+    left: 24,
+    bottom: 20,
+    backgroundColor: 'rgba(34, 211, 238, 0.12)',
+    borderWidth: 1,
+    borderColor: COLORS.accent,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  demoBadgeText: {
+    fontSize: 12,
+    fontFamily: FONTS.extraBold,
+    letterSpacing: 2,
+    color: COLORS.accent,
+  },
 });

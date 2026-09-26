@@ -321,7 +321,7 @@ export default function Dashboard() {
     }, [fetchUserData])
   );
 
-  const handleLessonGenerated = (generatedLesson: any) => {
+  const handleCourseGenerated = (generatedLesson: any) => {
     setLesson(generatedLesson);
     setShowLessonGenerator(false);
   };
@@ -373,7 +373,7 @@ export default function Dashboard() {
   if (showLessonGenerator) {
     return (
       <LessonGenerator
-        onLessonGenerated={handleLessonGenerated}
+        onCourseGenerated={handleCourseGenerated}
         onCancel={() => setShowLessonGenerator(false)}
       />
     );
@@ -577,7 +577,7 @@ export default function Dashboard() {
               removeClippedSubviews={true}
             >
               {recommendations.slice(0, 4).map((rec, index) => {
-                const gradients = [
+                const gradients: [string, string][] = [
                   ['#EDE9FE', '#DDD6FE'],
                   ['#FCE7F3', '#FBCFE8'],
                   ['#D1FAE5', '#A7F3D0'],

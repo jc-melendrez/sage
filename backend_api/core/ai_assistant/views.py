@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from .models import ChatSession, ChatMessage, Quiz, QuizAttempt, QuizQuestion
-from .serializers import QuizSerializer # Import the new serializer
+from .serializers import QuizSerializer, _display_name, _percent # Import the new serializer
 from users.models import Course
 from users.utils.file_parser import extract_text_from_file
 import base64
@@ -500,6 +500,97 @@ class QuizAttemptView(APIView):
         if course and course.students.filter(id=request.user.id).exists():
             return quiz
         return None
+
+    def _get_monitored_quiz(self, request, quiz_id):
+        """Quiz whose attempts the caller is allowed to review: the author or
+        the educator of the course it belongs to."""
+        quiz = Quiz.objects.filter(id=quiz_id).first()
+        if not quiz:
+            return None
+        if request.user == quiz.user:
+            return quiz
+        if quiz.course and quiz.course.educator_id == request.user.id:
+            return quiz
+        return None
+
+    def get(self, request, quiz_id):
+        """Educator monitoring: who attempted this quiz and how they scored."""
+        quiz = self._get_monitored_quiz(request, quiz_id)
+        if not quiz:
+            # Deliberately mirror the 404 used elsewhere so a learner cannot
+            # probe for the existence of a quiz they may not monitor.
+            return Response({"error": "Quiz not found."}, status=404)
+
+        attempts = list(
+            QuizAttempt.objects
+            .filter(quiz=quiz)
+            .select_related('user')
+            .order_by('user_id', '-started_at')
+        )
+
+        # Collapse retries into one row per learner, keeping their best result
+        # for the average but reporting the most recent attempt's timing.
+        per_student = {}
+        for attempt in attempts:
+            entry = per_student.setdefault(attempt.user_id, {
+                'attempts': [],
+            })
+            entry['attempts'].append(attempt)
+
+        rows = []
+        best_ratios = []
+        for user_id, entry in per_student.items():
+            learner_attempts = entry['attempts']
+            latest = learner_attempts[0]  # ordered -started_at
+
+            best = None
+            for attempt in learner_attempts:
+                if attempt.completed_at is None or not attempt.total:
+                    continue
+                ratio = attempt.score / attempt.total
+                if best is None or ratio > best[0]:
+                    best = (ratio, attempt)
+            if best is not None:
+                best_ratios.append(best[0])
+
+            rows.append({
+                'student_id': user_id,
+                'student_name': _display_name(latest.user),
+                'attempts': len(learner_attempts),
+                'completed': latest.completed_at is not None,
+                'best_score': best[1].score if best else None,
+                'best_total': best[1].total if best else None,
+                'best_percent': round(best[0] * 100) if best else None,
+                'last_score': latest.score,
+                'last_total': latest.total,
+                'last_score_percent': _percent(latest.score, latest.total),
+                'started_at': latest.started_at,
+                'completed_at': latest.completed_at,
+            })
+
+        rows.sort(key=lambda r: (r['completed_at'] is None, -(r['best_percent'] or -1)))
+
+        # Denominator is the class size, so the educator can see at a glance how
+        # many learners have not opened the quiz yet.
+        if quiz.course:
+            student_count = quiz.course.students.count()
+        else:
+            student_count = len(per_student)
+
+        return Response({
+            'quiz': {
+                'id': quiz.id,
+                'title': quiz.title,
+                'quiz_type': quiz.quiz_type,
+                'question_count': quiz.questions.count(),
+                'available_until': quiz.available_until,
+            },
+            'student_count': student_count,
+            'attempted_count': len(per_student),
+            'completed_count': sum(1 for r in rows if r['completed']),
+            'average_percent': round(sum(best_ratios) / len(best_ratios) * 100) if best_ratios else None,
+            'attempts': rows,
+        })
 
     def post(self, request, quiz_id):
         """Record a quiz attempt. Unlimited retries allowed."""

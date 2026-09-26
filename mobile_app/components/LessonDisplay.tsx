@@ -15,9 +15,9 @@ interface LessonDisplayProps {
 
 export default function LessonDisplay({ lesson, onClose }: LessonDisplayProps) {
   const [loading, setLoading] = useState(false);
-  const user = getCurrentUser();
 
   const handleSaveLesson = async () => {
+    const user = await getCurrentUser();
     if (!user) {
       Alert.alert('Error', 'Please log in to save lessons');
       return;

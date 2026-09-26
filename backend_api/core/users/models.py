@@ -210,9 +210,10 @@ class CourseScore(models.Model):
 class ClassActivity(models.Model):
     """A teacher-set academic task (activity) for a class.
 
-    Paper-aligned "activities / academic tasks" — there is deliberately NO
-    submission or grading concept here; that is out of scope. Activities group
-    the quizzes / lessons / live games an educator assigns to a course.
+    `note` holds the assignment instructions shown to students, `due_date` is
+    the deadline (date *and* time, so "due Friday 5pm" is expressible), and
+    `max_points` is the point value students are graded out of. Task-kind
+    activities additionally collect `TaskSubmission` turn-ins.
     """
 
     KIND_CHOICES = [
@@ -233,9 +234,10 @@ class ClassActivity(models.Model):
     # live games have no Django object, so this stays null for those kinds.
     ref_id = models.IntegerField(null=True, blank=True)
     note = models.TextField(blank=True, default='')
-    due_date = models.DateField(null=True, blank=True)
+    due_date = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     max_points = models.PositiveIntegerField(default=100)
+    allow_multiple_files = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -247,21 +249,21 @@ class ClassActivity(models.Model):
 
 
 class TaskSubmission(models.Model):
-    """A student's file submission for a task-kind class activity.
+    """A student's turn-in for a task-kind class activity.
 
-    A student may submit at most once per task (unique on activity + student);
-    resubmitting replaces the previous file. The file bytes are stored in the
-    database so uploads survive redeploys (no filesystem storage).
+    One turn-in per student per task. The turn-in holds any number of files
+    (see `TaskSubmissionFile`) plus the student's own note to the educator, and
+    carries the grade. File bytes are stored in the database so uploads survive
+    redeploys (no filesystem storage).
     """
 
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+    MAX_FILES = 10
 
     activity = models.ForeignKey(ClassActivity, on_delete=models.CASCADE, related_name='submissions')
     student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='task_submissions')
-    file_name = models.CharField(max_length=255)
-    file_mime = models.CharField(max_length=120, default='application/octet-stream')
-    file_size = models.IntegerField(default=0)
-    file_data = models.BinaryField()
+    # Optional note from the student to their educator ("I wasn't sure about Q3").
+    description = models.TextField(blank=True, default='')
     submitted_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     score = models.IntegerField(null=True, blank=True)
@@ -273,14 +275,41 @@ class TaskSubmission(models.Model):
         unique_together = ('activity', 'student')
         ordering = ['submitted_at']
 
+    @property
+    def is_late(self):
+        """True when the turn-in landed after the assignment's due date."""
+        if not self.activity.due_date:
+            return False
+        return self.submitted_at > self.activity.due_date
+
     def __str__(self):
-        return f"{self.student.username} -> {self.activity.title} ({self.file_name})"
+        return f"{self.student.username} -> {self.activity.title}"
+
+
+class TaskSubmissionFile(models.Model):
+    """A single file inside a student's turn-in."""
+
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+    submission = models.ForeignKey(TaskSubmission, on_delete=models.CASCADE, related_name='files')
+    file_name = models.CharField(max_length=255)
+    file_mime = models.CharField(max_length=120, default='application/octet-stream')
+    file_size = models.IntegerField(default=0)
+    file_data = models.BinaryField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.submission} - {self.file_name}"
 
 
 class ClassActivityAttachment(models.Model):
     """Teacher-uploaded attachment for a class activity (e.g., task worksheet)."""
 
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+    MAX_FILES = 10
 
     activity = models.ForeignKey(ClassActivity, on_delete=models.CASCADE, related_name='attachments')
     file_name = models.CharField(max_length=255)

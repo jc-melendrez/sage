@@ -155,13 +155,6 @@ export default function EditDeckScreen() {
     <LinearGradient colors={PURPLE_HEADER_GRADIENT} style={styles.headerBand}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
 
-      <FlashBanner
-        visible={!!banner}
-        message={banner?.message ?? ''}
-        type={banner?.type ?? 'info'}
-        onHide={() => setBanner(null)}
-      />
-
       {/* HEADER */}
       <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
         <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.7}>
@@ -183,6 +176,13 @@ export default function EditDeckScreen() {
 
     <LinearGradient colors={GRADIENT_COLORS} style={styles.gradient}>
     <View style={styles.container}>
+      <FlashBanner
+        visible={!!banner}
+        message={banner?.message ?? ''}
+        type={banner?.type ?? 'info'}
+        onHide={() => setBanner(null)}
+      />
+
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
         {/* SETTINGS */}
         <Text style={styles.sectionLabel}>DECK SETTINGS</Text>
@@ -313,7 +313,11 @@ export default function EditDeckScreen() {
 const styles = StyleSheet.create({
   keyboardWrap: { flex: 1 },
   root: { flex: 1 },
-  headerBand: { overflow: 'hidden' },
+  headerBand: {
+    overflow: 'hidden',
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
+  },
   gradient: { flex: 1 },
   container: { flex: 1, paddingHorizontal: 20 },
   header: {
@@ -334,7 +338,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.3)',
   },
   headerBtnPlaceholder: { width: 40 },
-  headerTitleWrap: { alignItems: 'center' },
+  headerTitleWrap: { flex: 1, alignItems: 'center', paddingHorizontal: 8 },
   headerTitle: { color: '#fff', fontSize: 17, fontFamily: FONTS.extraBold },
   headerSub: { color: 'rgba(255,255,255,0.75)', fontSize: 12, fontFamily: FONTS.semiBold, marginTop: 2 },
   content: { paddingBottom: 60 },

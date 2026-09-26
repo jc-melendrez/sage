@@ -7,6 +7,7 @@ import { getCoursePath } from '@/services/courseService';
 import { CoursePathTopic, NODE_TYPE_CONFIG, LearningNode } from '@/types/learning';
 import ProgressRing from '@/components/courses/ProgressRing';
 import { getCourseActivities, ClassActivity } from '@/services/activityService';
+import { describeDue } from '@/services/dueDate';
 import { getQuiz, getQuizzes, Quiz } from '@/services/quizService';
 import { getCurrentUser } from '@/services/authService';
 import CourseBadges from '@/components/courses/CourseBadges';
@@ -21,6 +22,7 @@ const COLORS = {
   accent: '#22D3EE',
   success: '#10B981',
   warning: '#F59E0B',
+  danger: '#DC2626',
   textPrimary: '#3a107a',
   textSecondary: '#CBD5E1',
   textMuted: '#94A3B8',
@@ -220,6 +222,7 @@ export default function CourseDetailScreen() {
                 {activities.map((activity) => {
                   const meta = ACTIVITY_META[activity.kind] || ACTIVITY_META.quiz;
                   const hostedInClass = activity.kind === 'lesson' || activity.kind === 'game';
+                  const due = describeDue(activity.due_date);
                   return (
                     <TouchableOpacity
                       key={activity.id}
@@ -244,8 +247,13 @@ export default function CourseDetailScreen() {
                             Hosted live in class by your educator
                           </Text>
                         ) : activity.due_date ? (
-                          <Text style={styles.activityMeta}>
-                            Due {new Date(activity.due_date).toLocaleDateString()}
+                          <Text
+                            style={[
+                              styles.activityMeta,
+                              due.isOverdue && { color: COLORS.danger, fontWeight: '600' },
+                            ]}
+                          >
+                            {due.label}
                           </Text>
                         ) : null}
                       </View>

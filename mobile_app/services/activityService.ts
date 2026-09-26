@@ -1,11 +1,10 @@
-import { apiCall } from './apiClient';
-import { API_BASE_URL } from '../config/api';
-import { getToken } from './authService';
+import { apiCall, apiUpload } from './apiClient';
 import { invalidateCachePrefix } from './apiCache';
 
 export type ActivityKind = 'quiz' | 'lesson' | 'game' | 'task';
 export type ActivityStatus = 'draft' | 'published';
 
+/** Materials an educator attaches to an activity (e.g. a worksheet). */
 export interface ClassActivityAttachment {
   id: number;
   activity: number;
@@ -22,12 +21,16 @@ export interface ClassActivity {
   kind: ActivityKind;
   title: string;
   ref_id: number | null;
+  /** The assignment instructions shown to students. */
   note: string;
+  /** ISO datetime, or null when there is no deadline. */
   due_date: string | null;
   status: ActivityStatus;
   max_points: number;
+  allow_multiple_files: boolean;
   created_at: string;
   submission_count?: number;
+  graded_count?: number;
   attachments?: ClassActivityAttachment[];
 }
 
@@ -35,6 +38,8 @@ export interface UploadFile {
   uri: string;
   name: string;
   mimeType?: string;
+  /** Byte length, when the picker reported one. Used for display only. */
+  size?: number;
 }
 
 export interface CreateActivityInput {
@@ -45,7 +50,50 @@ export interface CreateActivityInput {
   due_date?: string | null;
   status?: ActivityStatus;
   max_points?: number;
+  allow_multiple_files?: boolean;
   attachments?: UploadFile[];
+}
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+/**
+ * Build a multipart body for an activity write, including any new materials.
+ *
+ * `isUpdate` matters for the nullable fields: on an update a blank value is
+ * the only way to say "clear this", because omitting the key would leave the
+ * stored value untouched. On a create there is nothing to clear, so blanks
+ * stay omitted.
+ */
+function activityFormData(
+  input: Partial<CreateActivityInput>,
+  isUpdate = false,
+): FormData {
+  const form = new FormData();
+  const append = (key: string, value: string | number | boolean | null | undefined) => {
+    if (value === undefined || value === null) {
+      if (isUpdate && value === null) form.append(key, '');
+      return;
+    }
+    form.append(key, String(value));
+  };
+
+  append('kind', input.kind);
+  append('title', input.title);
+  append('ref_id', input.ref_id);
+  append('note', input.note);
+  append('due_date', input.due_date);
+  append('status', input.status);
+  append('max_points', input.max_points);
+  append('allow_multiple_files', input.allow_multiple_files);
+
+  for (const file of input.attachments ?? []) {
+    form.append('attachments', {
+      uri: file.uri,
+      name: file.name,
+      type: file.mimeType || 'application/octet-stream',
+    } as unknown as Blob);
+  }
+  return form;
 }
 
 /** Cross-class activity feed for the educator (Activities tab + dashboard). */
@@ -58,77 +106,71 @@ export async function getCourseActivities(courseId: number): Promise<ClassActivi
   return apiCall<ClassActivity[]>(`/users/courses/${courseId}/activities/`);
 }
 
+/** A single activity, for the educator's view/edit screen. */
+export async function getActivity(activityId: number): Promise<ClassActivity> {
+  return apiCall<ClassActivity>(`/users/activities/${activityId}/`, { noCache: true });
+}
+
 export async function createActivity(
   courseId: number,
   input: CreateActivityInput,
 ): Promise<ClassActivity> {
-  const hasAttachments = input.attachments && input.attachments.length > 0;
+  const hasAttachments = !!input.attachments && input.attachments.length > 0;
 
-  if (hasAttachments) {
-    const token = await getToken();
-    const formData = new FormData();
-    formData.append('kind', input.kind);
-    formData.append('title', input.title);
-    if (input.note) formData.append('note', input.note);
-    if (input.due_date) formData.append('due_date', input.due_date);
-    if (input.status) formData.append('status', input.status);
-    if (input.max_points !== undefined) formData.append('max_points', String(input.max_points));
+  const created = hasAttachments
+    ? await apiUpload<ClassActivity>(
+        `/users/courses/${courseId}/activities/`,
+        activityFormData(input),
+        'POST'
+      )
+    : await apiCall<ClassActivity>(`/users/courses/${courseId}/activities/`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
 
-    for (const file of input.attachments!) {
-      formData.append('attachments', {
-        uri: file.uri,
-        name: file.name,
-        type: file.mimeType || 'application/octet-stream',
-      } as any);
-    }
-
-    const response = await fetch(`${API_BASE_URL}/users/courses/${courseId}/activities/`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: formData,
-    });
-
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Failed to create activity');
-    invalidateCachePrefix('/activities');
-    return data as ClassActivity;
-  }
-
-  return apiCall<ClassActivity>(`/users/courses/${courseId}/activities/`, {
-    method: 'POST',
-    body: JSON.stringify(input),
-  }).then((created) => {
-    invalidateCachePrefix('/activities');
-    return created;
-  });
+  invalidateCachePrefix('/activities');
+  return created;
 }
 
+/** Partial update. New materials are appended to the existing ones. */
 export async function updateActivity(
   activityId: number,
   input: Partial<CreateActivityInput>,
 ): Promise<ClassActivity> {
-  return apiCall<ClassActivity>(`/users/activities/${activityId}/`, {
-    method: 'PATCH',
-    body: JSON.stringify(input),
-  }).then((updated) => {
-    invalidateCachePrefix('/activities');
-    return updated;
-  });
+  const hasAttachments = !!input.attachments && input.attachments.length > 0;
+
+  const updated = hasAttachments
+    ? await apiUpload<ClassActivity>(
+        `/users/activities/${activityId}/`,
+        activityFormData(input, true),
+        'PATCH'
+      )
+    : await apiCall<ClassActivity>(`/users/activities/${activityId}/`, {
+        method: 'PATCH',
+        body: JSON.stringify(input),
+      });
+
+  invalidateCachePrefix('/activities');
+  return updated;
 }
 
 export async function deleteActivity(activityId: number): Promise<void> {
-  const token = await getToken();
-  const response = await fetch(`${API_BASE_URL}/users/activities/${activityId}/`, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  await apiCall<void>(`/users/activities/${activityId}/`, { method: 'DELETE' });
   invalidateCachePrefix('/activities');
-  if (!response.ok && response.status !== 204) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || 'Failed to delete activity');
-  }
 }
 
+/** Remove one material; the activity's other materials are untouched. */
+export async function deleteActivityAttachment(
+  activityId: number,
+  attachmentId: number,
+): Promise<void> {
+  await apiCall<void>(`/users/tasks/${activityId}/attachments/${attachmentId}/`, {
+    method: 'DELETE',
+  });
+  invalidateCachePrefix('/activities');
+}
+
+/** Download one material's bytes (base64), for sharing out of the app. */
 export async function getTaskAttachment(
   activityId: number,
   attachmentId: number,
@@ -137,3 +179,5 @@ export async function getTaskAttachment(
     `/users/tasks/${activityId}/attachments/${attachmentId}/`
   );
 }
+
+export { MAX_FILE_SIZE };

@@ -2,24 +2,19 @@ import React, { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Modal } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useFocusEffect } from 'expo-router';
-import * as FileSystem from 'expo-file-system/legacy';
-import * as Sharing from 'expo-sharing';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { EmptyState } from '@/components/educator/EducatorPrimitives';
 import {
   getTaskSubmissions,
+  getTaskSubmission,
   getTaskSubmissionFile,
   gradeTaskSubmission,
   TaskSubmission,
+  TaskSubmissionFile,
   TaskSubmissionFull,
 } from '@/services/taskService';
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
+import { formatBytes, shareBase64File } from '@/services/fileShare';
 
 function getScoreColor(score: number | null | undefined, maxPoints: number): string {
   if (score === null || score === undefined) return COLORS.textMuted;
@@ -61,7 +56,7 @@ export default function TaskSubmissionsScreen() {
 
   const openSubmissionForGrading = async (sub: TaskSubmission) => {
     try {
-      const full: TaskSubmissionFull = await getTaskSubmissionFile(tid, sub.id);
+      const full: TaskSubmissionFull = await getTaskSubmission(tid, sub.id);
       setGradingSub(sub);
       setGradingFull(full);
       setScoreInput(full.score !== null && full.score !== undefined ? String(full.score) : '');
@@ -71,21 +66,13 @@ export default function TaskSubmissionsScreen() {
     }
   };
 
-  const openFile = async (sub: TaskSubmission, full: TaskSubmissionFull) => {
-    setOpeningId(sub.id);
+  const openFile = async (file: TaskSubmissionFile) => {
+    setOpeningId(file.id);
     try {
-      const uri = `${FileSystem.cacheDirectory}${sub.file_name}`;
-      const base64Body = full.file_data.includes('base64,') ? full.file_data.split('base64,')[1] : full.file_data;
-      await FileSystem.writeAsStringAsync(uri, base64Body, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(uri, { mimeType: sub.file_mime });
-      } else {
-        Alert.alert('Cannot open file', 'File sharing is not available on this device.');
-      }
-    } catch {
-      Alert.alert('Open failed', 'Could not open the submission file.');
+      const payload = await getTaskSubmissionFile(tid, file.id);
+      await shareBase64File(payload.file_data, payload.file_name, payload.file_mime);
+    } catch (err) {
+      Alert.alert('Open failed', err instanceof Error ? err.message : 'Could not open the file.');
     } finally {
       setOpeningId(null);
     }
@@ -93,14 +80,12 @@ export default function TaskSubmissionsScreen() {
 
   const handleSaveGrade = async () => {
     if (gradingSub === null || gradingFull === null) return;
-    const score = parseInt(scoreInput, 10);
-    if (isNaN(score)) {
-      Alert.alert('Invalid score', 'Please enter a valid number.');
-      return;
-    }
     const maxPoints = gradingFull.max_points || 100;
-    if (score < 0 || score > maxPoints) {
-      Alert.alert('Invalid score', `Score must be between 0 and ${maxPoints}.`);
+    // An empty box means "no grade yet", which the backend stores as null.
+    const trimmed = scoreInput.trim();
+    const score = trimmed === '' ? null : parseInt(trimmed, 10);
+    if (score !== null && (isNaN(score) || score < 0 || score > maxPoints)) {
+      Alert.alert('Invalid score', `Score must be between 0 and ${maxPoints}, or left blank.`);
       return;
     }
     setGrading(true);
@@ -114,6 +99,23 @@ export default function TaskSubmissionsScreen() {
       Alert.alert('Grade saved', 'The submission has been graded.');
     } catch (err) {
       Alert.alert('Failed to save grade', err instanceof Error ? err.message : 'Something went wrong.');
+    } finally {
+      setGrading(false);
+    }
+  };
+
+  const handleClearGrade = async () => {
+    if (gradingSub === null) return;
+    setGrading(true);
+    try {
+      await gradeTaskSubmission(tid, gradingSub.id, { score: null, feedback: '' });
+      setGradingSub(null);
+      setGradingFull(null);
+      setScoreInput('');
+      setFeedbackInput('');
+      load();
+    } catch (err) {
+      Alert.alert('Failed to clear grade', err instanceof Error ? err.message : 'Something went wrong.');
     } finally {
       setGrading(false);
     }
@@ -178,24 +180,56 @@ export default function TaskSubmissionsScreen() {
                     )}
                   </View>
 
+                  {sub.is_late && (
+                    <View style={styles.lateBadge}>
+                      <Ionicons name="time" size={12} color={COLORS.warning} />
+                      <Text style={styles.lateBadgeText}>Turned in late</Text>
+                    </View>
+                  )}
+
+                  {sub.description ? (
+                    <View style={styles.noteBox}>
+                      <Text style={styles.noteLabel}>Note from student</Text>
+                      <Text style={styles.noteText}>{sub.description}</Text>
+                    </View>
+                  ) : null}
+
+                  {sub.files.map((file) => (
+                    <TouchableOpacity
+                      key={file.id}
+                      style={styles.fileRow}
+                      activeOpacity={0.75}
+                      onPress={() => openFile(file)}
+                      disabled={openingId !== null}
+                    >
+                      <View style={[styles.fileIcon, { backgroundColor: tint(COLORS.accent) }]}>
+                        <Ionicons name="document" size={16} color={COLORS.accent} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.fileName} numberOfLines={1}>{file.file_name}</Text>
+                        <Text style={styles.fileMeta}>{formatBytes(file.file_size)}</Text>
+                      </View>
+                      {openingId === file.id ? (
+                        <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
+                      ) : (
+                        <Ionicons name="share-outline" size={18} color={COLORS.purpleVibrant} />
+                      )}
+                    </TouchableOpacity>
+                  ))}
+
                   <TouchableOpacity
-                    style={styles.fileRow}
-                    activeOpacity={0.75}
+                    style={styles.gradeBtn}
+                    activeOpacity={0.8}
                     onPress={() => openSubmissionForGrading(sub)}
-                    disabled={openingId === sub.id}
                   >
-                    <View style={[styles.fileIcon, { backgroundColor: tint(COLORS.accent) }]}>
-                      <Ionicons name="document" size={16} color={COLORS.accent} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.fileName} numberOfLines={1}>{sub.file_name}</Text>
-                      <Text style={styles.fileMeta}>{formatBytes(sub.file_size)}</Text>
-                    </View>
-                    {openingId === sub.id ? (
-                      <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
-                    ) : (
-                      <Ionicons name="eye-outline" size={18} color={COLORS.purpleVibrant} />
-                    )}
+                    <Ionicons
+                      name={score === null || score === undefined ? 'create-outline' : 'checkmark-done'}
+                      size={16}
+                      color={COLORS.purpleVibrant}
+                    />
+                    <Text style={styles.gradeBtnText}>
+                      {score === null || score === undefined ? 'Grade this work' : 'Edit grade'}
+                    </Text>
                   </TouchableOpacity>
                 </View>
               );
@@ -236,32 +270,42 @@ export default function TaskSubmissionsScreen() {
                 </Text>
               </View>
 
-              <TouchableOpacity
-                style={styles.fileRowModal}
-                activeOpacity={0.75}
-                onPress={() => openFile(gradingSub, gradingFull)}
-                disabled={openingId === gradingSub.id}
-              >
-                <View style={[styles.fileIcon, { backgroundColor: tint(COLORS.accent) }]}>
-                  <Ionicons name="document" size={16} color={COLORS.accent} />
+              {gradingFull.files.map((file) => (
+                <TouchableOpacity
+                  key={file.id}
+                  style={styles.fileRowModal}
+                  activeOpacity={0.75}
+                  onPress={() => openFile(file)}
+                  disabled={openingId !== null}
+                >
+                  <View style={[styles.fileIcon, { backgroundColor: tint(COLORS.accent) }]}>
+                    <Ionicons name="document" size={16} color={COLORS.accent} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fileName} numberOfLines={1}>{file.file_name}</Text>
+                    <Text style={styles.fileMeta}>{formatBytes(file.file_size)}</Text>
+                  </View>
+                  {openingId === file.id ? (
+                    <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
+                  ) : (
+                    <Ionicons name="share-outline" size={18} color={COLORS.purpleVibrant} />
+                  )}
+                </TouchableOpacity>
+              ))}
+
+              {gradingFull.description ? (
+                <View style={styles.noteBox}>
+                  <Text style={styles.noteLabel}>Note from student</Text>
+                  <Text style={styles.noteText}>{gradingFull.description}</Text>
                 </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fileName} numberOfLines={1}>{gradingSub.file_name}</Text>
-                  <Text style={styles.fileMeta}>{formatBytes(gradingSub.file_size)}</Text>
-                </View>
-                {openingId === gradingSub.id ? (
-                  <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
-                ) : (
-                  <Ionicons name="share-outline" size={18} color={COLORS.purpleVibrant} />
-                )}
-              </TouchableOpacity>
+              ) : null}
 
               <View style={styles.gradeForm}>
                 <Text style={styles.fieldLabel}>Score</Text>
                 <View style={styles.scoreInputRow}>
                   <TextInput
                     style={styles.scoreInput}
-                    placeholder="0"
+                    placeholder="Not graded"
                     placeholderTextColor={COLORS.textMuted}
                     value={scoreInput}
                     onChangeText={setScoreInput}
@@ -298,6 +342,18 @@ export default function TaskSubmissionsScreen() {
                     </>
                   )}
                 </TouchableOpacity>
+
+                {gradingFull.score !== null && gradingFull.score !== undefined && (
+                  <TouchableOpacity
+                    style={styles.clearGradeBtn}
+                    activeOpacity={0.8}
+                    onPress={handleClearGrade}
+                    disabled={grading}
+                  >
+                    <Ionicons name="close-circle-outline" size={16} color={COLORS.danger} />
+                    <Text style={styles.clearGradeText}>Clear grade</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             </View>
           </KeyboardAvoidingView>
@@ -332,6 +388,55 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.pill,
   },
   scoreBadgeText: { fontSize: 13, fontFamily: FONTS.bold, fontWeight: '700' },
+  lateBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: RADIUS.pill,
+    marginTop: 12,
+  },
+  lateBadgeText: { fontSize: 11, fontFamily: FONTS.bold, color: COLORS.warning },
+  noteBox: {
+    backgroundColor: 'white',
+    borderRadius: RADIUS.sm,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 12,
+    marginTop: 12,
+  },
+  noteLabel: {
+    fontSize: 10,
+    fontFamily: FONTS.bold,
+    color: COLORS.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+    marginBottom: 4,
+  },
+  noteText: { fontSize: 13, fontFamily: FONTS.regular, color: COLORS.textPrimary, lineHeight: 19 },
+  gradeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    marginTop: 14,
+    paddingVertical: 12,
+    borderRadius: RADIUS.sm,
+    backgroundColor: tint(COLORS.purpleVibrant),
+  },
+  gradeBtnText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.purpleVibrant },
+  clearGradeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 10,
+    paddingVertical: 8,
+  },
+  clearGradeText: { fontSize: 12, fontFamily: FONTS.semiBold, color: COLORS.danger },
   fileRow: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -5,7 +5,6 @@ import {
   Rating,
   RATINGS,
   gradeCard,
-  isDue,
   maturityOf,
   newCardState,
 } from './srs';
@@ -59,7 +58,6 @@ export interface DeckSummary {
   newCount: number;
   learningCount: number;
   matureCount: number;
-  dueCount: number;
 }
 
 export interface CardSearchMatch {
@@ -387,24 +385,18 @@ export function deleteReviewLog(reviewId: number): void {
 
 // ---------- Session queue ----------
 
-export function buildQueue(deckId: number, opts?: { now?: Date }): CardEntry[] {
-  const now = opts?.now ?? new Date();
-  const cards = getCards(deckId);
-  const all: CardEntry[] = cards.map((card) => ({ card, state: getCardState(card.id) }));
-  const due = all.filter((e) => e.state.state !== 'new' && isDue(e.state, now));
-  const fresh = all.filter((e) => e.state.state === 'new');
-  return [...due, ...fresh];
+export function buildQueue(deckId: number): CardEntry[] {
+  return getCards(deckId).map((card) => ({ card, state: getCardState(card.id) }));
 }
 
 export function getDeckSummary(deckId: number): DeckSummary {
   const entries = buildQueue(deckId);
-  const summary: DeckSummary = { total: entries.length, newCount: 0, learningCount: 0, matureCount: 0, dueCount: 0 };
+  const summary: DeckSummary = { total: entries.length, newCount: 0, learningCount: 0, matureCount: 0 };
   for (const e of entries) {
-    const m = maturityOf(e.state);
-    if (m === 'new') summary.newCount += 1;
-    else if (m === 'mature') summary.matureCount += 1;
+    const maturity = maturityOf(e.state);
+    if (maturity === 'new') summary.newCount += 1;
+    else if (maturity === 'mature') summary.matureCount += 1;
     else summary.learningCount += 1;
-    if (e.state.state !== 'new' && isDue(e.state)) summary.dueCount += 1;
   }
   return summary;
 }

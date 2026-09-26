@@ -1641,29 +1641,38 @@ class TaskSubmissionAPITests(APITestCase):
     def test_student_submits_file(self):
         resp = self._submit(self.student)
         self.assertEqual(resp.status_code, 201)
-        self.assertEqual(resp.data['file_name'], 'essay.txt')
-        self.assertEqual(resp.data['file_mime'], 'text/plain')
-        self.assertEqual(resp.data['file_size'], len(b'hello world'))
-        self.assertIn('file_data', resp.data)
+        self.assertEqual(len(resp.data['files']), 1)
+        submitted = resp.data['files'][0]
+        self.assertEqual(submitted['file_name'], 'essay.txt')
+        self.assertEqual(submitted['file_mime'], 'text/plain')
+        self.assertEqual(submitted['file_size'], len(b'hello world'))
         self.assertEqual(resp.data['student_name'], 'Task Student')
 
         # submission_count on the activity reflects it
         self.assertEqual(self.task.submissions.count(), 1)
 
-    def test_resubmission_replaces_file(self):
+    def test_second_upload_extends_the_turn_in(self):
         self._submit(self.student)
         resp = self._submit(self.student, content=b'new version')
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self.task.submissions.count(), 1)
-        self.assertEqual(resp.data['file_size'], len(b'new version'))
+        self.assertEqual(len(resp.data['files']), 2)
+        self.assertEqual(resp.data['files'][1]['file_size'], len(b'new version'))
 
     def test_student_can_read_own_submission(self):
         self._submit(self.student)
         self.client.force_authenticate(user=self.student)
         resp = self.client.get(reverse('task_submit', args=[self.task.id]))
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data['file_name'], 'essay.txt')
-        self.assertIn('file_data', resp.data)
+        self.assertEqual(resp.data['files'][0]['file_name'], 'essay.txt')
+
+        # The bytes come from the per-file endpoint, not the turn-in payload.
+        file_id = resp.data['files'][0]['id']
+        file_resp = self.client.get(
+            reverse('task_submission_file', args=[self.task.id, file_id]))
+        self.assertEqual(file_resp.status_code, 200)
+        self.assertIn('file_data', file_resp.data)
+        self.assertEqual(file_resp.data['file_data'], 'aGVsbG8gd29ybGQ=')
 
     def test_no_submission_returns_null(self):
         self.client.force_authenticate(user=self.student)
@@ -1679,6 +1688,7 @@ class TaskSubmissionAPITests(APITestCase):
         self.assertEqual(len(resp.data), 1)
         self.assertEqual(resp.data[0]['student_name'], 'Task Student')
         self.assertNotIn('file_data', resp.data[0])
+        self.assertNotIn('file_data', resp.data[0]['files'][0])
 
     def test_educator_fetches_single_submission_with_file(self):
         self._submit(self.student)
@@ -1686,8 +1696,13 @@ class TaskSubmissionAPITests(APITestCase):
         self.client.force_authenticate(user=self.educator)
         resp = self.client.get(reverse('task_submission_detail', args=[self.task.id, sub.id]))
         self.assertEqual(resp.status_code, 200)
-        self.assertIn('file_data', resp.data)
-        self.assertEqual(resp.data['file_name'], 'essay.txt')
+        self.assertEqual(len(resp.data['files']), 1)
+
+        file_resp = self.client.get(
+            reverse('task_submission_file', args=[self.task.id, resp.data['files'][0]['id']]))
+        self.assertEqual(file_resp.status_code, 200)
+        self.assertIn('file_data', file_resp.data)
+        self.assertEqual(file_resp.data['file_name'], 'essay.txt')
 
     def test_student_cannot_list_submissions(self):
         self._submit(self.student)
@@ -2101,24 +2116,38 @@ class GenerateTopicViewTests(APITestCase):
         self.client.force_authenticate(user=self.educator)
         self.course = Course.objects.create(name='Gen Course', educator=self.educator, description='material')
 
-    class FakeGroqResponse:
-        def __init__(self, content, status_code=200):
+    class FakeDeepSeekResponse:
+        def __init__(self, content, status_code=200, finish_reason='stop'):
             self.status_code = status_code
             self.text = content
             self._content = content
+            self._finish_reason = finish_reason
 
         def json(self):
-            return {'choices': [{'message': {'content': self._content}}]}
+            return {
+                'choices': [{
+                    'finish_reason': self._finish_reason,
+                    'message': {'content': self._content},
+                }]
+            }
 
-    def _post(self, raw_content):
-        fake = lambda payload, api_key, max_retries=3: self.FakeGroqResponse(raw_content)
+    def _post(self, raw_content, finish_reason='stop', **extra_fields):
+        captured = {}
+
+        def fake(payload, api_key, **kwargs):
+            captured['payload'] = payload
+            captured['kwargs'] = kwargs
+            return self.FakeDeepSeekResponse(raw_content, finish_reason=finish_reason)
+
         upload = SimpleUploadedFile('material.txt', b'Water evaporates into vapor.', content_type='text/plain')
         with patch.object(users_views, 'deepseek_chat_completion', side_effect=fake):
-            return self.client.post(
+            resp = self.client.post(
                 reverse('generate_topic', args=[self.course.id]),
-                {'file': upload},
+                {'file': upload, **extra_fields},
                 format='multipart',
             )
+        self.captured = captured
+        return resp
 
     def _valid_topic(self):
         return {
@@ -2221,4 +2250,76 @@ class GenerateTopicViewTests(APITestCase):
 
     def test_empty_nodes_rejected(self):
         resp = self._post(json.dumps({'title': 'Water', 'nodes': []}))
+        self.assertEqual(resp.status_code, 400)
+
+    # --- Latency budget: generation must finish inside the gunicorn timeout ---
+
+    def test_thinking_mode_disabled(self):
+        """DeepSeek V4 reasons by default; that hidden pass is what pushed
+        generation past the Procfile's 90s gunicorn timeout (and Cloudflare's
+        100s origin cap), which returned an HTML error page the client could
+        not JSON.parse."""
+        self._post(json.dumps(self._valid_topic()))
+        self.assertEqual(self.captured['payload']['thinking'], {'type': 'disabled'})
+
+    def test_generation_bounded_by_deadline(self):
+        """Every attempt plus backoff must fit in one wall-clock budget."""
+        self._post(json.dumps(self._valid_topic()))
+        self.assertEqual(
+            self.captured['kwargs'].get('deadline_seconds'),
+            users_views.AI_GEN_BUDGET_SECONDS,
+        )
+        # Must stay under the Procfile's `gunicorn --timeout 90`.
+        self.assertLess(users_views.AI_GEN_BUDGET_SECONDS, 90)
+
+    def test_max_tokens_scales_with_node_count(self):
+        small = self._post(json.dumps(self._valid_topic()), node_count='2')
+        self.assertEqual(small.status_code, 200)
+        small_tokens = self.captured['payload']['max_tokens']
+
+        large = self._post(json.dumps(self._valid_topic()), node_count='6')
+        self.assertEqual(large.status_code, 200)
+        large_tokens = self.captured['payload']['max_tokens']
+
+        self.assertLess(small_tokens, large_tokens)
+        self.assertLessEqual(large_tokens, 12000)
+
+    def test_truncated_response_rejected(self):
+        """finish_reason=length means max_tokens cut the JSON off. Surface that
+        directly instead of letting safe_json_parse fail and reporting the
+        misleading 'AI returned invalid structure'."""
+        resp = self._post(json.dumps(self._valid_topic()), finish_reason='length')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('cut off', resp.json()['error'].lower())
+
+    # --- Provenance citation repair: cosmetic title drift is fixed, not rejected ---
+
+    def _cited(self, resp, node_index, question_index=0):
+        return resp.json()['nodes'][node_index]['content_json']['questions'][question_index]['based_on']
+
+    def test_merged_citation_repaired_to_verbatim_title(self):
+        """A model that cites two real blocks in one string is making a cosmetic
+        error, not an ungrounded question. Repair it instead of discarding a
+        whole otherwise-valid topic."""
+        topic = self._valid_topic()
+        topic['nodes'][2]['content_json']['questions'][0]['based_on'] = \
+            'Learn 1 — The Water Cycle and Boiling Pots'
+        resp = self._post(json.dumps(topic))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._cited(resp, 2), 'Learn 1 — The Water Cycle')
+
+    def test_case_and_punctuation_drift_repaired(self):
+        topic = self._valid_topic()
+        topic['nodes'][2]['content_json']['questions'][0]['based_on'] = 'Learn 1 — the water cycle'
+        resp = self._post(json.dumps(topic))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._cited(resp, 2), 'Learn 1 — The Water Cycle')
+
+    def test_merge_with_one_unknown_part_still_rejected(self):
+        """Repair must not launder a half-real citation: if any merged part
+        resolves to nothing, the question is still ungrounded."""
+        topic = self._valid_topic()
+        topic['nodes'][2]['content_json']['questions'][0]['based_on'] = \
+            'Learn 1 — The Water Cycle and Evaporation'
+        resp = self._post(json.dumps(topic))
         self.assertEqual(resp.status_code, 400)

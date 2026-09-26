@@ -7,7 +7,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
-import { getQuizzes } from '@/services/quizService';
+import { getQuizzes, saveSharedQuiz } from '@/services/quizService';
 import { getMyCourses } from '@/services/courseService';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
@@ -567,6 +567,17 @@ export default function QuizManagerScreen() {
           }],
         }),
       });
+
+      // Save shared quiz to user's account (with deduplication)
+      try {
+        const result = await saveSharedQuiz(shareData.id);
+        if (!result.isNew) {
+          Alert.alert('Already Saved', 'This quiz is already in your quiz list.');
+        }
+      } catch (saveErr) {
+        console.warn('Failed to save shared quiz:', saveErr);
+      }
+
       setShowShareModal(false);
       setShareQuizId(null);
       Alert.alert('Shared!', 'Quiz sent to group chat.');

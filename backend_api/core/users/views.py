@@ -13,7 +13,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, ClassActivityAttachment
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
 from ai_assistant.models import Quiz, QuizAttempt
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
@@ -35,6 +35,7 @@ from .serializers import (
     TopicSerializer, LearningNodeSerializer, NodeProgressSerializer, CoursePathTopicSerializer,
     ClassActivitySerializer,
     TaskSubmissionSerializer, TaskSubmissionListSerializer,
+    TaskSubmissionFileSerializer, TaskSubmissionFileListSerializer,
     ClassActivityAttachmentSerializer, ClassActivityAttachmentListSerializer,
 )
 from .permissions import IsSuperadmin
@@ -404,14 +405,85 @@ def _learn_node_blocks(learn_node):
 _BASED_ON_RE = re.compile(r'^Learn\s+(\d+)\s*[-–—]\s*(.+)$', re.IGNORECASE)
 
 
+def _normalize_title(value):
+    """Loose comparison key for a block title: casefolded, punctuation dropped,
+    whitespace collapsed. Lets 'Light-Dependent Reactions' and
+    'light dependent reactions' compare equal."""
+    text = re.sub(r'[^0-9a-z]+', ' ', str(value or '').lower())
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _split_cited_title(value):
+    """Split a citation that glues several block titles together.
+
+    Models routinely cite 'Light-Dependent Reactions and The Calvin Cycle' when
+    those are two separate blocks, so the conjunction is treated as a
+    separator rather than as part of a single title."""
+    parts = re.split(r'\s+(?:and|&)\s+|,\s*|\s*;\s*|\s+/\s+', str(value or ''), flags=re.IGNORECASE)
+    return [p for p in (s.strip() for s in parts) if p]
+
+
+def _resolve_cited_block(blocks, cited):
+    """Find the block a `based_on` citation refers to, tolerating the ways a
+    model drifts from a verbatim title. Returns (block, canonical_title) or
+    (None, None) when the citation genuinely points at nothing real.
+
+    The safety property this preserves is that a question may only cite a block
+    that actually exists in the learn node - citation *spelling* is repaired,
+    citation *substance* is not."""
+    candidates = [(b, str(b.get('title', '')).strip()) for b in blocks]
+    cited_raw = str(cited or '').strip()
+    if not cited_raw:
+        return None, None
+
+    # A citation that reads as several titles must resolve completely: every
+    # part has to be a real block. If any part is unknown the whole citation is
+    # ungrounded, and we deliberately do NOT fall through to the looser
+    # substring match below (that would launder 'Real Block and Invented Thing'
+    # into a pass on the strength of its first half).
+    parts = _split_cited_title(cited_raw)
+    if len(parts) > 1:
+        resolved = []
+        for part in parts:
+            pkey = _normalize_title(part)
+            hit = next(
+                ((b, t) for b, t in candidates
+                 if _normalize_title(t) == pkey or pkey in _normalize_title(t) or _normalize_title(t) in pkey),
+                None,
+            )
+            if hit is None:
+                return None, None
+            resolved.append(hit)
+        return resolved[0][0], resolved[0][1]
+
+    # Single title: verbatim, then punctuation/case-insensitive.
+    for block, title in candidates:
+        if title.lower() == cited_raw.lower():
+            return block, title
+    key = _normalize_title(cited_raw)
+    for block, title in candidates:
+        if _normalize_title(title) == key:
+            return block, title
+
+    # One real title contains the other (a clipped or over-long citation).
+    if key:
+        for block, title in candidates:
+            tkey = _normalize_title(title)
+            if tkey and (tkey in key or key in tkey):
+                return block, title
+
+    return None, None
+
+
 def _validate_provenance(nodes):
     """Strict provenance check for every practice/mastery question.
 
-    `based_on` must match "Learn N — <exact block title>" where N is the ORDINAL
+    `based_on` must match "Learn N — <block title>" where N is the ORDINAL
     learn node (1 = first learn node in the sequence, not a raw array position)
-    and the title exactly matches the `title` of a non-empty concept/example block
-    of that learn node. Returns (ok, detail); on failure the whole topic is
-    rejected so corrupted questions are never delivered."""
+    and the title must resolve to a non-empty concept/example block of that
+    learn node. Cosmetic title drift is repaired in place (the citation is
+    rewritten to the block's verbatim title); only a citation that resolves to
+    nothing real is rejected. Returns (ok, detail)."""
     learn_nodes = [n for n in nodes if n.get('node_type') == 'learn']
     for node in nodes:
         if node.get('node_type') not in ('practice', 'mastery'):
@@ -439,41 +511,84 @@ def _validate_provenance(nodes):
             blocks = _learn_node_blocks(learn_nodes[idx - 1])
             if not blocks:
                 return False, f"based_on '{based_on}' references a learn node with no concept/example content"
-            cited = next((b for b in blocks if str(b.get('title', '')).strip().lower() == title.lower()), None)
+            cited, canonical = _resolve_cited_block(blocks, title)
             if cited is None:
                 return False, f"based_on '{based_on}' references unknown block title '{title}'"
             if not str(cited.get('content', '') or '').strip():
                 return False, f"based_on '{based_on}' references an empty block"
+            # Store the verbatim title so the provenance shown to students (and
+            # any later re-validation) refers to the block that actually exists.
+            if canonical and canonical != title:
+                q['based_on'] = f"Learn {idx} — {canonical}"
     return True, 'ok'
 
 
-def deepseek_chat_completion(payload, api_key, max_retries=3):
-    """POST to DeepSeek and retry transient failures."""
+# Total wall-clock budget for one AI generation request. Stays under the
+# Procfile's `gunicorn --timeout 90` (and Cloudflare's 100s origin cap) so a
+# slow model or a retry storm fails as a clean HTTP error instead of an HTML
+# error page the client can't parse.
+AI_GEN_BUDGET_SECONDS = float(os.getenv('AI_GEN_BUDGET_SECONDS', '70'))
+
+
+def deepseek_chat_completion(payload, api_key, max_retries=3, deadline_seconds=None):
+    """POST to DeepSeek and retry transient failures.
+
+    When deadline_seconds is given, the whole call (every attempt plus backoff)
+    is bounded by that wall-clock budget. Without it a retry storm can run
+    120s x 3 attempts plus Retry-After sleeps, which outlives any front-end
+    timeout and gets the request killed mid-flight.
+    """
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    started = time.monotonic()
+
+    def remaining():
+        if deadline_seconds is None:
+            return None
+        return deadline_seconds - (time.monotonic() - started)
+
+    def budget_exhausted(reserve=5):
+        left = remaining()
+        return left is not None and left <= reserve
+
+    def clamp_wait(wait):
+        """Never sleep past the deadline."""
+        left = remaining()
+        if left is None:
+            return wait
+        return max(0.0, min(wait, left - 1))
+
     last_response = None
     for attempt in range(1, max_retries + 1):
+        if budget_exhausted():
+            print(f"[DeepSeek] deadline of {deadline_seconds}s exhausted before attempt {attempt}")
+            return last_response
+
+        left = remaining()
+        read_timeout = 120 if left is None else max(5.0, min(120.0, left))
         try:
             last_response = requests.post(
                 "https://api.deepseek.com/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=120,
+                # (connect, read): never hang on connect, cap the read so a
+                # stalled generation still returns inside the budget.
+                timeout=(10, read_timeout),
             )
         except requests.exceptions.RequestException as e:
             print(f"[DeepSeek] attempt {attempt} request error: {e}")
             last_response = None
-            if attempt < max_retries:
-                time.sleep(2 * attempt)
+            if attempt < max_retries and not budget_exhausted():
+                time.sleep(clamp_wait(2 * attempt))
             continue
 
         if last_response.status_code == 200:
             return last_response
 
         print(f"[DeepSeek] attempt {attempt} status {last_response.status_code}: {last_response.text[:300]}")
-        if attempt < max_retries:
+        if attempt < max_retries and not budget_exhausted():
             # Honor DeepSeek's suggested wait time (rate limits) when present.
             wait = 2 * attempt
             retry_after = last_response.headers.get('Retry-After')
@@ -486,7 +601,7 @@ def deepseek_chat_completion(payload, api_key, max_retries=3):
                 match = re.search(r"Please try again in\s+([\d.]+)\s*s", last_response.text)
                 if match:
                     wait = max(wait, float(match.group(1)))
-            time.sleep(wait)
+            time.sleep(clamp_wait(wait))
     return last_response
 
 PALETTE = ['#7F77DD', '#1D9E75', '#D85A30', '#D4537E', '#378ADD', '#639922']
@@ -562,16 +677,23 @@ class CompleteQuizView(APIView):
                     status=403,
                 )
 
-            try:
-                attempt = QuizAttempt.objects.get(quiz=quiz, user=request.user)
-            except QuizAttempt.DoesNotExist:
+            # Retries are unlimited, so a learner can legitimately have several
+            # attempt rows. Use the most recent one instead of .get(), which
+            # would raise MultipleObjectsReturned and 500 on a second attempt.
+            attempt = (
+                QuizAttempt.objects
+                .filter(quiz=quiz, user=request.user)
+                .order_by('-started_at')
+                .first()
+            )
+            if attempt is None:
                 return Response(
                     {'error': 'Take quiz cannot be completed because you did not start it.'},
                     status=409,
                 )
             if attempt.completed_at is not None:
                 return Response(
-                    {'error': 'You have already completed this quiz. It can only be taken once.'},
+                    {'error': 'You have already completed the latest attempt. Start a new attempt to try again.'},
                     status=409,
                 )
 
@@ -1471,6 +1593,42 @@ class CourseLeaderboardView(APIView):
         })
 
 
+def _store_activity_attachments(request, activity):
+    """Attach every uploaded `attachments` file to `activity`.
+
+    Returns a (None, None) pair on success or (None, error_response) when a
+    file is rejected, so callers can `if err: return err`.
+    """
+    uploads = request.FILES.getlist('attachments')
+    if not uploads:
+        return None, None
+
+    existing = activity.attachments.count()
+    if existing + len(uploads) > ClassActivityAttachment.MAX_FILES:
+        return None, Response(
+            {"error": f"An activity can have at most {ClassActivityAttachment.MAX_FILES} attachments"},
+            status=400,
+        )
+
+    for upload in uploads:
+        if upload.size > ClassActivityAttachment.MAX_FILE_SIZE:
+            return None, Response(
+                {"error": f"File '{upload.name}' is too large (max {ClassActivityAttachment.MAX_FILE_SIZE // (1024 * 1024)} MB)"},
+                status=400,
+            )
+        data = upload.read()
+        if not data:
+            return None, Response({"error": f"File '{upload.name}' is empty"}, status=400)
+        ClassActivityAttachment.objects.create(
+            activity=activity,
+            file_name=upload.name[:255],
+            file_mime=upload.content_type or 'application/octet-stream',
+            file_size=len(data),
+            file_data=data,
+        )
+    return None, None
+
+
 class CourseActivitiesView(APIView):
     """List / create activities for a single course (class)."""
     permission_classes = [IsAuthenticated]
@@ -1480,10 +1638,14 @@ class CourseActivitiesView(APIView):
         course, err = _get_course_for_activity(request, course_id)
         if err:
             return err
-        if request.user != course.educator and not course.students.filter(id=request.user.id).exists():
+        is_educator = request.user == course.educator
+        if not is_educator and not course.students.filter(id=request.user.id).exists():
             return Response({"error": "You are not a member of this course"}, status=403)
 
-        activities = course.activities.prefetch_related('attachments').all()
+        activities = course.activities.prefetch_related('attachments')
+        # Students must never see work the educator has not published yet.
+        if not is_educator:
+            activities = activities.filter(status='published')
         return Response(ClassActivitySerializer(activities, many=True).data)
 
     def post(self, request, course_id):
@@ -1499,24 +1661,9 @@ class CourseActivitiesView(APIView):
 
         activity = serializer.save(course=course, status=request.data.get('status', 'draft'))
 
-        # Handle file attachments
-        files = request.FILES.getlist('attachments')
-        for upload in files:
-            if upload.size > ClassActivityAttachment.MAX_FILE_SIZE:
-                return Response(
-                    {"error": f"File '{upload.name}' is too large (max {ClassActivityAttachment.MAX_FILE_SIZE // (1024 * 1024)} MB)"},
-                    status=400,
-                )
-            data = upload.read()
-            if not data:
-                return Response({"error": f"File '{upload.name}' is empty"}, status=400)
-            ClassActivityAttachment.objects.create(
-                activity=activity,
-                file_name=upload.name[:255],
-                file_mime=upload.content_type or 'application/octet-stream',
-                file_size=len(data),
-                file_data=data,
-            )
+        _, err = _store_activity_attachments(request, activity)
+        if err:
+            return err
 
         # Refetch with attachments for response
         activity = ClassActivity.objects.prefetch_related('attachments').get(id=activity.id)
@@ -1524,7 +1671,7 @@ class CourseActivitiesView(APIView):
 
 
 class ClassActivityDetailView(APIView):
-    """Update / delete a single class activity (educator only)."""
+    """Read / update / delete a single class activity."""
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
@@ -1537,6 +1684,12 @@ class ClassActivityDetailView(APIView):
             return None, Response({"error": "Only the course educator can manage this activity"}, status=403)
         return activity, None
 
+    def get(self, request, activity_id):
+        activity, err = self._get_owned(request, activity_id)
+        if err:
+            return err
+        return Response(ClassActivitySerializer(activity).data)
+
     def patch(self, request, activity_id):
         activity, err = self._get_owned(request, activity_id)
         if err:
@@ -1546,26 +1699,12 @@ class ClassActivityDetailView(APIView):
             return Response(serializer.errors, status=400)
         activity = serializer.save()
 
-        # Handle file attachments (additional or replacement)
-        files = request.FILES.getlist('attachments')
-        for upload in files:
-            if upload.size > ClassActivityAttachment.MAX_FILE_SIZE:
-                return Response(
-                    {"error": f"File '{upload.name}' is too large (max {ClassActivityAttachment.MAX_FILE_SIZE // (1024 * 1024)} MB)"},
-                    status=400,
-                )
-            data = upload.read()
-            if not data:
-                return Response({"error": f"File '{upload.name}' is empty"}, status=400)
-            ClassActivityAttachment.objects.create(
-                activity=activity,
-                file_name=upload.name[:255],
-                file_mime=upload.content_type or 'application/octet-stream',
-                file_size=len(data),
-                file_data=data,
-            )
+        # New materials are appended; removing one is a DELETE on the
+        # attachment endpoint so the other files survive.
+        _, err = _store_activity_attachments(request, activity)
+        if err:
+            return err
 
-        # Refetch with attachments for response
         activity = ClassActivity.objects.prefetch_related('attachments').get(id=activity.id)
         return Response(ClassActivitySerializer(activity).data)
 
@@ -1594,39 +1733,76 @@ def _get_task_activity(request, activity_id):
         activity = ClassActivity.objects.select_related('course').get(id=activity_id)
     except ClassActivity.DoesNotExist:
         return None, Response({"error": "Activity not found"}, status=404)
-    if request.user != activity.course.educator and not activity.course.students.filter(id=request.user.id).exists():
+    is_educator = request.user == activity.course.educator
+    if not is_educator and not activity.course.students.filter(id=request.user.id).exists():
         return None, Response({"error": "You are not a member of this course"}, status=403)
     if activity.kind != 'task':
         return None, Response({"error": "This activity does not accept file submissions"}, status=400)
+    # Unpublished work is invisible to students, not merely hidden in the UI.
+    if not is_educator and activity.status != 'published':
+        return None, Response({"error": "Activity not found"}, status=404)
     return activity, None
 
 
 class TaskSubmissionView(APIView):
-    """Student's own submission for a task: GET returns it, POST upserts it."""
-    permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
+    """A student's turn-in for a task: GET reads it, POST adds files to it.
 
-    def _validate_file(self, request):
-        upload = request.FILES.get('file')
-        if not upload:
+    The turn-in is created on the first upload and then extended, so a student
+    can attach several files (a report plus a spreadsheet) without wiping what
+    they already added. PATCH edits the note to the educator, DELETE discards
+    the whole turn-in.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def _validate_uploads(self, request, activity, existing_count):
+        """Check the upload count/size limits and return [(upload, bytes), ...].
+
+        The bytes are read once here because reading an upload consumes its
+        stream — a second read in the save loop would store empty files.
+        """
+        uploads = request.FILES.getlist('file') or request.FILES.getlist('files')
+        if not uploads:
             return None, Response({"error": "A file is required"}, status=400)
-        if upload.size > TaskSubmission.MAX_FILE_SIZE:
+
+        # A single-file assignment only ever holds one file; a multi-file
+        # assignment is still capped so a turn-in cannot balloon.
+        if not activity.allow_multiple_files and existing_count + len(uploads) > 1:
             return None, Response(
-                {"error": f"File is too large (max {TaskSubmission.MAX_FILE_SIZE // (1024 * 1024)} MB)"},
+                {"error": "This assignment only accepts a single file"},
                 status=400,
             )
-        data = upload.read()
-        if not data:
-            return None, Response({"error": "File is empty"}, status=400)
-        return (upload, data), None
+        if existing_count + len(uploads) > TaskSubmission.MAX_FILES:
+            return None, Response(
+                {"error": f"You can attach at most {TaskSubmission.MAX_FILES} files"},
+                status=400,
+            )
+
+        prepared = []
+        for upload in uploads:
+            if upload.size > TaskSubmissionFile.MAX_FILE_SIZE:
+                return None, Response(
+                    {"error": f"'{upload.name}' is too large (max {TaskSubmissionFile.MAX_FILE_SIZE // (1024 * 1024)} MB)"},
+                    status=400,
+                )
+            data = upload.read()
+            if not data:
+                return None, Response({"error": f"'{upload.name}' is empty"}, status=400)
+            prepared.append((upload, data))
+        return prepared, None
+
+    def _get_submission(self, activity, user):
+        try:
+            return TaskSubmission.objects.get(activity=activity, student=user)
+        except TaskSubmission.DoesNotExist:
+            return None
 
     def get(self, request, activity_id):
         activity, err = _get_task_activity(request, activity_id)
         if err:
             return err
-        try:
-            submission = TaskSubmission.objects.get(activity=activity, student=request.user)
-        except TaskSubmission.DoesNotExist:
+        submission = self._get_submission(activity, request.user)
+        if submission is None:
             return Response(None)
         return Response(TaskSubmissionSerializer(submission).data)
 
@@ -1637,22 +1813,105 @@ class TaskSubmissionView(APIView):
         if request.user == activity.course.educator:
             return Response({"error": "Only enrolled students can submit"}, status=403)
 
-        file_info, err = self._validate_file(request)
+        submission = self._get_submission(activity, request.user)
+        prepared, err = self._validate_uploads(request, activity, submission.files.count() if submission else 0)
         if err:
             return err
-        upload, data = file_info
 
-        submission, created = TaskSubmission.objects.update_or_create(
-            activity=activity,
-            student=request.user,
-            defaults={
-                'file_name': upload.name[:255],
-                'file_mime': upload.content_type or 'application/octet-stream',
-                'file_size': len(data),
-                'file_data': data,
-            },
-        )
+        created = submission is None
+        if created:
+            submission = TaskSubmission.objects.create(
+                activity=activity,
+                student=request.user,
+                description=(request.data.get('description') or '')[:5000],
+            )
+        elif request.data.get('description'):
+            submission.description = request.data['description'][:5000]
+            submission.save(update_fields=['description', 'updated_at'])
+
+        for upload, data in prepared:
+            TaskSubmissionFile.objects.create(
+                submission=submission,
+                file_name=upload.name[:255],
+                file_mime=upload.content_type or 'application/octet-stream',
+                file_size=len(data),
+                file_data=data,
+            )
+
+        submission.refresh_from_db()
         return Response(TaskSubmissionSerializer(submission).data, status=201 if created else 200)
+
+    def patch(self, request, activity_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        if request.user == activity.course.educator:
+            return Response({"error": "Only enrolled students can edit their turn-in"}, status=403)
+        submission = self._get_submission(activity, request.user)
+        if submission is None:
+            return Response({"error": "You have not submitted this task yet"}, status=404)
+
+        description = request.data.get('description', submission.description)
+        submission.description = (description or '')[:5000]
+        submission.save(update_fields=['description', 'updated_at'])
+        return Response(TaskSubmissionSerializer(submission).data)
+
+    def delete(self, request, activity_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        if request.user == activity.course.educator:
+            return Response({"error": "Only enrolled students can remove their turn-in"}, status=403)
+        submission = self._get_submission(activity, request.user)
+        if submission is None:
+            return Response(status=204)
+        submission.delete()
+        return Response(status=204)
+
+
+class TaskSubmissionFileView(APIView):
+    """One file inside a turn-in: GET returns the bytes, DELETE removes it.
+
+    Allowed for the student who owns the turn-in and for the course educator
+    (so a teacher can pull down anything that was handed in).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _get(self, request, activity_id, file_id, for_educator):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return None, err
+        is_educator = request.user == activity.course.educator
+        if for_educator and not is_educator:
+            return None, Response({"error": "Only the course educator can view submissions"}, status=403)
+
+        try:
+            submission_file = TaskSubmissionFile.objects.select_related(
+                'submission__student'
+            ).get(id=file_id, submission__activity=activity)
+        except TaskSubmissionFile.DoesNotExist:
+            return None, Response({"error": "File not found"}, status=404)
+
+        if not is_educator and submission_file.submission.student_id != request.user.id:
+            return None, Response({"error": "This file belongs to another student"}, status=403)
+        return submission_file, None
+
+    def get(self, request, activity_id, file_id):
+        submission_file, err = self._get(request, activity_id, file_id, for_educator=False)
+        if err:
+            return err
+        return Response(TaskSubmissionFileSerializer(submission_file).data)
+
+    def delete(self, request, activity_id, file_id):
+        submission_file, err = self._get(request, activity_id, file_id, for_educator=False)
+        if err:
+            return err
+        submission = submission_file.submission
+        submission_file.delete()
+        # A turn-in with no files left is not a turn-in.
+        if not submission.files.exists():
+            submission.delete()
+        return Response(status=204)
 
 
 class TaskSubmissionsView(APIView):
@@ -1665,7 +1924,11 @@ class TaskSubmissionsView(APIView):
             return err
         if request.user != activity.course.educator:
             return Response({"error": "Only the course educator can view submissions"}, status=403)
-        submissions = TaskSubmission.objects.filter(activity=activity).select_related('student')
+        submissions = (
+            TaskSubmission.objects.filter(activity=activity)
+            .select_related('student')
+            .prefetch_related('files')
+        )
         return Response(TaskSubmissionListSerializer(submissions, many=True).data)
 
 
@@ -1687,7 +1950,7 @@ class TaskSubmissionDetailView(APIView):
 
 
 class TaskSubmissionGradeView(APIView):
-    """Educator grades a submission (score + feedback)."""
+    """Educator grades a submission (score + feedback), or clears the grade."""
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, activity_id, submission_id):
@@ -1701,16 +1964,22 @@ class TaskSubmissionGradeView(APIView):
         except TaskSubmission.DoesNotExist:
             return Response({"error": "Submission not found"}, status=404)
 
-        score = request.data.get('score')
         feedback = request.data.get('feedback', '')
+        # An explicit null score un-grades the work.
+        score = request.data.get('score', submission.score)
 
         if score is None:
-            return Response({"error": "Score is required"}, status=400)
+            submission.score = None
+            submission.feedback = feedback
+            submission.graded_at = None
+            submission.graded_by = None
+            submission.save(update_fields=['score', 'feedback', 'graded_at', 'graded_by', 'updated_at'])
+            return Response(TaskSubmissionSerializer(submission).data)
 
         try:
             score = int(score)
         except (TypeError, ValueError):
-            return Response({"error": "Score must be an integer"}, status=400)
+            return Response({"error": "Score must be a whole number"}, status=400)
 
         max_points = activity.max_points
         if score < 0 or score > max_points:
@@ -1726,7 +1995,7 @@ class TaskSubmissionGradeView(APIView):
 
 
 class TaskActivityAttachmentView(APIView):
-    """Download a teacher attachment for a task activity (course members only)."""
+    """Teacher attachment for a task: GET downloads it, DELETE removes it."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, activity_id, attachment_id):
@@ -1738,6 +2007,19 @@ class TaskActivityAttachmentView(APIView):
         except ClassActivityAttachment.DoesNotExist:
             return Response({"error": "Attachment not found"}, status=404)
         return Response(ClassActivityAttachmentSerializer(attachment).data)
+
+    def delete(self, request, activity_id, attachment_id):
+        activity, err = _get_task_activity(request, activity_id)
+        if err:
+            return err
+        if request.user != activity.course.educator:
+            return Response({"error": "Only the course educator can remove materials"}, status=403)
+        try:
+            attachment = ClassActivityAttachment.objects.get(id=attachment_id, activity=activity)
+        except ClassActivityAttachment.DoesNotExist:
+            return Response({"error": "Attachment not found"}, status=404)
+        attachment.delete()
+        return Response(status=204)
 
 
 # --- Learning Path Views ---
@@ -2151,7 +2433,7 @@ def sync_user_to_firestore(user):
 @parser_classes([MultiPartParser, FormParser])
 def generate_lesson(request):
     """
-    Generate an AI-powered multi‑level course using Groq API.
+    Generate an AI-powered multi‑level course using the DeepSeek API.
     File upload ONLY (PDF, DOCX, TXT)
     """
 
@@ -2253,6 +2535,10 @@ Each level must have:
 
         payload = {
             "model": model_name,
+            # DeepSeek V4 thinks by default; that hidden reasoning pass burns
+            # the token budget and latency budget for no benefit here.
+            # Matches AskSAGEView in ai_assistant/views.py.
+            "thinking": {"type": "disabled"},
             "messages": [
                 {
                     "role": "system",
@@ -2274,17 +2560,24 @@ Each level must have:
 
         print("🧠 Sending request to DeepSeek...")
 
-        response = deepseek_chat_completion(payload, api_key)
+        response = deepseek_chat_completion(payload, api_key, deadline_seconds=AI_GEN_BUDGET_SECONDS)
 
         if response is None or response.status_code != 200:
             print("❌ DeepSeek error:", getattr(response, 'text', 'no response'))
             return Response(
-                {"error": "AI generation failed. Please try again."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "AI generation timed out. Please try again with a smaller file."},
+                status=status.HTTP_504_GATEWAY_TIMEOUT
             )
 
         data = response.json()
-        lesson_content = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        if choice.get("finish_reason") == "length":
+            print("❌ DEEPSEEK RESPONSE TRUNCATED (finish_reason=length)")
+            return Response(
+                {"error": "AI response was cut off. Please try again with a smaller file."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        lesson_content = choice["message"]["content"]
 
         print("🔥 DEEPSEEK RAW OUTPUT:")
         print(lesson_content[:1000])
@@ -2324,7 +2617,7 @@ Each level must have:
 
 
 class GenerateTopicView(APIView):
-    """Generate a full topic with nodes from a file using Groq AI."""
+    """Generate a full topic with nodes from a file using DeepSeek AI."""
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
@@ -2473,26 +2766,43 @@ A practice question must be answerable from its cited Learn block without requir
 
         model_name = os.getenv('DEEPSEEK_GEN_MODEL', 'deepseek-v4-pro')
 
+        # DeepSeek V4 thinks by default. That hidden reasoning pass eats the
+        # token budget, adds tens of seconds of latency, and was the reason
+        # generation ran past the gunicorn timeout. Disable it here, matching
+        # ai_assistant/views.py (AskSAGEView).
+        #
+        # With thinking off, max_tokens only has to cover the visible JSON, so
+        # bound it from node_count instead of always asking for 12000. A smaller
+        # ceiling also caps the worst-case generation time.
+        max_tokens = min(12000, 1500 + node_count * 1100)
+
         payload = {
             'model': model_name,
+            'thinking': {'type': 'disabled'},
             'messages': [
                 {'role': 'system', 'content': 'You are an expert educator. Return ONLY valid JSON. No markdown. No explanations.'},
                 {'role': 'user', 'content': prompt},
             ],
             'temperature': 0.5,
-            'max_tokens': 12000,
+            'max_tokens': max_tokens,
             'response_format': {'type': 'json_object'},
         }
 
         try:
-            response = deepseek_chat_completion(payload, api_key)
+            response = deepseek_chat_completion(payload, api_key, deadline_seconds=AI_GEN_BUDGET_SECONDS)
 
             if response is None or response.status_code != 200:
                 print(f"[GenerateTopicView] DeepSeek error: {getattr(response, 'text', 'no response')}")
-                return Response({'error': 'AI generation failed. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return Response({'error': 'AI generation timed out. Please try again with fewer nodes or a smaller file.'}, status=status.HTTP_504_GATEWAY_TIMEOUT)
 
             data = response.json()
-            raw_content = data['choices'][0]['message']['content']
+            choice = data['choices'][0]
+            # A truncated response would otherwise fail safe_json_parse and get
+            # reported as the misleading "AI returned invalid structure".
+            if choice.get('finish_reason') == 'length':
+                print(f"[GenerateTopicView] response truncated at max_tokens={max_tokens}")
+                return Response({'error': 'AI response was cut off. Please try again with fewer nodes or a smaller file.'}, status=status.HTTP_400_BAD_REQUEST)
+            raw_content = choice['message']['content']
             topic_data = safe_json_parse(raw_content)
 
             if not topic_data or 'title' not in topic_data or 'nodes' not in topic_data:
