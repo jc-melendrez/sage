@@ -1,16 +1,44 @@
 import { useState, useRef, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar, KeyboardAvoidingView } from 'react-native';
-import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
 import { Ionicons } from '@expo/vector-icons';
 import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
+import { notify } from '@/services/notify';
+import {
+  pickDocument,
+  pickImage,
+  readAsBase64,
+  describeFileError,
+  type PickedDocument,
+  type PickedImage,
+} from '@/services/fileUpload';
 import { LinearGradient } from 'expo-linear-gradient';
 import Markdown from '@ronradtke/react-native-markdown-display';
 
 // 🌟 Enable Layout Animations for Android
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+/**
+ * Pinned chats first, then newest first within each group. The server returns
+ * sessions already in this order, but pinning and deleting both rewrite the
+ * list locally, so re-sorting is what stops a newly pinned chat from staying
+ * wherever it happened to be.
+ */
+function sortSessionsPinnedFirst<T extends { pinned?: boolean; updated_at?: string }>(list: T[]): T[] {
+  return [...list].sort((a, b) => {
+    const aPinned = a.pinned ? 1 : 0;
+    const bPinned = b.pinned ? 1 : 0;
+    if (aPinned !== bPinned) return bPinned - aPinned;
+    return String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? ''));
+  });
+}
+
+/** Pull the server's own error text out of a failed response. */
+async function describeFailure(res: Response, fallback: string): Promise<string> {
+  const data = await res.json().catch(() => ({}));
+  return data?.error || data?.detail || fallback;
 }
 
 // 🎨 Unified Purple Palette
@@ -222,9 +250,22 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
   const [isLoading, setIsLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
-  const [attachedFile, setAttachedFile] = useState<any>(null);
+  const [attachedFile, setAttachedFile] = useState<PickedDocument | PickedImage | null>(null);
 
   const quickActions = QUICK_ACTIONS[variant];
+
+  // A newly opened thread has to land at the newest message even though the
+  // ScrollView still holds the previous thread's offset. `scrollToEnd` is a
+  // no-op while the old content is still laid out, so the offset is zeroed
+  // first and the scroll is retried on the next layout pass.
+  const scrollToBottom = (animated: boolean, force = false) => {
+    if (!force && userScrolledRef.current) return;
+    const sv = scrollViewRef.current;
+    if (!sv) return;
+    requestAnimationFrame(() => {
+      sv.scrollToEnd({ animated });
+    });
+  };
 
   const handleScroll = (event: any) => {
     const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
@@ -236,17 +277,18 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
     if (pendingHistoryScrollRef.current) {
       pendingHistoryScrollRef.current = false;
       userScrolledRef.current = false;
-      scrollViewRef.current?.scrollToEnd({ animated: false });
+      scrollToBottom(false, true);
       return;
     }
-    if (!userScrolledRef.current) {
-      scrollViewRef.current?.scrollToEnd({ animated: true });
-    }
+    scrollToBottom(true);
   };
 
   const resetUserScrolled = () => {
     userScrolledRef.current = false;
   };
+
+  // Send is live when there is something to say or something attached.
+  const sendDisabled = isLoading || isTyping || (!inputValue.trim() && !attachedFile);
 
   // 1. Load Sessions on Startup
   useEffect(() => {
@@ -261,7 +303,7 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
       });
       if (res.ok) {
         const data = await res.json();
-        setSessions(data);
+        setSessions(sortSessionsPinnedFirst(data));
         if (data.length > 0 && !activeSessionId) {
           loadHistory(data[0].id);
         } else if (data.length === 0) {
@@ -278,7 +320,11 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
     setActiveSessionId(sessionId);
     setIsMenuVisible(false);
     resetUserScrolled();
-    setMessages([]); 
+    // Drop the previous thread's scroll position. Without this the new thread
+    // inherits it, so switching from a long chat to a short one opened
+    // mid-thread or on a blank area.
+    scrollViewRef.current?.scrollTo({ x: 0, y: 0, animated: false });
+    setMessages([]);
     
     try {
       const token = await getToken();
@@ -319,22 +365,34 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
     setMenuSessionId(null);
   };
 
+  /**
+   * The backend is the single source of truth for pinning: only one session
+   * can be pinned, so mirroring `data.pinned` across the list is what keeps
+   * the list consistent with the server instead of leaving two rows claiming
+   * to be pinned.
+   */
   const handlePinSession = async (sessionId: number, currentlyPinned: boolean) => {
+    closeMenu();
     try {
       const token = await getToken();
+      if (!token) throw new Error('Please sign in again.');
       const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ pinned: !currentlyPinned }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, pinned: data.pinned } : s));
-      }
+      if (!res.ok) throw new Error(await describeFailure(res, 'Could not update that chat.'));
+      const data = await res.json();
+      const serverPinnedId: number | null = data.pinned ? sessionId : null;
+      setSessions(prev =>
+        sortSessionsPinnedFirst(
+          prev.map(s => ({ ...s, pinned: s.id === serverPinnedId })),
+        ),
+      );
     } catch (err) {
       console.error('Failed to pin session:', err);
+      notify('Pin failed', err instanceof Error ? err.message : 'Could not update that chat.');
     }
-    closeMenu();
   };
 
   const startRenameSession = (sessionId: number, currentTitle: string) => {
@@ -344,19 +402,24 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
   };
 
   const saveRenameSession = async (sessionId: number) => {
-    if (!editTitle.trim()) return;
+    const nextTitle = editTitle.trim();
+    if (!nextTitle) {
+      notify('Title required', 'A chat needs a name.');
+      return;
+    }
     try {
       const token = await getToken();
+      if (!token) throw new Error('Please sign in again.');
       const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ title: editTitle.trim() }),
+        body: JSON.stringify({ title: nextTitle }),
       });
-      if (res.ok) {
-        setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: editTitle.trim() } : s));
-      }
+      if (!res.ok) throw new Error(await describeFailure(res, 'Could not rename that chat.'));
+      setSessions(prev => prev.map(s => (s.id === sessionId ? { ...s, title: nextTitle } : s)));
     } catch (err) {
       console.error('Failed to rename session:', err);
+      notify('Rename failed', err instanceof Error ? err.message : 'Could not rename that chat.');
     }
     setEditingSessionId(null);
     setEditTitle('');
@@ -375,18 +438,20 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
           onPress: async () => {
             try {
               const token = await getToken();
+              if (!token) throw new Error('Please sign in again.');
               const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/`, {
                 method: 'DELETE',
                 headers: { Authorization: `Bearer ${token}` },
               });
-              if (res.ok) {
-                setSessions(prev => prev.filter(s => s.id !== sessionId));
-                if (activeSessionId === sessionId) {
-                  startNewChat();
-                }
+              if (!res.ok) throw new Error(await describeFailure(res, 'Could not delete that chat.'));
+              setSessions(prev => prev.filter(s => s.id !== sessionId));
+              if (activeSessionId === sessionId) {
+                startNewChat();
               }
+              notify('Chat deleted', 'The conversation was removed.');
             } catch (err) {
               console.error('Failed to delete session:', err);
+              notify('Delete failed', err instanceof Error ? err.message : 'Could not delete that chat.');
             }
           },
         },
@@ -397,7 +462,10 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
   // 4. Send Message
   const handleSend = async (overrideText?: string) => {
     const textToSend = overrideText || inputValue;
-    if (!textToSend.trim() || isLoading || isTyping) return;
+    // A turn with only an attachment is valid -- the endpoint accepts it
+    // ("explain this"). Requiring text meant picking a document and tapping
+    // send did nothing at all.
+    if ((!textToSend.trim() && !attachedFile) || isLoading || isTyping) return;
 
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     resetUserScrolled();
@@ -421,16 +489,24 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
     setAttachedFile(null);
     setAttachedFileName(null);
 
-    let extractedText = "";
+    // Send the real bytes. This used to build a "[FILE ATTACHED] Name: ..."
+    // placeholder string, so a DOCX reached the model as its own filename and
+    // the assistant had nothing to actually read. The endpoint takes
+    // `{ name, mime, data }` with base64 `data` and does its own extraction.
+    let filePayload: { name: string; mime: string; data: string } | null = null;
     if (fileToProcess) {
       try {
-        if (fileToProcess.mimeType === 'text/plain') {
-          extractedText = await FileSystem.readAsStringAsync(fileToProcess.uri);
-        } else {
-          extractedText = `[FILE ATTACHED]\nName: ${fileToProcess.name}\nType: ${fileToProcess.mimeType}\nSize: ${fileToProcess.size} bytes`;
-        }
+        filePayload = {
+          name: fileToProcess.name,
+          // Documents can report no MIME (Android often says
+          // application/octet-stream); the server falls back to the extension,
+          // so an empty string is the right "unknown" here.
+          mime: fileToProcess.mimeType ?? '',
+          data: await readAsBase64(fileToProcess.uri),
+        };
       } catch (err) {
-        console.error("Text extraction failed:", err);
+        console.error('Attachment read failed:', err);
+        notify('Attachment failed', describeFileError(err));
       }
     }
 
@@ -444,10 +520,10 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           message: textToSend.trim(),
-          attachment_text: extractedText,
-          session_id: activeSessionId 
+          file: filePayload,
+          session_id: activeSessionId
         })
       });
 
@@ -503,25 +579,32 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
   };
 
   // 5. Handle File Upload and Text Extraction
-  const handleFileUpload = async () => {
+  const attach = async (kind: 'photo' | 'document') => {
     try {
-      // Select the file from the device
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ['text/plain', 'application/pdf', 'image/*'],
-        copyToCacheDirectory: true,
-      });
-
-      if (result.canceled) return;
-
-      const file = result.assets[0];
-      
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setAttachedFile(file);
-      setAttachedFileName(file.name);
+      if (kind === 'photo') {
+        const image = await pickImage();
+        if (!image) return;
+        setAttachedFile(image);
+        setAttachedFileName(image.name);
+        return;
+      }
+      const doc = await pickDocument();
+      if (!doc) return;
+      setAttachedFile(doc);
+      setAttachedFileName(doc.name);
     } catch (err) {
-      console.error("File processing error:", err);
-      Alert.alert("Error", "Could not process the selected file.");
+      console.error('File processing error:', err);
+      Alert.alert('Unsupported file', describeFileError(err));
     }
+  };
+
+  const handleFileUpload = () => {
+    Alert.alert('Attach', 'Add something for SAGE to read.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Photo', onPress: () => attach('photo') },
+      { text: 'Document', onPress: () => attach('document') },
+    ]);
   };
 
   const clearAttachment = () => {
@@ -719,6 +802,12 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
         contentContainerStyle={styles.messagesContent}
         onScroll={handleScroll}
         onContentSizeChange={handleContentSizeChange}
+        onLayout={() => {
+          // The sidebar modal is often still dismissing when the new thread
+          // lays out, so the first scroll attempt lands before the viewport
+          // has its final height. Retry once the layout settles.
+          if (pendingHistoryScrollRef.current) scrollToBottom(false, true);
+        }}
       >
         {messages.map((message) => (
           <View 
@@ -850,19 +939,19 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
               multiline
             />
           </View>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={[
-              styles.sendButton, 
-              { backgroundColor: isLoading || isTyping || !inputValue.trim() ? COLORS.surface : COLORS.purplePrimary }
-            ]} 
-            onPress={() => handleSend()} 
-            disabled={isLoading || isTyping || !inputValue.trim()}
+              styles.sendButton,
+              { backgroundColor: sendDisabled ? COLORS.surface : COLORS.purplePrimary }
+            ]}
+            onPress={() => handleSend()}
+            disabled={sendDisabled}
             activeOpacity={0.8}
           >
-            <Ionicons 
-              name="send" 
-              size={18} 
-              color={isLoading || isTyping || !inputValue.trim() ? COLORS.textMuted : 'white'} 
+            <Ionicons
+              name="send"
+              size={18}
+              color={sendDisabled ? COLORS.textMuted : 'white'}
             />
           </TouchableOpacity>
         </View>

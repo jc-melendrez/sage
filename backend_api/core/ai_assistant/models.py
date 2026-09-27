@@ -112,9 +112,42 @@ class QuizGroupShare(models.Model):
     keyed by a string id with firebase uids in `members`), so this stores the
     document id rather than a foreign key to `users.StudyGroup`, which is not
     populated for groups created after the move to Firestore.
+
+    `quiz` is nullable so the row survives the source quiz being deleted. That
+    used to be a CASCADE, which silently revoked access from everyone the
+    moment the educator tidied up their quiz list: the card stayed in the chat
+    history pointing at a 404. Instead the share keeps a full copy of the
+    questions (`package`) and the title, and read access for a deleted source
+    is decided against `group_members` -- the roster captured at share time.
+
+    Recording that roster is the whole reason former members keep working. A
+    live share asks Firestore "is this person in the group right now?", which
+    answers no the moment they leave and would make the snapshot just as
+    ephemeral. The user asked for shares to be durable for the people they
+    were shared with, so the answer is frozen here: a uid in `group_members`
+    keeps access to the snapshot even after leaving the group, forever, unless
+    the row is deleted. A uid that was never in the roster never gets it.
     """
 
-    quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE, related_name='group_shares')
+    quiz = models.ForeignKey(
+        Quiz,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='group_shares',
+    )
+    # The quiz's id at share time. Kept separately from `quiz_id` so the id
+    # survives deletion and the uniqueness rule still collapses a re-share of
+    # the same (possibly deleted) source into one row.
+    source_quiz_id = models.PositiveIntegerField(null=True, blank=True)
+    # A full copy of the quiz as a portable package document, so a deleted
+    # source can still be read. See `quiz_package.build_quiz_package`.
+    package = models.JSONField(null=True, blank=True)
+    # Denormalised so a card can be rendered from the share row alone once the
+    # source is gone, without deserialising the whole package.
+    title = models.CharField(max_length=255, blank=True)
+    # Firebase uids of the group members at the moment of sharing.
+    group_members = models.JSONField(default=list, blank=True)
     group_id = models.CharField(max_length=128)
     shared_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -124,8 +157,21 @@ class QuizGroupShare(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = [('quiz', 'group_id')]
+        unique_together = [('source_quiz_id', 'group_id')]
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"{self.quiz_id} -> group {self.group_id}"
+        source = self.source_quiz_id or self.quiz_id
+        return f"quiz {source} -> group {self.group_id}"
+
+    def member_may_read_snapshot(self, firebase_uid):
+        """
+        Whether `firebase_uid` may read this share's snapshot.
+
+        Only ever consulted when the source quiz is gone -- a live quiz always
+        goes through the owner/enrolled/group checks, so a snapshot can never
+        widen access to something that still exists.
+        """
+        if not firebase_uid:
+            return False
+        return firebase_uid in (self.group_members or [])

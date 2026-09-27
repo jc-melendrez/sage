@@ -4,7 +4,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useFocusEffect, type Href } from 'expo-router';
 import { useAuth } from '@/hooks/useAuth';
-import { getCurrentUser } from '@/services/authService';
+import { useCurrentUser } from '@/contexts/UserContext';
 import { pfpSource } from '@/constants/pfps';
 
 // 🎨 Exact same tokens as Dashboard for a unified Design System
@@ -42,7 +42,10 @@ const FONTS = {
 export default function ProfileScreen() {
   const { logout } = useAuth();
   const router = useRouter();
-  const [userData, setUserData] = useState<any>(null);
+  // Read identity from the shared provider so an edit made in /edit-profile
+  // shows up here without this screen refetching on its own.
+  const { user: sharedUser, loading: userLoading, refreshUser } = useCurrentUser();
+  const [fetched, setFetched] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useFocusEffect(
@@ -50,8 +53,8 @@ export default function ProfileScreen() {
       let active = true;
       (async () => {
         try {
-          const profile = await getCurrentUser();
-          if (active) setUserData(profile);
+          const profile = await refreshUser();
+          if (active) setFetched(profile);
         } catch (error) {
           console.error("Failed to refresh profile:", error);
         } finally {
@@ -61,8 +64,13 @@ export default function ProfileScreen() {
       return () => {
         active = false;
       };
-    }, [])
+    }, [refreshUser])
   );
+
+  // Fall back to the shared provider while this screen's own fetch is in
+  // flight, and whenever it has nothing (first load, or a save made elsewhere).
+  const userData = fetched ?? sharedUser;
+  const showSpinner = loading && userLoading && !userData;
 
   const handleLogout = async () => {
     await logout();
@@ -73,7 +81,7 @@ export default function ProfileScreen() {
     router.push('/edit-profile' as Href);
   };
 
-  if (loading) {
+  if (showSpinner) {
     return (
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
         <ActivityIndicator size="large" color={COLORS.purpleVibrant} />

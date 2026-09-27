@@ -7,6 +7,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { getCurrentUser, updateProfile } from '@/services/authService';
+import { useCurrentUser, type CurrentUser } from '@/contexts/UserContext';
 import { PFP_OPTIONS, pfpSource } from '@/constants/pfps';
 
 const COLORS = {
@@ -47,6 +48,7 @@ export default function EditProfileScreen() {
   const [avatar, setAvatar] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { setUser } = useCurrentUser();
 
   useEffect(() => {
     const fetchProfile = async () => {
@@ -75,12 +77,15 @@ export default function EditProfileScreen() {
     setSaving(true);
     setError(null);
     try {
-      await updateProfile({
+      const updated = await updateProfile({
         username: username.trim(),
         first_name: firstName.trim(),
         last_name: lastName.trim(),
         avatar,
       });
+      // Publish straight away. Going back to a profile screen that still holds
+      // the pre-save name/avatar in its own state looked like the save failed.
+      setUser(updated as CurrentUser);
       router.back();
     } catch (err: any) {
       setError(err?.message || 'Failed to save changes.');

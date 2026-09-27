@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { updateQuiz, parseDeadlineInput, toDeadlineInput, type Quiz } from '@/services/quizService';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 
@@ -50,6 +51,7 @@ type Props = {
  * own draft so a host only has to hold the quiz being edited.
  */
 export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
+  const insets = useSafeAreaInsets();
   const [draft, setDraft] = useState<EditableQuiz | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -237,10 +239,13 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
 
   return (
     <>
-      <Modal visible={!!quiz} animationType="slide" transparent onRequestClose={close}>
-        <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      {/* statusBarTranslucent + the sheet's top inset: Android is edge-to-edge
+          by default, so this bottom-anchored sheet (maxHeight 90%) put its
+          header -- the X and Save -- underneath the status bar. */}
+      <Modal visible={!!quiz} animationType="slide" transparent statusBarTranslucent onRequestClose={close}>
+        <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={close} />
-          <View style={styles.sheet}>
+          <View style={[styles.sheet, { paddingTop: insets.top }]}>
             <View style={styles.grabber} />
             <View style={styles.header}>
               <TouchableOpacity onPress={close} style={styles.headerBtn} disabled={isSaving} hitSlop={10}>

@@ -77,9 +77,41 @@ export function setCachedResponse(key: string, body: string, ttlSeconds: number)
 /** Drop cached rows whose URL contains prefix (used to invalidate after writes). */
 export function invalidateCachePrefix(prefix: string) {
   const d = getDb();
+  notifyCacheInvalidated(prefix);
   if (!d) return;
   ensureInitialized();
   d.runSync('DELETE FROM http_cache WHERE cache_key LIKE ?', [`%${prefix}%`]);
+}
+
+// ---------------------------------------------------------------------------
+// Invalidation bus
+//
+// Deleting a SQLite row only helps the *next* mount. Screens that already
+// hold the payload in React state keep showing it, which is how a renamed
+// profile or a removed group lingered after a write. Writers announce the
+// prefix they invalidated and any mounted reader of that prefix refetches.
+// ---------------------------------------------------------------------------
+
+type CacheInvalidationListener = (prefix: string) => void;
+
+const invalidationListeners = new Set<CacheInvalidationListener>();
+
+/** Subscribe to prefix-scoped cache invalidations. Returns an unsubscribe fn. */
+export function onCacheInvalidated(listener: CacheInvalidationListener): () => void {
+  invalidationListeners.add(listener);
+  return () => {
+    invalidationListeners.delete(listener);
+  };
+}
+
+function notifyCacheInvalidated(prefix: string) {
+  for (const listener of [...invalidationListeners]) {
+    try {
+      listener(prefix);
+    } catch {
+      // A broken subscriber must not break the write that triggered it.
+    }
+  }
 }
 
 export function clearApiCache() {

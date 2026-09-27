@@ -1263,6 +1263,68 @@ class GroupChatQuizEmbedTests(APITestCase):
         self.assertIsNotNone(share)
         self.assertEqual(share.group_id, 'group-abc')
         self.assertEqual(share.shared_by, self.owner)
+        self.assertEqual(share.source_quiz_id, self.quiz.id)
+
+    def test_posting_a_card_freezes_a_copy_of_the_questions(self):
+        # Without a snapshot the share cannot survive the quiz being deleted,
+        # because the card would be left pointing at a 404.
+        self._post(self.owner, {'id': self.quiz.id})
+        share = QuizGroupShare.objects.filter(quiz=self.quiz).first()
+        self.assertEqual(share.title, 'Photosynthesis Basics')
+        self.assertEqual(share.package['format'], 'sage.quiz')
+        self.assertEqual(len(share.package['questions']), 2)
+        self.assertEqual(
+            share.package['questions'][0]['correct_answer'], 'Chlorophyll',
+        )
+
+    def test_posting_a_card_freezes_the_member_roster(self):
+        # Frozen at share time on purpose: if this were re-read from
+        # Firestore on every check, someone leaving the group would lose
+        # access to a shared quiz, which is what the user asked to avoid.
+        self._post(self.owner, {'id': self.quiz.id})
+        share = QuizGroupShare.objects.filter(quiz=self.quiz).first()
+        self.assertEqual(share.group_members, ['fb-owner', 'fb-member'])
+
+    def test_a_failed_send_records_no_share(self):
+        # Recording the share before the message lands would grant read access
+        # for a card that is not in the chat.
+        self.client.force_authenticate(user=self.owner)
+        with patch.object(users_views, 'get_study_group', return_value=self.group), \
+             patch.object(users_views, 'send_message', side_effect=RuntimeError('firestore down')):
+            with self.assertRaises(RuntimeError):
+                self.client.post(
+                    self.url,
+                    {'text': '', 'quiz_embed': {'id': self.quiz.id}},
+                    format='json',
+                )
+        self.assertEqual(QuizGroupShare.objects.count(), 0)
+    def test_a_firestore_read_failure_still_records_the_share(self):
+        # The message is already in the chat, so the share must be recorded;
+        # it just grants nothing extra, because a roster-less snapshot is
+        # never readable. The first get_study_group is the membership gate and
+        # has to succeed; it is the roster read afterwards that blips.
+        calls = {'n': 0}
+
+        def flaky(group_id):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                return self.group
+            raise RuntimeError('firestore read blip')
+
+        self.client.force_authenticate(user=self.owner)
+        with patch.object(users_views, 'get_study_group', side_effect=flaky), \
+             patch.object(users_views, 'send_message', return_value='msg-1'):
+            res = self.client.post(
+                self.url,
+                {'text': '', 'quiz_embed': {'id': self.quiz.id}},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 201)
+        share = QuizGroupShare.objects.filter(quiz=self.quiz).first()
+        self.assertIsNotNone(share)
+        self.assertEqual(share.group_members, [])
+        # ...and an empty roster reads as "nobody", never as "everyone".
+        self.assertFalse(share.member_may_read_snapshot('fb-member'))
 
     def test_resharing_updates_rather_than_duplicates(self):
         self._post(self.owner, {'id': self.quiz.id})

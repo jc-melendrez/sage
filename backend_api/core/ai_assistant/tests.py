@@ -12,6 +12,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
 from .models import ChatMessage, ChatSession, Quiz, QuizAttempt, QuizGroupShare, QuizQuestion
+from .quiz_package import build_quiz_package
 from users.models import Course
 
 User = get_user_model()
@@ -899,6 +900,168 @@ class QuizPackageAccessTests(APITestCase):
         self.client.force_authenticate(user=self.outsider)
         resp = self.client.get(reverse('quiz_share', args=[self.quiz.id]))
         self.assertEqual(resp.status_code, 403)
+
+
+class DeletedQuizSnapshotTests(APITestCase):
+    """
+    A shared quiz must stay readable after the educator deletes the source.
+
+    The `quiz` FK used to CASCADE, so deleting a quiz silently revoked the
+    share: the card stayed in the chat history pointing at a 404 for everyone.
+    The share now keeps a copy of the questions and the group roster, so the
+    people it was shared with can still open it.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='snap-teacher', password='pass123', role='educator',
+        )
+        self.member = User.objects.create_user(
+            username='snap-member', password='pass123', role='student',
+        )
+        self.member.firebase_uid = 'uid-member'
+        self.member.save(update_fields=['firebase_uid'])
+
+        self.outsider = User.objects.create_user(
+            username='snap-outsider', password='pass123', role='student',
+        )
+        self.outsider.firebase_uid = 'uid-outsider'
+        self.outsider.save(update_fields=['firebase_uid'])
+
+        # Deliberately NOT enrolled on the course: access here comes only from
+        # being in the group at share time.
+        self.course = Course.objects.create(name='History', educator=self.educator)
+        self.quiz = _make_quiz(self.educator, self.course)
+        self.quiz_id = self.quiz.id
+        self.group_id = 'group-snap'
+
+    def _share(self, members=('uid-member',)):
+        return QuizGroupShare.objects.create(
+            quiz=self.quiz,
+            source_quiz_id=self.quiz_id,
+            group_id=self.group_id,
+            shared_by=self.educator,
+            package=build_quiz_package(self.quiz),
+            title=self.quiz.title,
+            group_members=list(members),
+        )
+
+    def _delete_source(self):
+        self.quiz.delete()
+
+    def _package(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.get(reverse('quiz_package', args=[self.quiz_id]))
+
+    def test_share_survives_source_deletion(self):
+        self._share()
+        self._delete_source()
+        self.assertTrue(QuizGroupShare.objects.filter(group_id=self.group_id).exists())
+
+    def test_member_at_share_time_can_still_read_the_questions(self):
+        self._share()
+        self._delete_source()
+        resp = self._package(self.member)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data['questions']), 2)
+        self.assertEqual(resp.data['questions'][0]['correct_answer'], 'A')
+
+    def test_member_keeps_access_after_leaving_the_group(self):
+        # The whole point of freezing the roster: a live check against
+        # Firestore would answer "no" the moment they left, making the share
+        # just as ephemeral as before.
+        self._share()
+        self._delete_source()
+        empty_group = {'id': self.group_id, 'members': []}
+        with patch('ai_assistant.views.get_study_group', return_value=empty_group):
+            self.assertEqual(self._package(self.member).status_code, 200)
+
+    def test_outsider_still_gets_nothing(self):
+        self._share()
+        self._delete_source()
+        # Even with the group doc listing them, they were never in the frozen
+        # roster, so the snapshot stays closed to them.
+        with patch('ai_assistant.views.get_study_group', return_value={
+            'id': self.group_id, 'members': ['uid-outsider'],
+        }):
+            self.assertEqual(self._package(self.outsider).status_code, 404)
+
+    def test_missing_firebase_uid_gets_nothing(self):
+        # Firestore membership was always keyed on uid, so a user without one
+        # must not be able to claim a snapshot.
+        self._share(members=('', None, 'uid-member'))
+        self._delete_source()
+        no_uid = User.objects.create_user(username='snap-nouid', password='pass123')
+        self.assertFalse(no_uid.firebase_uid)
+        resp = self._package(no_uid)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_share_view_reports_the_frozen_metadata(self):
+        self._share()
+        self._delete_source()
+        resp = self._package(self.member)
+        self.client.force_authenticate(user=self.member)
+        share = self.client.get(reverse('quiz_share', args=[self.quiz_id]))
+        self.assertEqual(share.status_code, 200)
+        self.assertEqual(share.data['title'], self.quiz.title)
+        self.assertEqual(share.data['question_count'], 2)
+        self.assertTrue(share.data['source_deleted'])
+        self.assertEqual(share.data['package_url'], f"/ai/quizzes/{self.quiz_id}/package/")
+
+    def test_firestore_being_down_does_not_affect_a_snapshot(self):
+        # Snapshot access must not depend on Firestore at all, or an outage
+        # would take away access the share already granted.
+        self._share()
+        self._delete_source()
+        with patch('ai_assistant.views.get_study_group', side_effect=RuntimeError('down')):
+            self.assertEqual(self._package(self.member).status_code, 200)
+
+    def test_a_snapshot_cannot_widen_access_to_a_live_quiz(self):
+        # A share must not become a back door for a quiz that still exists:
+        # a live quiz always goes through owner/enrolled/group.
+        self._share()
+        with patch('ai_assistant.views.get_study_group', return_value={
+            'id': self.group_id, 'members': [],
+        }):
+            self.assertEqual(self._package(self.outsider).status_code, 403)
+
+    def test_reshare_replaces_the_snapshot_rather_than_stacking(self):
+        self._share()
+        second = _make_quiz(self.educator, self.course)
+        second.title = 'History (revised)'
+        second.save(update_fields=['title'])
+        # The educator has to be a member of the group they post into, so the
+        # share's frozen roster includes them alongside the original member.
+        group = {'id': self.group_id, 'members': ['uid-member', 'uid-educator']}
+        self.educator.firebase_uid = 'uid-educator'
+        self.educator.save(update_fields=['firebase_uid'])
+        with patch('users.views.get_study_group', return_value=group), \
+             patch('users.views.send_message', return_value='msg-2'):
+            self.client.force_authenticate(user=self.educator)
+            resp = self.client.post(
+                reverse('group_chat', args=[self.group_id]),
+                {'text': '', 'quiz_embed': {'id': second.id}},
+                format='json',
+            )
+            self.assertEqual(resp.status_code, 201)
+        # Django clears the pk after delete(), so keep the id to look the
+        # share up by.
+        revised_source_id = second.id
+        second.delete()
+        self._delete_source()
+
+        shares = QuizGroupShare.objects.filter(group_id=self.group_id)
+        self.assertEqual(shares.count(), 2)
+        revised = shares.filter(source_quiz_id=revised_source_id).first()
+        self.assertIsNotNone(revised, 're-share should have recorded its own snapshot')
+        self.assertEqual(revised.title, 'History (revised)')
+        self.assertEqual(revised.group_members, ['uid-member', 'uid-educator'])
+
+    def test_deleted_source_with_no_snapshot_is_still_a_404(self):
+        # A quiz deleted before it was ever shared must not be resurrectable.
+        self._delete_source()
+        self.assertEqual(self._package(self.member).status_code, 404)
 
 
 class QuizImportTests(APITestCase):

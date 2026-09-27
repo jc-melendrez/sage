@@ -6,6 +6,15 @@ import { cachePolicyFor, buildCacheKey } from './cachePolicy';
 export interface ApiRequestOptions extends RequestInit {
   /** Bypass the HTTP cache for this request (pull-to-refresh, writes that must be live). */
   noCache?: boolean;
+  /**
+   * Force a network read but still store the result.
+   *
+   * `noCache` skips the cache read *and* the cache write, so a pull-to-refresh
+   * built on it would fetch fresh data, render it, and then leave the stale
+   * copy sitting in the cache for the next mount. `refresh` skips only the
+   * read, which is what "show me the latest and remember it" means.
+   */
+  refresh?: boolean;
 }
 
 async function fetchJson<T>(url: string, options: RequestInit): Promise<T> {
@@ -59,12 +68,16 @@ function revalidateInBackground(url: string, options: RequestInit, ttlSeconds: n
 }
 
 export async function apiCall<T>(endpoint: string, options: ApiRequestOptions = {}): Promise<T> {
-  const { noCache, ...rest } = options;
+  const { noCache, refresh, ...rest } = options;
   const method = (rest.method || 'GET').toUpperCase();
   const url = `${API_BASE_URL}${endpoint}`;
+  // `noCache` opts out of caching entirely; `refresh` opts out of the read but
+  // keeps the write so the fresh payload replaces the stale one.
+  const skipRead = Boolean(noCache) || Boolean(refresh);
+  const skipWrite = Boolean(noCache);
 
   // Transparent, user-scoped, stale-while-revalidate GET caching.
-  if (!noCache && method === 'GET') {
+  if (!skipRead && method === 'GET') {
     setCacheUserId(await getCachedUserId());
     const policy = cachePolicyFor(url, method);
     if (policy) {
@@ -86,7 +99,7 @@ export async function apiCall<T>(endpoint: string, options: ApiRequestOptions = 
 
   const data = await fetchJson<T>(url, rest);
 
-  if (!noCache && method === 'GET') {
+  if (!skipWrite && method === 'GET') {
     const policy = cachePolicyFor(url, method);
     if (policy) {
       setCacheUserId(await getCachedUserId());

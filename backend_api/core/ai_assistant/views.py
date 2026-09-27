@@ -8,6 +8,15 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from .models import ChatSession, ChatMessage, Quiz, QuizAttempt, QuizQuestion, QuizGroupShare
+from .quiz_package import (
+    QUIZ_PACKAGE_FORMAT,
+    QUIZ_PACKAGE_VERSION,
+    MAX_IMPORT_QUESTIONS,
+    MAX_IMPORT_OPTION_CHARS,
+    MAX_IMPORT_TITLE_CHARS,
+    build_quiz_package,
+    validate_quiz_package,
+)
 from .serializers import QuizSerializer, _display_name, _percent # Import the new serializer
 from users.models import Course
 from core.firestore_service import get_study_group
@@ -930,6 +939,22 @@ class QuizShareView(APIView):
     def get(self, request, quiz_id):
         quiz = Quiz.objects.filter(id=quiz_id).first()
         if not quiz:
+            # Deleted source. Serve the frozen copy to anyone the share was
+            # made to, so a card already sitting in a chat keeps working.
+            if _snapshot_share_allows(request.user, quiz_id):
+                package, error = _deleted_quiz_snapshot(quiz_id)
+                if error:
+                    return error
+                return Response({
+                    'id': quiz_id,
+                    'title': package.get('title') or 'Deleted quiz',
+                    'question_count': len(package.get('questions') or []),
+                    'quiz_type': package.get('quiz_type') or 'Multiple Choice',
+                    'deep_link': f"sage://quiz/{quiz_id}",
+                    'package_url': f"/ai/quizzes/{quiz_id}/package/",
+                    'import_url': "/ai/quizzes/import/",
+                    'source_deleted': True,
+                })
             return Response({"error": "Quiz not found."}, status=404)
         if not _can_receive_quiz(request.user, quiz):
             return Response({"error": "Not authorized to share this quiz."}, status=403)
@@ -949,17 +974,9 @@ class QuizShareView(APIView):
 
 # --- Quiz packages: export/import a quiz as a portable document ------------
 #
-# The request was for a shared quiz to be *downloadable* in a form the
-# recipient can actually use, rather than a PDF or a text dump. A package is
-# plain JSON holding the questions, so it can be written to a file, shared, and
-# -- the point of the exercise -- re-imported into the recipient's own quiz
-# list. Versioned so a future format change can be detected rather than
-# silently mis-parsed.
-QUIZ_PACKAGE_FORMAT = 'sage.quiz'
-QUIZ_PACKAGE_VERSION = 1
-MAX_IMPORT_QUESTIONS = 100
-MAX_IMPORT_OPTION_CHARS = 500
-MAX_IMPORT_TITLE_CHARS = 255
+# Format constants, serialization and validation now live in
+# `ai_assistant.quiz_package`, so the group-share recording path can build and
+# store a package without importing the view layer.
 
 
 def _group_share_authorizes(user, quiz):
@@ -982,6 +999,44 @@ def _group_share_authorizes(user, quiz):
     return False
 
 
+def _snapshot_share_allows(user, quiz_id):
+    """
+    True if `user` may read a snapshot of a *deleted* quiz `quiz_id`.
+
+    Consulted only when the source row is gone. A live quiz is always checked
+    through owner/enrolled/group, so reaching here means the source is absent
+    and the frozen copy is the only thing left to serve.
+
+    Access comes from the roster frozen on the share row, not from Firestore:
+    someone who was in the group when it was shared keeps access after leaving,
+    which is what makes the share durable instead of expiring with membership.
+    """
+    uid = user.firebase_uid
+    if not uid:
+        return False
+    for share in QuizGroupShare.objects.filter(source_quiz_id=quiz_id):
+        if share.package and share.member_may_read_snapshot(uid):
+            return True
+    return False
+
+
+def _deleted_quiz_snapshot(quiz_id):
+    """
+    Newest share snapshot for a deleted quiz, as ``(package, error_response)``.
+
+    Exactly one is None. The newest wins so a re-share of an edited quiz
+    supersedes the older copy.
+    """
+    share = (
+        QuizGroupShare.objects.filter(source_quiz_id=quiz_id, package__isnull=False)
+        .order_by('-created_at')
+        .first()
+    )
+    if not share or not share.package:
+        return None, Response({"error": "Quiz not found."}, status=404)
+    return share.package, None
+
+
 def _can_receive_quiz(user, quiz):
     """
     Who may read a quiz's questions: its owner, anyone enrolled on its course,
@@ -1002,21 +1057,7 @@ def _can_receive_quiz(user, quiz):
 
 def _serialize_quiz_package(quiz):
     """Build the portable JSON document for a quiz."""
-    return {
-        'format': QUIZ_PACKAGE_FORMAT,
-        'version': QUIZ_PACKAGE_VERSION,
-        'title': quiz.title,
-        'quiz_type': quiz.quiz_type,
-        'questions': [
-            {
-                'question_text': q.question_text,
-                'options': list(q.options or []),
-                'correct_answer': q.correct_answer,
-                'explanation': q.explanation or '',
-            }
-            for q in quiz.questions.all().order_by('id')
-        ],
-    }
+    return build_quiz_package(quiz)
 
 
 class QuizPackageView(APIView):
@@ -1034,6 +1075,11 @@ class QuizPackageView(APIView):
     def get(self, request, quiz_id):
         quiz = Quiz.objects.filter(id=quiz_id).first()
         if not quiz:
+            if _snapshot_share_allows(request.user, quiz_id):
+                package, error = _deleted_quiz_snapshot(quiz_id)
+                if error:
+                    return error
+                return Response(package)
             return Response({"error": "Quiz not found."}, status=404)
         if not _can_receive_quiz(request.user, quiz):
             return Response({"error": "You do not have access to this quiz."}, status=403)
@@ -1052,83 +1098,19 @@ class QuizImportView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        package = request.data
-        if not isinstance(package, dict):
-            return Response({"error": "A quiz package object is required."}, status=400)
-
-        if package.get('format') != QUIZ_PACKAGE_FORMAT:
-            return Response(
-                {"error": "This file is not a SAGE quiz package."}, status=400
-            )
-        try:
-            version = int(package.get('version') or 0)
-        except (TypeError, ValueError):
-            version = 0
-        if version != QUIZ_PACKAGE_VERSION:
-            return Response(
-                {"error": f"Unsupported quiz package version: {package.get('version')!r}."},
-                status=400,
-            )
-
-        title = str(package.get('title') or '').strip()[:MAX_IMPORT_TITLE_CHARS]
-        raw_questions = package.get('questions')
-        if not title:
-            return Response({"error": "The quiz package has no title."}, status=400)
-        if not isinstance(raw_questions, list) or not raw_questions:
-            return Response({"error": "The quiz package has no questions."}, status=400)
-        if len(raw_questions) > MAX_IMPORT_QUESTIONS:
-            return Response(
-                {"error": f"A quiz can have at most {MAX_IMPORT_QUESTIONS} questions."},
-                status=400,
-            )
-
-        quiz_type = str(package.get('quiz_type') or 'Multiple Choice')[:50]
-        prepared = []
-        for index, raw in enumerate(raw_questions, start=1):
-            if not isinstance(raw, dict):
-                return Response({"error": f"Question {index} is not an object."}, status=400)
-            question_text = str(raw.get('question_text') or '').strip()
-            correct_answer = str(raw.get('correct_answer') or '').strip()
-            options = raw.get('options')
-            if not question_text:
-                return Response({"error": f"Question {index} has no text."}, status=400)
-            if not correct_answer:
-                return Response(
-                    {"error": f"Question {index} has no correct answer."}, status=400
-                )
-            if not isinstance(options, list) or not options:
-                return Response(
-                    {"error": f"Question {index} has no answer options."}, status=400
-                )
-            options = [str(opt)[:MAX_IMPORT_OPTION_CHARS] for opt in options]
-            # A correct answer that is not one of the options would render a
-            # quiz nobody can get right, so reject it at the door.
-            if correct_answer not in options:
-                return Response(
-                    {
-                        "error": (
-                            f"Question {index} has a correct answer that is not "
-                            "among its options."
-                        )
-                    },
-                    status=400,
-                )
-            prepared.append({
-                'question_text': question_text,
-                'options': options,
-                'correct_answer': correct_answer,
-                'explanation': str(raw.get('explanation') or ''),
-            })
+        prepared, error = validate_quiz_package(request.data)
+        if error:
+            return Response({"error": error}, status=400)
 
         with transaction.atomic():
             quiz = Quiz.objects.create(
                 user=request.user,
                 course=None,
-                title=title,
-                quiz_type=quiz_type,
+                title=prepared['title'],
+                quiz_type=prepared['quiz_type'],
             )
             QuizQuestion.objects.bulk_create([
-                QuizQuestion(quiz=quiz, **question) for question in prepared
+                QuizQuestion(quiz=quiz, **question) for question in prepared['questions']
             ])
 
         return Response(QuizSerializer(quiz).data, status=201)

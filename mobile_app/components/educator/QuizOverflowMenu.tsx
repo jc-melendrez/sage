@@ -14,7 +14,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
-import { updateQuiz, deleteQuiz, type Quiz } from '@/services/quizService';
+import { updateQuiz, deleteQuiz, shareQuizToGroup, type Quiz } from '@/services/quizService';
+import { notify } from '@/services/notify';
 
 const MENU_WIDTH = 168;
 const MENU_ITEM_HEIGHT = 44;
@@ -121,10 +122,10 @@ export function QuizOverflowMenu({ quiz, anchor, onClose, onPreview, onEdit, onC
       await updateQuiz(renameTarget.id, { title: nextTitle });
       setRenameTarget(null);
       await onChanged?.();
-      Alert.alert('Renamed', 'Quiz title updated.');
+      notify('Renamed', 'Quiz title updated.');
     } catch (err) {
       console.error('Rename Error:', err);
-      Alert.alert('Error', err instanceof Error ? err.message : 'Failed to rename quiz');
+      notify('Error', err instanceof Error ? err.message : 'Failed to rename quiz');
     } finally {
       setRenaming(false);
     }
@@ -146,9 +147,11 @@ export function QuizOverflowMenu({ quiz, anchor, onClose, onPreview, onEdit, onC
             try {
               await deleteQuiz(target.id);
               await onChanged?.();
+              // No confirmation existed here, so a successful delete was silent.
+              notify('Quiz deleted', `"${target.title}" was removed.`);
             } catch (err) {
               console.error('Delete Error:', err);
-              Alert.alert('Delete Failed', err instanceof Error ? err.message : 'Something went wrong.');
+              notify('Delete Failed', err instanceof Error ? err.message : 'Something went wrong.');
             }
           },
         },
@@ -177,47 +180,30 @@ export function QuizOverflowMenu({ quiz, anchor, onClose, onPreview, onEdit, onC
       console.error('Share Error:', err);
       setShareTarget(null);
       setShareGroups(null);
-      Alert.alert('Error', err instanceof Error ? err.message : 'Failed to load groups');
+      notify('Error', err instanceof Error ? err.message : 'Failed to load groups');
     } finally {
       setLoadingGroups(false);
     }
   };
 
-  const shareToGroup = async (groupId: string) => {
+  const shareToGroup = async (groupId: string, groupName: string) => {
     if (!shareTarget) return;
+    const target = shareTarget;
     try {
-      const token = await getToken();
-      if (!token) throw new Error('Not signed in');
-      const shareRes = await fetch(`${API_BASE_URL}/ai/quizzes/${shareTarget.id}/share/`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!shareRes.ok) throw new Error('Failed to get share data');
-      const shareData = await shareRes.json();
-
-      await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          text: `Quiz Shared: "${shareData.title}"`,
-          attachments: [
-            {
-              type: 'quiz_embed',
-              quiz_id: shareData.id,
-              title: shareData.title,
-              question_count: shareData.question_count,
-              quiz_type: shareData.quiz_type,
-              deep_link: shareData.deep_link,
-            },
-          ],
-        }),
-      });
-
+      // Go through the service instead of hand-rolling the POST. The old
+      // request sent the card under `attachments`, but the backend reads a
+      // top-level `quiz_embed: { id }` -- so it recorded no QuizGroupShare,
+      // posted a plain text message with no quiz card, and because the
+      // response was never checked, a 403 still reported "Shared!".
+      const result = await shareQuizToGroup(groupId, target.id);
       setShareTarget(null);
       setShareGroups(null);
-      Alert.alert('Shared!', 'Quiz sent to group chat.');
+      notify('Shared!', `"${result.message}" was sent to ${groupName}.`);
     } catch (err) {
       console.error('Share Error:', err);
-      Alert.alert('Failed to share', err instanceof Error ? err.message : 'Please try again.');
+      setShareTarget(null);
+      setShareGroups(null);
+      notify('Failed to share', err instanceof Error ? err.message : 'Please try again.');
     }
   };
 
@@ -355,7 +341,7 @@ export function QuizOverflowMenu({ quiz, anchor, onClose, onPreview, onEdit, onC
               <FlatList
                 data={shareGroups ?? []}
                 renderItem={({ item }) => (
-                  <TouchableOpacity style={styles.groupItem} onPress={() => shareToGroup(item.id)} activeOpacity={0.7}>
+                  <TouchableOpacity style={styles.groupItem} onPress={() => shareToGroup(item.id, item.name)} activeOpacity={0.7}>
                     <View style={styles.groupItemIcon}>
                       <Ionicons name="people-outline" size={20} color={COLORS.purplePrimary} />
                     </View>

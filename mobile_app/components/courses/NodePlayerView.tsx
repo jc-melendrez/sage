@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getNode, completeNode } from '@/services/courseService';
-import { LearningNode, isLearnContent, isPracticeContent, NODE_TYPE_CONFIG } from '@/types/learning';
+import { LearningNode, NodeCompleteResponse, isLearnContent, isPracticeContent, NODE_TYPE_CONFIG } from '@/types/learning';
 import { ConceptBlockView, ExampleBlockView, InteractionBlockView, SummaryBlockView } from '@/components/lesson/BlockRenderer';
 import QuizRunner, { QuestionResult } from '@/components/lesson/QuizRunner';
 import ResultsSummary from '@/components/lesson/ResultsSummary';
@@ -37,13 +38,22 @@ type NodePlayerViewProps = {
 };
 
 export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodePlayerViewProps) {
+  const insets = useSafeAreaInsets();
   const [node, setNode] = useState<LearningNode | null>(null);
   const [phase, setPhase] = useState<ScreenPhase>('loading');
   const [currentBlockIndex, setCurrentBlockIndex] = useState(0);
   const [interactionsCorrect, setInteractionsCorrect] = useState(0);
   const [interactionsTotal, setInteractionsTotal] = useState(0);
   const [quizResults, setQuizResults] = useState<QuestionResult[]>([]);
-  const [quizScore, setQuizScore] = useState(0);
+  // null, not 0. A 0 is a real score, and the old `quizScore != null` check
+  // therefore pinned every lesson to 0 -- only the quiz path ever set it, so
+  // a learn node with perfect interaction answers still reported "0/0" and
+  // "Keep Practicing!". null makes the guard actually discriminate.
+  const [quizScore, setQuizScore] = useState<number | null>(null);
+  // Authoritative completion result. The server owns score/passed, and it is
+  // the only place XP, level-ups and new badges are known -- it used to be
+  // discarded, so a completed node never told the student what it earned.
+  const [result, setResult] = useState<NodeCompleteResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -53,6 +63,9 @@ export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodeP
   const loadNode = async () => {
     try {
       setPhase('loading');
+      setError(null);
+      setResult(null);
+      setQuizScore(null);
       const data = await getNode(nid);
       setNode(data);
 
@@ -75,6 +88,30 @@ export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodeP
     if (correct) setInteractionsCorrect(prev => prev + 1);
   }, []);
 
+  // Declared before the handlers that call it and memoized on `node`/`isPreview`
+  // so those callbacks can list it as a dependency. It used to be a plain
+  // function defined below its callers, which left every `useCallback` in this
+  // file closing over a stale copy.
+  const submitScore = useCallback(async (score: number) => {
+    if (!node) return;
+    // Preview mode: render results without persisting progress or XP.
+    if (isPreview) {
+      setPhase('results');
+      return;
+    }
+    try {
+      const res = await completeNode(node.id, score);
+      // Keep it: the server is authoritative for score/passed and is the only
+      // source of XP, level-ups and any badges just earned. It used to be
+      // discarded, so finishing a node never said what it was worth.
+      setResult(res);
+      setPhase('results');
+    } catch (e: any) {
+      setError(e?.message || 'Failed to save progress');
+      setPhase('error');
+    }
+  }, [node, isPreview]);
+
   const handleBlockNext = useCallback(() => {
     if (!node || !isLearnContent(node.content_json)) return;
     const blocks = node.content_json.blocks;
@@ -85,9 +122,12 @@ export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodeP
       const score = interactionsTotal > 0
         ? Math.round((interactionsCorrect / interactionsTotal) * 100)
         : 100;
+      // Record it locally as well. The round trip can fail or lag, and the
+      // results screen needs the score either way.
+      setQuizScore(score);
       submitScore(score);
     }
-  }, [node, currentBlockIndex, interactionsCorrect, interactionsTotal]);
+  }, [node, currentBlockIndex, interactionsCorrect, interactionsTotal, submitScore]);
 
   const handleBlockBack = useCallback(() => {
     if (currentBlockIndex > 0) setCurrentBlockIndex(prev => prev - 1);
@@ -97,30 +137,15 @@ export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodeP
     setQuizScore(score);
     setQuizResults(results);
     submitScore(score);
-  }, [node]);
-
-  const submitScore = async (score: number) => {
-    if (!node) return;
-    // Preview mode: render results without persisting progress or XP.
-    if (isPreview) {
-      setPhase('results');
-      return;
-    }
-    try {
-      const res = await completeNode(node.id, score);
-      setPhase('results');
-    } catch (e: any) {
-      setError(e?.message || 'Failed to save progress');
-      setPhase('error');
-    }
-  };
+  }, [submitScore]);
 
   const handleRetry = () => {
     setCurrentBlockIndex(0);
     setInteractionsCorrect(0);
     setInteractionsTotal(0);
     setQuizResults([]);
-    setQuizScore(0);
+    setQuizScore(null);
+    setResult(null);
     if (node && isLearnContent(node.content_json)) {
       setPhase('lesson');
     } else {
@@ -133,6 +158,10 @@ export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodeP
   };
 
   const cfg = node ? NODE_TYPE_CONFIG[node.node_type] : null;
+  // Header padding used to be a hardcoded 48, which put the back button and
+  // title under the status bar on notched devices now that Android is
+  // edge-to-edge by default.
+  const headerStyle = [styles.header, { paddingTop: insets.top + 14 }];
 
   // ── Loading ──
   if (phase === 'loading') {
@@ -158,16 +187,23 @@ export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodeP
 
   // ── Results ──
   if (phase === 'results' && node) {
+    // A lesson has no questions, so there is no accuracy to report and no
+    // mistakes to review. Rendering it in quiz mode produced "0/0 correct"
+    // and a "Keep Practicing!" verdict for a node the student had passed.
+    const isLessonNode = isLearnContent(node.content_json);
     const finalScore = quizScore != null
       ? quizScore
       : (interactionsTotal > 0 ? Math.round((interactionsCorrect / interactionsTotal) * 100) : 100);
     return (
       <View style={styles.container}>
         <ResultsSummary
-          score={finalScore}
-          passed={finalScore >= node.required_score}
+          mode={isLessonNode ? 'lesson' : 'quiz'}
+          score={result?.score ?? finalScore}
+          passed={result?.passed ?? (finalScore >= node.required_score)}
           passingScore={node.required_score}
           results={quizResults}
+          title={node.title}
+          xpEarned={result?.xp?.xp ?? 0}
           onRetry={handleRetry}
           onContinue={handleContinue}
         />
@@ -183,7 +219,7 @@ export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodeP
 
     return (
       <View style={styles.container}>
-        <LinearGradient colors={[cfg?.color || COLORS.purpleDark, cfg?.color || COLORS.purpleDeep]} style={styles.header}>
+        <LinearGradient colors={[cfg?.color || COLORS.purpleDark, cfg?.color || COLORS.purpleDeep]} style={headerStyle}>
           <TouchableOpacity onPress={() => onBack()} style={styles.backBtn}>
             <Ionicons name="chevron-back" size={24} color="white" />
           </TouchableOpacity>
@@ -232,7 +268,7 @@ export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodeP
   if (phase === 'quiz' && node && isPracticeContent(node.content_json)) {
     return (
       <View style={styles.container}>
-        <LinearGradient colors={[cfg?.color || COLORS.purpleDark, cfg?.color || COLORS.purpleDeep]} style={styles.header}>
+        <LinearGradient colors={[cfg?.color || COLORS.purpleDark, cfg?.color || COLORS.purpleDeep]} style={headerStyle}>
           <TouchableOpacity onPress={() => onBack()} style={styles.backBtn}>
             <Ionicons name="chevron-back" size={24} color="white" />
           </TouchableOpacity>
@@ -252,7 +288,18 @@ export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodeP
     );
   }
 
-  return null;
+  // Reachable when the phase and the node's content disagree -- e.g. a quiz
+  // phase on content that is not practice-shaped. This used to `return null`,
+  // which rendered a blank white screen with no way out.
+  return (
+    <View style={styles.center}>
+      <Ionicons name="alert-circle-outline" size={40} color={COLORS.textMuted} />
+      <Text style={styles.errorText}>This activity isn&apos;t available right now.</Text>
+      <TouchableOpacity style={styles.retryBtn} onPress={() => onBack()}>
+        <Text style={styles.retryText}>Go Back</Text>
+      </TouchableOpacity>
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -262,7 +309,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 48,
     paddingBottom: 18,
     paddingHorizontal: 16,
     borderBottomLeftRadius: 24,

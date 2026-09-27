@@ -5,17 +5,21 @@ export interface CachePolicy {
   mode: 'swr';
 }
 
-// Rarely-changing content. Matched against the absolute URL.
+// Content SWR — paints from cache instantly, then revalidates in the
+// background. A TTL only bounds how long *stale* data can stay on screen, so
+// these are kept short: the day-long values that were here meant a quiz edit
+// or a published lesson could sit behind a stale row for up to 24 hours
+// whenever an invalidation was missed. Fresh reads still return immediately.
 const POLICY_RULES: Array<{ matcher: RegExp; ttlSeconds: number }> = [
   // Courses: mine, enrolled, detail, path, nodes.
-  { matcher: /\/api\/users\/courses/, ttlSeconds: 3600 },
-  { matcher: /\/api\/users\/nodes\//, ttlSeconds: 3600 },
+  { matcher: /\/api\/users\/courses/, ttlSeconds: 600 },
+  { matcher: /\/api\/users\/nodes\//, ttlSeconds: 600 },
   // Quiz lists + quiz payloads.
-  { matcher: /\/api\/ai\/quizzes/, ttlSeconds: 86400 },
+  { matcher: /\/api\/ai\/quizzes/, ttlSeconds: 300 },
   // Current user profile.
   { matcher: /\/api\/users\/me/, ttlSeconds: 300 },
   // Previously generated lesson content.
-  { matcher: /\/api\/users\/\d+\/lessons/, ttlSeconds: 86400 },
+  { matcher: /\/api\/users\/\d+\/lessons/, ttlSeconds: 900 },
   // Dashboard reads — short SWR so recs/activities/badges paint instantly
   // but still revalidate in the background. Covers both the student
   // per-user endpoints and the educator cross-class feed.

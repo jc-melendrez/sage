@@ -7,7 +7,14 @@ import {
   signInWithGoogle,
   signOutFirebase,
 } from './firebaseAuthService';
-import { getCachedResponse, setCachedResponse, setCacheUserId, clearApiCache, parseCached } from './apiCache';
+import {
+  getCachedResponse,
+  setCachedResponse,
+  setCacheUserId,
+  clearApiCache,
+  parseCached,
+  invalidateCachePrefix,
+} from './apiCache';
 import { cachePolicyFor, buildCacheKey } from './cachePolicy';
 
 export interface LoginCredentials {
@@ -327,10 +334,17 @@ async function loadCurrentUser() {
   return await response.json();
 }
 
-export async function getCurrentUser() {
+/**
+ * Get the current user profile using stored Django token.
+ *
+ * `refresh` skips the cache read but still stores the result, which is what
+ * pull-to-refresh needs — `noCache` semantics would fetch fresh data and leave
+ * the stale row behind for the next mount.
+ */
+export async function getCurrentUser(options: { refresh?: boolean } = {}) {
   const url = `${API_BASE_URL}/users/me/`;
   const policy = cachePolicyFor(url, 'GET');
-  if (policy) {
+  if (policy && !options.refresh) {
     setCacheUserId(await getCachedUserId());
     const key = buildCacheKey('GET', url);
     const cached = getCachedResponse(key);
@@ -401,7 +415,14 @@ export async function updateProfile(fields: {
   const policy = cachePolicyFor(url, 'GET');
   if (policy) {
     setCacheUserId(await getCachedUserId());
+    // Invalidate *before* writing the fresh row. Invalidation is also how
+    // mounted screens learn to refetch, and it clears the row we are about to
+    // replace -- doing it the other way round would delete the new value.
+    invalidateCachePrefix('/users/me');
+    setCacheUserId(await getCachedUserId());
     setCachedResponse(buildCacheKey('GET', url), JSON.stringify(updated), policy.ttlSeconds);
+  } else {
+    invalidateCachePrefix('/users/me');
   }
   return updated;
 }

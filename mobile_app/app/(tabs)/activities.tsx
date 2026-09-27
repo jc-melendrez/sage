@@ -18,6 +18,7 @@ import TakeQuiz from '../../components/TakeQuiz';
 import QuizInfoModal from '@/components/QuizInfoModal';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
 import { deleteQuiz, startQuizAttempt, shareQuizToGroup, updateQuiz, parseDeadlineInput } from '@/services/quizService';
+import { notify } from '@/services/notify';
 import { pickDocument, readAsBase64, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
 import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/JoinCodeInput';
 import ModalScreenHeader from '@/components/ModalScreenHeader';
@@ -154,18 +155,19 @@ export default function ActivitiesScreen() {
     }
   };
 
-  const handleShareToGroup = async (groupId: string) => {
+  const handleShareToGroup = async (groupId: string, groupName?: string) => {
     if (!shareTarget) return;
+    const where = groupName ? ` to ${groupName}` : ' to the group chat.';
     try {
       setIsSharing(groupId);
       const { message } = await shareQuizToGroup(groupId, shareTarget.id);
       setIsShareOpen(false);
-      Alert.alert('Shared!', `"${message}" was sent to the group chat.`);
+      notify('Shared!', `"${message}" was sent${where}`);
     } catch (err) {
       // shareQuizToGroup rethrows the server's own `error`/`detail`, so this
       // shows the real reason (not a member, no access, quiz gone) instead of
       // a blanket "please try again".
-      Alert.alert('Failed to share', err instanceof Error ? err.message : 'Please try again.');
+      notify('Failed to share', err instanceof Error ? err.message : 'Please try again.');
     } finally {
       setIsSharing(null);
     }
@@ -380,9 +382,9 @@ export default function ActivitiesScreen() {
       setQuizzes((prev) => prev.map((quiz) => (quiz.id === updated.id ? { ...quiz, ...updated } : quiz)));
       invalidateCachePrefix('/ai/quizzes');
       closeEditor();
-      Alert.alert('Saved', 'Your quiz was updated.');
+      notify('Saved', 'Your quiz was updated.');
     } catch (err) {
-      Alert.alert('Save failed', err instanceof Error ? err.message : 'Could not update the quiz.');
+      notify('Save failed', err instanceof Error ? err.message : 'Could not update the quiz.');
     } finally {
       setIsSavingEdit(false);
     }
@@ -413,9 +415,9 @@ export default function ActivitiesScreen() {
       invalidateCachePrefix('/ai/quizzes');
       setRenameQuizId(null);
       setRenameTitle('');
-      Alert.alert('Renamed', 'Quiz title updated.');
+      notify('Renamed', 'Quiz title updated.');
     } catch (err) {
-      Alert.alert('Rename failed', err instanceof Error ? err.message : 'Could not rename the quiz.');
+      notify('Rename failed', err instanceof Error ? err.message : 'Could not rename the quiz.');
     } finally {
       setIsRenaming(false);
     }
@@ -489,10 +491,12 @@ export default function ActivitiesScreen() {
       setLoading(!isRefresh);
       // Go through apiCall's SWR HTTP cache so both the group list and quiz
       // list paint instantly on every visit and revalidate in the background.
-      // Pull-to-refresh bypasses the cache for a true network hit.
+      // Pull-to-refresh uses `refresh`, not `noCache`: `noCache` skips the cache
+      // write as well, so refreshing left the pre-refresh copy sitting in the
+      // cache and the very next visit painted the stale list.
       const [groupRes, quizRes, enrolled] = await Promise.all([
-        apiCall<StudyGroup[]>('/users/groups/mine/', { noCache: isRefresh }).catch(() => null),
-        apiCall<Quiz[]>('/ai/quizzes/', { noCache: isRefresh }).catch(() => null),
+        apiCall<StudyGroup[]>('/users/groups/mine/', { refresh: isRefresh }).catch(() => null),
+        apiCall<Quiz[]>('/ai/quizzes/', { refresh: isRefresh }).catch(() => null),
         getEnrolledCourses().catch(() => null),
       ]);
 
@@ -578,8 +582,11 @@ export default function ActivitiesScreen() {
             try {
               await deleteQuiz(quiz.id);
               setQuizzes((prev) => prev.filter((q) => q.id !== quiz.id));
+              // The row disappeared with no confirmation at all, so a
+              // successful delete looked like the tap had done nothing.
+              notify('Quiz deleted', `"${quiz.title}" was removed.`);
             } catch (err) {
-              Alert.alert('Delete failed', err instanceof Error ? err.message : 'Could not delete the quiz.');
+              notify('Delete failed', err instanceof Error ? err.message : 'Could not delete the quiz.');
             }
           },
         },
@@ -1175,7 +1182,7 @@ export default function ActivitiesScreen() {
                   <TouchableOpacity
                     key={g.id}
                     style={styles.shareGroupItem}
-                    onPress={() => handleShareToGroup(g.id)}
+                    onPress={() => handleShareToGroup(g.id, g.name)}
                     disabled={isSharing !== null}
                     activeOpacity={0.7}
                   >

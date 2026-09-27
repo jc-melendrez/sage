@@ -6,6 +6,7 @@ import { Platform } from 'react-native';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { UserProvider } from '@/contexts/UserContext';
 import {
   useFonts,
   Montserrat_400Regular,
@@ -137,19 +138,21 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="login" options={{ headerShown: false }} />
-        <Stack.Screen name="edit-profile" options={{ headerShown: false, presentation: 'card' }} />
-        <Stack.Screen name="settings" options={{ headerShown: false, presentation: 'card' }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-        <Stack.Screen name="game" options={{ headerShown: false }} />
-        <Stack.Screen name="superadmin" options={{ headerShown: false }} />
-        <Stack.Screen name="educator" options={{ headerShown: false }} />
-        <Stack.Screen name="tv" options={{ headerShown: false }} />
-        <Stack.Screen name="[roomCode]" options={{ headerShown: false }} />
-        <Stack.Screen name="chat/[groupId]" options={{ headerShown: false, presentation: 'card' }} />
-      </Stack>
+      <UserProvider>
+        <Stack>
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen name="login" options={{ headerShown: false }} />
+          <Stack.Screen name="edit-profile" options={{ headerShown: false, presentation: 'card' }} />
+          <Stack.Screen name="settings" options={{ headerShown: false, presentation: 'card' }} />
+          <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+          <Stack.Screen name="game" options={{ headerShown: false }} />
+          <Stack.Screen name="superadmin" options={{ headerShown: false }} />
+          <Stack.Screen name="educator" options={{ headerShown: false }} />
+          <Stack.Screen name="tv" options={{ headerShown: false }} />
+          <Stack.Screen name="[roomCode]" options={{ headerShown: false }} />
+          <Stack.Screen name="chat/[groupId]" options={{ headerShown: false, presentation: 'card' }} />
+        </Stack>
+      </UserProvider>
       <StatusBar style="auto" />
     </ThemeProvider>
   );

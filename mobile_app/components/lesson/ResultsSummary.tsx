@@ -92,7 +92,7 @@ export default function ResultsSummary({
           activeOpacity={0.85}
         >
           <Ionicons name="refresh" size={18} color="white" />
-          <Text style={styles.practiceText}>Keep Practicing</Text>
+          <Text style={styles.practiceText}>Practice Again</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.lessonContinueBtn}

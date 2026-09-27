@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
 from ai_assistant.models import Quiz, QuizAttempt, QuizGroupShare
+from ai_assistant.quiz_package import build_quiz_package
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
@@ -1258,6 +1259,44 @@ class GroupAttachmentUploadView(APIView):
         return Response(attachment, status=201)
 
 
+def _record_quiz_group_share(quiz, quiz_id, title, group_id, shared_by):
+    """
+    Persist the share of a quiz into a group, with everything needed to keep
+    the card working after the source quiz is deleted.
+
+    Stores: the live FK (nullable), the source id, a full copy of the questions
+    as a portable package, the title, and the group's member roster at share
+    time. Idempotent per ``(source_quiz_id, group_id)`` -- re-sharing an edited
+    quiz refreshes the snapshot instead of stacking duplicates.
+
+    The roster is best-effort: if Firestore cannot be read we still record the
+    share (just without members) rather than failing a message that is already
+    safely in the chat. A roster-less share grants nothing extra, because
+    `member_may_read_snapshot` requires a uid to be present in the list.
+    """
+    members = []
+    try:
+        group = get_study_group(str(group_id))
+    except Exception:
+        group = None
+    if group:
+        members = [uid for uid in (group.get('members') or []) if uid]
+
+    package = build_quiz_package(quiz) if quiz is not None else None
+
+    QuizGroupShare.objects.update_or_create(
+        source_quiz_id=quiz_id,
+        group_id=str(group_id),
+        defaults={
+            'quiz': quiz,
+            'shared_by': shared_by,
+            'package': package,
+            'title': (title or (quiz.title if quiz is not None else ''))[:255],
+            'group_members': members,
+        },
+    )
+
+
 def _validate_quiz_embed(user, payload):
     """Validate a `quiz_embed` posted alongside a group chat message.
 
@@ -1365,17 +1404,11 @@ class GroupChatView(APIView):
         if embed_error:
             return embed_error
 
+        # Snapshot the source while it is still guaranteed to exist. The share
+        # row keeps this package so the card survives the quiz being deleted.
+        quiz_snapshot = None
         if quiz_embed:
-            # Record that this quiz was put in front of this group. The embed
-            # is a reference and the card alone is not useful to someone who is
-            # not on the quiz's course, so the share is what later lets a group
-            # member fetch a copy to import. Idempotent: re-sharing updates the
-            # existing row rather than stacking duplicates.
-            QuizGroupShare.objects.update_or_create(
-                quiz_id=quiz_embed['id'],
-                group_id=str(group_id),
-                defaults={'shared_by': request.user},
-            )
+            quiz_snapshot = Quiz.objects.filter(id=quiz_embed['id']).first()
 
         sender_name = request.user.get_full_name() or request.user.username
         sender_avatar = request.user.avatar or ''
@@ -1384,6 +1417,25 @@ class GroupChatView(APIView):
             sender_name, sender_avatar, attachments=attachments,
             quiz_embed=quiz_embed,
         )
+
+        if quiz_embed:
+            # Record that this quiz was put in front of this group, but only
+            # once the message is actually in Firestore. Recording first would
+            # grant read access to a card that failed to send.
+            #
+            # The member roster is frozen here on purpose. A live share asks
+            # Firestore "is this person still in the group?", which starts
+            # answering no the moment someone leaves and would make the share
+            # just as ephemeral as before. Snapshotting the roster is what
+            # makes a shared quiz durable for the people it was shared with.
+            _record_quiz_group_share(
+                quiz=quiz_snapshot,
+                quiz_id=quiz_embed['id'],
+                title=quiz_embed.get('title') or '',
+                group_id=str(group_id),
+                shared_by=request.user,
+            )
+
         return Response({
             "id": msg_id,
             "sender_uid": request.user.firebase_uid,

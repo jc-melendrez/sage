@@ -10,6 +10,7 @@ import {
   StatusBar,
   Dimensions,
   Alert,
+  RefreshControl,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
@@ -26,8 +27,9 @@ import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
 import NotificationSheet from './NotificationSheet';
 import { getCurrentUser } from '@/services/authService';
+import { useCurrentUser } from '@/contexts/UserContext';
 import { apiCall } from '@/services/apiClient';
-import { getCoursePath, getEnrolledCourses } from '@/services/courseService';
+import { getEnrolledCourses } from '@/services/courseService';
 import { dailyCheckIn } from '@/services/gamificationService';
 import BottomSheet from './BottomSheet';
 
@@ -165,6 +167,8 @@ export default function Dashboard() {
   const [currentPage, setCurrentPage] = useState(0);
   const currentPageRef = useRef(0);
   const scrollViewRef = useRef<ScrollView>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const { setUser: publishUser } = useCurrentUser();
   const autoSlideTimerRef = useRef<NodeJS.Timeout | null>(null);
   const refreshingRecs = useRef(false);
   
@@ -268,29 +272,34 @@ export default function Dashboard() {
   }, [featurePages.length]);
 
   // --- Data fetching ---
-  const fetchUserData = useCallback(async () => {
+  // `force` is what pull-to-refresh uses: it skips the cache *read* but still
+  // writes the response, so the next mount is not served the pre-refresh copy.
+  const fetchUserData = useCallback(async (force = false) => {
     try {
       setError(null);
-      const userProfile = await getCurrentUser();
-      if (!userProfile || !userProfile.id) {
+      const opts = force ? { refresh: true } : {};
+      const userProfile = force
+        ? await getCurrentUser({ refresh: true })
+        : await getCurrentUser();      if (!userProfile || !userProfile.id) {
         setError('Session expired. Please log in again.');
         return;
       }
       setUser(userProfile);
+      publishUser(userProfile);
       const realUserId = userProfile.id;
 
       if (userProfile.badges) {
         setBadges(userProfile.badges);
       } else {
-        setBadges(await apiCall<Badge[]>(`/users/${realUserId}/badges/`));
+        setBadges(await apiCall<Badge[]>(`/users/${realUserId}/badges/`, opts));
       }
 
-      let recs = await apiCall<Recommendation[]>(`/users/${realUserId}/recommendations/`);
+      let recs = await apiCall<Recommendation[]>(`/users/${realUserId}/recommendations/`, opts);
       if (Array.isArray(recs) && recs.length === 0) {
         recs = await refreshRecommendations(realUserId);
       }
       setRecommendations(recs);
-      setActivities(await apiCall<Activity[]>(`/users/${realUserId}/activities/`));
+      setActivities(await apiCall<Activity[]>(`/users/${realUserId}/activities/`, opts));
     } catch (err) {
       const rawError = err instanceof Error ? err : new Error('An error occurred');
       const isNetworkError =
@@ -300,7 +309,17 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [publishUser]);
+
+  // Pull to refresh: force a live read of everything this screen shows.
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await fetchUserData(true);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchUserData]);
 
   // Daily check-in (once per session)
   const checkInRanRef = useRef(false);
@@ -355,41 +374,6 @@ export default function Dashboard() {
     refreshingRecs.current = false;
   };
 
-  /**
-   * "Start learning" should land on the thing to actually study, not on a
-   * course overview the student then has to navigate again. So: resolve the
-   * target course, read its path, and jump to the first node they have not
-   * passed.
-   *
-   * There is deliberately no Activities fallback any more. That fallback is
-   * why the button felt broken -- a recommendation with no resolvable course
-   * used to silently dump the user on a different screen, which looks like
-   * the tap did nothing. If we genuinely cannot find somewhere to send them,
-   * say so instead of pretending.
-   */
-  const openCourseNextNode = useCallback(async (courseId: number) => {
-    try {
-      const path = await getCoursePath(courseId);
-      // Same flatten the course path screen uses: nodes are only startable in
-      // course order, so "first not passed" has to be computed across the whole
-      // path rather than per topic.
-      const firstOpen = path
-        .flatMap((topic) => topic.nodes ?? [])
-        .find((node) => !node.progress?.passed);
-      if (firstOpen) {
-        router.push(`/course/node/${firstOpen.id}?courseId=${courseId}` as any);
-        return true;
-      }
-      // Everything passed (or the course has no nodes yet): the path screen
-      // is still the right place, and it shows completion state.
-      router.push(`/(tabs)/course/path/${courseId}` as any);
-      return true;
-    } catch {
-      router.push(`/(tabs)/course/path/${courseId}` as any);
-      return true;
-    }
-  }, [router]);
-
   const [isOpeningRecommendation, setIsOpeningRecommendation] = useState(false);
 
   /**
@@ -405,12 +389,21 @@ export default function Dashboard() {
   const [detailActivity, setDetailActivity] = useState<Activity | null>(null);
   const [detailBadge, setDetailBadge] = useState<Badge | null>(null);
 
+  /**
+   * A For You card opens the course path, never a single activity directly.
+   *
+   * This used to fetch the path and deep-jump into the first unpassed node,
+   * which dropped the student straight into a practice with no context and no
+   * way to pick something else. The path screen already scrolls to and
+   * highlights the first unpassed node, so it is a strictly better landing
+   * spot: they choose the node and tap Start themselves.
+   */
   const handleOpenRecommendation = useCallback(async (rec: Recommendation) => {
     if (isOpeningRecommendation) return;
     setIsOpeningRecommendation(true);
     try {
       if (rec.course_id) {
-        await openCourseNextNode(rec.course_id);
+        router.push(`/(tabs)/course/path/${rec.course_id}` as any);
         return;
       }
 
@@ -419,7 +412,7 @@ export default function Dashboard() {
       // whatever the student is actually enrolled in.
       const enrolled = await getEnrolledCourses();
       if (enrolled.length > 0) {
-        await openCourseNextNode(enrolled[0].id);
+        router.push(`/(tabs)/course/path/${enrolled[0].id}` as any);
         return;
       }
 
@@ -432,7 +425,7 @@ export default function Dashboard() {
     } finally {
       setIsOpeningRecommendation(false);
     }
-  }, [isOpeningRecommendation, openCourseNextNode]);
+  }, [isOpeningRecommendation, router]);
 
   if (loading && !user) {
     return (
@@ -446,7 +439,7 @@ export default function Dashboard() {
       <View style={styles.loadingContainer}>
         <Ionicons name="cloud-offline-outline" size={48} color={COLORS.danger} />
         <Text style={styles.errorText}>{error}</Text>
-        <TouchableOpacity style={styles.retryButton} activeOpacity={0.85} onPress={fetchUserData}>
+        <TouchableOpacity style={styles.retryButton} activeOpacity={0.85} onPress={handleRefresh}>
           <Ionicons name="refresh" size={16} color="#FFFFFF" />
           <Text style={styles.retryButtonText}>Try Again</Text>
         </TouchableOpacity>
@@ -528,6 +521,14 @@ export default function Dashboard() {
         contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
         removeClippedSubviews={true}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={COLORS.purpleVibrant}
+            colors={[COLORS.purpleVibrant]}
+          />
+        }
       >
         {/* ERROR BANNER (inside scroll, shown when error occurs) */}
         {error ? (
@@ -686,7 +687,7 @@ export default function Dashboard() {
                     activeOpacity={0.7}
                     onPress={() => handleOpenRecommendation(rec)}
                     accessibilityRole="button"
-                    accessibilityLabel={`${rec.title}. Start learning`}
+                    accessibilityLabel={`${rec.title}. View learning path`}
                   >
                     <LinearGradient
                       colors={gradients[index % gradients.length]}
@@ -700,7 +701,7 @@ export default function Dashboard() {
                       <Text style={styles.recommendationDesc} numberOfLines={3}>
                         {rec.description}
                       </Text>
-                      <Text style={styles.recommendationCTA}>Start learning →</Text>
+                      <Text style={styles.recommendationCTA}>View path →</Text>
                     </LinearGradient>
                   </TouchableOpacity>
                 );

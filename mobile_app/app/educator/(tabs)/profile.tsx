@@ -4,14 +4,15 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useFocusEffect, type Href } from 'expo-router';
 import { useAuth } from '@/hooks/useAuth';
-import { getCurrentUser } from '@/services/authService';
+import { useCurrentUser } from '@/contexts/UserContext';
 import { COLORS, FONTS, RADIUS } from '@/constants/educatorTheme';
 import { pfpSource } from '@/constants/pfps';
 
 export default function EducatorProfileScreen() {
   const { logout } = useAuth();
   const router = useRouter();
-  const [userData, setUserData] = useState<any>(null);
+  const { user: sharedUser, loading: userLoading, refreshUser } = useCurrentUser();
+  const [fetched, setFetched] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useFocusEffect(
@@ -19,8 +20,8 @@ export default function EducatorProfileScreen() {
       let active = true;
       (async () => {
         try {
-          const profile = await getCurrentUser();
-          if (active) setUserData(profile);
+          const profile = await refreshUser();
+          if (active) setFetched(profile);
         } catch (error) {
           console.error("Failed to load educator profile:", error);
         } finally {
@@ -30,8 +31,12 @@ export default function EducatorProfileScreen() {
       return () => {
         active = false;
       };
-    }, [])
+    }, [refreshUser])
   );
+
+  // Shared provider wins once this screen's own fetch has nothing, so an edit
+  // made in /edit-profile is visible here without a restart.
+  const userData = fetched ?? sharedUser;
 
   const handleLogout = () => {
     Alert.alert(
@@ -51,7 +56,7 @@ export default function EducatorProfileScreen() {
     );
   };
 
-  if (loading) {
+  if (loading && userLoading && !userData) {
     return (
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
         <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
