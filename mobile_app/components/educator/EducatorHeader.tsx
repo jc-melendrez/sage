@@ -1,5 +1,6 @@
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Platform, StatusBar } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, StatusBar } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -34,6 +35,9 @@ export function EducatorHeader({
   children,
 }: EducatorHeaderProps) {
   const router = useRouter();
+  // Real status-bar height. The gradient is meant to run under the bar
+  // (edge-to-edge), so the controls need to sit below it.
+  const insets = useSafeAreaInsets();
 
   return (
     <View>
@@ -42,7 +46,7 @@ export function EducatorHeader({
         colors={[COLORS.purpleDeep, COLORS.purpleDark]}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
-        style={styles.header}
+        style={[styles.header, { paddingTop: insets.top + 16 }]}
       >
         <View style={styles.row}>
           {showBack && (
@@ -79,7 +83,6 @@ export function EducatorHeader({
 
 const styles = StyleSheet.create({
   header: {
-    paddingTop: Platform.OS === 'ios' ? 60 : 40,
     paddingBottom: 24,
     paddingHorizontal: 24,
     borderBottomLeftRadius: 32,

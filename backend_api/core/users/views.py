@@ -14,7 +14,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
-from ai_assistant.models import Quiz, QuizAttempt
+from ai_assistant.models import Quiz, QuizAttempt, QuizGroupShare
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
@@ -905,11 +905,110 @@ def _build_student_progress_snapshot(user):
     return "\n".join(lines) or "The student has no learning activity yet."
 
 
+def _build_study_habits(user):
+    """
+    Summarise *how* this learner studies, not just where they got to.
+
+    The node/activity dump above tells the model what is unfinished. This adds
+    the patterns that decide which unfinished thing is worth suggesting first:
+    which topics they keep retrying, how they are scoring, when they actually
+    turn up, and whether their streak is alive. Without it the model keeps
+    recommending "review the topic you most recently opened" because that is
+    the only signal in the prompt.
+    """
+    lines = []
+
+    # Quiz accuracy per course, from the aggregate score rows.
+    scores = CourseScore.objects.filter(user=user).select_related('course')
+    if scores.exists():
+        lines.append("QUIZ ACCURACY BY COURSE:")
+        for score in scores:
+            lines.append(
+                f"- {score.course.name}: {score.quizzes_completed} quizzes completed"
+                + (f", average score {score.average_score}%" if hasattr(score, 'average_score') else "")
+            )
+
+    # Weakest nodes: retried and still not passed. These are the highest-value
+    # recommendations and the model cannot infer them from course-level totals.
+    struggling = (
+        NodeProgress.objects.filter(user=user, passed=False)
+        .select_related('node', 'node__topic', 'node__topic__course')
+        .order_by('-attempts')[:5]
+    )
+    if struggling:
+        lines.append("STILL FAILING (worth revisiting):")
+        for np in struggling:
+            lines.append(
+                f"- [{np.node.topic.course.name} > {np.node.topic.title}] {np.node.title}: "
+                f"{np.score}/{np.node.required_score} after {np.attempts} attempt(s)"
+            )
+
+    # Which day and hour they study. A learner who only ever shows up on
+    # Saturday morning should not be told to "set aside 15 minutes each evening".
+    activities = list(
+        Activity.objects.filter(user=user).order_by('-created_at')[:60]
+    )
+    if activities:
+        weekday_counts = {}
+        hour_buckets = {'morning': 0, 'afternoon': 0, 'evening': 0, 'night': 0}
+        kind_counts = {}
+        for act in activities:
+            created = act.created_at
+            weekday_counts[created.strftime('%A')] = weekday_counts.get(created.strftime('%A'), 0) + 1
+            hour = created.hour
+            if hour < 12:
+                hour_buckets['morning'] += 1
+            elif hour < 17:
+                hour_buckets['afternoon'] += 1
+            elif hour < 22:
+                hour_buckets['evening'] += 1
+            else:
+                hour_buckets['night'] += 1
+            kind_counts[act.activity_type] = kind_counts.get(act.activity_type, 0) + 1
+
+        top_days = sorted(weekday_counts.items(), key=lambda kv: -kv[1])[:3]
+        top_hours = sorted(hour_buckets.items(), key=lambda kv: -kv[1])[:2]
+        top_kinds = sorted(kind_counts.items(), key=lambda kv: -kv[1])[:3]
+
+        lines.append("STUDY HABITS (last 60 activities):")
+        lines.append("- Most active days: " + ", ".join(f"{day} ({n})" for day, n in top_days))
+        lines.append("- Most active times: " + ", ".join(f"{slot} ({n})" for slot, n in top_hours))
+        lines.append("- What they spend time on: " + ", ".join(f"{kind} ({n})" for kind, n in top_kinds))
+        lines.append(
+            f"- Current streak: {user.streak} day(s), "
+            f"{user.quizzes_taken} quizzes taken, level {user.level}"
+        )
+
+    return "\n".join(lines)
+
+
+def _daily_rotation(items, user):
+    """
+    Rotate a recommendation list by the day so the hero card changes daily.
+
+    The set of suggestions barely changes, so without this the same card sits at
+    the top of "For You" for a week. Rotation is derived from the day of year
+    rather than stored, so it needs no migration and every device agrees on the
+    order without a round trip. Stable within a day, and the same for everyone
+    on the same day.
+    """
+    items = list(items)
+    if len(items) < 2:
+        return items
+    offset = (timezone.now().timetuple().tm_yday + (user.id or 0)) % len(items)
+    return items[offset:] + items[:offset]
+
+
 def _generate_recommendations(user):
     """Call Groq to write personalized recommendations and persist them."""
     from django.conf import settings
 
-    snapshot = _build_student_progress_snapshot(user)
+    snapshot = "\n\n".join(
+        part for part in (
+            _build_student_progress_snapshot(user),
+            _build_study_habits(user),
+        ) if part
+    )
 
     GROQ_API_KEY = getattr(settings, 'GROQ_API_KEY', None)
     if not GROQ_API_KEY:
@@ -918,7 +1017,7 @@ def _generate_recommendations(user):
     # Every card has to land somewhere, so the model picks from the courses
     # this learner is actually enrolled in. We validate the returned ids
     # against the same set below, so a hallucinated id becomes a null course
-    # (client falls back to Activities) rather than a broken link.
+    # (client offers a course picker) rather than a dead link.
     enrolled = list(
         Course.objects.filter(students=user)
         .order_by('name')
@@ -927,6 +1026,8 @@ def _generate_recommendations(user):
     enrolled_by_id = {cid: name for cid, name in enrolled}
     course_choices = "\n".join(f"- {cid}: {name}" for cid, name in enrolled) or "(none)"
 
+    # Asking for an explicit priority order lets the model's own ranking of
+    # "what this learner should do next" survive into the response.
     system_prompt = (
         "You are SAGE, a Smart Assistant for Group-Based Education. "
         "You write short, personalized study recommendations for a student based on "
@@ -935,10 +1036,12 @@ def _generate_recommendations(user):
         "The JSON structure must be: "
         '{"recommendations": [{"course_id": 12, "title": "Short actionable title", '
         '"description": "2-3 sentence explanation"}]} '
-        "Return exactly 3 to 4 recommendations that are specific to the data provided. "
+        "Return exactly 3 to 4 recommendations, ordered most to least useful. "
         "For every item, set course_id to the id of the enrolled course the learner "
         "should start with, chosen from the list you are given. Never invent a course "
-        "id, and use null if none of the listed courses fit."
+        "id, and use null if none of the listed courses fit. "
+        "Weigh the study habits in the prompt: if the learner reliably studies at a "
+        "particular time, phrase that suggestion around it rather than inventing a new habit."
     )
 
     user_prompt = (
@@ -1026,7 +1129,10 @@ def user_recommendations(request, user_id):
             traceback.print_exc()
             print(f"[Recommendation Generation Critical Error] {e}")
 
-    recommendations = Recommendation.objects.filter(user_id=user_id)
+    recommendations = _daily_rotation(
+        Recommendation.objects.filter(user_id=user_id).order_by('created_at', 'id'),
+        user,
+    )
     serializer = RecommendationSerializer(recommendations, many=True)
     return Response(serializer.data)
 
@@ -1188,12 +1294,17 @@ def _validate_quiz_embed(user, payload):
     # Always recount. An earlier version accepted the client's question_count
     # when it looked sane, which let anyone render a card claiming a 2-question
     # quiz had 99 questions -- the exact spoof this function exists to stop.
+    #
+    # The package routes ride along on the card so a reader can save or import
+    # the quiz without reconstructing URLs on the client.
     return {
         'id': quiz.id,
         'title': (quiz.title or 'Untitled quiz')[:180],
         'question_count': quiz.questions.count(),
         'quiz_type': str(quiz.quiz_type or 'quiz')[:40],
         'deep_link': f"sage://quiz/{quiz.id}",
+        'package_url': f"/ai/quizzes/{quiz.id}/package/",
+        'import_url': "/ai/quizzes/import/",
     }, None
 
 
@@ -1253,6 +1364,18 @@ class GroupChatView(APIView):
         quiz_embed, embed_error = _validate_quiz_embed(request.user, request.data.get('quiz_embed'))
         if embed_error:
             return embed_error
+
+        if quiz_embed:
+            # Record that this quiz was put in front of this group. The embed
+            # is a reference and the card alone is not useful to someone who is
+            # not on the quiz's course, so the share is what later lets a group
+            # member fetch a copy to import. Idempotent: re-sharing updates the
+            # existing row rather than stacking duplicates.
+            QuizGroupShare.objects.update_or_create(
+                quiz_id=quiz_embed['id'],
+                group_id=str(group_id),
+                defaults={'shared_by': request.user},
+            )
 
         sender_name = request.user.get_full_name() or request.user.username
         sender_avatar = request.user.avatar or ''

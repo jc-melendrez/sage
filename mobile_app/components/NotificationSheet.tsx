@@ -199,12 +199,14 @@ export default function NotificationSheet({
     }
 
     for (const r of recommendations.slice(0, 5)) {
-      // Prefer the server's href, fall back to the course path, then
-      // Activities. Every card used to point at Activities regardless of what
-      // it recommended, so tapping a course suggestion was a no-op detour.
+      // Prefer the server's href, then the course path. A recommendation with
+      // no resolvable course goes to the dashboard, which is where "For You"
+      // lives -- not to Activities, which is an unrelated screen and read as
+      // a broken tap. The dashboard's own Start button handles the
+      // course-less case properly.
       const href =
         r.href ||
-        (r.course_id ? `/(tabs)/course/path/${r.course_id}` : '/(tabs)/activities');
+        (r.course_id ? `/(tabs)/course/path/${r.course_id}` : '/(tabs)/dashboard');
       out.push({
         id: `rec-${r.id}`,
         kind: 'recommendation',

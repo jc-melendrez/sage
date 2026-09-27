@@ -20,6 +20,50 @@ def _has_badge(user, name):
     return Badge.objects.filter(user=user, name=name).exists()
 
 
+# --- Badge catalogue ---
+#
+# A Badge row only stores a name and an icon, which reads fine in a grid but
+# tells the student nothing about *why* they have it or what it took. Rather
+# than add a description column (every historical row would need backfilling
+# and the text would then be editable per-badge, which nothing needs), the
+# criteria live here next to the awarding logic that uses the same names, and
+# the serializer looks them up on the way out.
+#
+# Keys are exact badge names. Course-scoped badges embed the course title, so
+# those are matched by prefix in _BADGE_DESCRIPTION_PREFIXES.
+BADGE_DESCRIPTIONS = {
+    'First Quiz': 'Finish your first quiz to get started.',
+    'Perfect Score': 'Answer every question in a quiz correctly.',
+    'Quiz Whiz': 'Complete 5 quizzes.',
+    'Level 5': 'Reach level 5.',
+    'Level 10': 'Reach level 10.',
+    '1,000 XP': 'Earn 1,000 lifetime XP.',
+    '7-Day Streak': 'Check in 7 days in a row.',
+    'Course Starter': 'Complete your first quiz in this course.',
+    'Course Scholar': 'Complete 5 quizzes in this course.',
+    'Course Master': 'Complete 10 quizzes in this course.',
+    'Course Finisher': 'Pass every topic in this course.',
+    'Game Champion': 'Finish a group game in first place.',
+}
+
+_BADGE_DESCRIPTION_PREFIXES = {
+    'Perfect ': 'Score full marks on a quiz in this course.',
+}
+
+_BADGE_FALLBACK_DESCRIPTION = 'A milestone you reached.'
+
+
+def describe_badge(badge):
+    """Human-readable criteria for a badge, resolved from its name."""
+    name = (badge.name or '').strip()
+    if name in BADGE_DESCRIPTIONS:
+        return BADGE_DESCRIPTIONS[name]
+    for prefix, description in _BADGE_DESCRIPTION_PREFIXES.items():
+        if name.startswith(prefix):
+            return description
+    return _BADGE_FALLBACK_DESCRIPTION
+
+
 def award_badge(user, name, icon, course=None):
     """Create a badge if the user doesn't already own it (globally or for this course)."""
     q = Badge.objects.filter(user=user, name=name)

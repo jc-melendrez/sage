@@ -90,3 +90,42 @@ class QuizQuestion(models.Model):
     options = models.JSONField()  # Stores the list of choices
     correct_answer = models.TextField()
     explanation = models.TextField(blank=True, null=True)
+
+
+class QuizGroupShare(models.Model):
+    """
+    "This quiz was shared into that group", recorded so the group can be
+    granted read access afterwards.
+
+    Without this, a quiz card posted in a group chat was a dead end for anyone
+    who was not already on the quiz's course: `_validate_quiz_embed` (sharing)
+    and `QuizShareView` (fetching) both require owner-or-enrolled, so a student
+    who was invited to the group but not the class could see the title and
+    question count and nothing else.
+
+    Recording the share closes that gap without loosening either existing
+    check, because access is still per user and still revocable -- remove the
+    member from the group, or delete the row, and the copy they already made
+    stays theirs while new fetches are denied.
+
+    The group itself lives in Firestore (groups are `studyGroups` documents
+    keyed by a string id with firebase uids in `members`), so this stores the
+    document id rather than a foreign key to `users.StudyGroup`, which is not
+    populated for groups created after the move to Firestore.
+    """
+
+    quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE, related_name='group_shares')
+    group_id = models.CharField(max_length=128)
+    shared_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='quiz_group_shares',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('quiz', 'group_id')]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.quiz_id} -> group {self.group_id}"

@@ -20,6 +20,7 @@ import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/
 import { deleteQuiz, startQuizAttempt, shareQuizToGroup, updateQuiz, parseDeadlineInput } from '@/services/quizService';
 import { pickDocument, readAsBase64, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
 import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/JoinCodeInput';
+import ModalScreenHeader from '@/components/ModalScreenHeader';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 import { TabSkeleton } from '@/components/Skeleton';
 
@@ -1203,31 +1204,43 @@ export default function ActivitiesScreen() {
       >
         <KeyboardAvoidingView style={styles.editorRoot} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           {editView === 'list' ? (
-            <View style={styles.editorHeader}>
-              <TouchableOpacity onPress={requestCloseEditor} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
-                <Ionicons name="close" size={24} color={COLORS.textPrimary} />
-              </TouchableOpacity>
-              <Text style={styles.editorHeaderTitle}>Edit Quiz</Text>
-              <TouchableOpacity
-                style={[styles.editorSaveBtn, isSavingEdit && { opacity: 0.6 }]}
-                onPress={handleSaveEdit}
-                disabled={isSavingEdit}
-              >
-                {isSavingEdit ? <ActivityIndicator size="small" color="white" /> : <Text style={styles.editorSaveText}>Save</Text>}
-              </TouchableOpacity>
-            </View>
+            <ModalScreenHeader
+              title="Edit Quiz"
+              backgroundColor={COLORS.surface}
+              borderColor={COLORS.border}
+              titleStyle={styles.editorHeaderTitle}
+              left={
+                <TouchableOpacity onPress={requestCloseEditor} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                  <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+                </TouchableOpacity>
+              }
+              right={
+                <TouchableOpacity
+                  style={[styles.editorSaveBtn, isSavingEdit && { opacity: 0.6 }]}
+                  onPress={handleSaveEdit}
+                  disabled={isSavingEdit}
+                >
+                  {isSavingEdit ? <ActivityIndicator size="small" color="white" /> : <Text style={styles.editorSaveText}>Save</Text>}
+                </TouchableOpacity>
+              }
+            />
           ) : (
-            <View style={styles.editorHeader}>
-              <TouchableOpacity onPress={goToList} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
-                <Ionicons name="arrow-back" size={24} color={COLORS.textPrimary} />
-              </TouchableOpacity>
-              <Text style={styles.editorHeaderTitle}>
-                {editQIndex !== null ? `Question ${editQIndex + 1}` : 'Question'}
-              </Text>
-              <TouchableOpacity onPress={removeActiveQuestion} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
-                <Ionicons name="trash-outline" size={22} color={COLORS.danger} />
-              </TouchableOpacity>
-            </View>
+            <ModalScreenHeader
+              title={editQIndex !== null ? `Question ${editQIndex + 1}` : 'Question'}
+              backgroundColor={COLORS.surface}
+              borderColor={COLORS.border}
+              titleStyle={styles.editorHeaderTitle}
+              left={
+                <TouchableOpacity onPress={goToList} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                  <Ionicons name="arrow-back" size={24} color={COLORS.textPrimary} />
+                </TouchableOpacity>
+              }
+              right={
+                <TouchableOpacity onPress={removeActiveQuestion} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                  <Ionicons name="trash-outline" size={22} color={COLORS.danger} />
+                </TouchableOpacity>
+              }
+            />
           )}
 
           <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.editorContent}>
@@ -1743,19 +1756,8 @@ const styles = StyleSheet.create({
 
   // Quiz editor (Edit own quiz)
   editorRoot: { flex: 1, backgroundColor: COLORS.bg },
-  editorHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-    backgroundColor: COLORS.surface,
-  },
-  editorHeaderBtn: { padding: 8 },
-  editorHeaderTitle: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary },
+  editorHeaderBtn: { padding: 6 },
+  editorHeaderTitle: { fontFamily: FONTS.bold, color: COLORS.textPrimary },
   editorSaveBtn: {
     backgroundColor: COLORS.purplePrimary,
     borderRadius: 10,

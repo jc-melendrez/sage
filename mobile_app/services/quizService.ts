@@ -70,6 +70,55 @@ export interface QuizShareData {
   question_count: number;
   quiz_type: string;
   deep_link: string;
+  /** Server route serving the portable package for this quiz. */
+  package_url?: string;
+  /** Server route that turns a package into a quiz owned by the caller. */
+  import_url?: string;
+}
+
+/**
+ * The portable quiz document. Versioned by the server; the app only ever
+ * round-trips it, so it deliberately mirrors the wire format rather than
+ * inventing a local shape to convert to and from.
+ */
+export interface QuizPackage {
+  format: 'sage.quiz';
+  version: number;
+  title: string;
+  quiz_type: string;
+  questions: Array<{
+    question_text: string;
+    options: string[];
+    correct_answer: string;
+    explanation: string;
+  }>;
+}
+
+/**
+ * Fetch a quiz as a portable package.
+ *
+ * This is the endpoint that honours group membership: someone who was sent a
+ * quiz card in a chat they belong to, but is not enrolled on the quiz's
+ * course, can still obtain a copy to import. The share endpoint cannot be used
+ * for this because it is also the check performed when posting a card, where
+ * the access has to stay owner-or-enrolled.
+ */
+export async function getQuizPackage(quizId: number): Promise<QuizPackage> {
+  return apiCall<QuizPackage>(`/ai/quizzes/${quizId}/package/`, { noCache: true });
+}
+
+/**
+ * Import a package into the caller's own quiz list, returning the new quiz.
+ *
+ * The server always creates an independent copy with no class attached, so
+ * the recipient never inherits the source quiz's course or its grading.
+ */
+export async function importQuizPackage(pkg: QuizPackage): Promise<Quiz> {
+  return apiCall<Quiz>('/ai/quizzes/import/', {
+    method: 'POST',
+    body: JSON.stringify(pkg),
+    noCache: true,
+  });
 }
 
 /** Format a Date as a local "YYYY-MM-DD HH:MM" string for editing. */

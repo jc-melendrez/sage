@@ -22,6 +22,7 @@ import { getFirebaseUid } from '@/services/firebaseAuthService';
 import { getChatCache, setChatCache, clearChatCache, setCacheUserId, invalidateCachePrefix } from '@/services/apiCache';
 import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName, QuizEmbed } from '@/services/chatService';
 import { pfpSource } from '@/constants/pfps';
+import QuizShareSheet from '@/components/QuizShareSheet';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
 // Presigned attachment links live ~30 min; only hydrate cached URLs while
@@ -220,6 +221,14 @@ export default function GroupChatScreen() {
   const [resolvedLinks, setResolvedLinks] = useState<Record<string, string>>({});
   const [linkErrors, setLinkErrors] = useState<Record<string, boolean>>({});
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
+  /**
+   * Which shared-quiz card the action sheet is open for. The card cannot deep
+   * link straight into the quiz any more: `/course/quiz/{id}` only resolves for
+   * the owner or someone on the quiz's course, so a member of the group who is
+   * not in the class got a dead button. The sheet offers preview / import /
+   * save instead, all of which work for anyone the quiz was shared to.
+   */
+  const [sharedQuiz, setSharedQuiz] = useState<QuizEmbed | null>(null);
   const linkCacheRef = useRef<Record<string, string>>({});
   const mintAtRef = useRef<Record<string, number>>({});
 
@@ -890,9 +899,9 @@ const renderQuizCard = () => {
   return (
     <TouchableOpacity
       style={styles.quizEmbedCard}
-      onPress={() => router.push(`/course/quiz/${embed.id}`)}
+      onPress={() => setSharedQuiz(embed)}
       activeOpacity={0.85}
-      accessibilityLabel={`Open quiz ${embed.title}`}
+      accessibilityLabel={`Quiz shared: ${embed.title}. Opens quiz actions.`}
     >
       <View style={styles.quizEmbedHeader}>
         <Ionicons name="document-text-outline" size={24} color={COLORS.purplePrimary} />
@@ -905,7 +914,7 @@ const renderQuizCard = () => {
         </Text>
       </View>
       <View style={styles.quizEmbedAction}>
-        <Text style={styles.quizEmbedActionText}>Take Quiz</Text>
+        <Text style={styles.quizEmbedActionText}>Preview or add to my quizzes</Text>
         <Ionicons name="chevron-forward" size={16} color={COLORS.purplePrimary} />
       </View>
     </TouchableOpacity>
@@ -1477,6 +1486,15 @@ const renderAttachments = () => {
           </View>
         </TouchableOpacity>
       </Modal>
+
+      <QuizShareSheet
+        visible={sharedQuiz != null}
+        onClose={() => setSharedQuiz(null)}
+        quizId={sharedQuiz?.id ?? 0}
+        title={sharedQuiz?.title || ''}
+        questionCount={sharedQuiz?.question_count}
+        quizType={sharedQuiz?.quiz_type}
+      />
     </KeyboardAvoidingView>
   );
 }

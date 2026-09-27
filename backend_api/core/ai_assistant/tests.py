@@ -11,7 +11,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import ChatMessage, ChatSession, Quiz, QuizAttempt
+from .models import ChatMessage, ChatSession, Quiz, QuizAttempt, QuizGroupShare, QuizQuestion
 from users.models import Course
 
 User = get_user_model()
@@ -793,3 +793,208 @@ class AskImageRoutingTests(APITestCase):
         # is that the bytes are read as text rather than routed to vision.
         self.assertEqual(resp.status_code, 200)
         mock_text.assert_called_once()
+
+
+# --- Group share -> portable package -> import -----------------------------
+#
+# A quiz card in a group chat used to be a dead end for anyone who was not on
+# the quiz's course: the card showed the title and question count, and its only
+# action routed to /course/quiz/{id}, which 403s for them. These cover the
+# replacement path -- record the share, let the group fetch a package, and let
+# them import it as their own copy.
+
+def _make_quiz(owner, course=None, title='Cell Biology', questions=2):
+    quiz = Quiz.objects.create(user=owner, course=course, title=title)
+    for i in range(questions):
+        QuizQuestion.objects.create(
+            quiz=quiz,
+            question_text=f'Question {i + 1}?',
+            options=['A', 'B'],
+            correct_answer='A',
+            explanation=f'Because {i + 1}.',
+        )
+    return quiz
+
+
+class QuizPackageAccessTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='pkg-teacher', password='pass123', role='educator',
+        )
+        self.enrolled = User.objects.create_user(
+            username='pkg-enrolled', password='pass123', role='student',
+        )
+        self.outsider = User.objects.create_user(
+            username='pkg-outsider', password='pass123', role='student',
+        )
+        self.groupmate = User.objects.create_user(
+            username='pkg-groupmate', password='pass123', role='student',
+        )
+        # Group membership is checked by firebase uid against the Firestore doc.
+        self.groupmate.firebase_uid = 'uid-groupmate'
+        self.groupmate.save(update_fields=['firebase_uid'])
+
+        self.course = Course.objects.create(name='Biology', educator=self.educator)
+        self.course.students.add(self.enrolled)
+        self.quiz = _make_quiz(self.educator, self.course)
+
+        self.group = {'id': 'group-1', 'members': ['uid-groupmate']}
+
+    def _package(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.get(reverse('quiz_package', args=[self.quiz.id]))
+
+    def test_owner_can_fetch_a_package(self):
+        resp = self._package(self.educator)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['format'], 'sage.quiz')
+        self.assertEqual(len(resp.data['questions']), 2)
+        self.assertEqual(resp.data['questions'][0]['correct_answer'], 'A')
+
+    def test_enrolled_student_can_fetch_a_package(self):
+        self.assertEqual(self._package(self.enrolled).status_code, 200)
+
+    def test_outsider_is_denied_before_any_share(self):
+        self.assertEqual(self._package(self.outsider).status_code, 403)
+
+    def test_group_member_can_fetch_after_the_quiz_is_shared(self):
+        QuizGroupShare.objects.create(
+            quiz=self.quiz, group_id=self.group['id'], shared_by=self.educator,
+        )
+        with patch('ai_assistant.views.get_study_group', return_value=self.group):
+            resp = self._package(self.groupmate)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data['questions']), 2)
+
+    def test_share_does_not_grant_access_to_non_members(self):
+        QuizGroupShare.objects.create(
+            quiz=self.quiz, group_id=self.group['id'], shared_by=self.educator,
+        )
+        with patch('ai_assistant.views.get_study_group', return_value=self.group):
+            self.assertEqual(self._package(self.outsider).status_code, 403)
+
+    def test_a_firestore_failure_does_not_grant_access(self):
+        # Failing closed matters more than failing open here: a blip in
+        # Firestore must not become a way to read someone else's quiz.
+        QuizGroupShare.objects.create(
+            quiz=self.quiz, group_id=self.group['id'], shared_by=self.educator,
+        )
+        with patch('ai_assistant.views.get_study_group', side_effect=RuntimeError('down')):
+            self.assertEqual(self._package(self.groupmate).status_code, 403)
+
+    def test_share_view_advertises_the_package_routes(self):
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(reverse('quiz_share', args=[self.quiz.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['package_url'], f"/ai/quizzes/{self.quiz.id}/package/")
+        self.assertEqual(resp.data['import_url'], '/ai/quizzes/import/')
+
+    def test_share_view_still_blocks_outsiders(self):
+        # The share endpoint doubles as the "may this card be posted" check,
+        # so it must NOT inherit the looser group rule.
+        self.assertEqual(
+            self._package(self.outsider).status_code, 403
+        )
+        self.client.force_authenticate(user=self.outsider)
+        resp = self.client.get(reverse('quiz_share', args=[self.quiz.id]))
+        self.assertEqual(resp.status_code, 403)
+
+
+class QuizImportTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.student = User.objects.create_user(
+            username='imp-student', password='pass123', role='student',
+        )
+        self.client.force_authenticate(user=self.student)
+
+    def _package(self, **overrides):
+        pkg = {
+            'format': 'sage.quiz',
+            'version': 1,
+            'title': 'Photosynthesis',
+            'quiz_type': 'Multiple Choice',
+            'questions': [
+                {
+                    'question_text': 'What does chlorophyll absorb?',
+                    'options': ['Light', 'Sound'],
+                    'correct_answer': 'Light',
+                    'explanation': 'It is the pigment that catches light.',
+                },
+            ],
+        }
+        pkg.update(overrides)
+        return pkg
+
+    def test_import_creates_an_owned_unattached_copy(self):
+        resp = self.client.post(reverse('quiz_import'), self._package(), format='json')
+        self.assertEqual(resp.status_code, 201)
+        created = Quiz.objects.get(id=resp.data['id'])
+        self.assertEqual(created.user, self.student)
+        # No course: the importer may not be in the source class, and silently
+        # enrolling them in one they never joined is worse than a loose quiz.
+        self.assertIsNone(created.course)
+        self.assertEqual(created.questions.count(), 1)
+        self.assertEqual(created.questions.first().correct_answer, 'Light')
+
+    def test_import_appears_in_the_callers_own_quiz_list(self):
+        self.client.post(reverse('quiz_import'), self._package(), format='json')
+        resp = self.client.get(reverse('quiz_list'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('Photosynthesis', {q['title'] for q in resp.data})
+
+    def test_rejects_a_foreign_format(self):
+        resp = self.client.post(
+            reverse('quiz_import'), self._package(format='something.else'), format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    def test_rejects_an_unknown_version(self):
+        resp = self.client.post(
+            reverse('quiz_import'), self._package(version=99), format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    def test_rejects_an_empty_quiz(self):
+        resp = self.client.post(
+            reverse('quiz_import'), self._package(questions=[]), format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    def test_rejects_a_correct_answer_that_is_not_an_option(self):
+        # Otherwise the import produces a question nobody can get right.
+        pkg = self._package()
+        pkg['questions'][0]['correct_answer'] = 'None of these'
+        resp = self.client.post(reverse('quiz_import'), pkg, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('not among its options', resp.data['error'])
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    def test_rejects_a_question_with_no_options(self):
+        pkg = self._package()
+        pkg['questions'][0]['options'] = []
+        resp = self.client.post(reverse('quiz_import'), pkg, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    def test_round_trip_through_the_package_endpoint(self):
+        educator = User.objects.create_user(
+            username='imp-teacher', password='pass123', role='educator',
+        )
+        source = _make_quiz(educator, title='Round Trip')
+
+        self.client.force_authenticate(user=educator)
+        pkg_resp = self.client.get(reverse('quiz_package', args=[source.id]))
+        self.assertEqual(pkg_resp.status_code, 200)
+
+        self.client.force_authenticate(user=self.student)
+        resp = self.client.post(reverse('quiz_import'), pkg_resp.data, format='json')
+        self.assertEqual(resp.status_code, 201)
+        imported = Quiz.objects.get(id=resp.data['id'])
+        self.assertEqual(imported.title, 'Round Trip')
+        self.assertEqual(imported.questions.count(), source.questions.count())
+

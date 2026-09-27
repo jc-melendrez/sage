@@ -1,4 +1,5 @@
-import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -25,6 +26,9 @@ export default function AdminHeader({
   showBack = true,
 }: AdminHeaderProps) {
   const router = useRouter();
+  // Real status-bar height. The gradient is meant to run under the bar
+  // (edge-to-edge), so the controls need to sit below it.
+  const insets = useSafeAreaInsets();
   const gradientColors: [string, string] =
     variant === 'superadmin'
       ? ['#0F172A', '#1E293B']
@@ -35,7 +39,7 @@ export default function AdminHeader({
       colors={gradientColors}
       start={{ x: 0, y: 0 }}
       end={{ x: 1, y: 1 }}
-      style={styles.header}
+      style={[styles.header, { paddingTop: insets.top + 14 }]}
     >
       <View style={styles.row}>
         {showBack ? (
@@ -76,7 +80,6 @@ export default function AdminHeader({
 
 const styles = StyleSheet.create({
   header: {
-    paddingTop: Platform.OS === 'ios' ? 56 : 36,
     paddingBottom: 20,
     paddingHorizontal: 16,
     borderBottomLeftRadius: 28,

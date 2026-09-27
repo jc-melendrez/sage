@@ -11,7 +11,14 @@
  *     user was not looking at.
  *
  * Here the state is an array with one entry per box, so a slot can only ever
- * hold its own character and backspace always moves backwards one box.
+ * hold its own character.
+ *
+ * Backspace navigation lives in onKeyPress alone. An earlier version also
+ * moved focus backwards from onChangeText whenever a box reported empty text,
+ * which fought with onKeyPress: on Android the two fire for the same keypress,
+ * so a single backspace could run the "clear the previous box" step twice and
+ * drag focus two boxes left, leaving the user pressing backspace at a slot they
+ * had not typed into. onChangeText now only ever writes the current slot.
  */
 
 import React, { useRef } from 'react';
@@ -62,9 +69,11 @@ export default function JoinCodeInput({
     const next = [...slots];
 
     if (!char) {
+      // The slot was cleared (backspace, or the user selected its character
+      // and deleted it). Just empty this slot -- deliberately no focus change,
+      // because backspace navigation is owned by handleKeyPress below.
       next[index] = '';
       onChange(next);
-      focusSlot(index - 1);
       return;
     }
 
@@ -75,11 +84,16 @@ export default function JoinCodeInput({
 
   const handleKeyPress = (event: any, index: number) => {
     if (event.nativeEvent.key !== 'Backspace') return;
-    // Only act when this box is already empty, so a normal backspace on a
-    // filled box still clears that one box through onChangeText.
-    if (slots[index]) return;
-    if (index === 0) return;
     const next = [...slots];
+    // Filled box: clear it and stay put, which is what the user sees happen.
+    if (slots[index]) {
+      next[index] = '';
+      onChange(next);
+      return;
+    }
+    // Empty box: eat the character to the left and follow it there, so
+    // repeated presses walk backwards one box at a time.
+    if (index === 0) return;
     next[index - 1] = '';
     onChange(next);
     focusSlot(index - 1);

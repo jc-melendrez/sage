@@ -27,7 +27,9 @@ import LessonGenerator from './LessonGenerator';
 import NotificationSheet from './NotificationSheet';
 import { getCurrentUser } from '@/services/authService';
 import { apiCall } from '@/services/apiClient';
+import { getCoursePath, getEnrolledCourses } from '@/services/courseService';
 import { dailyCheckIn } from '@/services/gamificationService';
+import BottomSheet from './BottomSheet';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -82,6 +84,10 @@ interface Badge {
   icon_url?: string;
   icon?: string;
   name: string;
+  /** Criteria for earning it, resolved server-side from the badge name. */
+  description?: string;
+  earned_at?: string;
+  course_name?: string | null;
 }
 interface Recommendation {
   id: number;
@@ -89,7 +95,7 @@ interface Recommendation {
   description: string;
   /** Course this recommendation is about, when the backend could resolve one. */
   course_id?: number | null;
-  /** Server-computed deep link. Falls back to course_id, then Activities. */
+  /** Server-computed deep link. Unused for "Start learning" (see below). */
   href?: string | null;
 }
 interface Activity {
@@ -350,21 +356,83 @@ export default function Dashboard() {
   };
 
   /**
-   * A "Start learning" card that goes nowhere is worse than no card. Prefer
-   * the server's href, fall back to the resolved course path, and only then to
-   * Activities so the tap is never dead.
+   * "Start learning" should land on the thing to actually study, not on a
+   * course overview the student then has to navigate again. So: resolve the
+   * target course, read its path, and jump to the first node they have not
+   * passed.
+   *
+   * There is deliberately no Activities fallback any more. That fallback is
+   * why the button felt broken -- a recommendation with no resolvable course
+   * used to silently dump the user on a different screen, which looks like
+   * the tap did nothing. If we genuinely cannot find somewhere to send them,
+   * say so instead of pretending.
    */
-  const handleOpenRecommendation = (rec: Recommendation) => {
-    if (rec.href) {
-      router.push(rec.href as any);
-      return;
+  const openCourseNextNode = useCallback(async (courseId: number) => {
+    try {
+      const path = await getCoursePath(courseId);
+      // Same flatten the course path screen uses: nodes are only startable in
+      // course order, so "first not passed" has to be computed across the whole
+      // path rather than per topic.
+      const firstOpen = path
+        .flatMap((topic) => topic.nodes ?? [])
+        .find((node) => !node.progress?.passed);
+      if (firstOpen) {
+        router.push(`/course/node/${firstOpen.id}?courseId=${courseId}` as any);
+        return true;
+      }
+      // Everything passed (or the course has no nodes yet): the path screen
+      // is still the right place, and it shows completion state.
+      router.push(`/(tabs)/course/path/${courseId}` as any);
+      return true;
+    } catch {
+      router.push(`/(tabs)/course/path/${courseId}` as any);
+      return true;
     }
-    if (rec.course_id) {
-      router.push(`/(tabs)/course/path/${rec.course_id}` as any);
-      return;
+  }, [router]);
+
+  const [isOpeningRecommendation, setIsOpeningRecommendation] = useState(false);
+
+  /**
+   * "View all" and per-row detail for Recent Activity and Badges.
+   *
+   * These used to navigate to the Activities tab and the Profile tab, which
+   * meant the row you tapped was not the thing that happened: the dashboard
+   * row either did nothing (activities with no `payload.route`) or dumped you
+   * somewhere unrelated. In-place sheets keep the context and work for every
+   * row, including ones with no route.
+   */
+  const [sheet, setSheet] = useState<'activities' | 'badges' | null>(null);
+  const [detailActivity, setDetailActivity] = useState<Activity | null>(null);
+  const [detailBadge, setDetailBadge] = useState<Badge | null>(null);
+
+  const handleOpenRecommendation = useCallback(async (rec: Recommendation) => {
+    if (isOpeningRecommendation) return;
+    setIsOpeningRecommendation(true);
+    try {
+      if (rec.course_id) {
+        await openCourseNextNode(rec.course_id);
+        return;
+      }
+
+      // The model could not tie this suggestion to a class (or the class has
+      // since been deleted). Rather than bounce to an unrelated screen, use
+      // whatever the student is actually enrolled in.
+      const enrolled = await getEnrolledCourses();
+      if (enrolled.length > 0) {
+        await openCourseNextNode(enrolled[0].id);
+        return;
+      }
+
+      Alert.alert(
+        'Nothing to start yet',
+        'Enrol in a course first and your next step will show up here.',
+      );
+    } catch {
+      Alert.alert('Could not open that', 'Please try again in a moment.');
+    } finally {
+      setIsOpeningRecommendation(false);
     }
-    router.push('/(tabs)/activities');
-  };
+  }, [isOpeningRecommendation, openCourseNextNode]);
 
   if (loading && !user) {
     return (
@@ -665,7 +733,11 @@ export default function Dashboard() {
               </View>
               <Text style={styles.sectionTitle}>Recent Activity</Text>
             </View>
-            <TouchableOpacity onPress={() => router.push('/(tabs)/activities')}>
+            <TouchableOpacity
+              onPress={() => setSheet('activities')}
+              accessibilityRole="button"
+              accessibilityLabel="View all recent activity"
+            >
               <Text style={styles.viewAllText}>View all</Text>
             </TouchableOpacity>
           </View>
@@ -679,10 +751,9 @@ export default function Dashboard() {
                     key={activity.id}
                     style={styles.activityItem}
                     activeOpacity={0.7}
-                    disabled={!activity.payload?.route}
-                    onPress={() => {
-                      if (activity.payload?.route) router.push(activity.payload.route as any);
-                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${activity.title}. View details`}
+                    onPress={() => setDetailActivity(activity)}
                   >
                     <View style={[styles.activityIconBox, { backgroundColor: `${meta.color}26` }]}>
                       <Ionicons name={meta.icon} size={20} color={meta.color} />
@@ -736,7 +807,7 @@ export default function Dashboard() {
                 <Text style={styles.sectionTitle}>Badges</Text>
               </View>
               <TouchableOpacity
-                onPress={() => router.push('/(tabs)/profile')}
+                onPress={() => setSheet('badges')}
                 accessibilityRole="button"
                 accessibilityLabel="View all badges"
               >
@@ -751,7 +822,14 @@ export default function Dashboard() {
               removeClippedSubviews={true}
             >
               {badges.slice(0, 6).map((badge) => (
-                <View key={badge.id} style={styles.badgeItem}>
+                <TouchableOpacity
+                  key={badge.id}
+                  style={styles.badgeItem}
+                  activeOpacity={0.75}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Badge ${badge.name}. View how to earn it.`}
+                  onPress={() => setDetailBadge(badge)}
+                >
                   <LinearGradient
                     colors={[COLORS.purpleDark, COLORS.purpleVibrant]}
                     start={{ x: 0, y: 0 }}
@@ -763,7 +841,7 @@ export default function Dashboard() {
                   <Text style={styles.badgeName} numberOfLines={1}>
                     {badge.name}
                   </Text>
-                </View>
+                </TouchableOpacity>
               ))}
             </ScrollView>
           </View>
@@ -780,12 +858,194 @@ export default function Dashboard() {
         badges={badges}
         recommendations={recommendations}
       />
+
+      {/* View-all + detail sheets. In-tree overlays, never <Modal>, because
+          Android drops a Modal stacked on another. */}
+      <BottomSheet
+        visible={sheet === 'activities'}
+        onClose={() => setSheet(null)}
+        title="Recent Activity"
+        subtitle={`${activities.length} ${activities.length === 1 ? 'entry' : 'entries'}`}
+      >
+        {activities.length === 0 ? (
+          <View style={styles.sheetEmpty}>
+            <Ionicons name="analytics-outline" size={36} color={COLORS.textMuted} />
+            <Text style={styles.sheetEmptyText}>No activity yet.</Text>
+          </View>
+        ) : (
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.sheetList}>
+            {activities.map((activity) => {
+              const meta = ACTIVITY_META[activity.kind || ''] || ACTIVITY_META.other;
+              return (
+                <TouchableOpacity
+                  key={activity.id}
+                  style={styles.sheetRow}
+                  activeOpacity={0.75}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${activity.title}. View details`}
+                  onPress={() => {
+                    setSheet(null);
+                    setDetailActivity(activity);
+                  }}
+                >
+                  <View style={[styles.activityIconBox, { backgroundColor: `${meta.color}26` }]}>
+                    <Ionicons name={meta.icon} size={20} color={meta.color} />
+                  </View>
+                  <View style={styles.activityContent}>
+                    <Text style={styles.activityTitle} numberOfLines={1}>
+                      {activity.title}
+                    </Text>
+                    <Text style={styles.activityDesc} numberOfLines={1}>
+                      {activity.description}
+                    </Text>
+                  </View>
+                  <View style={styles.activityRight}>
+                    {activity.xp_earned ? (
+                      <View style={styles.xpChip}>
+                        <Text style={styles.xpChipText}>+{activity.xp_earned} XP</Text>
+                      </View>
+                    ) : null}
+                    {activity.created_at ? (
+                      <Text style={styles.activityTime}>{relativeTime(activity.created_at)}</Text>
+                    ) : null}
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        )}
+      </BottomSheet>
+
+      <BottomSheet
+        visible={sheet === 'badges'}
+        onClose={() => setSheet(null)}
+        title="Badges"
+        subtitle={`${badges.length} earned`}
+      >
+        {badges.length === 0 ? (
+          <View style={styles.sheetEmpty}>
+            <Ionicons name="ribbon-outline" size={36} color={COLORS.textMuted} />
+            <Text style={styles.sheetEmptyText}>No badges yet.</Text>
+          </View>
+        ) : (
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.sheetList}>
+            {badges.map((badge) => (
+              <TouchableOpacity
+                key={badge.id}
+                style={styles.sheetRow}
+                activeOpacity={0.75}
+                accessibilityRole="button"
+                accessibilityLabel={`Badge ${badge.name}. View how to earn it.`}
+                onPress={() => {
+                  setSheet(null);
+                  setDetailBadge(badge);
+                }}
+              >
+                <View style={styles.sheetBadgeCircle}>
+                  <Text style={styles.badgeEmoji}>{badge.icon || badge.icon_url || '🏆'}</Text>
+                </View>
+                <View style={styles.activityContent}>
+                  <Text style={styles.activityTitle} numberOfLines={1}>
+                    {badge.name}
+                  </Text>
+                  <Text style={styles.activityDesc} numberOfLines={2}>
+                    {badge.description || 'Earned for reaching a milestone.'}
+                  </Text>
+                </View>
+                {badge.earned_at ? (
+                  <Text style={styles.activityTime}>{relativeTime(badge.earned_at)}</Text>
+                ) : null}
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        )}
+      </BottomSheet>
+
+      <BottomSheet
+        visible={detailActivity != null}
+        onClose={() => setDetailActivity(null)}
+        title={detailActivity?.title || 'Activity'}
+        subtitle={
+          detailActivity?.created_at ? relativeTime(detailActivity.created_at) : undefined
+        }
+        maxHeight="60%"
+      >
+        <View style={styles.sheetDetail}>
+          <Text style={styles.sheetDetailText}>
+            {detailActivity?.description || 'No further detail was recorded.'}
+          </Text>
+          <View style={styles.sheetDetailMeta}>
+            {detailActivity?.course_name ? (
+              <Text style={styles.sheetDetailMetaText}>{detailActivity.course_name}</Text>
+            ) : null}
+            {detailActivity?.xp_earned ? (
+              <Text style={[styles.sheetDetailMetaText, { color: COLORS.purpleVibrant }]}>
+                +{detailActivity.xp_earned} XP
+              </Text>
+            ) : null}
+          </View>
+        </View>
+      </BottomSheet>
+
+      <BottomSheet
+        visible={detailBadge != null}
+        onClose={() => setDetailBadge(null)}
+        title={detailBadge?.name || 'Badge'}
+        subtitle={
+          detailBadge?.earned_at ? `Earned ${relativeTime(detailBadge.earned_at)}` : undefined
+        }
+        maxHeight="60%"
+      >
+        <View style={styles.sheetDetail}>
+          <Text style={styles.sheetDetailText}>
+            {detailBadge?.description || 'Earned for reaching a milestone.'}
+          </Text>
+          {detailBadge?.course_name ? (
+            <Text style={[styles.sheetDetailMetaText, { marginTop: 10 }]}>
+              {detailBadge.course_name}
+            </Text>
+          ) : null}
+        </View>
+      </BottomSheet>
     </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
   mainWrapper: { flex: 1 },
+
+  // --- Bottom sheets ---
+  sheetList: { paddingHorizontal: 16, paddingBottom: 8, gap: 8 },
+  sheetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  sheetBadgeCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.purpleGhost,
+  },
+  sheetEmpty: { paddingVertical: 36, alignItems: 'center', gap: 10 },
+  sheetEmptyText: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textMuted },
+  sheetDetail: { paddingHorizontal: 20, paddingBottom: 8 },
+  sheetDetailText: {
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+    lineHeight: 21,
+  },
+  sheetDetailMeta: { flexDirection: 'row', gap: 12, marginTop: 12 },
+  sheetDetailMetaText: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted },
+
   loadingContainer: {
     flex: 1,
     backgroundColor: COLORS.bg,

@@ -13,9 +13,10 @@ from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
 from .models import Activity, Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, Recommendation, TaskSubmission, Topic, User
-from .serializers import RecommendationSerializer
+from .serializers import RecommendationSerializer, BadgeSerializer
 from . import gamification
 from . import views as users_views
+from ai_assistant.models import Quiz, QuizGroupShare
 
 User = get_user_model()
 
@@ -1036,6 +1037,94 @@ class RecommendationSerializerHrefTests(APITestCase):
         )
 
 
+class RecommendationRotationTests(APITestCase):
+    """
+    "For You" must not show the same hero card every day. Rotation is derived
+    from the day of year rather than stored, so it needs no migration and every
+    device agrees without a round trip.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.student = User.objects.create_user(
+            username='rot-student', password='pass12345', role='student',
+        )
+        self.client.force_authenticate(user=self.student)
+
+    def _make(self, count=3):
+        for i in range(count):
+            Recommendation.objects.create(
+                user=self.student, title=f'Rec {i}', description='x',
+            )
+
+    def test_rotation_keeps_every_card(self):
+        self._make(4)
+        resp = self.client.get(reverse('user_recommendations', args=[self.student.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            sorted(r['title'] for r in resp.data), ['Rec 0', 'Rec 1', 'Rec 2', 'Rec 3'],
+        )
+
+    def test_rotation_is_stable_within_a_request(self):
+        self._make(4)
+        first = self.client.get(reverse('user_recommendations', args=[self.student.id])).data
+        second = self.client.get(reverse('user_recommendations', args=[self.student.id])).data
+        self.assertEqual([r['title'] for r in first], [r['title'] for r in second])
+
+    def test_single_recommendation_is_returned_unchanged(self):
+        self._make(1)
+        resp = self.client.get(reverse('user_recommendations', args=[self.student.id]))
+        self.assertEqual([r['title'] for r in resp.data], ['Rec 0'])
+
+
+class BadgeDescriptionTests(APITestCase):
+    """
+    A badge grid that only says "Quiz Whiz" tells the student nothing. The
+    criteria are resolved from the badge name on the way out, so no historical
+    row needs backfilling and no description column can drift from the rule
+    that awards it.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.student = User.objects.create_user(
+            username='badge-student', password='pass12345', role='student',
+        )
+        self.educator = User.objects.create_user(
+            username='badge-teacher', password='pass12345', role='educator',
+        )
+        self.client.force_authenticate(user=self.student)
+
+    def test_known_badge_gets_its_criteria(self):
+        badge = Badge.objects.create(user=self.student, name='Quiz Whiz', icon='📚')
+        self.assertIn('5 quizzes', BadgeSerializer(badge).data['description'])
+
+    def test_course_scoped_badge_resolves_by_prefix(self):
+        course = Course.objects.create(
+            name='Physics', educator=self.educator, join_code='PHY001',
+        )
+        badge = Badge.objects.create(
+            user=self.student, name=f'Perfect {course.name}', icon='🎯', course=course,
+        )
+        data = BadgeSerializer(badge).data
+        self.assertIn('this course', data['description'])
+        self.assertEqual(data['course_name'], 'Physics')
+
+    def test_unknown_badge_falls_back_rather_than_returning_nothing(self):
+        # A badge from a future release, or one renamed, must not render an
+        # empty subtitle.
+        badge = Badge.objects.create(user=self.student, name='Brand New Badge', icon='x')
+        self.assertTrue(BadgeSerializer(badge).data['description'])
+
+    def test_profile_includes_the_description(self):
+        gamification.award_badge(self.student, 'First Quiz', '🏆')
+        resp = self.client.get(reverse('current_user_profile'))
+        self.assertEqual(resp.status_code, 200)
+        descriptions = {b['name']: b['description'] for b in resp.data['badges']}
+        self.assertIn('First Quiz', descriptions)
+        self.assertTrue(descriptions['First Quiz'])
+
+
 class GroupChatQuizEmbedTests(APITestCase):
     """A shared quiz is a *reference* the server re-derives, not a card the
     client gets to describe. Otherwise anyone could post a convincing card for
@@ -1164,6 +1253,40 @@ class GroupChatQuizEmbedTests(APITestCase):
         with patch.object(users_views, 'get_study_group', return_value=self.group):
             res = self.client.post(self.url, {'text': ''}, format='json')
         self.assertEqual(res.status_code, 400)
+
+    def test_posting_a_card_records_the_group_share(self):
+        # This is what later lets a group member who is not on the quiz's
+        # course fetch a copy to import. Without the row, the card is a dead
+        # end for them.
+        self._post(self.owner, {'id': self.quiz.id})
+        share = QuizGroupShare.objects.filter(quiz=self.quiz).first()
+        self.assertIsNotNone(share)
+        self.assertEqual(share.group_id, 'group-abc')
+        self.assertEqual(share.shared_by, self.owner)
+
+    def test_resharing_updates_rather_than_duplicates(self):
+        self._post(self.owner, {'id': self.quiz.id})
+        self._post(self.owner, {'id': self.quiz.id})
+        self.assertEqual(
+            QuizGroupShare.objects.filter(quiz=self.quiz, group_id='group-abc').count(),
+            1,
+        )
+
+    def test_plain_message_does_not_record_a_share(self):
+        self._post(self.owner, None, text='just text')
+        self.assertEqual(QuizGroupShare.objects.count(), 0)
+
+    def test_rejected_embed_records_no_share(self):
+        # A share row for a card that was never posted would hand out access
+        # the sharer was never actually granted.
+        self._post(self.outsider, {'id': self.quiz.id})
+        self.assertEqual(QuizGroupShare.objects.count(), 0)
+
+    def test_embed_advertises_the_package_routes(self):
+        res, mock_send = self._post(self.owner, {'id': self.quiz.id})
+        embed = mock_send.call_args.kwargs['quiz_embed']
+        self.assertEqual(embed['package_url'], f"/ai/quizzes/{self.quiz.id}/package/")
+        self.assertEqual(embed['import_url'], '/ai/quizzes/import/')
 
 
 class GroupChatMessageTests(APITestCase):

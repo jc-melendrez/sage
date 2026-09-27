@@ -42,6 +42,10 @@ export interface QuizEmbed {
   question_count: number;
   quiz_type: string;
   deep_link: string;
+  /** Server route serving the portable package, when the server sent one. */
+  package_url?: string;
+  /** Server route that imports a package into the reader's own quizzes. */
+  import_url?: string;
 }
 
 export interface Attachment {

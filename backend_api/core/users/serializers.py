@@ -3,6 +3,7 @@ from datetime import timedelta
 from django.utils import timezone
 from rest_framework import serializers
 from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
+from .gamification import describe_badge
 # --- Your Related Serializers (Unchanged, these are great!) ---
 from django.contrib.auth import get_user_model
 
@@ -18,13 +19,19 @@ AVATAR_KEYS = {
 
 class BadgeSerializer(serializers.ModelSerializer):
     course_name = serializers.SerializerMethodField()
+    description = serializers.SerializerMethodField()
 
     class Meta:
         model = Badge
-        fields = ['id', 'icon', 'name', 'earned_at', 'course', 'course_name']
+        fields = ['id', 'icon', 'name', 'description', 'earned_at', 'course', 'course_name']
 
     def get_course_name(self, obj):
         return obj.course.name if obj.course else None
+
+    def get_description(self, obj):
+        # Resolved from the badge name by the awarding module, so a badge
+        # always explains its own criteria without a migration.
+        return describe_badge(obj)
 
 
 class UserProfileSerializer(serializers.ModelSerializer):

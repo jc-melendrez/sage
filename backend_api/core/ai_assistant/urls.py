@@ -11,4 +11,6 @@ urlpatterns = [
     path('quizzes/<int:quiz_id>/', views.QuizDetailView.as_view(), name='quiz_detail'),
     path('quizzes/<int:quiz_id>/attempts/', views.QuizAttemptView.as_view(), name='quiz_attempt'),
     path('quizzes/<int:quiz_id>/share/', views.QuizShareView.as_view(), name='quiz_share'),
+    path('quizzes/<int:quiz_id>/package/', views.QuizPackageView.as_view(), name='quiz_package'),
+    path('quizzes/import/', views.QuizImportView.as_view(), name='quiz_import'),
 ]

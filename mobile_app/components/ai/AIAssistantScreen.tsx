@@ -130,6 +130,12 @@ interface Message {
   type: 'user' | 'ai';
   text: string;
   time: string;
+  // Set from the history endpoint's file_name/file_mime/file_size. Absent for
+  // turns sent without an attachment, and for the optimistic copy we push
+  // locally right after the user hits send.
+  fileName?: string;
+  fileMime?: string;
+  fileSize?: number | null;
 }
 
 interface ChatSession {
@@ -172,9 +178,33 @@ const GREETINGS: Record<AIAssistantVariant, string> = {
   educator: "Hi! I'm your SAGE AI assistant. Ask me about your classes, lessons, or students.",
 };
 
+/**
+ * The history endpoint speaks Django's snake_case (file_name, file_mime,
+ * file_size) while Message -- and the chip that renders it -- is camelCase.
+ * The rows used to be dropped in untouched, so a reloaded conversation lost
+ * every attachment label and the user could not tell which document a given
+ * turn was about. Normalise here rather than renaming at both use sites.
+ */
+function mapHistoryRow(row: any): Message {
+  return {
+    id: row.id,
+    type: row.type,
+    text: row.text,
+    time: row.time,
+    fileName: row.file_name || undefined,
+    fileMime: row.file_mime || undefined,
+    fileSize: row.file_size ?? null,
+  };
+}
+
 export default function AIAssistantScreen({ variant }: { variant: AIAssistantVariant }) {
   const scrollViewRef = useRef<ScrollView>(null);
   const userScrolledRef = useRef(false);
+  // Set by loadHistory before it commits the populated message list. Opening a
+  // thread renders twice -- once empty, once full -- and the empty pass's
+  // scroll events otherwise leave userScrolledRef stuck true, so the populated
+  // pass never scrolls and a long thread opens part-way down.
+  const pendingHistoryScrollRef = useRef(false);
 
   // --- Multi-Thread State ---
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -203,6 +233,12 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
   };
 
   const handleContentSizeChange = () => {
+    if (pendingHistoryScrollRef.current) {
+      pendingHistoryScrollRef.current = false;
+      userScrolledRef.current = false;
+      scrollViewRef.current?.scrollToEnd({ animated: false });
+      return;
+    }
     if (!userScrolledRef.current) {
       scrollViewRef.current?.scrollToEnd({ animated: true });
     }
@@ -251,7 +287,10 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
       });
       if (res.ok) {
         const history = await res.json();
-        setMessages(history);
+        // Flag before the populated render commits, so the layout pass that
+        // finally has content is the one that scrolls.
+        pendingHistoryScrollRef.current = true;
+        setMessages(history.map(mapHistoryRow));
       }
     } catch (err) {
       console.error("Failed to load history", err);
@@ -368,6 +407,9 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
       type: 'user',
       text: textToSend.trim(),
       time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+      // Carry the staged filename onto the optimistic copy so the chip shows
+      // up immediately; history re-supplies it after a reload.
+      fileName: attachedFileName ?? undefined,
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -705,6 +747,14 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
                   <Text style={styles.aiLabel}>SAGE AI</Text>
                 </View>
               )}
+              {message.fileName && (
+                <View style={styles.msgAttachment}>
+                  <Ionicons name="document" size={12} color={COLORS.purpleVibrant} />
+                  <Text style={styles.msgAttachmentName} numberOfLines={1}>
+                    {message.fileName}
+                  </Text>
+                </View>
+              )}
               {message.type === 'ai' ? (
                 <Markdown style={markdownStyles}>{message.text}</Markdown>
               ) : (
@@ -1009,6 +1059,28 @@ sessionMenuButton: {
   userMessage: { 
     borderBottomRightRadius: 6,
     backgroundColor: COLORS.purplePrimary,
+  },
+  // Filename chip for an attachment that was sent in this turn. Sits above the
+  // body so a reloaded thread still shows which document a question was about
+  // -- without it the only trace of the upload is the AI's reply.
+  msgAttachment: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginBottom: 6,
+    maxWidth: '100%',
+  },
+  msgAttachmentName: {
+    flexShrink: 1,
+    fontSize: 11,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.bg,
   },
   aiMessage: { 
     borderBottomLeftRadius: 6,
