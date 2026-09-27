@@ -8,7 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Quiz, QuizAttempt
+from .models import ChatMessage, ChatSession, Quiz, QuizAttempt
 from users.models import Course
 
 User = get_user_model()
@@ -391,3 +391,41 @@ class QuizRetryCompletionTests(APITestCase):
         self.client.post(self.attempt_url)
         resp = self._complete(2, 2)
         self.assertEqual(resp.status_code, 200)
+
+
+class SessionPinningAPITests(APITestCase):
+    """The sidebar renders a pin icon straight off `pinned`, so every session
+    row in the list response has to carry the field."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='pinner', password='pass123', role='student',
+        )
+        self.client.force_authenticate(user=self.user)
+        self.list_url = reverse('session_list')
+
+    def test_new_session_reports_unpinned(self):
+        resp = self.client.post(self.list_url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('pinned', resp.data)
+        self.assertFalse(resp.data['pinned'])
+
+    def test_list_includes_pinned_for_each_session(self):
+        session = ChatSession.objects.create(user=self.user, title='Chats', pinned=True)
+        other = ChatSession.objects.create(user=self.user, title='More')
+
+        resp = self.client.get(self.list_url)
+        self.assertEqual(resp.status_code, 200)
+        by_id = {row['id']: row for row in resp.data}
+        self.assertTrue(by_id[session.id]['pinned'])
+        self.assertFalse(by_id[other.id]['pinned'])
+
+    def test_legacy_bucket_is_present_but_never_pinned(self):
+        # The legacy "Old Chat History" row is virtual (id 0); the client hides
+        # its action button, and the server must not claim it is pinned.
+        ChatMessage.objects.create(user=self.user, text='hi')
+        resp = self.client.get(self.list_url)
+        legacy = [row for row in resp.data if row['id'] == 0]
+        self.assertEqual(len(legacy), 1)
+        self.assertFalse(legacy[0]['pinned'])

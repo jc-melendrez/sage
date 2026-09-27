@@ -24,6 +24,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
+import NotificationSheet from './NotificationSheet';
 import { getCurrentUser } from '@/services/authService';
 import { apiCall } from '@/services/apiClient';
 import { dailyCheckIn } from '@/services/gamificationService';
@@ -147,6 +148,7 @@ export default function Dashboard() {
 
   const [lesson, setLesson] = useState<any>(null);
   const [showLessonGenerator, setShowLessonGenerator] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
 
   // Carousel state
   const [currentPage, setCurrentPage] = useState(0);
@@ -417,7 +419,7 @@ export default function Dashboard() {
             <TouchableOpacity
               style={styles.headerIconBtn}
               activeOpacity={0.7}
-              onPress={() => console.log('Notifications pressed')}
+              onPress={() => setShowNotifications(true)}
             >
               <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />
             </TouchableOpacity>
@@ -730,6 +732,16 @@ export default function Dashboard() {
           </View>
         )}
       </ScrollView>
+
+      {/* Notification centre — in-tree overlay over the whole dashboard. */}
+      <NotificationSheet
+        visible={showNotifications}
+        onClose={() => setShowNotifications(false)}
+        onOpenHref={(href) => router.push(href as any)}
+        activities={activities}
+        badges={badges}
+        recommendations={recommendations}
+      />
     </LinearGradient>
   );
 }

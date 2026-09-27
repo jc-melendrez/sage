@@ -15,10 +15,10 @@ import { apiCall } from '@/services/apiClient';
 import { invalidateCachePrefix } from '@/services/apiCache';
 import { completeQuiz } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
+import QuizInfoModal from '@/components/QuizInfoModal';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
 import { deleteQuiz, startQuizAttempt, getQuizShare, updateQuiz, parseDeadlineInput } from '@/services/quizService';
-import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
+import { pickDocument, readAsBase64, describeFileError, type PickedDocument } from '@/services/fileUpload';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 import { TabSkeleton } from '@/components/Skeleton';
 
@@ -39,7 +39,10 @@ interface Quiz {
   created_at: string;
   quiz_type?: string;
   available_until?: string | null;
-  attempted?: boolean;
+  /** How many times the current user has attempted this quiz. */
+  attempt_count?: number;
+  /** True when the current user wrote this quiz — such quizzes award no XP. */
+  is_owner?: boolean;
   questions: any[];
 }
 
@@ -94,7 +97,7 @@ export default function ActivitiesScreen() {
 
   // --- Quiz Generator State ---
   const [isGenerateQuizModalOpen, setIsGenerateQuizModalOpen] = useState(false);
-  const [quizFile, setQuizFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [quizFile, setQuizFile] = useState<PickedDocument | null>(null);
   const [quizDifficulty, setQuizDifficulty] = useState('Medium');
   const [quizCount, setQuizCount] = useState('10');
   const [quizType, setQuizType] = useState('Multiple Choice');
@@ -125,6 +128,9 @@ export default function ActivitiesScreen() {
 
   // --- Quiz info modal state ---
   const [infoModalQuiz, setInfoModalQuiz] = useState<Quiz | null>(null);
+  // Kept alongside the quiz so the sheet can say "Retake Quiz" even after the
+  // list re-sorts underneath it.
+  const [infoModalAttempted, setInfoModalAttempted] = useState(false);
 
   // --- Rename modal state ---
   const [renameQuizId, setRenameQuizId] = useState<number | null>(null);
@@ -432,21 +438,18 @@ export default function ActivitiesScreen() {
 
   const pickQuizFile = async () => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ['application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-        copyToCacheDirectory: true,
-      });
-      if (result.canceled) return;
-      setQuizFile(result.assets[0]);
+      const file = await pickDocument();
+      if (!file) return;
+      setQuizFile(file);
     } catch (err) {
       console.error("File picker error:", err);
-      Alert.alert("Error", "Failed to select file.");
+      Alert.alert("Unsupported file", describeFileError(err));
     }
   };
 
   const handleGenerateQuiz = async () => {
     if (!quizFile) {
-      Alert.alert("Material Required", "Please select a study material (PDF or Text) before generating a quiz.");
+      Alert.alert("Material Required", "Please select a study material (PDF, DOCX, PPTX, TXT, MD or CSV) before generating a quiz.");
       return;
     }
     setIsGeneratingQuiz(true);
@@ -454,9 +457,7 @@ export default function ActivitiesScreen() {
       // Honest stage-based progress: real steps only, no fabricated percentages.
       setQuizGenerationStatus("Reading file...");
 
-      const base64Data = await FileSystem.readAsStringAsync(quizFile.uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
+      const base64Data = await readAsBase64(quizFile.uri);
 
       setQuizGenerationStatus("Generating questions...");
 
@@ -530,21 +531,23 @@ export default function ActivitiesScreen() {
   }, [loadInitialData]);
 
   const handleTakeQuiz = (quiz: Quiz) => {
-    if (quiz.attempted) {
-      Alert.alert('Already Taken', 'You already took this quiz. Each quiz can only be taken once.');
-      return;
-    }
     if (quiz.available_until && new Date(quiz.available_until).getTime() <= Date.now()) {
       Alert.alert('Quiz Closed', `This quiz closed on ${new Date(quiz.available_until).toLocaleString()}.`);
       return;
     }
+    // Retakes are unlimited — the server counts attempts and only ever pays
+    // the XP once, so there is nothing to guard against here.
+    const isRetake = (quiz.attempt_count ?? 0) > 0;
+    setInfoModalQuiz(null);
     Alert.alert(
-      'Take this quiz?',
-      `You can only take "${quiz.title}" once.`,
+      isRetake ? 'Retake this quiz?' : 'Take this quiz?',
+      isRetake
+        ? `This is attempt ${(quiz.attempt_count ?? 0) + 1} of "${quiz.title}". Only your best score counts.`
+        : `"${quiz.title}" — you can retake it as many times as you like.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Start',
+          text: isRetake ? 'Retake' : 'Start',
           onPress: async () => {
             setIsQuizStarting(true);
             try {
@@ -862,7 +865,13 @@ export default function ActivitiesScreen() {
               <View key={quiz.id} style={styles.card}>
                 <TouchableOpacity
                   style={styles.quizCardPress}
-                  onPress={() => { closeMenu(); setInfoModalQuiz(quiz); }}
+                  onPress={() => {
+                    // Don't open the info sheet while the 3-dots menu is up.
+                    if (menuQuizId !== null) return;
+                    closeMenu();
+                    setInfoModalAttempted((quiz.attempt_count ?? 0) > 0);
+                    setInfoModalQuiz(quiz);
+                  }}
                   activeOpacity={0.9}
                 >
                   <View style={{ flex: 1 }}>
@@ -1454,109 +1463,43 @@ export default function ActivitiesScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Quiz Info Modal */}
-      <Modal
-        visible={infoModalQuiz !== null}
-        animationType="fade"
-        transparent={true}
-        onRequestClose={() => setInfoModalQuiz(null)}
-      >
-        <View style={styles.infoModalOverlay}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setInfoModalQuiz(null)} />
-          {infoModalQuiz && (
-            <View style={styles.infoModalCard}>
-              <View style={styles.infoModalHeader}>
-                <View style={[styles.badgePill, styles.infoModalBadge]}>
-                  <Ionicons name={infoModalQuiz.quiz_type === 't/f' ? 'checkmark-outline' : 'list-outline'} size={14} color={COLORS.purpleVibrant} />
-                  <Text style={styles.badgePillText}>{infoModalQuiz.quiz_type || 'quiz'}</Text>
-                </View>
-                <Pressable style={styles.closeBtn} onPress={() => setInfoModalQuiz(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                  <Ionicons name="close" size={20} color={COLORS.textMuted} />
-                </Pressable>
-              </View>
-              <Text style={styles.infoModalTitle}>{infoModalQuiz.title}</Text>
-              <View style={styles.infoModalMetaRow}>
-                <Ionicons name="help-circle-outline" size={16} color={COLORS.purpleVibrant} />
-                <Text style={styles.infoModalMetaText}>{infoModalQuiz.questions?.length || 0} questions</Text>
-              </View>
-              <View style={styles.infoModalMetaRow}>
-                <Ionicons name="star-outline" size={16} color={COLORS.warning} />
-                <Text style={styles.infoModalMetaText}>25 XP reward</Text>
-              </View>
-              {infoModalQuiz.available_until && (
-                <View style={styles.infoModalMetaRow}>
-                  <Ionicons name="time-outline" size={16} color={new Date(infoModalQuiz.available_until).getTime() <= Date.now() ? COLORS.danger : COLORS.warning} />
-                  <Text style={[styles.infoModalMetaText, { color: new Date(infoModalQuiz.available_until).getTime() <= Date.now() ? COLORS.danger : COLORS.warning }]}>
-                    {new Date(infoModalQuiz.available_until).getTime() <= Date.now()
-                      ? `Closed ${new Date(infoModalQuiz.available_until).toLocaleString()}`
-                      : `Closes ${new Date(infoModalQuiz.available_until).toLocaleString()}`}
-                  </Text>
-                </View>
-              )}
-              {infoModalQuiz.attempted ? (
-                <View style={[styles.infoModalStartBtn, { backgroundColor: COLORS.success }]}>
-                  <Ionicons name="checkmark-circle-outline" size={18} color="white" />
-                  <Text style={styles.infoModalStartBtnText}>Already Taken</Text>
-                </View>
-              ) : (
-                <TouchableOpacity
-                  style={styles.infoModalStartBtn}
-                  onPress={() => { const q = infoModalQuiz; setInfoModalQuiz(null); handleTakeQuiz(q); }}
-                  disabled={isQuizStarting}
-                  activeOpacity={0.8}
-                >
-                  {isQuizStarting ? (
-                    <ActivityIndicator size="small" color="white" />
-                  ) : (
-                    <>
-                      <Ionicons name="play-outline" size={18} color="white" />
-                      <Text style={styles.infoModalStartBtnText}>Start Quiz</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
-              )}
-            </View>
-          )}
-        </View>
-      </Modal>
+      {/* Quiz Info — in-tree overlay (a nested <Modal> would be dropped on Android) */}
+      <QuizInfoModal
+        quiz={infoModalQuiz}
+        attempted={infoModalAttempted}
+        starting={isQuizStarting}
+        onClose={() => setInfoModalQuiz(null)}
+        onStart={() => { const q = infoModalQuiz; if (q) handleTakeQuiz(q); }}
+      />
 
-      {/* Quiz 3-dots menu — modal action sheet (Rename / Edit / Share / Delete) */}
-      <Modal
-        visible={menuQuizId !== null}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={closeMenu}
-      >
-        <Pressable style={styles.menuSheetOverlay} onPress={closeMenu}>
-          <Pressable style={styles.menuSheetCard} onPress={() => {}}>
-            {(() => {
-              const quiz = quizzes.find((q) => q.id === menuQuizId);
-              if (!quiz) return null;
-              return (
-                <>
-                  <Text style={styles.menuSheetTitle} numberOfLines={2}>{quiz.title}</Text>
-                  <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); openRenameModal(quiz); }} activeOpacity={0.7}>
-                    <Ionicons name="pencil-outline" size={20} color={COLORS.textPrimary} style={styles.menuSheetIcon} />
-                    <Text style={styles.menuSheetRowText}>Rename</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); openEditor(quiz); }} activeOpacity={0.7}>
-                    <Ionicons name="create-outline" size={20} color={COLORS.purpleVibrant} style={styles.menuSheetIcon} />
-                    <Text style={styles.menuSheetRowText}>Edit questions</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); handleShareQuiz(quiz); }} activeOpacity={0.7}>
-                    <Ionicons name="share-outline" size={20} color={COLORS.purpleVibrant} style={styles.menuSheetIcon} />
-                    <Text style={styles.menuSheetRowText}>Share</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={[styles.menuSheetRow, styles.menuSheetDanger]} onPress={() => { closeMenu(); handleDeleteQuiz(quiz); }} activeOpacity={0.7}>
-                    <Ionicons name="trash-outline" size={20} color={COLORS.danger} style={styles.menuSheetIcon} />
-                    <Text style={[styles.menuSheetRowText, { color: COLORS.danger }]}>Delete</Text>
-                  </TouchableOpacity>
-                </>
-              );
-            })()}
+      {/* Quiz 3-dots menu — in-tree overlay (Rename / Edit / Share / Delete) */}
+      {menuQuizId !== null && (() => {
+        const quiz = quizzes.find((q) => q.id === menuQuizId);
+        if (!quiz) return null;
+        return (
+          <Pressable style={styles.menuSheetOverlay} onPress={closeMenu}>
+            <Pressable style={styles.menuSheetCard} onPress={() => {}}>
+              <Text style={styles.menuSheetTitle} numberOfLines={2}>{quiz.title}</Text>
+              <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); openRenameModal(quiz); }} activeOpacity={0.7}>
+                <Ionicons name="pencil-outline" size={20} color={COLORS.textPrimary} style={styles.menuSheetIcon} />
+                <Text style={styles.menuSheetRowText}>Rename</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); openEditor(quiz); }} activeOpacity={0.7}>
+                <Ionicons name="create-outline" size={20} color={COLORS.purpleVibrant} style={styles.menuSheetIcon} />
+                <Text style={styles.menuSheetRowText}>Edit questions</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); handleShareQuiz(quiz); }} activeOpacity={0.7}>
+                <Ionicons name="share-outline" size={20} color={COLORS.purpleVibrant} style={styles.menuSheetIcon} />
+                <Text style={styles.menuSheetRowText}>Share</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.menuSheetRow, styles.menuSheetDanger]} onPress={() => { closeMenu(); handleDeleteQuiz(quiz); }} activeOpacity={0.7}>
+                <Ionicons name="trash-outline" size={20} color={COLORS.danger} style={styles.menuSheetIcon} />
+                <Text style={[styles.menuSheetRowText, { color: COLORS.danger }]}>Delete</Text>
+              </TouchableOpacity>
+            </Pressable>
           </Pressable>
-        </Pressable>
-      </Modal>
+        );
+      })()}
 
       {/* Rename Quiz Modal */}
       <Modal
@@ -1788,7 +1731,16 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bg,
   },
   menuBtn: { padding: 8 },
-  menuSheetOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24 },
+  // Absolute, not flex:1. The screen root is a column, so a flex child here
+  // would split the height with the list and squash it into the top half.
+  menuSheetOverlay: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24,
+    zIndex: 20,
+    elevation: 20,
+  },
   menuSheetCard: {
     backgroundColor: COLORS.surface,
     borderRadius: 20,

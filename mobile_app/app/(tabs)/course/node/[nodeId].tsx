@@ -42,7 +42,9 @@ export default function NodePlayerScreen() {
   const [interactionsCorrect, setInteractionsCorrect] = useState(0);
   const [interactionsTotal, setInteractionsTotal] = useState(0);
   const [quizResults, setQuizResults] = useState<QuestionResult[]>([]);
-  const [quizScore, setQuizScore] = useState(0);
+  // null means "no quiz was taken". It must not default to 0 — the results
+  // screen treats a number as authoritative, so a lesson would report 0%.
+  const [quizScore, setQuizScore] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -119,7 +121,7 @@ export default function NodePlayerScreen() {
     setInteractionsCorrect(0);
     setInteractionsTotal(0);
     setQuizResults([]);
-    setQuizScore(0);
+    setQuizScore(null);
     if (node && isLearnContent(node.content_json)) {
       setPhase('lesson');
     } else {
@@ -157,12 +159,17 @@ export default function NodePlayerScreen() {
 
   // ── Results ──
   if (phase === 'results' && node) {
+    // A lesson has no questions, so there is no accuracy to show — the
+    // summary renders a "Lesson Complete!" card instead of a score ring.
+    const wasLesson = isLearnContent(node.content_json);
     const finalScore = quizScore != null
       ? quizScore
       : (interactionsTotal > 0 ? Math.round((interactionsCorrect / interactionsTotal) * 100) : 100);
     return (
       <View style={styles.container}>
         <ResultsSummary
+          mode={wasLesson ? 'lesson' : 'quiz'}
+          title={node.title}
           score={finalScore}
           passed={finalScore >= node.required_score}
           passingScore={node.required_score}
@@ -170,6 +177,7 @@ export default function NodePlayerScreen() {
           xpEarned={isPreview ? 0 : node.xp_reward}
           onRetry={handleRetry}
           onContinue={handleContinue}
+          onClose={handleContinue}
         />
       </View>
     );

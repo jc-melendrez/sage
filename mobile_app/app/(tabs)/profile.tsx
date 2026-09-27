@@ -200,9 +200,15 @@ export default function ProfileScreen() {
           <View style={styles.sectionHeaderRow}>
             <Text style={styles.sectionTitle}>Badges</Text>
           </View>
-          <View style={styles.badgesGrid}>
-            {earnedBadges.length > 0 ? (
-              earnedBadges.map((badge: any) => (
+          {earnedBadges.length > 0 ? (
+            // Horizontal rail: a wrapping grid pushed the rest of the page
+            // down and left no room to read badge names.
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.badgesRow}
+            >
+              {earnedBadges.map((badge: any) => (
                 <View key={badge.id} style={styles.badgeCard}>
                   <LinearGradient
                     colors={[COLORS.purpleDark, COLORS.purpleVibrant]}
@@ -212,19 +218,19 @@ export default function ProfileScreen() {
                   >
                     <Text style={styles.badgeEmoji}>{badge.icon || badge.icon_url || '🏆'}</Text>
                   </LinearGradient>
-                  <Text style={styles.badgeName} numberOfLines={1}>{badge.name}</Text>
+                  <Text style={styles.badgeName} numberOfLines={2}>{badge.name}</Text>
                   <View style={styles.earnedPill}>
                     <Ionicons name="checkmark-circle" size={12} color={COLORS.success} />
                     <Text style={styles.earnedText}>Earned</Text>
                   </View>
                 </View>
-              ))
-            ) : (
-              <View style={styles.emptyBadges}>
-                <Text style={styles.emptyBadgesText}>Complete activities to earn badges!</Text>
-              </View>
-            )}
-          </View>
+              ))}
+            </ScrollView>
+          ) : (
+            <View style={styles.emptyBadges}>
+              <Text style={styles.emptyBadgesText}>Complete activities to earn badges!</Text>
+            </View>
+          )}
         </View>
 
         {/* Menu Items */}
@@ -419,11 +425,11 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.textPrimary
   },
-  badgesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  badgesRow: { flexDirection: 'row', gap: 12, paddingRight: 4 },
   badgeCard: {
-    width: '31%',
+    width: 104,
     backgroundColor: COLORS.surface,
-    paddingVertical: 18,
+    paddingVertical: 16,
     paddingHorizontal: 8,
     borderRadius: 20,
     alignItems: 'center',

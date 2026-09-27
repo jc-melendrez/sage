@@ -130,8 +130,17 @@ def award_xp(user, amount, source='', course=None):
     }
 
 
-def record_quiz_completion(user, score, total, course=None):
-    """Record a finished quiz: XP per question + pass bonus + badges."""
+def record_quiz_completion(user, score, total, course=None, grant_xp=True):
+    """Record a finished quiz: XP per question + pass bonus + badges.
+
+    ``grant_xp=False`` still counts the attempt, logs the activity and returns
+    the score shape the client expects, but pays no XP and awards no
+    score-based badges. Used for self-authored quizzes so the AI generator
+    cannot be used to farm points.
+
+    Named ``grant_xp`` rather than ``award_xp`` so it doesn't shadow the
+    ``award_xp()`` function called below.
+    """
     user.quizzes_taken += 1
     user.save()
 
@@ -140,19 +149,24 @@ def record_quiz_completion(user, score, total, course=None):
     if perfect:
         xp += QUIZ_PASS_BONUS
 
-    result = award_xp(user, xp, source='quiz', course=course)
+    if grant_xp:
+        result = award_xp(user, xp, source='quiz', course=course)
+    else:
+        result = {'xp': 0, 'level': user.level, 'leveled_up': False, 'badges': []}
 
     badges = list(result['badges'])
-    first = award_badge(user, 'First Quiz', '🎯')
-    if first:
-        badges.append(_badge_dicts([first])[0])
-    if perfect:
-        perfect_badge = award_badge(user, 'Perfect Score', '💯')
-        if perfect_badge:
-            badges.append(_badge_dicts([perfect_badge])[0])
-            
+
+    if grant_xp:
+        first = award_badge(user, 'First Quiz', '🎯')
+        if first:
+            badges.append(_badge_dicts([first])[0])
+        if perfect:
+            perfect_badge = award_badge(user, 'Perfect Score', '💯')
+            if perfect_badge:
+                badges.append(_badge_dicts([perfect_badge])[0])
+
     # Course-specific perfect score badge
-    if perfect and course:
+    if grant_xp and perfect and course:
         course_perfect = award_badge(user, f'Perfect {course.name}', '✨', course=course)
         if course_perfect:
             badges.append(_badge_dicts([course_perfect])[0])
@@ -162,7 +176,8 @@ def record_quiz_completion(user, score, total, course=None):
         user,
         kind='quiz',
         title=f"Quiz {course.name if course else ''}".strip(),
-        description=f"Scored {score}/{total}" + (" · Perfect!" if perfect else ""),
+        description=f"Scored {score}/{total}" + (" · Perfect!" if perfect else "")
+                    + (" · Practice (no XP)" if not award_xp else ""),
         xp=result['xp'],
         course_name=course.name if course else '',
         payload=payload,

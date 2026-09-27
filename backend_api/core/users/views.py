@@ -39,7 +39,7 @@ from .serializers import (
     ClassActivityAttachmentSerializer, ClassActivityAttachmentListSerializer,
 )
 from .permissions import IsSuperadmin
-from .utils.file_parser import extract_text_from_file
+from .utils.file_parser import extract_text_from_file, UnsupportedDocumentFormat
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework_simplejwt.tokens import RefreshToken  # noqa: F401 (kept for imports elsewhere)
@@ -719,9 +719,17 @@ class CompleteQuizView(APIView):
             attempt.completed_at = timezone.now()
             attempt.save(update_fields=['score', 'total', 'completed_at'])
 
-        result = record_quiz_completion(request.user, score, total, course=course)
+        # A student writing their own quiz shouldn't be able to mint XP by
+        # generating something trivial and sitting it. Educator-authored and
+        # shared quizzes still pay out.
+        self_authored = quiz is not None and quiz.user_id == request.user.id
+        award_xp = not self_authored
 
-        if course:
+        result = record_quiz_completion(
+            request.user, score, total, course=course, grant_xp=award_xp
+        )
+
+        if course and award_xp:
             add_course_quiz_score(
                 course,
                 request.user,
@@ -2139,8 +2147,12 @@ class CompleteNodeView(APIView):
         )
         if not created:
             was_already_passed = progress.passed
-            progress.score = score
-            progress.passed = passed
+            # Passing is a one-way door. The trail locks every later node on
+            # `passed`, so letting a weaker retake revoke a pass would strand
+            # the learner on a node they had already cleared — and lock
+            # everything behind it. Keep the best score for the same reason.
+            progress.score = max(progress.score, score)
+            progress.passed = progress.passed or passed
             progress.attempts += 1
             progress.save()
         else:
@@ -2154,8 +2166,11 @@ class CompleteNodeView(APIView):
             xp_result = award_xp(request.user, node.xp_reward, source='learning_node')
 
         return Response({
-            'score': score,
-            'passed': passed,
+            'score': progress.score,
+            # Report the stored verdict, not this attempt's — otherwise a
+            # failed retake tells the learner they failed a node the trail
+            # still shows as cleared.
+            'passed': progress.passed,
             'attempts': progress.attempts,
             'xp': xp_result,
         })
@@ -2459,6 +2474,8 @@ def generate_lesson(request):
     # 2. Extract file content
     try:
         extracted_text = extract_text_from_file(uploaded_file)
+    except UnsupportedDocumentFormat as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
         print(f"[File Extract Error] {e}")
         return Response(
@@ -2644,6 +2661,8 @@ class GenerateTopicView(APIView):
 
         try:
             extracted_text = extract_text_from_file(uploaded_file)
+        except UnsupportedDocumentFormat as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             print(f"[GenerateTopicView] File extract error: {e}")
             return Response({'error': 'Failed to process uploaded file'}, status=status.HTTP_400_BAD_REQUEST)

@@ -33,6 +33,8 @@ export interface QuestionResult {
   correct: boolean;
   selectedAnswer: string;
   correctAnswer: string;
+  /** The question itself, so the review list is readable on its own. */
+  question: string;
 }
 
 function resolveCorrectAnswer(question: QuizQuestion): string {
@@ -74,6 +76,7 @@ export default function QuizRunner({ questions, passingScore = 70, onFinish }: Q
       correct: isCorrect,
       selectedAnswer: answer,
       correctAnswer: resolveCorrectAnswer(current),
+      question: current.question ?? '',
     }];
     setResults(newResults);
   }, [answered, current, currentIndex, results]);

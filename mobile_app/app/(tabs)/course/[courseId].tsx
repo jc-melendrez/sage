@@ -8,9 +8,12 @@ import { CoursePathTopic, NODE_TYPE_CONFIG, LearningNode } from '@/types/learnin
 import ProgressRing from '@/components/courses/ProgressRing';
 import { getCourseActivities, ClassActivity } from '@/services/activityService';
 import { describeDue } from '@/services/dueDate';
-import { getQuiz, getQuizzes, Quiz } from '@/services/quizService';
+import { getQuiz, getQuizzes, startQuizAttempt, Quiz } from '@/services/quizService';
+import { completeQuiz } from '@/services/gamificationService';
 import { getCurrentUser } from '@/services/authService';
 import CourseBadges from '@/components/courses/CourseBadges';
+import TakeQuiz from '@/components/TakeQuiz';
+import QuizInfoModal from '@/components/QuizInfoModal';
 
 const COLORS = {
   bg: '#FFFFFF',
@@ -85,6 +88,17 @@ export default function CourseDetailScreen() {
 
   const [openingQuiz, setOpeningQuiz] = useState(false);
 
+  // Quizzes from the Quizzes tab open in-place: a sheet for details, then the
+  // runner as a full-screen layer over this page. Navigating away would lose
+  // the tab position and the scroll state.
+  const [infoQuiz, setInfoQuiz] = useState<Quiz | null>(null);
+  const [infoAttempted, setInfoAttempted] = useState(false);
+  const [activeQuiz, setActiveQuiz] = useState<{
+    id: number;
+    title: string;
+    questions: any[];
+  } | null>(null);
+
   useEffect(() => {
     const load = async () => {
       try {
@@ -110,12 +124,50 @@ export default function CourseDetailScreen() {
     load().finally(() => setLoading(false));
   }, [courseId]);
 
+  /** Tasks still navigate out — they need the dedicated task/quiz screens. */
   const openQuiz = async (quiz: Quiz) => {
     if (!quiz.questions || quiz.questions.length === 0) {
       Alert.alert('No questions', 'This quiz has no questions yet.');
       return;
     }
     router.push(`/course/quiz/${quiz.id}?courseId=${courseId}` as any);
+  };
+
+  const showQuizInfo = (quiz: Quiz) => {
+    setInfoAttempted((quiz.attempt_count ?? 0) > 0);
+    setInfoQuiz(quiz);
+  };
+
+  /** Start the in-place runner. Safe to call for a retake. */
+  const startQuizInPlace = async (quiz: Quiz) => {
+    if (!quiz.questions || quiz.questions.length === 0) {
+      Alert.alert('No questions', 'This quiz has no questions yet.');
+      return;
+    }
+    if (quiz.available_until && new Date(quiz.available_until).getTime() <= Date.now()) {
+      Alert.alert('Quiz Closed', `This quiz closed on ${new Date(quiz.available_until).toLocaleString()}.`);
+      return;
+    }
+    setInfoQuiz(null);
+    setOpeningQuiz(true);
+    try {
+      await startQuizAttempt(quiz.id);
+      setActiveQuiz({
+        id: quiz.id,
+        title: quiz.title,
+        questions: quiz.questions.map((q: any) => ({
+          id: q.id,
+          question: q.question_text,
+          type: (quiz.quiz_type || 'Multiple Choice') as any,
+          options: q.options,
+          correct_answer: q.correct_answer,
+        })),
+      });
+    } catch (err) {
+      Alert.alert('Cannot Take Quiz', err instanceof Error ? err.message : 'Please try again.');
+    } finally {
+      setOpeningQuiz(false);
+    }
   };
 
   const openActivity = async (activity: ClassActivity) => {
@@ -285,7 +337,8 @@ export default function CourseDetailScreen() {
                     key={quiz.id}
                     style={styles.quizCard}
                     activeOpacity={0.8}
-                    onPress={() => openQuiz(quiz)}
+                    onPress={() => showQuizInfo(quiz)}
+                    disabled={openingQuiz}
                   >
                     <View style={styles.quizHeader}>
                       <View style={styles.quizIconBox}>
@@ -389,6 +442,41 @@ export default function CourseDetailScreen() {
           </>
         )}
       </ScrollView>
+
+      {/* Quiz details sheet */}
+      <QuizInfoModal
+        quiz={infoQuiz}
+        attempted={infoAttempted}
+        starting={openingQuiz}
+        onClose={() => setInfoQuiz(null)}
+        onStart={() => { if (infoQuiz) startQuizInPlace(infoQuiz); }}
+      />
+
+      {/* In-place quiz runner */}
+      {activeQuiz ? (
+        <View style={StyleSheet.absoluteFill}>
+          <TakeQuiz
+            quizTitle={activeQuiz.title}
+            questions={activeQuiz.questions}
+            onFinish={async (score) => {
+              const total = activeQuiz.questions.length;
+              try {
+                // Passing courseId keeps the class leaderboard credit.
+                const result = await completeQuiz(score, total, Number(courseId), activeQuiz.id);
+                return { xp: result.xp, badges: result.badges };
+              } catch (error) {
+                console.error('Failed to record quiz completion:', error);
+                return { xp: 0, badges: [] };
+              }
+            }}
+            onClose={() => {
+              setActiveQuiz(null);
+              // Attempt counts and XP changed server-side; refresh in place.
+              getQuizzes(Number(courseId)).then(setQuizzes).catch(() => {});
+            }}
+          />
+        </View>
+      ) : null}
     </View>
   );
 }

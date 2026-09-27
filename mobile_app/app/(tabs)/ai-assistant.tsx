@@ -1,12 +1,11 @@
 import { useState, useRef, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar, KeyboardAvoidingView, Pressable } from 'react-native';
-import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
 import { Ionicons } from '@expo/vector-icons';
 import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
 import { LinearGradient } from 'expo-linear-gradient';
 import Markdown from '@ronradtke/react-native-markdown-display';
+import { pickDocument, readAsBase64, describeFileError, type PickedDocument } from '@/services/fileUpload';
 
 // 🌟 Enable Layout Animations for Android
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -158,7 +157,7 @@ export default function AIAssistantScreen() {
   const [isLoading, setIsLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
-  const [attachedFile, setAttachedFile] = useState<any>(null);
+  const [attachedFile, setAttachedFile] = useState<PickedDocument | null>(null);
 
   const handleScroll = (event: any) => {
     const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
@@ -251,22 +250,33 @@ export default function AIAssistantScreen() {
     setMenuSessionId(null);
   };
 
+  /** PATCH a chat session, surfacing server errors instead of failing silently. */
+  const patchSession = async (
+    sessionId: number,
+    body: Record<string, unknown>,
+  ): Promise<{ id: number; title: string; pinned: boolean }> => {
+    const token = await getToken();
+    const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error || 'Could not update this conversation.');
+    }
+    return res.json();
+  };
+
   const handlePinSession = async (sessionId: number, currentlyPinned: boolean) => {
+    closeMenu();
     try {
-      const token = await getToken();
-      const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ pinned: !currentlyPinned }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, pinned: data.pinned } : s));
-      }
+      const data = await patchSession(sessionId, { pinned: !currentlyPinned });
+      setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, pinned: data.pinned } : s));
     } catch (err) {
       console.error('Failed to pin session:', err);
+      Alert.alert('Could not pin', err instanceof Error ? err.message : 'Please try again.');
     }
-    closeMenu();
   };
 
   const startRenameSession = (sessionId: number, currentTitle: string) => {
@@ -276,60 +286,60 @@ export default function AIAssistantScreen() {
   };
 
   const saveRenameSession = async (sessionId: number) => {
-    if (!editTitle.trim()) return;
+    const nextTitle = editTitle.trim();
+    // Always leave edit mode, even when the title is unchanged or blank —
+    // otherwise the row stays stuck as a text input.
+    setEditingSessionId(null);
+    setEditTitle('');
+    if (!nextTitle) return;
+    try {
+      const data = await patchSession(sessionId, { title: nextTitle });
+      setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: data.title } : s));
+    } catch (err) {
+      console.error('Failed to rename session:', err);
+      Alert.alert('Could not rename', err instanceof Error ? err.message : 'Please try again.');
+    }
+  };
+
+  const deleteSession = async (sessionId: number) => {
     try {
       const token = await getToken();
       const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ title: editTitle.trim() }),
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) {
-        setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: editTitle.trim() } : s));
+      if (!res.ok && res.status !== 204) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error || 'Could not delete this conversation.');
+      }
+      setSessions(prev => prev.filter(s => s.id !== sessionId));
+      if (activeSessionId === sessionId) {
+        startNewChat();
       }
     } catch (err) {
-      console.error('Failed to rename session:', err);
+      console.error('Failed to delete session:', err);
+      Alert.alert('Could not delete', err instanceof Error ? err.message : 'Please try again.');
     }
-    setEditingSessionId(null);
-    setEditTitle('');
   };
 
-  const handleDeleteSession = async (sessionId: number) => {
+  const handleDeleteSession = (sessionId: number) => {
     closeMenu();
     Alert.alert(
       'Delete Chat',
       'Are you sure you want to delete this conversation?',
       [
         { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const token = await getToken();
-              const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/`, {
-                method: 'DELETE',
-                headers: { Authorization: `Bearer ${token}` },
-              });
-              if (res.ok) {
-                setSessions(prev => prev.filter(s => s.id !== sessionId));
-                if (activeSessionId === sessionId) {
-                  startNewChat();
-                }
-              }
-            } catch (err) {
-              console.error('Failed to delete session:', err);
-            }
-          },
-        },
+        { text: 'Delete', style: 'destructive', onPress: () => deleteSession(sessionId) },
       ],
     );
   };
 
   // 4. Send Message
   const handleSend = async (overrideText?: string) => {
-    const textToSend = overrideText || inputValue;
-    if (!textToSend.trim() || isLoading || isTyping) return;
+    const textToSend = (overrideText ?? inputValue).trim();
+    if (isLoading || isTyping) return;
+    // A bare attachment is a valid prompt; the server knows to just read it.
+    if (!textToSend && !attachedFile) return;
 
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     resetUserScrolled();
@@ -337,7 +347,8 @@ export default function AIAssistantScreen() {
     const userMessage: Message = {
       id: Date.now(),
       type: 'user',
-      text: textToSend.trim(),
+      // No typed text means the chip alone represents the turn.
+      text: textToSend || (attachedFileName ? `📎 ${attachedFileName}` : ''),
       time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
     };
 
@@ -350,16 +361,19 @@ export default function AIAssistantScreen() {
     setAttachedFile(null);
     setAttachedFileName(null);
 
-    let extractedText = "";
+    // Base64 the file and let the server extract the text. Doing it here
+    // client-side meant we could only ever read .txt, and every other
+    // document reached the model as nothing but a filename.
+    let filePayload: { name: string; data: string } | null = null;
     if (fileToProcess) {
       try {
-        if (fileToProcess.mimeType === 'text/plain') {
-          extractedText = await FileSystem.readAsStringAsync(fileToProcess.uri);
-        } else {
-          extractedText = `[FILE ATTACHED]\nName: ${fileToProcess.name}\nType: ${fileToProcess.mimeType}\nSize: ${fileToProcess.size} bytes`;
-        }
+        filePayload = {
+          name: fileToProcess.name,
+          data: await readAsBase64(fileToProcess.uri),
+        };
       } catch (err) {
-        console.error("Text extraction failed:", err);
+        console.error("File read failed:", err);
+        filePayload = null;
       }
     }
 
@@ -373,16 +387,18 @@ export default function AIAssistantScreen() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ 
-          message: textToSend.trim(),
-          attachment_text: extractedText,
-          session_id: activeSessionId 
+        body: JSON.stringify({
+          message: textToSend,
+          file: filePayload,
+          session_id: activeSessionId
         })
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText);
+        // The API returns { error } for bad uploads; surface that instead of
+        // dumping raw JSON into the chat bubble.
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error || 'The assistant could not process that request.');
       }
 
       const data = await response.json();
@@ -417,10 +433,16 @@ export default function AIAssistantScreen() {
 
     } catch (error) {
       console.error("AI Chat Error:", error);
+      // Prefer the message the server sent (e.g. the friendly "save as .docx"
+      // note for legacy uploads) over a generic "backend is down" line that
+      // sends users chasing a server that is actually running fine.
+      const detail = error instanceof Error && error.message
+        ? error.message
+        : "Sorry, I couldn't reach the server. Make sure your Django backend is running the latest code!";
       setMessages((prev) => [...prev, {
         id: Date.now() + 1,
         type: 'ai',
-        text: "Sorry, I couldn't reach the server. Make sure your Django backend is running the latest code!",
+        text: detail,
         time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
       }]);
     } finally {
@@ -431,25 +453,18 @@ export default function AIAssistantScreen() {
     }
   };
 
-  // 5. Handle File Upload and Text Extraction
+  // 5. Attach study material for the AI to read
   const handleFileUpload = async () => {
     try {
-      // Select the file from the device
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ['text/plain', 'application/pdf', 'image/*'],
-        copyToCacheDirectory: true,
-      });
+      const file = await pickDocument();
+      if (!file) return;
 
-      if (result.canceled) return;
-
-      const file = result.assets[0];
-      
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setAttachedFile(file);
       setAttachedFileName(file.name);
     } catch (err) {
       console.error("File processing error:", err);
-      Alert.alert("Error", "Could not process the selected file.");
+      Alert.alert("Unsupported file", describeFileError(err));
     }
   };
 
@@ -458,6 +473,11 @@ export default function AIAssistantScreen() {
     setAttachedFile(null);
     setAttachedFileName(null);
   };
+
+  // An attachment is enough on its own — "summarise this" with no typed
+  // prompt is a valid ask, so sending must not require text.
+  const busy = isLoading || isTyping;
+  const canSend = !!inputValue.trim() || !!attachedFile;
 
   return (
     <KeyboardAvoidingView
@@ -551,7 +571,13 @@ export default function AIAssistantScreen() {
                         styles.sessionItem, 
                         isActive && styles.activeSessionItem
                       ]}
-                      onPress={() => !isEditing && !isMenuOpen && loadHistory(session.id)}
+                      onPress={() => {
+                        // Tapping the row opens the chat — but not while the
+                        // 3-dots sheet is up or the row is being renamed.
+                        if (isEditing || menuSessionId !== null) return;
+                        closeMenu();
+                        loadHistory(session.id);
+                      }}
                       activeOpacity={0.7}
                     >
                       <View style={[
@@ -591,20 +617,19 @@ export default function AIAssistantScreen() {
                         </View>
                       )}
 
-                      <TouchableOpacity
-                        style={styles.sessionMenuButton}
-                        onPress={(e) => { e.stopPropagation(); toggleMenu(session.id); }}
-                        activeOpacity={0.7}
-                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      >
-                        <Ionicons name="ellipsis-horizontal" size={22} color={isActive ? "rgba(255,255,255,0.7)" : COLORS.textMuted} />
-                      </TouchableOpacity>
-
-                      {isActive && !isEditing && (
-                        <View style={styles.activeIndicator}>
-                          <View style={styles.activeDot} />
-                        </View>
-                      )}
+                      {/* The legacy "Old Chat History" bucket is a virtual
+                          row with no database row behind it, so pin/rename/
+                          delete would 404. Hide the control entirely. */}
+                      {session.id !== 0 ? (
+                        <TouchableOpacity
+                          style={styles.sessionMenuButton}
+                          onPress={() => toggleMenu(session.id)}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Ionicons name="ellipsis-horizontal" size={22} color={isActive ? "rgba(255,255,255,0.7)" : COLORS.textMuted} />
+                        </TouchableOpacity>
+                      ) : null}
                     </TouchableOpacity>
                   </View>
                 );
@@ -616,23 +641,16 @@ export default function AIAssistantScreen() {
             style={styles.modalCloseArea} 
             onPress={() => setIsMenuVisible(false)} 
           />
-        </View>
-      </Modal>
 
-      {/* Chat 3-dots menu — modal action sheet (Pin / Rename / Delete) */}
-      <Modal
-        visible={menuSessionId !== null}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={closeMenu}
-      >
-        <Pressable style={styles.menuSheetOverlay} onPress={closeMenu}>
-          <Pressable style={styles.menuSheetCard} onPress={() => {}}>
-            {(() => {
-              const session = sessions.find((s) => s.id === menuSessionId);
-              if (!session) return null;
-              return (
-                <>
+          {/* Chat 3-dots menu — an in-tree overlay, NOT a nested <Modal>.
+              Android drops a second Modal on top of another, which is why
+              Pin/Rename/Delete silently did nothing. */}
+          {menuSessionId !== null && (() => {
+            const session = sessions.find((s) => s.id === menuSessionId);
+            if (!session) return null;
+            return (
+              <Pressable style={styles.menuSheetOverlay} onPress={closeMenu}>
+                <Pressable style={styles.menuSheetCard} onPress={() => {}}>
                   <Text style={styles.menuSheetTitle} numberOfLines={2}>{session.title}</Text>
                   <TouchableOpacity style={styles.menuSheetRow} onPress={() => handlePinSession(session.id, session.pinned || false)} activeOpacity={0.7}>
                     <Ionicons name={session.pinned ? "pin-outline" : "pin"} size={20} color={COLORS.textPrimary} style={styles.menuSheetIcon} />
@@ -646,11 +664,11 @@ export default function AIAssistantScreen() {
                     <Ionicons name="trash-outline" size={20} color={COLORS.danger} style={styles.menuSheetIcon} />
                     <Text style={[styles.menuSheetRowText, { color: COLORS.danger }]}>Delete</Text>
                   </TouchableOpacity>
-                </>
-              );
-            })()}
-          </Pressable>
-        </Pressable>
+                </Pressable>
+              </Pressable>
+            );
+          })()}
+        </View>
       </Modal>
 
       {/* Messages Scroll Area */}
@@ -787,16 +805,16 @@ export default function AIAssistantScreen() {
           <TouchableOpacity 
             style={[
               styles.sendButton, 
-              { backgroundColor: isLoading || isTyping || !inputValue.trim() ? COLORS.surface : COLORS.purplePrimary }
+              { backgroundColor: !canSend || busy ? COLORS.surface : COLORS.purplePrimary }
             ]} 
             onPress={() => handleSend()} 
-            disabled={isLoading || isTyping || !inputValue.trim()}
+            disabled={!canSend || busy}
             activeOpacity={0.8}
           >
             <Ionicons 
               name="send" 
               size={18} 
-              color={isLoading || isTyping || !inputValue.trim() ? COLORS.textMuted : 'white'} 
+              color={!canSend || busy ? COLORS.textMuted : 'white'} 
             />
           </TouchableOpacity>
         </View>
@@ -860,7 +878,7 @@ sessionMenuButton: {
   modalOverlay: { 
     flex: 1, 
     backgroundColor: 'rgba(0,0,0,0.5)', 
-    flexDirection: 'row' 
+    flexDirection: 'row',
   },
   modalContent: { 
     backgroundColor: COLORS.surface,
@@ -952,12 +970,6 @@ sessionMenuButton: {
   },
   activeIndicator: {
     marginLeft: 4,
-  },
-  activeDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: 'white',
   },
 
   // Messages
@@ -1212,7 +1224,16 @@ sessionMenuButton: {
     borderRadius: 8,
     backgroundColor: 'transparent',
   },
-  menuSheetOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24 },
+  // Absolute, not flex:1. modalOverlay is a row, so a flex child here would
+  // steal width from the 80% sidebar and squeeze the sheet into a thin strip.
+  menuSheetOverlay: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24,
+    zIndex: 20,
+    elevation: 20,
+  },
   menuSheetCard: {
     backgroundColor: COLORS.surface,
     borderRadius: 20,

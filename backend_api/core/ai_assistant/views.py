@@ -9,9 +9,66 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from .models import ChatSession, ChatMessage, Quiz, QuizAttempt, QuizQuestion
 from .serializers import QuizSerializer, _display_name, _percent # Import the new serializer
 from users.models import Course
-from users.utils.file_parser import extract_text_from_file
+from users.utils.file_parser import (
+    extract_text_from_bytes,
+    extract_text_from_file,
+    UnsupportedDocumentFormat,
+    SUPPORTED_EXTENSIONS,
+)
 import base64
 from io import BytesIO
+
+
+# Matches the app-side cap in services/fileUpload.ts. Generous enough for a
+# slide deck or a long report, small enough to keep the base64 JSON body sane.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def _read_upload(raw_upload, json_body=False):
+    """Pull text out of a multipart UploadedFile or a base64 ``{name, data}`` dict.
+
+    Returns a (content, error_response) pair. Exactly one is not None.
+    """
+    if hasattr(raw_upload, 'read'):
+        filename = getattr(raw_upload, 'name', '') or ''
+        if raw_upload.size and raw_upload.size > MAX_UPLOAD_BYTES:
+            return None, Response(
+                {'error': f'"{filename}" is larger than 10 MB. Please upload a smaller file.'},
+                status=400,
+            )
+        try:
+            return extract_text_from_file(raw_upload), None
+        except UnsupportedDocumentFormat as exc:
+            return None, Response({'error': str(exc)}, status=400)
+        except Exception as exc:
+            return None, Response(
+                {'error': f'Could not read "{filename}". The file may be corrupt.'},
+                status=400,
+            )
+
+    if isinstance(raw_upload, dict) and raw_upload.get('data'):
+        filename = (raw_upload.get('name') or 'file.pdf').lower()
+        try:
+            raw = base64.b64decode(raw_upload['data'])
+        except Exception:
+            return None, Response({'error': 'Could not decode the uploaded file.'}, status=400)
+        if len(raw) > MAX_UPLOAD_BYTES:
+            return None, Response(
+                {'error': f'"{filename}" is larger than 10 MB. Please upload a smaller file.'},
+                status=400,
+            )
+        try:
+            return extract_text_from_bytes(raw, filename), None
+        except UnsupportedDocumentFormat as exc:
+            return None, Response({'error': str(exc)}, status=400)
+        except Exception:
+            return None, Response(
+                {'error': f'Could not read "{filename}". The file may be corrupt.'},
+                status=400,
+            )
+
+    return None, None
+
 
 class SessionListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -19,31 +76,50 @@ class SessionListView(APIView):
     def get(self, request):
         # 1. Grab all the new folder-based sessions
         sessions = ChatSession.objects.filter(user=request.user)
-        data = [{"id": s.id, "title": s.title, "updated_at": s.updated_at} for s in sessions]
+        data = [
+            {
+                "id": s.id,
+                "title": s.title,
+                "updated_at": s.updated_at,
+                "pinned": s.pinned,
+            }
+            for s in sessions
+        ]
 
         # 2. 🌟 THE LEGACY TRICK: Check if they have old "loose" messages
         has_legacy_messages = ChatMessage.objects.filter(user=request.user, session__isnull=True).exists()
         
         if has_legacy_messages:
             # Create a virtual session with ID "0" so it shows up in the mobile sidebar
-            data.append({"id": 0, "title": "Old Chat History", "updated_at": None})
+            data.append({"id": 0, "title": "Old Chat History", "updated_at": None, "pinned": False})
 
         return Response(data)
 
     def post(self, request):
         session = ChatSession.objects.create(user=request.user, title="New Conversation")
-        return Response({"id": session.id, "title": session.title})
+        return Response({"id": session.id, "title": session.title, "pinned": session.pinned})
 
 class AskSAGEView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def post(self, request):
         user_message = request.data.get('message')
-        attachment_text = request.data.get('attachment_text', '')
+        attachment_text = request.data.get('attachment_text', '') or ''
         session_id = request.data.get('session_id')
-        
+
         if not user_message:
             return Response({"error": "Message is required"}, status=400)
+
+        # The app sends the raw file (base64 in JSON, or multipart) and we
+        # extract the text here, so chat and quiz generation read documents
+        # through exactly the same code path.
+        uploaded_file = request.FILES.get('file') or request.data.get('file')
+        if uploaded_file:
+            file_text, file_error = _read_upload(uploaded_file)
+            if file_error is not None:
+                return file_error
+            attachment_text = file_text or attachment_text
 
         # 1. Figure out where to save this message
         session = None
@@ -211,31 +287,23 @@ class GenerateQuizView(APIView):
         content = request.data.get('content')
 
         if not content and uploaded_file:
-            # Handle Django UploadedFile (multipart)
-            if hasattr(uploaded_file, 'read'):
-                content = extract_text_from_file(uploaded_file)
-            # Handle base64-encoded file from JSON body
-            elif isinstance(uploaded_file, dict) and uploaded_file.get('data'):
-                raw = base64.b64decode(uploaded_file['data'])
-                fname = (uploaded_file.get('name') or 'file.pdf').lower()
-                if fname.endswith('.pdf'):
-                    from pypdf import PdfReader
-                    reader = PdfReader(BytesIO(raw))
-                    pages = [page.extract_text() or '' for page in reader.pages]
-                    content = '\n'.join(pages)
-                elif fname.endswith('.docx'):
-                    import docx
-                    doc = docx.Document(BytesIO(raw))
-                    content = '\n'.join(p.text for p in doc.paragraphs)
-                else:
-                    content = raw.decode('utf-8')
+            content, file_error = _read_upload(uploaded_file)
+            if file_error is not None:
+                return file_error
 
         if not content:
             print(f"[GenerateQuizView] No content received. "
                   f"FILES keys={list(request.FILES.keys())}, "
                   f"DATA keys={list(request.data.keys())}, "
                   f"content_type={request.content_type}")
-            return Response({"error": "No content provided to generate quiz."}, status=400)
+            return Response(
+                {
+                    'error': 'No readable content found. Supported files: '
+                             + ', '.join(SUPPORTED_EXTENSIONS)
+                             + '. Scanned PDFs with no text layer are not supported.'
+                },
+                status=400,
+            )
 
         difficulty = request.data.get('difficulty', 'Medium')
         count = int(request.data.get('count', 10))

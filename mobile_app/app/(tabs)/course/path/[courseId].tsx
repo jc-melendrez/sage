@@ -18,9 +18,9 @@ import { LearningNode, NODE_TYPE_CONFIG, CoursePathTopic } from '@/types/learnin
 
 // --- Modern palette: deeper, richer violets + a warm accent pair -----------
 const COLORS = {
-  bgTop: '#2E1065',
-  bgMid: '#5B21B6',
-  bgBottom: '#EDE9FE',
+  bgTop: '#4C1D95',
+  bgMid: '#6D28D9',
+  bgBottom: '#F5F3FF',
   surface: '#FFFFFF',
   surfaceTint: '#F5F3FF',
   purpleDeep: '#3B0F70',
@@ -58,6 +58,9 @@ const PATH_W = Math.min(SCREEN_W - 20, 400);
 const NODE_SIZE = 72;
 const ROW_H = 116; // Vertical spacing between nodes
 const AMP = PATH_W / 2 - 62; // Horizontal swing amplitude
+
+// Bottom tab bar is 70px tall (see app/(tabs)/_layout.tsx).
+const TAB_BAR_CLEARANCE = 70;
 
 // Popup bubble
 const POPUP_W = 288;
@@ -399,9 +402,9 @@ export default function CoursePathScreen() {
 
   if (loading) {
     return (
-      <LinearGradient colors={[COLORS.bgTop, COLORS.bgMid, COLORS.bgBottom]} style={styles.center}>
-        <ActivityIndicator size="large" color="#FFFFFF" />
-      </LinearGradient>
+      <View style={[styles.center, { backgroundColor: COLORS.bgBottom }]}>
+        <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
+      </View>
     );
   }
 
@@ -414,9 +417,9 @@ export default function CoursePathScreen() {
       : topics.length > 0 ? topics[0].title : 'Learning Path';
 
   return (
-    <LinearGradient colors={[COLORS.bgTop, COLORS.bgMid, COLORS.bgBottom]} locations={[0, 0.32, 0.75]} style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
+    <View style={styles.container}>
+      {/* Header keeps the dark gradient; the trail below is light. */}
+      <LinearGradient colors={[COLORS.bgTop, COLORS.bgMid]} style={styles.header}>
         <View style={styles.headerRow}>
           <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
             <Ionicons name="chevron-back" size={22} color="white" />
@@ -438,11 +441,14 @@ export default function CoursePathScreen() {
             style={[styles.progressFill, { width: `${Math.max(progressPct * 100, flat.length ? 4 : 0)}%` }]}
           />
         </View>
-      </View>
+      </LinearGradient>
 
       <ScrollView
         ref={scrollRef}
-        contentContainerStyle={[styles.scrollContent, { height: contentHeight }]}
+        // minHeight, not height: a fixed height swallowed paddingBottom, which
+        // is what let the last node hide behind the tab bar.
+        style={styles.trailBody}
+        contentContainerStyle={[styles.scrollContent, { minHeight: contentHeight, paddingBottom: TAB_BAR_CLEARANCE + 40 }]}
         showsVerticalScrollIndicator={false}
         scrollEventThrottle={16}
         onScroll={handleScroll}
@@ -636,13 +642,14 @@ export default function CoursePathScreen() {
           </Pressable>
         );
       })()}
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
+  container: { flex: 1, backgroundColor: COLORS.bgBottom },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  trailBody: { flex: 1, backgroundColor: COLORS.bgBottom },
 
   header: {
     paddingTop: 52,
@@ -680,7 +687,7 @@ const styles = StyleSheet.create({
 
   scrollContent: {
     paddingTop: 24,
-    paddingBottom: 70,
+    paddingBottom: 110,
   },
   emptyState: { alignItems: 'center', paddingVertical: 90, gap: 10, paddingHorizontal: 40 },
   emptyIconWrap: {

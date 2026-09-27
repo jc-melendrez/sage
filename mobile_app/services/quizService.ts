@@ -26,6 +26,8 @@ export interface Quiz {
   class_attempted_count?: number | null;
   /** Mean of each learner's best score, 0-100. Educators only, else null. */
   class_average_percent?: number | null;
+  /** True when the caller wrote this quiz. Self-authored quizzes award no XP. */
+  is_owner?: boolean;
 }
 
 /** One learner's result for a quiz, as an educator reviews it. */

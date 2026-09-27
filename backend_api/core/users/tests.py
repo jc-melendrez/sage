@@ -281,6 +281,74 @@ class CourseAPITests(APITestCase):
         self.assertFalse(course_b.scores.filter(user=self.student1).exists())
         self.assertFalse(course_a.scores.filter(user=self.student1).exists())
 
+    def test_self_authored_quiz_awards_no_xp_and_no_course_score(self):
+        """A student writing their own quiz must not be able to mint XP."""
+        from ai_assistant.models import Quiz, QuizAttempt
+        course = self._make_course_with_students()
+        quiz = Quiz.objects.create(user=self.student1, title='My own quiz', quiz_type='multiple_choice')
+        QuizAttempt.objects.create(quiz=quiz, user=self.student1)
+        self.client.force_authenticate(user=self.student1)
+
+        resp = self.client.post(
+            reverse('complete_quiz'),
+            {'score': 5, 'total': 5, 'course_id': course.id, 'quiz_id': quiz.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['xp'], 0)
+        self.assertEqual(resp.data['badges'], [])
+        self.student1.refresh_from_db()
+        self.assertEqual(self.student1.total_points, 0)
+        # The attempt is still recorded, so the client can offer a retake.
+        self.assertEqual(self.student1.quizzes_taken, 1)
+        self.assertFalse(course.scores.filter(user=self.student1).exists())
+
+    def test_educator_authored_quiz_still_awards_xp(self):
+        from ai_assistant.models import Quiz, QuizAttempt
+        course = self._make_course_with_students()
+        quiz = Quiz.objects.create(
+            user=self.educator, title='Class quiz', quiz_type='multiple_choice', course=course
+        )
+        QuizAttempt.objects.create(quiz=quiz, user=self.student1)
+        self.client.force_authenticate(user=self.student1)
+
+        resp = self.client.post(
+            reverse('complete_quiz'),
+            {'score': 5, 'total': 5, 'course_id': course.id, 'quiz_id': quiz.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreater(resp.data['xp'], 0)
+        score = Course.objects.get(id=course.id).scores.get(user=self.student1)
+        self.assertEqual(score.quizzes_completed, 1)
+
+    def test_failing_a_retake_never_revokes_a_pass(self):
+        """The trail locks later nodes on `passed`, so a pass must be sticky."""
+        course = self._make_course_with_students()
+        topic = Topic.objects.create(course=course, title='T', order=0)
+        node = LearningNode.objects.create(
+            topic=topic, node_type='learn', title='L', xp_reward=25, required_score=70
+        )
+        self.client.force_authenticate(user=self.student1)
+
+        first = self.client.post(
+            reverse('node_complete', args=[node.id]), {'score': 90, 'total': 10}, format='json'
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertTrue(first.data['passed'])
+
+        # A much weaker retake must not unlock-relock the node.
+        second = self.client.post(
+            reverse('node_complete', args=[node.id]), {'score': 20, 'total': 10}, format='json'
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.data['passed'])
+
+        progress = NodeProgress.objects.get(user=self.student1, node=node)
+        self.assertTrue(progress.passed)
+        self.assertEqual(progress.score, 90)
+        self.assertEqual(progress.attempts, 2)
+
 
 class GamificationServiceTests(TestCase):
     def setUp(self):
@@ -324,6 +392,16 @@ class GamificationServiceTests(TestCase):
         self.assertEqual(result['xp'], 50)  # 25 + 25 bonus
         self.assertTrue(result['perfect'])
         self.assertTrue(any(b['name'] == 'Perfect Score' for b in result['badges']))
+
+    def test_record_quiz_completion_without_xp_counts_attempt_but_pays_nothing(self):
+        result = gamification.record_quiz_completion(self.user, score=3, total=5, grant_xp=False)
+        self.assertEqual(result['xp'], 0)
+        self.assertEqual(result['badges'], [])
+        self.user.refresh_from_db()
+        # The attempt is still recorded so the UI can show "Retake Quiz".
+        self.assertEqual(self.user.quizzes_taken, 1)
+        self.assertEqual(self.user.total_points, 0)
+        self.assertFalse(Badge.objects.filter(user=self.user, name='First Quiz').exists())
 
     def test_lesson_completion_xp_once(self):
         r1 = gamification.record_lesson_completion(
