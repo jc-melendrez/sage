@@ -12,7 +12,8 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Activity, Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, TaskSubmission, Topic, User
+from .models import Activity, Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, Recommendation, TaskSubmission, Topic, User
+from .serializers import RecommendationSerializer
 from . import gamification
 from . import views as users_views
 
@@ -281,6 +282,74 @@ class CourseAPITests(APITestCase):
         self.assertFalse(course_b.scores.filter(user=self.student1).exists())
         self.assertFalse(course_a.scores.filter(user=self.student1).exists())
 
+    def test_self_authored_quiz_awards_no_xp_and_no_course_score(self):
+        """A student writing their own quiz must not be able to mint XP."""
+        from ai_assistant.models import Quiz, QuizAttempt
+        course = self._make_course_with_students()
+        quiz = Quiz.objects.create(user=self.student1, title='My own quiz', quiz_type='multiple_choice')
+        QuizAttempt.objects.create(quiz=quiz, user=self.student1)
+        self.client.force_authenticate(user=self.student1)
+
+        resp = self.client.post(
+            reverse('complete_quiz'),
+            {'score': 5, 'total': 5, 'course_id': course.id, 'quiz_id': quiz.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['xp'], 0)
+        self.assertEqual(resp.data['badges'], [])
+        self.student1.refresh_from_db()
+        self.assertEqual(self.student1.total_points, 0)
+        # The attempt is still recorded, so the client can offer a retake.
+        self.assertEqual(self.student1.quizzes_taken, 1)
+        self.assertFalse(course.scores.filter(user=self.student1).exists())
+
+    def test_educator_authored_quiz_still_awards_xp(self):
+        from ai_assistant.models import Quiz, QuizAttempt
+        course = self._make_course_with_students()
+        quiz = Quiz.objects.create(
+            user=self.educator, title='Class quiz', quiz_type='multiple_choice', course=course
+        )
+        QuizAttempt.objects.create(quiz=quiz, user=self.student1)
+        self.client.force_authenticate(user=self.student1)
+
+        resp = self.client.post(
+            reverse('complete_quiz'),
+            {'score': 5, 'total': 5, 'course_id': course.id, 'quiz_id': quiz.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreater(resp.data['xp'], 0)
+        score = Course.objects.get(id=course.id).scores.get(user=self.student1)
+        self.assertEqual(score.quizzes_completed, 1)
+
+    def test_failing_a_retake_never_revokes_a_pass(self):
+        """The trail locks later nodes on `passed`, so a pass must be sticky."""
+        course = self._make_course_with_students()
+        topic = Topic.objects.create(course=course, title='T', order=0)
+        node = LearningNode.objects.create(
+            topic=topic, node_type='learn', title='L', xp_reward=25, required_score=70
+        )
+        self.client.force_authenticate(user=self.student1)
+
+        first = self.client.post(
+            reverse('node_complete', args=[node.id]), {'score': 90, 'total': 10}, format='json'
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertTrue(first.data['passed'])
+
+        # A much weaker retake must not unlock-relock the node.
+        second = self.client.post(
+            reverse('node_complete', args=[node.id]), {'score': 20, 'total': 10}, format='json'
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.data['passed'])
+
+        progress = NodeProgress.objects.get(user=self.student1, node=node)
+        self.assertTrue(progress.passed)
+        self.assertEqual(progress.score, 90)
+        self.assertEqual(progress.attempts, 2)
+
 
 class GamificationServiceTests(TestCase):
     def setUp(self):
@@ -324,6 +393,16 @@ class GamificationServiceTests(TestCase):
         self.assertEqual(result['xp'], 50)  # 25 + 25 bonus
         self.assertTrue(result['perfect'])
         self.assertTrue(any(b['name'] == 'Perfect Score' for b in result['badges']))
+
+    def test_record_quiz_completion_without_xp_counts_attempt_but_pays_nothing(self):
+        result = gamification.record_quiz_completion(self.user, score=3, total=5, grant_xp=False)
+        self.assertEqual(result['xp'], 0)
+        self.assertEqual(result['badges'], [])
+        self.user.refresh_from_db()
+        # The attempt is still recorded so the UI can show "Retake Quiz".
+        self.assertEqual(self.user.quizzes_taken, 1)
+        self.assertEqual(self.user.total_points, 0)
+        self.assertFalse(Badge.objects.filter(user=self.user, name='First Quiz').exists())
 
     def test_lesson_completion_xp_once(self):
         r1 = gamification.record_lesson_completion(
@@ -805,6 +884,288 @@ class FirebaseSignupRoleTests(APITestCase):
         self.assertEqual(User.objects.get(username='existing').role, 'student')
 
 
+class RecommendationCourseTargetTests(APITestCase):
+    """A "For You" card has to land somewhere real. The model is asked to pick
+    a course, but its id is never trusted: an id the learner is not enrolled in
+    would deep-link to a course they cannot open."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='reced', password='pass12345', role='educator',
+        )
+        self.student = User.objects.create_user(
+            username='recstudent', password='pass12345', role='student',
+        )
+        self.biology = Course.objects.create(
+            name='Biology', educator=self.educator, join_code='BIO123',
+        )
+        self.biology.students.add(self.student)
+        self.history = Course.objects.create(
+            name='History', educator=self.educator, join_code='HIS123',
+        )
+        self.client.force_authenticate(user=self.student)
+
+    def _run_generator(self, payload):
+        fake_response = Mock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.return_value = {
+            'choices': [{'message': {'content': json.dumps(payload)}}]
+        }
+        with override_settings(GROQ_API_KEY='test-key'), \
+             patch.object(users_views.requests, 'post', return_value=fake_response) as mock_post:
+            return users_views._generate_recommendations(self.student), mock_post
+
+    def test_enrolled_course_id_is_kept(self):
+        recs, _ = self._run_generator({
+            'recommendations': [
+                {'title': 'Revisit chloroplasts', 'description': 'Weak area.', 'course_id': self.biology.id},
+            ]
+        })
+        rec = recs[0]
+        self.assertEqual(rec.course_id, self.biology.id)
+        self.assertEqual(rec.course, self.biology)
+
+    def test_hallucinated_course_id_becomes_null(self):
+        recs, _ = self._run_generator({
+            'recommendations': [
+                {'title': 'Start something', 'description': 'n/a', 'course_id': 987654},
+            ]
+        })
+        rec = recs[0]
+        self.assertIsNone(rec.course_id)
+
+    def test_course_they_never_joined_becomes_null(self):
+        recs, _ = self._run_generator({
+            'recommendations': [
+                {'title': 'Try History', 'description': 'n/a', 'course_id': self.history.id},
+            ]
+        })
+        self.assertIsNone(recs[0].course_id)
+
+    def test_non_numeric_course_id_becomes_null(self):
+        recs, _ = self._run_generator({
+            'recommendations': [
+                {'title': 'Vague', 'description': 'n/a', 'course_id': 'Biology'},
+            ]
+        })
+        self.assertIsNone(recs[0].course_id)
+
+    def test_prompt_lists_only_enrolled_courses(self):
+        _, mock_post = self._run_generator({'recommendations': []})
+        sent = mock_post.call_args.kwargs['json']['messages'][1]['content']
+        self.assertIn(f'- {self.biology.id}: Biology', sent)
+        self.assertNotIn(f'- {self.history.id}: History', sent)
+
+    def test_existing_rows_are_replaced(self):
+        Recommendation.objects.create(
+            user=self.student, title='Stale', description='old', course=self.biology,
+        )
+        self._run_generator({
+            'recommendations': [
+                {'title': 'Fresh', 'description': 'new', 'course_id': self.biology.id},
+            ]
+        })
+        titles = list(
+            Recommendation.objects.filter(user=self.student).values_list('title', flat=True)
+        )
+        self.assertEqual(titles, ['Fresh'])
+
+    def test_items_without_a_title_are_skipped(self):
+        recs, _ = self._run_generator({
+            'recommendations': [
+                {'title': '   ', 'description': 'blank title', 'course_id': self.biology.id},
+                {'title': 'Good', 'description': 'ok', 'course_id': self.biology.id},
+            ]
+        })
+        self.assertEqual([r.title for r in recs], ['Good'])
+
+
+class RecommendationSerializerHrefTests(APITestCase):
+    """The client navigates on `href`; a wrong route here is a dead card."""
+
+    def setUp(self):
+        self.educator = User.objects.create_user(
+            username='hrefed', password='pass12345', role='educator',
+        )
+        self.student = User.objects.create_user(
+            username='hrefstudent', password='pass12345', role='student',
+        )
+        self.course = Course.objects.create(
+            name='Physics', educator=self.educator, join_code='PHY123',
+        )
+        self.course.students.add(self.student)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.student)
+
+    def test_href_points_at_the_course_path(self):
+        rec = Recommendation.objects.create(
+            user=self.student, title='Review', description='x', course=self.course,
+        )
+        data = RecommendationSerializer(rec).data
+        self.assertEqual(data['href'], f'/(tabs)/course/path/{self.course.id}')
+        self.assertEqual(data['course_id'], self.course.id)
+
+    def test_href_is_null_without_a_course(self):
+        rec = Recommendation.objects.create(
+            user=self.student, title='General', description='x', course=None,
+        )
+        data = RecommendationSerializer(rec).data
+        # Null, not a broken string: the app falls back to Activities.
+        self.assertIsNone(data['href'])
+        self.assertIsNone(data['course_id'])
+
+    def test_deleting_a_course_keeps_the_recommendation(self):
+        rec = Recommendation.objects.create(
+            user=self.student, title='Review', description='x', course=self.course,
+        )
+        self.course.delete()
+        rec.refresh_from_db()
+        # The feed should not silently lose cards when a course is removed.
+        self.assertIsNone(rec.course_id)
+        self.assertEqual(rec.title, 'Review')
+
+    def test_endpoint_returns_href(self):
+        Recommendation.objects.create(
+            user=self.student, title='Review', description='x', course=self.course,
+        )
+        resp = self.client.get(reverse('user_recommendations', args=[self.student.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp.data[0]['href'], f'/(tabs)/course/path/{self.course.id}'
+        )
+
+
+class GroupChatQuizEmbedTests(APITestCase):
+    """A shared quiz is a *reference* the server re-derives, not a card the
+    client gets to describe. Otherwise anyone could post a convincing card for
+    a quiz they have no access to."""
+
+    def setUp(self):
+        from ai_assistant.models import Quiz, QuizQuestion
+
+        self.client = APIClient()
+        self.owner = User.objects.create_user(
+            username='quizowner', password='pass12345', role='educator',
+            first_name='Quinn', last_name='Owner',
+            firebase_uid='fb-owner',
+        )
+        self.member = User.objects.create_user(
+            username='quizmember', password='pass12345', role='student',
+            first_name='Mia', last_name='Member',
+            firebase_uid='fb-member',
+        )
+        self.outsider = User.objects.create_user(
+            username='quizoutsider', password='pass12345', role='student',
+            first_name='Otto', last_name='Outsider',
+            firebase_uid='fb-outsider',
+        )
+        self.quiz = Quiz.objects.create(
+            user=self.owner,
+            title='Photosynthesis Basics',
+            quiz_type='Multiple Choice',
+        )
+        # Questions live in their own model, so the embed's question_count is
+        # re-derived from these rows rather than trusted from the client.
+        QuizQuestion.objects.create(
+            quiz=self.quiz,
+            question_text='What pigment?',
+            options=['Chlorophyll', 'Haemoglobin'],
+            correct_answer='Chlorophyll',
+            explanation='Chlorophyll is the green pigment.',
+        )
+        QuizQuestion.objects.create(
+            quiz=self.quiz,
+            question_text='Where does photosynthesis happen?',
+            options=['Chloroplast', 'Nucleus'],
+            correct_answer='Chloroplast',
+            explanation='Chloroplasts are the site of photosynthesis.',
+        )
+        self.group = {
+            'id': 'group-abc', 'created_by': 'fb-owner',
+            'members': ['fb-owner', 'fb-member'],
+        }
+        self.url = reverse('group_chat', args=['group-abc'])
+
+    def _post(self, user, embed, text=''):
+        self.client.force_authenticate(user=user)
+        with patch.object(users_views, 'get_study_group', return_value=self.group), \
+             patch.object(users_views, 'send_message', return_value='msg-1') as mock_send:
+            res = self.client.post(
+                self.url,
+                {'text': text, 'quiz_embed': embed},
+                format='json',
+            )
+        return res, mock_send
+
+    def test_owner_can_share_own_quiz(self):
+        res, mock_send = self._post(self.owner, {'id': self.quiz.id})
+        self.assertEqual(res.status_code, 201)
+        embed = mock_send.call_args.kwargs['quiz_embed']
+        self.assertEqual(embed['id'], self.quiz.id)
+        self.assertEqual(embed['title'], 'Photosynthesis Basics')
+        self.assertEqual(embed['question_count'], 2)
+        self.assertEqual(embed['deep_link'], f'sage://quiz/{self.quiz.id}')
+
+    def test_bare_embed_without_text_is_accepted(self):
+        # Sharing a quiz to a group sends no caption; the card is the message.
+        res, mock_send = self._post(self.owner, {'id': self.quiz.id}, text='')
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['quiz_embed']['id'], self.quiz.id)
+
+    def test_client_supplied_title_is_ignored(self):
+        # The spoof this prevents: claiming someone else's quiz title.
+        res, mock_send = self._post(
+            self.owner,
+            {'id': self.quiz.id, 'title': 'Totally different quiz', 'question_count': 99},
+        )
+        self.assertEqual(res.status_code, 201)
+        embed = mock_send.call_args.kwargs['quiz_embed']
+        self.assertEqual(embed['title'], 'Photosynthesis Basics')
+        self.assertEqual(embed['question_count'], 2)
+
+    def test_enrolled_student_can_share_course_quiz(self):
+        course = Course.objects.create(name='Biology', educator=self.owner, join_code='ABC123')
+        course.students.add(self.member)
+        self.quiz.course = course
+        self.quiz.save()
+
+        res, mock_send = self._post(self.member, {'id': self.quiz.id})
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(mock_send.call_args.kwargs['quiz_embed']['id'], self.quiz.id)
+
+    def test_outsider_cannot_share_quiz(self):
+        res, mock_send = self._post(self.outsider, {'id': self.quiz.id})
+        self.assertEqual(res.status_code, 403)
+        mock_send.assert_not_called()
+
+    def test_missing_quiz_is_404(self):
+        res, mock_send = self._post(self.owner, {'id': 999999})
+        self.assertEqual(res.status_code, 404)
+        mock_send.assert_not_called()
+
+    def test_embed_without_id_is_400(self):
+        res, mock_send = self._post(self.owner, {'title': 'nameless'})
+        self.assertEqual(res.status_code, 400)
+        mock_send.assert_not_called()
+
+    def test_embed_must_be_an_object(self):
+        res, mock_send = self._post(self.owner, 'not-a-dict')
+        self.assertEqual(res.status_code, 400)
+        mock_send.assert_not_called()
+
+    def test_plain_message_is_unaffected(self):
+        res, mock_send = self._post(self.owner, None, text='just text')
+        self.assertEqual(res.status_code, 201)
+        self.assertIsNone(mock_send.call_args.kwargs['quiz_embed'])
+
+    def test_empty_message_without_embed_is_still_400(self):
+        self.client.force_authenticate(user=self.owner)
+        with patch.object(users_views, 'get_study_group', return_value=self.group):
+            res = self.client.post(self.url, {'text': ''}, format='json')
+        self.assertEqual(res.status_code, 400)
+
+
 class GroupChatMessageTests(APITestCase):
     """
     POST /groups/<id>/chat/ must return the full message payload
@@ -844,6 +1205,7 @@ class GroupChatMessageTests(APITestCase):
         mock_send.assert_called_once_with(
             'group-abc', 'fb-uid-chat', 'hello world', 'Chat Person', '',
             attachments=None,
+            quiz_embed=None,
         )
 
     def test_post_requires_text(self):
@@ -899,6 +1261,7 @@ class GroupChatMessageTests(APITestCase):
         mock_send.assert_called_once_with(
             'group-abc', 'fb-uid-chat', 'see pic', 'Chat Person', '',
             attachments=atts,
+            quiz_embed=None,
         )
 
     def test_post_attachment_must_come_from_group_upload(self):

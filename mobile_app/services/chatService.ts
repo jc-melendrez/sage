@@ -31,19 +31,25 @@ export interface GroupRoster {
   join_requests: JoinRequestMember[];
 }
 
+/**
+ * A quiz card shared into the chat. Stored as its own field on the message
+ * (`quiz_embed`), not inside `attachments` — attachments are S3 uploads and
+ * the server validates every one against the group's upload prefix.
+ */
+export interface QuizEmbed {
+  id: number;
+  title: string;
+  question_count: number;
+  quiz_type: string;
+  deep_link: string;
+}
+
 export interface Attachment {
   key?: string;      // S3 object key once uploaded; missing on an unsent echo
   url?: string;      // local file:// URI used only while previewing an unsent echo
   name: string;
   mime: string;
   size: number;
-  /** Quiz embed attachment */
-  type?: 'quiz_embed';
-  quiz_id?: number;
-  title?: string;
-  question_count?: number;
-  quiz_type?: string;
-  deep_link?: string;
 }
 
 export interface LocalAttachment {

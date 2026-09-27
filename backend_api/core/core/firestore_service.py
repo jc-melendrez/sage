@@ -254,9 +254,9 @@ def upload_group_attachment(group_id: str, upload, filename: str) -> dict:
     }
 
 
-def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '', sender_avatar: str = '', attachments=None) -> str:
+def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '', sender_avatar: str = '', attachments=None, quiz_embed=None) -> str:
     db = get_db()
-    msg_ref = db.collection('studyGroups').document(group_id).collection('messages').add({
+    payload = {
         'sender_uid': sender_uid,
         'sender_name': sender_name,
         'sender_avatar': sender_avatar,
@@ -265,7 +265,13 @@ def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '
         'reactions': {},
         'created_at': firestore.SERVER_TIMESTAMP,
         'is_synced': True,
-    })
+    }
+    # Only write the field when there is one: older readers do a
+    # `data.get('quiz_embed')` and a missing key is cheaper than an empty
+    # dict on the thousands of plain messages already stored.
+    if quiz_embed:
+        payload['quiz_embed'] = quiz_embed
+    msg_ref = db.collection('studyGroups').document(group_id).collection('messages').add(payload)
     return msg_ref[1].id
 
 
@@ -291,6 +297,7 @@ def get_messages(group_id: str, limit: int = 50, resolve_users: callable = None)
             'sender_avatar': data.get('sender_avatar') or '',
             'text': data.get('text'),
             'attachments': data.get('attachments') or [],
+            'quiz_embed': data.get('quiz_embed') or {},
             'created_at': created_at,
             'reactions': data.get('reactions') or {},
         })

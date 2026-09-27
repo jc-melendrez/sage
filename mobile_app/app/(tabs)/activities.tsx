@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
   TextInput, ActivityIndicator, Alert, Platform, StatusBar, RefreshControl,
-  KeyboardAvoidingView
+  KeyboardAvoidingView, Pressable
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
@@ -15,10 +15,11 @@ import { apiCall } from '@/services/apiClient';
 import { invalidateCachePrefix } from '@/services/apiCache';
 import { completeQuiz } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
+import QuizInfoModal from '@/components/QuizInfoModal';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
-import { deleteQuiz, startQuizAttempt, getQuizShare, updateQuiz, parseDeadlineInput } from '@/services/quizService';
-import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
+import { deleteQuiz, startQuizAttempt, shareQuizToGroup, updateQuiz, parseDeadlineInput } from '@/services/quizService';
+import { pickDocument, readAsBase64, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
+import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/JoinCodeInput';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 import { TabSkeleton } from '@/components/Skeleton';
 
@@ -39,8 +40,26 @@ interface Quiz {
   created_at: string;
   quiz_type?: string;
   available_until?: string | null;
-  attempted?: boolean;
+  /** How many times the current user has attempted this quiz. */
+  attempt_count?: number;
+  /** True when the current user wrote this quiz — such quizzes award no XP. */
+  is_owner?: boolean;
   questions: any[];
+}
+
+interface EditQuestion {
+  id?: number;
+  question_text: string;
+  options: string[];
+  correct_answer: string;
+  explanation: string;
+}
+
+interface EditDraft {
+  id: number;
+  title: string;
+  available_until: string;
+  questions: EditQuestion[];
 }
 
 export default function ActivitiesScreen() {
@@ -61,16 +80,14 @@ export default function ActivitiesScreen() {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
-  const [joinCodeInput, setJoinCodeInput] = useState('');
+  const [joinCodeInput, setJoinCodeInput] = useState<string[]>(() => Array(JOIN_CODE_LENGTH).fill(''));
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // --- Join Class Modal (enrolled backend courses) ---
   const [isJoinCourseModalOpen, setIsJoinCourseModalOpen] = useState(false);
-  const [classCodeInput, setClassCodeInput] = useState('');
+  const [classCodeInput, setClassCodeInput] = useState<string[]>(() => Array(JOIN_CODE_LENGTH).fill(''));
   const [isJoiningClass, setIsJoiningClass] = useState(false);
 
-  const groupCodeRefs = useRef<any[]>([]);
-  const classCodeRefs = useRef<any[]>([]);
 
   // --- Quiz Player State ---
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
@@ -79,7 +96,7 @@ export default function ActivitiesScreen() {
 
   // --- Quiz Generator State ---
   const [isGenerateQuizModalOpen, setIsGenerateQuizModalOpen] = useState(false);
-  const [quizFile, setQuizFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [quizFile, setQuizFile] = useState<PickedDocument | null>(null);
   const [quizDifficulty, setQuizDifficulty] = useState('Medium');
   const [quizCount, setQuizCount] = useState('10');
   const [quizType, setQuizType] = useState('Multiple Choice');
@@ -99,9 +116,25 @@ export default function ActivitiesScreen() {
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isSharing, setIsSharing] = useState<string | null>(null);
   const [editTarget, setEditTarget] = useState<Quiz | null>(null);
-  const [editTitle, setEditTitle] = useState('');
-  const [editDeadline, setEditDeadline] = useState('');
+  const [editDraft, setEditDraft] = useState<EditDraft | null>(null);
+  const [editOriginal, setEditOriginal] = useState<string | null>(null);
+  const [editView, setEditView] = useState<'list' | 'question'>('list');
+  const [editQIndex, setEditQIndex] = useState<number | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  // --- 3-dots menu state ---
+  const [menuQuizId, setMenuQuizId] = useState<number | null>(null);
+
+  // --- Quiz info modal state ---
+  const [infoModalQuiz, setInfoModalQuiz] = useState<Quiz | null>(null);
+  // Kept alongside the quiz so the sheet can say "Retake Quiz" even after the
+  // list re-sorts underneath it.
+  const [infoModalAttempted, setInfoModalAttempted] = useState(false);
+
+  // --- Rename modal state ---
+  const [renameQuizId, setRenameQuizId] = useState<number | null>(null);
+  const [renameTitle, setRenameTitle] = useState('');
+  const [isRenaming, setIsRenaming] = useState(false);
 
   const handleShareQuiz = async (quiz: Quiz) => {
     try {
@@ -124,54 +157,201 @@ export default function ActivitiesScreen() {
     if (!shareTarget) return;
     try {
       setIsSharing(groupId);
-      const shareData = await getQuizShare(shareTarget.id);
-      const token = await getToken();
-      if (!token) return;
-      const res = await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          text: `📝 Quiz Shared: "${shareData.title}"`,
-          attachments: [{
-            type: 'quiz_embed',
-            quiz_id: shareData.id,
-            title: shareData.title,
-            question_count: shareData.question_count,
-            quiz_type: shareData.quiz_type,
-            deep_link: shareData.deep_link,
-          }],
-        }),
-      });
-      if (!res.ok) throw new Error('Could not send to that group');
+      const { message } = await shareQuizToGroup(groupId, shareTarget.id);
       setIsShareOpen(false);
-      Alert.alert('Shared!', `"${shareData.title}" was sent to the group chat.`);
+      Alert.alert('Shared!', `"${message}" was sent to the group chat.`);
     } catch (err) {
+      // shareQuizToGroup rethrows the server's own `error`/`detail`, so this
+      // shows the real reason (not a member, no access, quiz gone) instead of
+      // a blanket "please try again".
       Alert.alert('Failed to share', err instanceof Error ? err.message : 'Please try again.');
     } finally {
       setIsSharing(null);
     }
   };
 
-  const handleOpenEdit = (quiz: Quiz) => {
-    setEditTarget(quiz);
-    setEditTitle(quiz.title);
-    setEditDeadline(
-      quiz.available_until
+  const openEditor = (quiz: Quiz) => {
+    const draft: EditDraft = {
+      id: quiz.id,
+      title: quiz.title,
+      available_until: quiz.available_until
         ? new Date(quiz.available_until).toISOString().slice(0, 16).replace('T', ' ')
         : '',
+      questions: (quiz.questions || []).map((q) => ({
+        id: q.id,
+        question_text: q.question_text || '',
+        options: [...(q.options || [])],
+        correct_answer: q.correct_answer || '',
+        explanation: q.explanation || '',
+      })),
+    };
+    setEditTarget(quiz);
+    setEditDraft(draft);
+    setEditOriginal(JSON.stringify(draft));
+    setEditView('list');
+    setEditQIndex(null);
+  };
+
+  const closeEditor = () => {
+    setEditTarget(null);
+    setEditDraft(null);
+    setEditOriginal(null);
+    setEditView('list');
+    setEditQIndex(null);
+  };
+
+  const requestCloseEditor = () => {
+    if (isSavingEdit) return;
+    const dirty = editOriginal !== null && editDraft && JSON.stringify(editDraft) !== editOriginal;
+    if (!dirty) {
+      closeEditor();
+      return;
+    }
+    Alert.alert(
+      'Unsaved Changes',
+      'You have unsaved changes to this quiz. What would you like to do?',
+      [
+        { text: 'Don\'t Save', style: 'destructive', onPress: closeEditor },
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Save', onPress: () => handleSaveEdit() },
+      ],
+      { cancelable: true },
     );
   };
 
+  const openQuestion = (index: number) => {
+    setEditQIndex(index);
+    setEditView('question');
+  };
+
+  const goToList = () => {
+    setEditView('list');
+    setEditQIndex(null);
+  };
+
+  const updateDraftTitle = (title: string) => setEditDraft((d) => (d ? { ...d, title } : d));
+
+  const updateDraftDeadline = (text: string) => setEditDraft((d) => (d ? { ...d, available_until: text } : d));
+
+  const updateEditQuestion = (index: number, field: 'question_text' | 'correct_answer' | 'explanation', value: string) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const questions = d.questions.map((q, i) => (i === index ? { ...q, [field]: value } : q));
+      return { ...d, questions };
+    });
+  };
+
+  const updateEditOption = (qIndex: number, oIndex: number, text: string) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const questions = d.questions.map((q, i) => {
+        if (i !== qIndex) return q;
+        const options = q.options.map((opt, oi) => (oi === oIndex ? text : opt));
+        const correct_answer = q.correct_answer === q.options[oIndex] ? text : q.correct_answer;
+        return { ...q, options, correct_answer };
+      });
+      return { ...d, questions };
+    });
+  };
+
+  const addEditOption = (qIndex: number) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const questions = d.questions.map((q, i) => (i === qIndex ? { ...q, options: [...q.options, ''] } : q));
+      return { ...d, questions };
+    });
+  };
+
+  const removeEditOption = (qIndex: number, oIndex: number) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const questions = d.questions.map((q, i) => {
+        if (i !== qIndex) return q;
+        const removed = q.options[oIndex];
+        const options = q.options.filter((_, oi) => oi !== oIndex);
+        const correct_answer = q.correct_answer === removed ? '' : q.correct_answer;
+        return { ...q, options, correct_answer };
+      });
+      return { ...d, questions };
+    });
+  };
+
+  const setEditCorrect = (qIndex: number, optionText: string) => {
+    updateEditQuestion(qIndex, 'correct_answer', optionText);
+  };
+
+  const removeEditQuestion = (qIndex: number) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      return { ...d, questions: d.questions.filter((_, i) => i !== qIndex) };
+    });
+  };
+
+  const removeActiveQuestion = () => {
+    if (editQIndex === null) return;
+    const index = editQIndex;
+    Alert.alert(
+      'Delete Question',
+      `Remove Question ${index + 1} from this quiz?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            removeEditQuestion(index);
+            goToList();
+          },
+        },
+      ],
+    );
+  };
+
+  const addEditQuestion = () => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const hasOptions = d.questions.length > 0 && d.questions[0].options.length > 0;
+      return {
+        ...d,
+        questions: [...d.questions, { question_text: '', options: hasOptions ? ['', ''] : [], correct_answer: '', explanation: '' }],
+      };
+    });
+    setEditQIndex((editDraft?.questions.length ?? 0));
+    setEditView('question');
+  };
+
   const handleSaveEdit = async () => {
-    if (!editTarget) return;
-    const title = editTitle.trim();
+    if (!editDraft) return;
+    const title = editDraft.title.trim();
     if (!title) {
       Alert.alert('Title Required', 'Please enter a title for your quiz.');
       return;
     }
+    for (let i = 0; i < editDraft.questions.length; i++) {
+      const q = editDraft.questions[i];
+      if (!q.question_text.trim()) {
+        Alert.alert('Incomplete Question', `Question ${i + 1} needs question text.`);
+        return;
+      }
+      if (q.options.length > 0) {
+        const nonEmpty = q.options.filter((o) => o.trim());
+        if (nonEmpty.length < 2) {
+          Alert.alert('Incomplete Question', `Question ${i + 1} needs at least two options.`);
+          return;
+        }
+        if (!q.correct_answer) {
+          Alert.alert('Missing Correct Answer', `Pick the correct answer for Question ${i + 1}.`);
+          return;
+        }
+      } else if (!q.correct_answer.trim()) {
+        Alert.alert('Missing Answer', `Question ${i + 1} needs an answer.`);
+        return;
+      }
+    }
+
     let available_until: string | null = null;
-    if (editDeadline.trim()) {
-      const parsed = parseDeadlineInput(editDeadline);
+    if (editDraft.available_until.trim()) {
+      const parsed = parseDeadlineInput(editDraft.available_until);
       if (!parsed) {
         Alert.alert('Invalid Deadline', 'Enter the deadline as YYYY-MM-DD HH:MM (24-hour), or leave it blank.');
         return;
@@ -182,12 +362,23 @@ export default function ActivitiesScreen() {
       }
       available_until = parsed.toISOString();
     }
+
     try {
       setIsSavingEdit(true);
-      const updated = await updateQuiz(editTarget.id, { title, available_until });
-      setQuizzes((prev) => prev.map((q) => (q.id === updated.id ? { ...q, ...updated } : q)));
+      const updated = await updateQuiz(editDraft.id, {
+        title,
+        available_until,
+        questions: editDraft.questions.map((q) => ({
+          id: q.id,
+          question_text: q.question_text.trim(),
+          options: q.options.map((o) => o.trim()).filter((o) => o !== ''),
+          correct_answer: q.correct_answer,
+          explanation: q.explanation.trim(),
+        })),
+      });
+      setQuizzes((prev) => prev.map((quiz) => (quiz.id === updated.id ? { ...quiz, ...updated } : quiz)));
       invalidateCachePrefix('/ai/quizzes');
-      setEditTarget(null);
+      closeEditor();
       Alert.alert('Saved', 'Your quiz was updated.');
     } catch (err) {
       Alert.alert('Save failed', err instanceof Error ? err.message : 'Could not update the quiz.');
@@ -196,23 +387,53 @@ export default function ActivitiesScreen() {
     }
   };
 
+  // --- 3-dots menu functions ---
+  const toggleMenu = (quizId: number) => {
+    setMenuQuizId(menuQuizId === quizId ? null : quizId);
+  };
+
+  const closeMenu = () => {
+    setMenuQuizId(null);
+  };
+
+  // --- Rename quiz ---
+  const openRenameModal = (quiz: Quiz) => {
+    setRenameQuizId(quiz.id);
+    setRenameTitle(quiz.title);
+    closeMenu();
+  };
+
+  const handleRenameQuiz = async () => {
+    if (!renameQuizId || !renameTitle.trim()) return;
+    try {
+      setIsRenaming(true);
+      const updated = await updateQuiz(renameQuizId, { title: renameTitle.trim() });
+      setQuizzes((prev) => prev.map((q) => (q.id === updated.id ? { ...q, ...updated } : q)));
+      invalidateCachePrefix('/ai/quizzes');
+      setRenameQuizId(null);
+      setRenameTitle('');
+      Alert.alert('Renamed', 'Quiz title updated.');
+    } catch (err) {
+      Alert.alert('Rename failed', err instanceof Error ? err.message : 'Could not rename the quiz.');
+    } finally {
+      setIsRenaming(false);
+    }
+  };
+
   const pickQuizFile = async () => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ['application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-        copyToCacheDirectory: true,
-      });
-      if (result.canceled) return;
-      setQuizFile(result.assets[0]);
+      const file = await pickDocument();
+      if (!file) return;
+      setQuizFile(file);
     } catch (err) {
       console.error("File picker error:", err);
-      Alert.alert("Error", "Failed to select file.");
+      Alert.alert("Unsupported file", describeFileError(err));
     }
   };
 
   const handleGenerateQuiz = async () => {
     if (!quizFile) {
-      Alert.alert("Material Required", "Please select a study material (PDF or Text) before generating a quiz.");
+      Alert.alert("Material Required", `Please select a study material (${SUPPORTED_LABEL}) before generating a quiz.`);
       return;
     }
     setIsGeneratingQuiz(true);
@@ -220,9 +441,7 @@ export default function ActivitiesScreen() {
       // Honest stage-based progress: real steps only, no fabricated percentages.
       setQuizGenerationStatus("Reading file...");
 
-      const base64Data = await FileSystem.readAsStringAsync(quizFile.uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
+      const base64Data = await readAsBase64(quizFile.uri);
 
       setQuizGenerationStatus("Generating questions...");
 
@@ -296,21 +515,23 @@ export default function ActivitiesScreen() {
   }, [loadInitialData]);
 
   const handleTakeQuiz = (quiz: Quiz) => {
-    if (quiz.attempted) {
-      Alert.alert('Already Taken', 'You already took this quiz. Each quiz can only be taken once.');
-      return;
-    }
     if (quiz.available_until && new Date(quiz.available_until).getTime() <= Date.now()) {
       Alert.alert('Quiz Closed', `This quiz closed on ${new Date(quiz.available_until).toLocaleString()}.`);
       return;
     }
+    // Retakes are unlimited — the server counts attempts and only ever pays
+    // the XP once, so there is nothing to guard against here.
+    const isRetake = (quiz.attempt_count ?? 0) > 0;
+    setInfoModalQuiz(null);
     Alert.alert(
-      'Take this quiz?',
-      `You can only take "${quiz.title}" once.`,
+      isRetake ? 'Retake this quiz?' : 'Take this quiz?',
+      isRetake
+        ? `This is attempt ${(quiz.attempt_count ?? 0) + 1} of "${quiz.title}". Only your best score counts.`
+        : `"${quiz.title}" — you can retake it as many times as you like.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Start',
+          text: isRetake ? 'Retake' : 'Start',
           onPress: async () => {
             setIsQuizStarting(true);
             try {
@@ -403,9 +624,12 @@ export default function ActivitiesScreen() {
   };
 
   const handleJoinGroup = async () => {
-    const code = joinCodeInput.trim().toUpperCase();
-    if (!code) {
-      Alert.alert('Code Required', 'Please enter the 6-character join code.');
+    const code = joinCodeToString(joinCodeInput);
+    if (code.length !== JOIN_CODE_LENGTH) {
+      Alert.alert(
+        'Code Required',
+        `Please enter the ${JOIN_CODE_LENGTH}-character join code. You've entered ${code.length}.`,
+      );
       return;
     }
     try {
@@ -418,7 +642,7 @@ export default function ActivitiesScreen() {
       });
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
-        setJoinCodeInput('');
+        setJoinCodeInput(Array(JOIN_CODE_LENGTH).fill(''));
         setIsJoinModalOpen(false);
         if (data?.status === 'pending') {
           Alert.alert('Request Sent', data.message || 'The group admin will approve your join request.');
@@ -438,15 +662,18 @@ export default function ActivitiesScreen() {
   };
 
   const handleJoinClass = async () => {
-    const code = classCodeInput.trim().toUpperCase();
-    if (!code) {
-      Alert.alert('Code Required', 'Please enter the join code shared by your educator.');
+    const code = joinCodeToString(classCodeInput);
+    if (code.length !== JOIN_CODE_LENGTH) {
+      Alert.alert(
+        'Code Required',
+        `Please enter the ${JOIN_CODE_LENGTH}-character join code shared by your educator. You've entered ${code.length}.`,
+      );
       return;
     }
     try {
       setIsJoiningClass(true);
       await joinCourseByCode(code);
-      setClassCodeInput('');
+      setClassCodeInput(Array(JOIN_CODE_LENGTH).fill(''));
       setIsJoinCourseModalOpen(false);
       await loadInitialData({ isRefresh: true });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -454,51 +681,6 @@ export default function ActivitiesScreen() {
       Alert.alert('Could Not Join Class', err instanceof Error ? err.message : 'Invalid join code.');
     } finally {
       setIsJoiningClass(false);
-    }
-  };
-
-  const handleGroupCodeChange = (t: string, i: number) => {
-    const char = t.slice(-1).toUpperCase();
-    const next = joinCodeInput.split('').slice(0, 6);
-    while (next.length < i) next.push('');
-    if (!char) {
-      next[i] = '';
-      if (i > 0) next[i - 1] = '';
-    } else {
-      next[i] = char;
-    }
-    setJoinCodeInput(next.join('').slice(0, 6));
-    if (char && i < 5) groupCodeRefs.current[i + 1]?.focus();
-    else if (!char && i > 0) groupCodeRefs.current[i - 1]?.focus();
-  };
-  const handleGroupCodeKeyPress = (e: any, i: number) => {
-    if (e.nativeEvent.key === 'Backspace' && !joinCodeInput[i] && i > 0) {
-      const next = joinCodeInput.split('');
-      next[i - 1] = '';
-      setJoinCodeInput(next.join(''));
-      groupCodeRefs.current[i - 1]?.focus();
-    }
-  };
-  const handleClassCodeChange = (t: string, i: number) => {
-    const char = t.slice(-1).toUpperCase();
-    const next = classCodeInput.split('').slice(0, 6);
-    while (next.length < i) next.push('');
-    if (!char) {
-      next[i] = '';
-      if (i > 0) next[i - 1] = '';
-    } else {
-      next[i] = char;
-    }
-    setClassCodeInput(next.join('').slice(0, 6));
-    if (char && i < 5) classCodeRefs.current[i + 1]?.focus();
-    else if (!char && i > 0) classCodeRefs.current[i - 1]?.focus();
-  };
-  const handleClassCodeKeyPress = (e: any, i: number) => {
-    if (e.nativeEvent.key === 'Backspace' && !classCodeInput[i] && i > 0) {
-      const next = classCodeInput.split('');
-      next[i - 1] = '';
-      setClassCodeInput(next.join(''));
-      classCodeRefs.current[i - 1]?.focus();
     }
   };
 
@@ -626,7 +808,17 @@ export default function ActivitiesScreen() {
             )}
             {quizzes.map((quiz) => (
               <View key={quiz.id} style={styles.card}>
-                <View style={styles.cardHeader}>
+                <TouchableOpacity
+                  style={styles.quizCardPress}
+                  onPress={() => {
+                    // Don't open the info sheet while the 3-dots menu is up.
+                    if (menuQuizId !== null) return;
+                    closeMenu();
+                    setInfoModalAttempted((quiz.attempt_count ?? 0) > 0);
+                    setInfoModalQuiz(quiz);
+                  }}
+                  activeOpacity={0.9}
+                >
                   <View style={{ flex: 1 }}>
                     <View style={styles.badgesRow}>
                       <View style={styles.badgePill}><Text style={styles.badgePillText}>{quiz.questions?.length || 0} Qs</Text></View>
@@ -642,51 +834,17 @@ export default function ActivitiesScreen() {
                       </Text>
                     )}
                   </View>
-                  <View style={styles.quizCardActions}>
-                    <TouchableOpacity
-                      style={styles.quizCardIconBtn}
-                      onPress={() => handleOpenEdit(quiz)}
-                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    >
-                      <Ionicons name="create-outline" size={18} color={COLORS.purpleVibrant} />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.quizCardIconBtn}
-                      onPress={() => handleShareQuiz(quiz)}
-                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    >
-                      <Ionicons name="share-outline" size={18} color={COLORS.purpleVibrant} />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.quizCardIconBtn}
-                      onPress={() => handleDeleteQuiz(quiz)}
-                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    >
-                      <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
-                    </TouchableOpacity>
-                  </View>
-                  {quiz.attempted ? (
-                    <View style={[styles.takeQuizBtn, { backgroundColor: COLORS.success, opacity: 0.8 }]}>
-                      <Ionicons name="checkmark-outline" size={16} color="white" />
-                      <Text style={styles.takeQuizBtnText}>Taken</Text>
-                    </View>
-                  ) : (
-                    <TouchableOpacity
-                      style={styles.takeQuizBtn}
-                      onPress={() => handleTakeQuiz(quiz)}
-                      disabled={isQuizStarting}
-                    >
-                      {isQuizStarting ? (
-                        <ActivityIndicator size="small" color="white" />
-                      ) : (
-                        <>
-                          <Ionicons name="play-outline" size={16} color="white" />
-                          <Text style={styles.takeQuizBtnText}>Take</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
-                  )}
-                </View>
+                  <TouchableOpacity
+                    style={styles.menuBtn}
+                    onPress={(e) => {
+                      e.stopPropagation();
+                      toggleMenu(quiz.id);
+                    }}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <Ionicons name="ellipsis-vertical" size={22} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                </TouchableOpacity>
               </View>
             ))}
           </View>
@@ -775,22 +933,15 @@ export default function ActivitiesScreen() {
               </TouchableOpacity>
               <Text style={styles.joinModalTitle}>JOIN GROUP</Text>
               <Text style={styles.joinModalSub}>Enter the code your classmate shared to join their study group.</Text>
-              <View style={styles.codeBoxes}>
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <TextInput
-                    key={i}
-                    ref={(r) => { groupCodeRefs.current[i] = r; }}
-                    style={[styles.codeBox, joinCodeInput[i] ? styles.codeBoxFilled : null]}
-                    value={joinCodeInput[i] || ''}
-                    onChangeText={(t) => handleGroupCodeChange(t, i)}
-                    onKeyPress={(e) => handleGroupCodeKeyPress(e, i)}
-                    maxLength={1}
-                    autoCapitalize="characters"
-                    autoCorrect={false}
-                    editable={!isSubmitting}
-                  />
-                ))}
-              </View>
+              <JoinCodeInput
+                slots={joinCodeInput}
+                onChange={setJoinCodeInput}
+                editable={!isSubmitting}
+                containerStyle={styles.codeBoxes}
+                boxStyle={styles.codeBox}
+                filledBoxStyle={styles.codeBoxFilled}
+                accessibilityLabel="Group code"
+              />
               <TouchableOpacity
                 style={[styles.joinSubmitBtn, isSubmitting && { opacity: 0.7 }]}
                 onPress={handleJoinGroup}
@@ -816,22 +967,15 @@ export default function ActivitiesScreen() {
               </TouchableOpacity>
               <Text style={styles.joinModalTitle}>JOIN CLASS</Text>
               <Text style={styles.joinModalSub}>Enter the 6-character join code shared by your educator.</Text>
-              <View style={styles.codeBoxes}>
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <TextInput
-                    key={i}
-                    ref={(r) => { classCodeRefs.current[i] = r; }}
-                    style={[styles.codeBox, classCodeInput[i] ? styles.codeBoxFilled : null]}
-                    value={classCodeInput[i] || ''}
-                    onChangeText={(t) => handleClassCodeChange(t, i)}
-                    onKeyPress={(e) => handleClassCodeKeyPress(e, i)}
-                    maxLength={1}
-                    autoCapitalize="characters"
-                    autoCorrect={false}
-                    editable={!isJoiningClass}
-                  />
-                ))}
-              </View>
+              <JoinCodeInput
+                slots={classCodeInput}
+                onChange={setClassCodeInput}
+                editable={!isJoiningClass}
+                containerStyle={styles.codeBoxes}
+                boxStyle={styles.codeBox}
+                filledBoxStyle={styles.codeBoxFilled}
+                accessibilityLabel="Class code"
+              />
               <TouchableOpacity
                 style={[styles.joinSubmitBtn, isJoiningClass && { opacity: 0.7 }]}
                 onPress={handleJoinClass}
@@ -907,7 +1051,7 @@ export default function ActivitiesScreen() {
                     <Text style={styles.quizGenMaterialMeta}>
                       {quizFile
                         ? `${quizFile.name.split('.').pop()?.toUpperCase() || 'FILE'} • ${quizFile.size ? (quizFile.size / (1024 * 1024)).toFixed(1) + ' MB' : 'Unknown size'}`
-                        : "Select a PDF or text file"}
+                        : `Select a ${SUPPORTED_LABEL} file`}
                     </Text>
                   </View>
                   <TouchableOpacity style={styles.quizGenChangeBtn} onPress={pickQuizFile}>
@@ -1051,60 +1195,270 @@ export default function ActivitiesScreen() {
         </View>
       </Modal>
 
-      {/* Edit own quiz (title + deadline) */}
+      {/* Edit own quiz — question list + per-question editor */}
       <Modal
         visible={editTarget !== null}
         animationType="slide"
-        transparent
-        onRequestClose={() => setEditTarget(null)}
+        onRequestClose={requestCloseEditor}
       >
-        <View style={styles.modalOverlay}>
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            style={styles.shareSheet}
-          >
-            <View style={styles.shareSheetHeader}>
-              <Text style={styles.shareSheetTitle}>Edit Quiz</Text>
-              <TouchableOpacity onPress={() => setEditTarget(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                <Ionicons name="close" size={24} color={COLORS.textMuted} />
+        <KeyboardAvoidingView style={styles.editorRoot} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          {editView === 'list' ? (
+            <View style={styles.editorHeader}>
+              <TouchableOpacity onPress={requestCloseEditor} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+              </TouchableOpacity>
+              <Text style={styles.editorHeaderTitle}>Edit Quiz</Text>
+              <TouchableOpacity
+                style={[styles.editorSaveBtn, isSavingEdit && { opacity: 0.6 }]}
+                onPress={handleSaveEdit}
+                disabled={isSavingEdit}
+              >
+                {isSavingEdit ? <ActivityIndicator size="small" color="white" /> : <Text style={styles.editorSaveText}>Save</Text>}
               </TouchableOpacity>
             </View>
+          ) : (
+            <View style={styles.editorHeader}>
+              <TouchableOpacity onPress={goToList} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                <Ionicons name="arrow-back" size={24} color={COLORS.textPrimary} />
+              </TouchableOpacity>
+              <Text style={styles.editorHeaderTitle}>
+                {editQIndex !== null ? `Question ${editQIndex + 1}` : 'Question'}
+              </Text>
+              <TouchableOpacity onPress={removeActiveQuestion} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                <Ionicons name="trash-outline" size={22} color={COLORS.danger} />
+              </TouchableOpacity>
+            </View>
+          )}
 
-            <Text style={styles.quizGenLabel}>Title</Text>
+          <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.editorContent}>
+            {editDraft && editView === 'list' && (
+              <>
+                <Text style={styles.editorLabel}>Quiz Title</Text>
+                <TextInput
+                  style={styles.editorTitleInput}
+                  value={editDraft.title}
+                  onChangeText={updateDraftTitle}
+                  placeholder="Quiz title"
+                  placeholderTextColor={COLORS.textMuted}
+                  editable={!isSavingEdit}
+                />
+
+                <Text style={styles.editorLabel}>Deadline (Optional) · YYYY-MM-DD HH:MM</Text>
+                <View style={styles.editorDeadlineRow}>
+                  <TextInput
+                    style={[styles.editorInput, { flex: 1 }]}
+                    value={editDraft.available_until}
+                    onChangeText={updateDraftDeadline}
+                    placeholder="e.g. 2026-10-01 23:59 — blank = no deadline"
+                    placeholderTextColor={COLORS.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    editable={!isSavingEdit}
+                  />
+                  {editDraft.available_until !== '' && (
+                    <TouchableOpacity
+                      style={styles.editorDeadlineClear}
+                      onPress={() => updateDraftDeadline('')}
+                      disabled={isSavingEdit}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    >
+                      <Ionicons name="close-circle" size={24} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+                  )}
+                </View>
+                <Text style={styles.editorMeta}>
+                  {editDraft.questions.length} {editDraft.questions.length === 1 ? 'question' : 'questions'} · {editTarget?.quiz_type || 'quiz'} · Tap a question to edit it
+                </Text>
+
+                {editDraft.questions.length === 0 && (
+                  <View style={styles.editorEmpty}>
+                    <Ionicons name="help-circle-outline" size={40} color={COLORS.textMuted} />
+                    <Text style={styles.editorEmptyText}>No questions yet — tap {"\u201CAdd Question\u201D"} below.</Text>
+                  </View>
+                )}
+
+                {editDraft.questions.map((question, qIndex) => (
+                  <TouchableOpacity
+                    key={question.id ?? `new-${qIndex}`}
+                    style={styles.questionRow}
+                    onPress={() => openQuestion(qIndex)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.questionRowNum}>
+                      <Text style={styles.questionRowNumText}>{qIndex + 1}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.questionRowText} numberOfLines={2}>
+                        {question.question_text.trim() || 'Untitled question'}
+                      </Text>
+                      <Text style={styles.questionRowMeta} numberOfLines={1}>
+                        Answer: {question.correct_answer.trim() || 'not set'}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                ))}
+
+                <TouchableOpacity style={styles.addQuestionBtn} onPress={addEditQuestion} disabled={isSavingEdit}>
+                  <Ionicons name="add-circle-outline" size={18} color={COLORS.purplePrimary} />
+                  <Text style={styles.addQuestionText}>Add Question</Text>
+                </TouchableOpacity>
+              </>
+            )}
+
+            {editDraft && editView === 'question' && editQIndex !== null && editDraft.questions[editQIndex] && (
+              (() => {
+                const question = editDraft.questions[editQIndex];
+                const qIndex = editQIndex;
+                return (
+                  <>
+                    <Text style={styles.editorLabel}>Question</Text>
+                    <TextInput
+                      style={[styles.editorInput, styles.questionTextInput]}
+                      value={question.question_text}
+                      onChangeText={(text) => updateEditQuestion(qIndex, 'question_text', text)}
+                      placeholder="Enter the question"
+                      placeholderTextColor={COLORS.textMuted}
+                      multiline
+                      editable={!isSavingEdit}
+                    />
+
+                    {question.options.length > 0 ? (
+                      <>
+                        <Text style={styles.editorLabel}>Options</Text>
+                        {question.options.map((option, oIndex) => {
+                          const isCorrect = option === question.correct_answer && !!option;
+                          return (
+                            <View key={oIndex} style={styles.optionRow}>
+                              <TouchableOpacity onPress={() => setEditCorrect(qIndex, option)} style={styles.optionCheck}>
+                                <Ionicons
+                                  name={isCorrect ? 'checkmark-circle' : 'ellipse-outline'}
+                                  size={20}
+                                  color={isCorrect ? COLORS.success : COLORS.textMuted}
+                                />
+                              </TouchableOpacity>
+                              <TextInput
+                                style={styles.optionInput}
+                                value={option}
+                                onChangeText={(text) => updateEditOption(qIndex, oIndex, text)}
+                                placeholder={`Option ${oIndex + 1}`}
+                                placeholderTextColor={COLORS.textMuted}
+                                editable={!isSavingEdit}
+                              />
+                              <TouchableOpacity onPress={() => removeEditOption(qIndex, oIndex)} style={styles.optionRemove} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                                <Ionicons name="close-circle" size={20} color={COLORS.textMuted} />
+                              </TouchableOpacity>
+                            </View>
+                          );
+                        })}
+                        <TouchableOpacity style={styles.addOptionBtn} onPress={() => addEditOption(qIndex)} disabled={isSavingEdit}>
+                          <Ionicons name="add" size={16} color={COLORS.purplePrimary} />
+                          <Text style={styles.addOptionText}>Add Option</Text>
+                        </TouchableOpacity>
+                        <Text style={styles.editorHint}>Tap the circle next to an option to mark it as the correct answer.</Text>
+                      </>
+                    ) : (
+                      <>
+                        <Text style={styles.editorLabel}>Answer</Text>
+                        <TextInput
+                          style={styles.editorInput}
+                          value={question.correct_answer}
+                          onChangeText={(text) => updateEditQuestion(qIndex, 'correct_answer', text)}
+                          placeholder="Enter the correct answer"
+                          placeholderTextColor={COLORS.textMuted}
+                          editable={!isSavingEdit}
+                        />
+                      </>
+                    )}
+
+                    <Text style={styles.editorLabel}>Explanation (Optional)</Text>
+                    <TextInput
+                      style={[styles.editorInput, styles.explanationInput]}
+                      value={question.explanation}
+                      onChangeText={(text) => updateEditQuestion(qIndex, 'explanation', text)}
+                      placeholder="Brief explanation why"
+                      placeholderTextColor={COLORS.textMuted}
+                      multiline
+                      editable={!isSavingEdit}
+                    />
+
+                    <TouchableOpacity style={styles.qDoneBtn} onPress={goToList} disabled={isSavingEdit}>
+                      <Ionicons name="checkmark" size={18} color="white" />
+                      <Text style={styles.qDoneBtnText}>Done</Text>
+                    </TouchableOpacity>
+                  </>
+                );
+              })()
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Quiz Info — in-tree overlay (a nested <Modal> would be dropped on Android) */}
+      <QuizInfoModal
+        quiz={infoModalQuiz}
+        attempted={infoModalAttempted}
+        starting={isQuizStarting}
+        onClose={() => setInfoModalQuiz(null)}
+        onStart={() => { const q = infoModalQuiz; if (q) handleTakeQuiz(q); }}
+      />
+
+      {/* Quiz 3-dots menu — in-tree overlay (Rename / Edit / Share / Delete) */}
+      {menuQuizId !== null && (() => {
+        const quiz = quizzes.find((q) => q.id === menuQuizId);
+        if (!quiz) return null;
+        return (
+          <Pressable style={styles.menuSheetOverlay} onPress={closeMenu}>
+            <Pressable style={styles.menuSheetCard} onPress={() => {}}>
+              <Text style={styles.menuSheetTitle} numberOfLines={2}>{quiz.title}</Text>
+              <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); openRenameModal(quiz); }} activeOpacity={0.7}>
+                <Ionicons name="pencil-outline" size={20} color={COLORS.textPrimary} style={styles.menuSheetIcon} />
+                <Text style={styles.menuSheetRowText}>Rename</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); openEditor(quiz); }} activeOpacity={0.7}>
+                <Ionicons name="create-outline" size={20} color={COLORS.purpleVibrant} style={styles.menuSheetIcon} />
+                <Text style={styles.menuSheetRowText}>Edit questions</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.menuSheetRow} onPress={() => { closeMenu(); handleShareQuiz(quiz); }} activeOpacity={0.7}>
+                <Ionicons name="share-outline" size={20} color={COLORS.purpleVibrant} style={styles.menuSheetIcon} />
+                <Text style={styles.menuSheetRowText}>Share</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.menuSheetRow, styles.menuSheetDanger]} onPress={() => { closeMenu(); handleDeleteQuiz(quiz); }} activeOpacity={0.7}>
+                <Ionicons name="trash-outline" size={20} color={COLORS.danger} style={styles.menuSheetIcon} />
+                <Text style={[styles.menuSheetRowText, { color: COLORS.danger }]}>Delete</Text>
+              </TouchableOpacity>
+            </Pressable>
+          </Pressable>
+        );
+      })()}
+
+      {/* Rename Quiz Modal */}
+      <Modal
+        visible={renameQuizId !== null}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => { setRenameQuizId(null); setRenameTitle(''); }}
+      >
+        <View style={styles.renameModalOverlay}>
+          <View style={styles.renameModalContent}>
+            <Text style={styles.renameModalTitle}>Rename Quiz</Text>
             <TextInput
-              style={styles.quizGenInput}
+              style={styles.renameModalInput}
+              value={renameTitle}
+              onChangeText={setRenameTitle}
               placeholder="Quiz title"
-              placeholderTextColor="#9CA3AF"
-              value={editTitle}
-              onChangeText={setEditTitle}
-              editable={!isSavingEdit}
+              placeholderTextColor={COLORS.textMuted}
+              autoFocus
             />
-
-            <Text style={styles.quizGenLabel}>Deadline (optional)</Text>
-            <TextInput
-              style={styles.quizGenInput}
-              placeholder="YYYY-MM-DD HH:MM"
-              placeholderTextColor="#9CA3AF"
-              value={editDeadline}
-              onChangeText={setEditDeadline}
-              autoCapitalize="none"
-              autoCorrect={false}
-              editable={!isSavingEdit}
-            />
-            <Text style={styles.shareSheetHint}>
-              24-hour time. Leave blank for no deadline. This quiz has {editTarget?.questions?.length || 0} question(s); questions cannot be edited here.
-            </Text>
-
-            <TouchableOpacity
-              style={[styles.quizGenGenerateButton, isSavingEdit && { opacity: 0.7 }]}
-              onPress={handleSaveEdit}
-              disabled={isSavingEdit}
-            >
-              {isSavingEdit ? <ActivityIndicator color="white" /> : (
-                <Text style={styles.quizGenGenerateButtonText}>Save Changes</Text>
-              )}
-            </TouchableOpacity>
-          </KeyboardAvoidingView>
+            <View style={styles.renameModalActions}>
+              <TouchableOpacity style={styles.renameModalCancel} onPress={() => { setRenameQuizId(null); setRenameTitle(''); }}>
+                <Text style={styles.renameModalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.renameModalConfirm, isRenaming && { opacity: 0.7 }]} onPress={handleRenameQuiz} disabled={isRenaming}>
+                {isRenaming ? <ActivityIndicator color="white" size="small" /> : <Text style={styles.renameModalConfirmText}>Rename</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
       </Modal>
 
@@ -1272,12 +1626,14 @@ const styles = StyleSheet.create({
     marginBottom: 16, 
     borderWidth: 1, 
     borderColor: COLORS.border,
+    position: 'relative',
     shadowColor: COLORS.purpleDeep,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.1,
     shadowRadius: 8,
     elevation: 2,
   },
+  quizCardPress: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 0 },
   colorDot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
   subjectBadge: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
@@ -1305,6 +1661,262 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: COLORS.bg,
   },
+  menuBtn: { padding: 8 },
+  // Absolute, not flex:1. The screen root is a column, so a flex child here
+  // would split the height with the list and squash it into the top half.
+  menuSheetOverlay: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24,
+    zIndex: 20,
+    elevation: 20,
+  },
+  menuSheetCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    width: '100%',
+    maxWidth: 360,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  menuSheetTitle: {
+    fontSize: 14,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textMutedStrong,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    marginBottom: 4,
+  },
+  menuSheetRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderRadius: 12 },
+  menuSheetIcon: { width: 24 },
+  menuSheetRowText: { fontSize: 15, fontFamily: FONTS.medium, fontWeight: '600', color: COLORS.textPrimary },
+  menuSheetDanger: { marginTop: 4, borderTopWidth: 1, borderTopColor: COLORS.border, paddingTop: 16 },
+
+  // Quiz info modal
+  infoModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24 },
+  infoModalCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 24,
+    padding: 24,
+    width: '100%',
+    maxWidth: 380,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  infoModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  infoModalBadge: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  closeBtn: { padding: 4 },
+  infoModalTitle: { fontSize: 20, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginBottom: 16 },
+  infoModalMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 },
+  infoModalMetaText: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.textPrimary, flexShrink: 1 },
+  infoModalStartBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: 14,
+    paddingVertical: 14,
+    marginTop: 8,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  infoModalStartBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 15 },
+
+  // Quiz editor (Edit own quiz)
+  editorRoot: { flex: 1, backgroundColor: COLORS.bg },
+  editorHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    backgroundColor: COLORS.surface,
+  },
+  editorHeaderBtn: { padding: 8 },
+  editorHeaderTitle: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary },
+  editorSaveBtn: {
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    minWidth: 64,
+    alignItems: 'center',
+  },
+  editorSaveText: { color: 'white', fontFamily: FONTS.bold, fontSize: 14 },
+  editorContent: { padding: 20, paddingBottom: 48 },
+  editorLabel: {
+    fontSize: 13,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textMutedStrong,
+    marginTop: 14,
+    marginBottom: 6,
+  },
+  editorInput: {
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+  },
+  editorTitleInput: {
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    fontFamily: FONTS.semiBold,
+    color: COLORS.textPrimary,
+  },
+  editorDeadlineRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  editorDeadlineClear: { padding: 4 },
+  editorMeta: { fontSize: 12, color: COLORS.textMuted, marginTop: 10, fontFamily: FONTS.regular, lineHeight: 17 },
+  editorHint: { fontSize: 12, color: COLORS.textMuted, marginTop: 8, fontFamily: FONTS.regular, lineHeight: 17 },
+  editorEmpty: { alignItems: 'center', paddingVertical: 36, gap: 10 },
+  editorEmptyText: { fontSize: 13, color: COLORS.textMuted, fontFamily: FONTS.regular },
+  questionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    marginTop: 10,
+  },
+  questionRowNum: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.purpleGhost,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  questionRowNumText: { fontSize: 14, fontFamily: FONTS.bold, color: COLORS.purplePrimary },
+  questionRowText: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.textPrimary },
+  questionRowMeta: { fontSize: 12, color: COLORS.textMuted, marginTop: 3, fontFamily: FONTS.regular },
+  questionTextInput: { minHeight: 60, textAlignVertical: 'top' },
+  qDoneBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: 14,
+    paddingVertical: 14,
+    marginTop: 22,
+    shadowColor: COLORS.purpleDeep,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  qDoneBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 15 },
+  optionRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
+  optionCheck: { padding: 4 },
+  optionInput: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+  },
+  optionRemove: { padding: 4 },
+  addOptionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, alignSelf: 'flex-start' },
+  addOptionText: { fontSize: 13, fontFamily: FONTS.semiBold, color: COLORS.purplePrimary },
+  explanationInput: { minHeight: 70, textAlignVertical: 'top' },
+  addQuestionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 18,
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: COLORS.purpleLight,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  addQuestionText: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.purplePrimary },
+
+  // Rename modal
+  renameModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  renameModalContent: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    padding: 24,
+    width: '85%',
+    maxWidth: 360,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  renameModalTitle: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginBottom: 16, textAlign: 'center' },
+  renameModalInput: {
+    backgroundColor: COLORS.bg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textPrimary,
+    marginBottom: 16,
+  },
+  renameModalActions: { flexDirection: 'row', gap: 12 },
+  renameModalCancel: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  renameModalCancelText: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.textSecondary },
+  renameModalConfirm: {
+    flex: 1,
+    backgroundColor: COLORS.purplePrimary,
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  renameModalConfirmText: { fontSize: 14, fontFamily: FONTS.bold, color: 'white' },
+
   shareSheet: {
     backgroundColor: COLORS.surface,
     borderTopLeftRadius: 24,
@@ -1354,7 +1966,7 @@ const styles = StyleSheet.create({
   closeInviteBtn: { position: 'absolute', top: 16, right: 16, padding: 4, zIndex: 10 },
   joinModalTitle: { fontSize: 20, fontFamily: FONTS.black, color: COLORS.purpleDeep, marginBottom: 6 },
   joinModalSub: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textMuted, textAlign: 'center', marginBottom: 24 },
-  codeBoxes: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 24 },
+  codeBoxes: { marginBottom: 24 },
   codeBox: {
     width: 40,
     height: 50,

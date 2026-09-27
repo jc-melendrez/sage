@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Animated
@@ -9,6 +9,7 @@ import { API_BASE_URL } from '@/config/api';
 import * as DocumentPicker from 'expo-document-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import JoinCodeInput, { JOIN_CODE_LENGTH, isJoinCodeComplete, joinCodeToString } from '@/components/JoinCodeInput';
 
 const COLORS = {
   bg: '#0f0c29',
@@ -58,7 +59,7 @@ export default function ClassicGameSetupScreen() {
   const router = useRouter();
   const { mode: paramMode, teamMode: paramTeamMode } = useLocalSearchParams<{ mode?: string; teamMode?: string }>();
   const groupMode = paramMode === 'create' && paramTeamMode === 'true';
-  const [joinCode, setJoinCode] = useState('');
+  const [joinCode, setJoinCode] = useState<string[]>(() => Array(JOIN_CODE_LENGTH).fill(''));
   const [timePerQuestion, setTimePerQuestion] = useState('15');
   const [teamMode, setTeamMode] = useState(paramTeamMode === 'true');
   const [teamCount, setTeamCount] = useState(2);
@@ -99,7 +100,6 @@ export default function ClassicGameSetupScreen() {
   const joinCardScale = useRef(new Animated.Value(1)).current;
 
   /* â”€â”€ new UI-only refs â”€â”€ */
-  const codeRefs = useRef<any[]>([]);
   const heroAnim = useRef(new Animated.Value(0)).current;
   const createCardAnim = useRef(new Animated.Value(0)).current;
   const joinCardAnim = useRef(new Animated.Value(0)).current;
@@ -143,26 +143,6 @@ export default function ClassicGameSetupScreen() {
   useEffect(() => {
     Animated.spring(segmentSlide, { toValue: useFileUpload ? 1 : 0, friction: 8, tension: 80, useNativeDriver: true }).start();
   }, [useFileUpload]);
-
-  /* â”€â”€ join-code box handlers (feed the SAME joinCode state) â”€â”€ */
-  const handleCodeChange = (text: string, index: number) => {
-    const char = text.slice(-1).toUpperCase();
-    const slots = Array.from({ length: 6 }, (_, i) => joinCode[i] || '');
-    slots[index] = char;
-    // compact leftward so joinCode is always a clean contiguous string
-    const next = slots.join('').replace(/\s/g, '').substring(0, 6);
-    setJoinCode(next);
-    const firstEmpty = Math.min(next.length, 5);
-    codeRefs.current[char ? firstEmpty : Math.max(0, index - 1)]?.focus();
-  };
-  const handleCodeKeyPress = (e: any, index: number) => {
-    if (e.nativeEvent.key === 'Backspace' && !joinCode[index] && index > 0) {
-      const next = joinCode.split('');
-      next[index - 1] = '';
-      setJoinCode(next.join(''));
-      codeRefs.current[index - 1]?.focus();
-    }
-  };
 
   /* â”€â”€ original handlers (unchanged) â”€â”€ */
   const pickDocument = async () => {
@@ -226,8 +206,8 @@ export default function ClassicGameSetupScreen() {
   };
 
   const handleJoin = async () => {
-    if (!joinCode.trim()) {
-      Alert.alert('Error', 'Please enter a room code');
+    if (!isJoinCodeComplete(joinCode)) {
+      Alert.alert('Incomplete Code', `Room codes are ${JOIN_CODE_LENGTH} characters.`);
       return;
     }
     setLoading(true);
@@ -239,11 +219,11 @@ export default function ClassicGameSetupScreen() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
         },
-        body: JSON.stringify({ roomCode: joinCode.toUpperCase() }),
+        body: JSON.stringify({ roomCode: joinCodeToString(joinCode) }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Failed to join room');
-      router.push({ pathname: '/game/lobby', params: { roomCode: joinCode.toUpperCase(), isHost: 'false', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
+      router.push({ pathname: '/game/lobby', params: { roomCode: joinCodeToString(joinCode), isHost: 'false', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
     } catch (error: any) {
       Alert.alert('Error', error.message);
     } finally {
@@ -254,7 +234,7 @@ export default function ClassicGameSetupScreen() {
   const segPad = 4;
   const segInner = Math.max(0, segWidth - segPad * 2);
   const createDisabled = (!selectedQuiz && !selectedFile) || loading;
-  const joinDisabled = !joinCode.trim() || loading;
+  const joinDisabled = !isJoinCodeComplete(joinCode) || loading;
 
   /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      HOME
@@ -701,21 +681,14 @@ export default function ClassicGameSetupScreen() {
                     <Text style={styles.codeLabel}>Enter Room Code</Text>
 
                     {/* 6 character boxes â€” same DNA as the identification answer boxes */}
-                    <View style={styles.codeBoxes}>
-                      {Array.from({ length: 6 }).map((_, i) => (
-                        <TextInput
-                          key={i}
-                          ref={(r) => { codeRefs.current[i] = r; }}
-                          style={[styles.codeBox, joinCode[i] ? styles.codeBoxFilled : null]}
-                          value={joinCode[i] || ''}
-                          onChangeText={(t) => handleCodeChange(t, i)}
-                          onKeyPress={(e) => handleCodeKeyPress(e, i)}
-                          maxLength={1}
-                          autoCapitalize="characters"
-                          selectionColor={COLORS.accent}
-                        />
-                      ))}
-                    </View>
+                    <JoinCodeInput
+                      slots={joinCode}
+                      onChange={setJoinCode}
+                      containerStyle={styles.codeBoxes}
+                      boxStyle={styles.codeBox}
+                      filledBoxStyle={styles.codeBoxFilled}
+                      accessibilityLabel="Room code"
+                    />
 
                     <Text style={styles.codeHint}>Ask your host for the 6-character code</Text>
                   </View>
@@ -1095,7 +1068,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center', alignItems: 'center', marginBottom: 16,
   },
   codeLabel: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.textSecondary, marginBottom: 18 },
-  codeBoxes: { flexDirection: 'row', gap: 8, marginBottom: 16 },
+  codeBoxes: { marginBottom: 16 },
   codeBox: {
     width: 44, height: 56, borderRadius: 12,
     borderWidth: 2, borderColor: 'rgba(34,211,238,0.3)',

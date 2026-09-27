@@ -33,6 +33,7 @@ import { LanMessage, LanPlayer, generateRoomCode } from '@/services/lanProtocol'
 import { startScanning, stopScanning, startAdvertising, stopAdvertising, DiscoveredRoom } from '@/services/lanDiscovery';
 import { buildQuestions } from '@/services/offlineEngine';
 import { pfpSource } from '@/constants/pfps';
+import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/JoinCodeInput';
 
 // 🎨 SAGE Design System Colors
 const COLORS = {
@@ -94,7 +95,7 @@ export default function GameCenterScreen() {
   const [teamCountDraft, setTeamCountDraft] = useState('');
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showJoinModal, setShowJoinModal] = useState(false);
-  const [joinCode, setJoinCode] = useState('');
+  const [joinCode, setJoinCode] = useState<string[]>(() => Array(JOIN_CODE_LENGTH).fill(''));
   const [joining, setJoining] = useState(false);
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [roomTopic, setRoomTopic] = useState<string>('');
@@ -299,7 +300,10 @@ export default function GameCenterScreen() {
         setQuizzes(list);
         setUsingCachedQuizzes(false);
         cacheQuizzes(list);
-        if (list.length > 0) setSelectedQuiz(list[0]);
+        // No implicit "pick the first one for you" — the selector has to say
+        // which quiz is being played, otherwise the host starts a game on a
+        // quiz nobody chose. The guard in startGame reports it instead.
+        setSelectedQuiz(prev => (list.some(q => q.id === prev?.id) ? prev : null));
         setLoadingQuizzes(false);
         return;
       }
@@ -310,7 +314,7 @@ export default function GameCenterScreen() {
     if (cached.length > 0) {
       setQuizzes(cached);
       setUsingCachedQuizzes(true);
-      setSelectedQuiz(prev => prev ?? cached[0]);
+      setSelectedQuiz(prev => (cached.some(q => q.id === prev?.id) ? prev : null));
     }
     setLoadingQuizzes(false);
   }, []);
@@ -363,8 +367,32 @@ export default function GameCenterScreen() {
     }
   };
 
+  /**
+   * Returns the chosen quiz when mode + quiz are both set, or null after
+   * showing an alert that names the missing pieces. A single generic "select
+   * a mode and quiz" message was unhelpful because you could not tell which
+   * one was the problem.
+   *
+   * Returning the quiz also narrows the type for the callers below, which
+   * would otherwise need their own `if (!selectedQuiz)` just to satisfy TS.
+   */
+  const requirePlaySelections = (): Quiz | null => {
+    const missing: string[] = [];
+    if (!selectedMode) missing.push('a game mode (Classic or Teams)');
+    if (!selectedQuiz) missing.push('a quiz');
+    if (missing.length === 0) return selectedQuiz;
+    Alert.alert(
+      missing.length === 2 ? 'Nothing Selected Yet' : 'Almost There',
+      `Please choose ${missing.join(' and ')} before starting a game.`,
+    );
+    return null;
+  };
+
   // 2. Handle Invite Press -> Create Room (if needed) & Show Code Modal
   const handleInvitePress = async () => {
+    const quiz = requirePlaySelections();
+    if (!quiz) return;
+
     if (isOffline || usingCachedQuizzes) {
       if (!lanHostRef.current) {
         setLanJoined([]);
@@ -395,12 +423,6 @@ export default function GameCenterScreen() {
       return;
     }
 
-    // Validate settings before creating
-    if (!selectedQuiz) {
-      Alert.alert("Missing Quiz", "Please select a game mode and quiz first.");
-      return;
-    }
-
     setIsCreatingRoom(true);
     try {
       const token = await getToken();
@@ -411,7 +433,7 @@ export default function GameCenterScreen() {
           'Authorization': `Bearer ${token}` 
         },
         body: JSON.stringify({
-          quizId: selectedQuiz.id,
+          quizId: quiz.id,
           timePerQuestion: parseInt(timePerQuestion) || 15,
           teamMode: selectedMode === 'group' ? 'true' : 'false',
           autoAssignTeams: selectedMode === 'group' ? 'true' : 'false',
@@ -423,7 +445,7 @@ export default function GameCenterScreen() {
       if (!response.ok) throw new Error(data.error || 'Failed to create room');
 
       setRoomCode(data.roomCode);
-      setRoomTopic(data.topic || selectedQuiz.title);
+      setRoomTopic(data.topic || quiz.title);
       // Sync host's selected mode to the room doc for joined players
       firestore()
         .collection('gameRooms')
@@ -453,7 +475,8 @@ export default function GameCenterScreen() {
       }
       console.log(`[game/index] START path: lan-broadcast (players=${host.playerCount})`);
       if (!selectedQuiz) {
-        Alert.alert('Missing Quiz', 'Please select a quiz first.');
+        const quiz = requirePlaySelections();
+    if (!quiz) return;
         return;
       }
       const count = buildQuestions(selectedQuiz).length;
@@ -507,7 +530,8 @@ export default function GameCenterScreen() {
     if (!roomCode) {
        // If no room exists, create one first silently
        if (!selectedQuiz) {
-        Alert.alert("Missing Quiz", "Please select a quiz first.");
+        const quiz = requirePlaySelections();
+    if (!quiz) return;
         return;
       }
       
@@ -599,19 +623,17 @@ export default function GameCenterScreen() {
   };
 
   const startOfflineGame = () => {
-    if (!selectedQuiz) {
-      Alert.alert("Missing Quiz", "Please select a quiz first.");
-      return;
-    }
+    const quiz = requirePlaySelections();
+    if (!quiz) return;
     console.log('[game/index] START path: offline-solo');
     const time = parseInt(timePerQuestion, 10) || 15;
     try {
-      createOfflineGame(selectedQuiz, time);
+      createOfflineGame(quiz, time);
     } catch (error: any) {
       Alert.alert("Can't Play Offline", error.message);
       return;
     }
-    runCountdown('OFFLINE', { offline: 'true', quizTitle: selectedQuiz.title }, '/game/question' as any);
+    runCountdown('OFFLINE', { offline: 'true', quizTitle: quiz.title }, '/game/question' as any);
   };
 
   const copyCode = async () => {
@@ -714,7 +736,7 @@ export default function GameCenterScreen() {
         lanGame.roomCode = code;
         lanGame.role = 'player';
         setShowJoinModal(false);
-        setJoinCode('');
+        setJoinCode(Array(JOIN_CODE_LENGTH).fill(''));
         resolve(true);
       } catch {
         setLanClient(null);
@@ -723,9 +745,9 @@ export default function GameCenterScreen() {
     });
 
   const handleJoin = async () => {
-    const code = joinCode.trim().toUpperCase();
-    if (!code) {
-      Alert.alert('Error', 'Please enter a room code');
+    const code = joinCodeToString(joinCode);
+    if (code.length !== JOIN_CODE_LENGTH) {
+      Alert.alert('Incomplete Code', `Room codes are ${JOIN_CODE_LENGTH} characters. You've entered ${code.length}.`);
       return;
     }
     setJoining(true);
@@ -752,7 +774,7 @@ export default function GameCenterScreen() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Failed to join room');
       setShowJoinModal(false);
-      setJoinCode('');
+      setJoinCode(Array(JOIN_CODE_LENGTH).fill(''));
       // Stay on Play tab — joined room view
       setRoomCode(code);
       setRoomTopic(data.topic || '');
@@ -812,31 +834,6 @@ export default function GameCenterScreen() {
         },
       ]
     );
-  };
-
-  const codeBoxRefs = useRef<any[]>([]);
-  const handleCodeChange = (t: string, i: number) => {
-    const char = t.slice(-1).toUpperCase();
-    const next = joinCode.split('').slice(0, 6);
-    while (next.length < i) next.push('');
-    if (!char) {
-      next[i] = '';
-      if (i > 0) next[i - 1] = '';
-    } else {
-      next[i] = char;
-    }
-    const clean = next.join('').slice(0, 6);
-    setJoinCode(clean);
-    if (char && i < 5) codeBoxRefs.current[i + 1]?.focus();
-    else if (!char && i > 0) codeBoxRefs.current[i - 1]?.focus();
-  };
-  const handleCodeKeyPress = (e: any, i: number) => {
-    if (e.nativeEvent.key === 'Backspace' && !joinCode[i] && i > 0) {
-      const next = joinCode.split('');
-      next[i - 1] = '';
-      setJoinCode(next.join(''));
-      codeBoxRefs.current[i - 1]?.focus();
-    }
   };
 
   const assignToTeam = async (teamId: string) => {
@@ -1412,22 +1409,15 @@ export default function GameCenterScreen() {
                     <Text style={styles.modalTitle}>JOIN ROOM</Text>
                     <Text style={styles.modalSub}>Enter the room code — finds LAN games on your hotspot too</Text>
 
-                    <View style={styles.codeBoxes}>
-                        {Array.from({ length: 6 }).map((_, i) => (
-                            <TextInput
-                                key={i}
-                                ref={(r) => { codeBoxRefs.current[i] = r; }}
-                                style={[styles.codeBox, joinCode[i] ? styles.codeBoxFilled : null]}
-                                value={joinCode[i] || ''}
-                                onChangeText={(t) => handleCodeChange(t, i)}
-                                onKeyPress={(e) => handleCodeKeyPress(e, i)}
-                                maxLength={1}
-                                autoCapitalize="characters"
-                                autoCorrect={false}
-                                editable={!joining}
-                            />
-                        ))}
-                    </View>
+                    <JoinCodeInput
+                        slots={joinCode}
+                        onChange={setJoinCode}
+                        editable={!joining}
+                        containerStyle={styles.codeBoxes}
+                        boxStyle={styles.codeBox}
+                        filledBoxStyle={styles.codeBoxFilled}
+                        accessibilityLabel="Room code"
+                    />
 
                     <TouchableOpacity 
                         style={[styles.copyCodeBtn, joining && { opacity: 0.7 }]}
@@ -2116,9 +2106,6 @@ const styles = StyleSheet.create({
     color: COLORS.purpleDark,
   },
   codeBoxes: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 8,
     marginBottom: 24,
   },
   codeBox: {

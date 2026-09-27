@@ -1,6 +1,7 @@
 import json
 import requests
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -9,9 +10,325 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from .models import ChatSession, ChatMessage, Quiz, QuizAttempt, QuizQuestion
 from .serializers import QuizSerializer, _display_name, _percent # Import the new serializer
 from users.models import Course
-from users.utils.file_parser import extract_text_from_file
+from users.utils.file_parser import (
+    extract_text_from_bytes,
+    extract_text_from_file,
+    UnsupportedDocumentFormat,
+    SUPPORTED_EXTENSIONS,
+)
 import base64
 from io import BytesIO
+
+
+# Matches the app-side cap in services/fileUpload.ts. Generous enough for a
+# slide deck or a long report, small enough to keep the base64 JSON body sane.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+# Images are described to the model, not dumped as text. Gemini accepts these
+# inline; anything outside the list is rejected before we spend a token on it.
+SUPPORTED_IMAGE_MIMES = {'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'}
+IMAGE_EXT_MIMES = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp'}
+
+# Gemini is only consulted for images. Text keeps using DeepSeek.
+GEMINI_MODEL = getattr(settings, 'GEMINI_MODEL_NAME', 'gemini-2.0-flash')
+GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
+
+
+def _is_image_upload(raw_upload, mime, filename):
+    """True when this upload is an image we should hand to a vision model."""
+    # For multipart the browser sets content_type on the file; for the base64
+    # JSON the app sends the same value as a `mime` key. Both have to be
+    # honoured, otherwise the "claimed image MIME we cannot use" rule below only
+    # held for one of the two upload paths.
+    if hasattr(raw_upload, 'content_type'):
+        candidate = (getattr(raw_upload, 'content_type', '') or '').split(';')[0].strip().lower()
+    else:
+        candidate = (mime or '').split(';')[0].strip().lower()
+    if candidate:
+        if candidate in SUPPORTED_IMAGE_MIMES:
+            return True
+        if candidate.startswith('image/'):
+            # A claimed image MIME we do not support should not silently fall
+            # through to the text extractor, which would return mojibake.
+            return False
+    ext = (filename or '').rsplit('.', 1)[-1].lower() if '.' in (filename or '') else ''
+    return ext in IMAGE_EXT_MIMES
+
+
+def _read_image_bytes(raw_upload):
+    """Return ``(bytes, mime, error_response)`` for an image upload.
+
+    The text extractors must never see an image: decoding a PNG as UTF-8
+    produces mojibake that then gets sent to the model as if it were the
+    user's document.
+    """
+    name = ''
+    if hasattr(raw_upload, 'read'):
+        name = str(getattr(raw_upload, 'name', '') or '')
+        mime = (getattr(raw_upload, 'content_type', '') or '').split(';')[0].strip().lower()
+        try:
+            raw_upload.seek(0)
+            data = raw_upload.read()
+        except Exception:
+            return None, '', Response({"error": f'Could not read "{name}". The file may be corrupt.'}, status=400)
+    elif isinstance(raw_upload, dict) and raw_upload.get('data'):
+        name = str(raw_upload.get('name') or 'photo')
+        mime = str(raw_upload.get('mime') or '').split(';')[0].strip().lower()
+        try:
+            data = base64.b64decode(raw_upload['data'])
+        except Exception:
+            return None, '', Response({"error": 'Could not decode the uploaded image.'}, status=400)
+    else:
+        return None, '', Response({"error": 'Could not read the uploaded image.'}, status=400)
+
+    if not data:
+        return None, '', Response({"error": f'"{name}" is empty.'}, status=400)
+    if len(data) > MAX_UPLOAD_BYTES:
+        return None, '', Response(
+            {"error": f'"{name}" is larger than 10 MB. Please upload a smaller image.'},
+            status=400,
+        )
+
+    if mime not in SUPPORTED_IMAGE_MIMES:
+        ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+        mime = IMAGE_EXT_MIMES.get(ext, '')
+    if mime not in SUPPORTED_IMAGE_MIMES:
+        return None, '', Response(
+            {"error": f'"{name}" is not a supported image. Use JPEG, PNG or WebP.'},
+            status=400,
+        )
+
+    return data, mime, None
+
+
+def _markdown_style_guide():
+    return (
+        "Format your answers with Markdown so they render nicely on a phone: "
+        "use short '### ' headings to split sections, '**bold**' for key terms, "
+        "'- ' bullets or '1. ' numbered lists for steps/points, and inline "
+        "'`code`' or code blocks where relevant. Avoid decorative '---' "
+        "separators, walls of '## ' headings, cluttered emoji or asterisks. "
+        "Keep answers easy to scan on a small screen."
+    )
+
+
+def _chat_history_for(session, limit=None):
+    """Recent turns as OpenAI-style role/content pairs, oldest first."""
+    if not session:
+        return []
+    limit = limit or settings.CHAT_MEMORY_LIMIT
+    recent = ChatMessage.objects.filter(session=session).order_by('-created_at')[:limit]
+    return [
+        {"role": "assistant" if m.is_ai else "user", "content": m.text or ''}
+        for m in reversed(list(recent))
+    ]
+
+
+def _ask_deepseek(attachment_text, user_message, session):
+    """Text path: plain questions and extracted document text."""
+    api_key = getattr(settings, 'DEEPSEEK_API_KEY', None)
+    if not api_key:
+        return "I'm sorry, my AI brain is temporarily offline. Please check the server logs!"
+
+    prompt = user_message
+    if attachment_text:
+        prompt = f"[File Content]:\n{attachment_text}\n\nUser Question: {user_message or 'Please summarise and explain this document.'}"
+
+    payload = {
+        "model": "deepseek-v4-flash",
+        # V4 thinks by default; disable it so the 2048-token budget isn't
+        # eaten by hidden reasoning (which would truncate the visible answer).
+        "thinking": {"type": "disabled"},
+        "max_tokens": 2048,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are SAGE, a Smart Assistant for Group-Based Education. "
+                    "You help students learn by providing clear, concise, and "
+                    "engaging educational explanations.\n\n"
+                    + _markdown_style_guide()
+                ),
+            },
+            *_chat_history_for(session),
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    try:
+        response = requests.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()['choices'][0]['message']['content']
+    except Exception as exc:
+        print(f"DeepSeek API Error: {exc}")
+        return "I'm sorry, my AI brain is temporarily offline. Please check the server logs!"
+
+
+def _ask_gemini_about_image(image_bytes, image_mime, user_message, file_name, session):
+    """Vision path: the image is inlined and the model answers about it."""
+    api_key = getattr(settings, 'GEMINI_API_KEY', None)
+    if not api_key:
+        # Be explicit about the missing config -- a generic "I'm offline"
+        # here would send people looking for a network problem that isn't one.
+        return (
+            "I can read photos, but photo questions are not switched on for this "
+            "server yet. Try describing the question in text and I'll help."
+        )
+
+    question = (user_message or '').strip() or (
+        f"Describe this image ({file_name or 'photo'}) and explain anything "
+        "in it that would help a student learn."
+    )
+
+    parts = [
+        {
+            "inline_data": {
+                "mime_type": image_mime,
+                "data": base64.b64encode(image_bytes).decode('ascii'),
+            }
+        },
+        {"text": question},
+    ]
+
+    contents = [{"role": "user", "parts": parts}]
+    # Prior text turns give the model context for "and explain the second one",
+    # but we never forward stored image bytes, so skip the chip-only turns.
+    for turn in _chat_history_for(session):
+        if turn['content']:
+            contents.insert(0, {
+                "role": turn['role'] if turn['role'] in ('user', 'model') else 'user',
+                "parts": [{"text": turn['content']}],
+            })
+
+    payload = {
+        "contents": contents,
+        "systemInstruction": {
+            "parts": [{
+                "text": (
+                    "You are SAGE, a Smart Assistant for Group-Based Education. "
+                    "You help students learn by providing clear, concise, and "
+                    "engaging educational explanations. When you are shown an "
+                    "image, describe what is relevant to the question rather than "
+                    "listing everything you can see. If the image is unreadable or "
+                    "you cannot tell what it shows, say so instead of guessing.\n\n"
+                    + _markdown_style_guide()
+                )
+            }]
+        },
+        "generationConfig": {"maxOutputTokens": 2048},
+    }
+
+    try:
+        response = requests.post(
+            GEMINI_ENDPOINT.format(model=GEMINI_MODEL),
+            params={"key": api_key},
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30,  # vision is slower than a text turn
+        )
+        if response.status_code != 200:
+            print(f"Gemini API Error {response.status_code}: {response.text[:500]}")
+            return "I couldn't read that photo just now. Please try again in a moment."
+        candidates = response.json().get('candidates') or []
+        if not candidates:
+            return "I couldn't work out an answer for that photo. Could you rephrase the question?"
+        parts_out = (candidates[0].get('content') or {}).get('parts') or []
+        reply = ''.join(p.get('text', '') for p in parts_out).strip()
+        return reply or "I received the photo but could not produce an answer for it."
+    except Exception as exc:
+        print(f"Gemini API Error: {exc}")
+        return "I couldn't read that photo just now. Please try again in a moment."
+
+
+def _upload_meta(raw_upload):
+    """Best-effort name/mime/size for an upload, for the message chip.
+
+    Kept separate from `_read_upload` so callers can record the metadata even
+    when extraction fails and the turn is rejected -- the chip is what tells
+    the user which document a conversation was about.
+    """
+    if raw_upload is None:
+        return '', '', None
+    name = ''
+    mime = ''
+    size = None
+    if hasattr(raw_upload, 'read'):
+        name = str(getattr(raw_upload, 'name', '') or '')
+        mime = str(getattr(raw_upload, 'content_type', '') or '')
+        raw_size = getattr(raw_upload, 'size', None)
+    elif isinstance(raw_upload, dict):
+        name = str(raw_upload.get('name') or '')
+        mime = str(raw_upload.get('mime') or '')
+        raw_size = raw_upload.get('size')
+        if raw_size is None:
+            try:
+                raw_size = len(base64.b64decode(raw_upload.get('data') or ''))
+            except Exception:
+                raw_size = None
+    else:
+        return '', '', None
+
+    try:
+        size = int(raw_size) if raw_size is not None else None
+    except (TypeError, ValueError):
+        size = None
+
+    return name[:255], mime[:100], size
+
+
+def _read_upload(raw_upload, json_body=False):
+    """Pull text out of a multipart UploadedFile or a base64 ``{name, data}`` dict.
+
+    Returns a (content, error_response) pair. Exactly one is not None.
+    """
+    if hasattr(raw_upload, 'read'):
+        filename = getattr(raw_upload, 'name', '') or ''
+        if raw_upload.size and raw_upload.size > MAX_UPLOAD_BYTES:
+            return None, Response(
+                {'error': f'"{filename}" is larger than 10 MB. Please upload a smaller file.'},
+                status=400,
+            )
+        try:
+            return extract_text_from_file(raw_upload), None
+        except UnsupportedDocumentFormat as exc:
+            return None, Response({'error': str(exc)}, status=400)
+        except Exception as exc:
+            return None, Response(
+                {'error': f'Could not read "{filename}". The file may be corrupt.'},
+                status=400,
+            )
+
+    if isinstance(raw_upload, dict) and raw_upload.get('data'):
+        filename = (raw_upload.get('name') or 'file.pdf').lower()
+        try:
+            raw = base64.b64decode(raw_upload['data'])
+        except Exception:
+            return None, Response({'error': 'Could not decode the uploaded file.'}, status=400)
+        if len(raw) > MAX_UPLOAD_BYTES:
+            return None, Response(
+                {'error': f'"{filename}" is larger than 10 MB. Please upload a smaller file.'},
+                status=400,
+            )
+        try:
+            return extract_text_from_bytes(raw, filename), None
+        except UnsupportedDocumentFormat as exc:
+            return None, Response({'error': str(exc)}, status=400)
+        except Exception:
+            return None, Response(
+                {'error': f'Could not read "{filename}". The file may be corrupt.'},
+                status=400,
+            )
+
+    return None, None
+
 
 class SessionListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -19,31 +336,63 @@ class SessionListView(APIView):
     def get(self, request):
         # 1. Grab all the new folder-based sessions
         sessions = ChatSession.objects.filter(user=request.user)
-        data = [{"id": s.id, "title": s.title, "updated_at": s.updated_at} for s in sessions]
+        data = [
+            {
+                "id": s.id,
+                "title": s.title,
+                "updated_at": s.updated_at,
+                "pinned": s.pinned,
+            }
+            for s in sessions
+        ]
 
         # 2. 🌟 THE LEGACY TRICK: Check if they have old "loose" messages
         has_legacy_messages = ChatMessage.objects.filter(user=request.user, session__isnull=True).exists()
         
         if has_legacy_messages:
             # Create a virtual session with ID "0" so it shows up in the mobile sidebar
-            data.append({"id": 0, "title": "Old Chat History", "updated_at": None})
+            data.append({"id": 0, "title": "Old Chat History", "updated_at": None, "pinned": False})
 
         return Response(data)
 
     def post(self, request):
         session = ChatSession.objects.create(user=request.user, title="New Conversation")
-        return Response({"id": session.id, "title": session.title})
+        return Response({"id": session.id, "title": session.title, "pinned": session.pinned})
 
 class AskSAGEView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def post(self, request):
-        user_message = request.data.get('message')
-        attachment_text = request.data.get('attachment_text', '')
+        user_message = (request.data.get('message') or '').strip()
+        attachment_text = request.data.get('attachment_text', '') or ''
         session_id = request.data.get('session_id')
-        
-        if not user_message:
+
+        # The app sends the raw file (base64 in JSON, or multipart) and we
+        # extract the text here, so chat and quiz generation read documents
+        # through exactly the same code path.
+        uploaded_file = request.FILES.get('file') or request.data.get('file')
+        file_name, file_mime, file_size = _upload_meta(uploaded_file)
+
+        # A turn is valid with a file and no text -- "explain this" is a
+        # normal thing to ask. Rejecting it forced users to invent a
+        # sentence before the attachment would attach.
+        if not user_message and not uploaded_file:
             return Response({"error": "Message is required"}, status=400)
+
+        image_bytes = None
+        image_mime = ''
+        if uploaded_file:
+            if _is_image_upload(uploaded_file, file_mime, file_name):
+                raw_bytes, resolved_mime, err = _read_image_bytes(uploaded_file)
+                if err is not None:
+                    return err
+                image_bytes, image_mime = raw_bytes, resolved_mime
+            else:
+                file_text, file_error = _read_upload(uploaded_file)
+                if file_error is not None:
+                    return file_error
+                attachment_text = file_text or attachment_text
 
         # 1. Figure out where to save this message
         session = None
@@ -53,92 +402,46 @@ class AskSAGEView(APIView):
             except ChatSession.DoesNotExist:
                 return Response({"error": "Session not found"}, status=404)
         elif session_id == 0:
-            pass 
+            pass
         else:
-            # 🌟 Brand new chat from the mobile app, creates a new folder automatically
-            session = ChatSession.objects.create(user=request.user, title=user_message[:30] + "...")
+            # Brand new chat from the mobile app, creates a new folder automatically.
+            # A file-only turn has no text to name the conversation, so fall
+            # back to the filename rather than "...".
+            seed = user_message or file_name or "New Conversation"
+            session = ChatSession.objects.create(user=request.user, title=seed[:30] + "...")
 
-        # 2. Save User Message
-        ChatMessage.objects.create(user=request.user, session=session, text=user_message, is_ai=False)
+        # 2. Save the user turn. We store the text we were sent, not the
+        #    extracted document: persisting the extraction would replay tens of
+        #    thousands of characters of PDF into the next turn's history and
+        #    bury the actual question. The filename is kept separately so the
+        #    bubble can show which document this turn was about.
+        ChatMessage.objects.create(
+            user=request.user,
+            session=session,
+            text=user_message,
+            is_ai=False,
+            file_name=file_name,
+            file_mime=file_mime,
+            file_size=file_size,
+        )
 
-        # 3. 🌟 REAL AI LOGIC: Call DeepSeek!
-        DEEPSEEK_API_KEY = getattr(settings, 'DEEPSEEK_API_KEY', None)
-        
-        if not DEEPSEEK_API_KEY:
-            return Response({"error": "DeepSeek API key not configured on server."}, status=500)
-
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        # Combine message with extracted context if available for the AI's perspective
-        ai_prompt = f"[File Content]:\n{attachment_text}\n\nUser Question: {user_message}" if attachment_text else user_message
-
-        # 🌟 CONVERSATION MEMORY: send recent session history so the AI has context
-        history_messages = []
-        if session:
-            recent = (ChatMessage.objects
-                      .filter(session=session)
-                      .order_by('-created_at')[:settings.CHAT_MEMORY_LIMIT])
-            for msg in reversed(recent):
-                history_messages.append({
-                    "role": "assistant" if msg.is_ai else "user",
-                    "content": msg.text
-                })
-
-        # DeepSeek uses the same OpenAI-compatible payload format
-        payload = {
-            # 🌟 DeepSeek V4 Flash for fast, low-latency educational chat
-            "model": "deepseek-v4-flash",
-            # V4 thinks by default; disable it so the 2048-token budget isn't
-            # eaten by hidden reasoning (which would truncate the visible answer).
-            "thinking": {"type": "disabled"},
-            "max_tokens": 2048,
-            "messages": [
-                {
-                    "role": "system", 
-                    "content": (
-                        "You are SAGE, a Smart Assistant for Group-Based Education. You help students learn by providing clear, concise, and engaging educational explanations.\n\n"
-                        "Format your answers with Markdown so they render nicely on a phone: "
-                        "use short '### ' headings to split sections, '**bold**' for key terms, '- ' bullets or '1. ' numbered lists for steps/points, "
-                        "and inline '`code`' or code blocks where relevant. "
-                        "Avoid decorative '---' separators, walls of '## ' headings, cluttered emoji or asterisks. "
-                        "Keep answers easy to scan on a small screen."
-                    )
-                },
-                *history_messages,
-                {
-                    "role": "user", 
-                    "content": ai_prompt
-                }
-            ]
-        }
-
-        try:
-            # Send the request to DeepSeek
-            api_response = requests.post(
-                "https://api.deepseek.com/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=10 # DeepSeek V4 Flash is fast
+        # 3. Route to the model that can actually read the input. DeepSeek is
+        #    text-only, so images go to Gemini; text documents stay on the
+        #    existing cheaper path.
+        if image_bytes is not None:
+            ai_reply = _ask_gemini_about_image(
+                image_bytes, image_mime, user_message, file_name, session,
             )
-            api_response.raise_for_status() 
-            
-            data = api_response.json()
-            ai_reply = data['choices'][0]['message']['content']
-            
-        except Exception as e:
-            print(f"DeepSeek API Error: {e}")
-            ai_reply = "I'm sorry, my AI brain is temporarily offline. Please check the server logs!"
+        else:
+            ai_reply = _ask_deepseek(attachment_text, user_message, session)
 
         # 4. Save AI Response
         ChatMessage.objects.create(user=request.user, session=session, text=ai_reply, is_ai=True)
 
-        # 🌟 CRITICAL FIX: It must return the session_id so the mobile app can save it!
+        # CRITICAL FIX: It must return the session_id so the mobile app can save it!
         return Response({
-            "reply": ai_reply, 
-            "session_id": session.id if session else 0, 
+            "reply": ai_reply,
+            "session_id": session.id if session else 0,
             "session_title": session.title if session else "Old Chat History"
         })
 
@@ -160,7 +463,12 @@ class SessionHistoryView(APIView):
             "id": msg.id,
             "text": msg.text,
             "type": "ai" if msg.is_ai else "user",
-            "time": msg.created_at.strftime("%I:%M %p")
+            "time": msg.created_at.strftime("%I:%M %p"),
+            # Attachment metadata, so a reloaded conversation still shows which
+            # document (or photo) each turn was about.
+            "file_name": msg.file_name or "",
+            "file_mime": msg.file_mime or "",
+            "file_size": msg.file_size,
         } for msg in messages]
         
         return Response(data)
@@ -190,9 +498,20 @@ class SessionDetailView(APIView):
             session.title = title
 
         if pinned is not None:
-            session.pinned = bool(pinned)
+            # Only one conversation may be pinned. Clearing the previous one in
+            # the same transaction means a client that pins a second chat
+            # never leaves two pinned rows behind, which is also what the
+            # partial unique constraint on the model would reject.
+            with transaction.atomic():
+                if bool(pinned):
+                    ChatSession.objects.filter(
+                        user=request.user, pinned=True
+                    ).exclude(id=session.id).update(pinned=False)
+                session.pinned = bool(pinned)
+                session.save()
+        else:
+            session.save()
 
-        session.save()
         return Response({"id": session.id, "title": session.title, "pinned": session.pinned})
 
     def delete(self, request, session_id):
@@ -211,31 +530,23 @@ class GenerateQuizView(APIView):
         content = request.data.get('content')
 
         if not content and uploaded_file:
-            # Handle Django UploadedFile (multipart)
-            if hasattr(uploaded_file, 'read'):
-                content = extract_text_from_file(uploaded_file)
-            # Handle base64-encoded file from JSON body
-            elif isinstance(uploaded_file, dict) and uploaded_file.get('data'):
-                raw = base64.b64decode(uploaded_file['data'])
-                fname = (uploaded_file.get('name') or 'file.pdf').lower()
-                if fname.endswith('.pdf'):
-                    from pypdf import PdfReader
-                    reader = PdfReader(BytesIO(raw))
-                    pages = [page.extract_text() or '' for page in reader.pages]
-                    content = '\n'.join(pages)
-                elif fname.endswith('.docx'):
-                    import docx
-                    doc = docx.Document(BytesIO(raw))
-                    content = '\n'.join(p.text for p in doc.paragraphs)
-                else:
-                    content = raw.decode('utf-8')
+            content, file_error = _read_upload(uploaded_file)
+            if file_error is not None:
+                return file_error
 
         if not content:
             print(f"[GenerateQuizView] No content received. "
                   f"FILES keys={list(request.FILES.keys())}, "
                   f"DATA keys={list(request.data.keys())}, "
                   f"content_type={request.content_type}")
-            return Response({"error": "No content provided to generate quiz."}, status=400)
+            return Response(
+                {
+                    'error': 'No readable content found. Supported files: '
+                             + ', '.join(SUPPORTED_EXTENSIONS)
+                             + '. Scanned PDFs with no text layer are not supported.'
+                },
+                status=400,
+            )
 
         difficulty = request.data.get('difficulty', 'Medium')
         count = int(request.data.get('count', 10))

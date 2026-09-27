@@ -42,13 +42,14 @@ class QuizSerializer(serializers.ModelSerializer):
     attempt_count = serializers.SerializerMethodField()
     class_attempted_count = serializers.SerializerMethodField()
     class_average_percent = serializers.SerializerMethodField()
+    is_owner = serializers.SerializerMethodField()
 
     class Meta:
         model = Quiz
         fields = [
             'id', 'title', 'created_at', 'quiz_type', 'course', 'available_until',
             'questions', 'attempt_count',
-            'class_attempted_count', 'class_average_percent',
+            'class_attempted_count', 'class_average_percent', 'is_owner',
         ]
         read_only_fields = fields
 
@@ -70,6 +71,17 @@ class QuizSerializer(serializers.ModelSerializer):
         if request is None or not request.user.is_authenticated:
             return 0
         return QuizAttempt.objects.filter(quiz=obj, user=request.user).count()
+
+    def get_is_owner(self, obj):
+        """True when the caller wrote this quiz.
+
+        Self-authored quizzes award no XP, so the client needs to know who
+        made it before it can label the reward.
+        """
+        request = self._request()
+        if request is None or not request.user.is_authenticated:
+            return False
+        return obj.user_id == request.user.id
 
     def get_class_attempted_count(self, obj):
         """Distinct learners who have opened this quiz. Educators only."""
