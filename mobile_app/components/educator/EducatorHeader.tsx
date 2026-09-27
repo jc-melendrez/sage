@@ -46,44 +46,23 @@ export function EducatorHeader({
       >
         <View style={styles.row}>
           {showBack && (
-            <TouchableOpacity
-              style={styles.iconBtn}
-              onPress={() => router.back()}
-              accessibilityRole="button"
-              accessibilityLabel="Go back"
-            >
+            <TouchableOpacity style={styles.iconBtn} onPress={() => router.back()}>
               <Ionicons name="chevron-back" size={22} color="white" />
             </TouchableOpacity>
           )}
           <View style={{ flex: 1 }} />
           {showNotifications && (
-            <TouchableOpacity
-              style={[styles.iconBtn, styles.bellBtn]}
-              onPress={onNotificationsPress}
-              accessibilityRole="button"
-              accessibilityLabel="Notifications"
-            >
+            <TouchableOpacity style={[styles.iconBtn, styles.bellBtn]} onPress={onNotificationsPress}>
               <Ionicons name="notifications-outline" size={20} color="white" />
             </TouchableOpacity>
           )}
           {rightIcon && (
-            <TouchableOpacity
-              style={[styles.iconBtn, styles.rightIconBtn]}
-              onPress={onRightPress}
-              accessibilityRole="button"
-              accessibilityLabel={rightIcon.replace(/-outline$/, '').replace(/-/g, ' ')}
-            >
+            <TouchableOpacity style={[styles.iconBtn, styles.rightIconBtn]} onPress={onRightPress}>
               <Ionicons name={rightIcon} size={20} color="white" />
             </TouchableOpacity>
           )}
           {avatar && (
-            <TouchableOpacity
-              onPress={onAvatarPress}
-              activeOpacity={0.85}
-              style={styles.avatarWrap}
-              accessibilityRole="button"
-              accessibilityLabel="Your profile"
-            >
+            <TouchableOpacity onPress={onAvatarPress} activeOpacity={0.85} style={styles.avatarWrap}>
               <Avatar initials={avatar} size={36} />
             </TouchableOpacity>
           )}
@@ -139,8 +118,6 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 14,
     fontFamily: FONTS.medium,
-    // purplePale measured 3.85:1 on this gradient and failed WCAG 1.4.3 for
-    // 14px text. purpleGhost clears 5:1 while staying in the same hue family.
-    color: COLORS.purpleGhost,
+    color: COLORS.purplePale,
   },
 });

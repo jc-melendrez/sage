@@ -2,12 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, FONTS, RADIUS, CARD_SHADOW, tint, composite, readableOn } from '@/constants/educatorTheme';
-
-/* Resolved once at module load so StyleSheet entries stay literal. */
-const EMPTY_ICON_COLOR = readableOn(COLORS.purpleVibrant, COLORS.bgSecondary, 3);
-const EMPTY_TITLE_COLOR = readableOn(COLORS.purpleDark, COLORS.surface);
-const EMPTY_TEXT_COLOR = readableOn(COLORS.purpleVibrant, COLORS.surface);
+import { COLORS, FONTS, RADIUS, CARD_SHADOW, tint } from '@/constants/educatorTheme';
 
 /* ---------- StatCard — mirrors profile.tsx overviewCard ---------- */
 interface StatCardProps {
@@ -40,13 +35,7 @@ export function SectionHeader({ title, actionLabel, onAction }: SectionHeaderPro
     <View style={styles.sectionHeader}>
       <Text style={styles.sectionTitle}>{title}</Text>
       {actionLabel && (
-        <TouchableOpacity
-          onPress={onAction}
-          style={styles.sectionAction}
-          accessibilityRole="button"
-          accessibilityLabel={actionLabel}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
+        <TouchableOpacity onPress={onAction}>
           <Text style={styles.viewAllText}>{actionLabel}</Text>
         </TouchableOpacity>
       )}
@@ -81,17 +70,10 @@ interface PillProps {
   icon?: keyof typeof Ionicons.glyphMap;
 }
 export function Pill({ label, color = COLORS.purpleVibrant, icon }: PillProps) {
-  // The chip background is a 15%-alpha wash of the label's own hue, which
-  // measured 1.49-3.18:1 for every SAGE semantic color (WCAG 1.4.3 needs
-  // 4.5:1). Flatten the wash onto the surface, then darken the hue until it
-  // clears the bar. Hue identity is preserved and the fix also covers any
-  // color a future caller passes in.
-  const bg = composite(color, 0.15, COLORS.surface);
-  const fg = readableOn(color, bg);
   return (
     <View style={[styles.pill, { backgroundColor: tint(color) }]}>
-      {icon && <Ionicons name={icon} size={11} color={fg} style={{ marginRight: 4 }} />}
-      <Text style={[styles.pillText, { color: fg }]}>{label}</Text>
+      {icon && <Ionicons name={icon} size={11} color={color} style={{ marginRight: 4 }} />}
+      <Text style={[styles.pillText, { color }]}>{label}</Text>
     </View>
   );
 }
@@ -124,9 +106,9 @@ interface EmptyStateProps {
 }
 export function EmptyState({ icon, title, text }: EmptyStateProps) {
   return (
-    <View style={styles.emptyCard} accessible accessibilityRole="summary" accessibilityLabel={`${title}. ${text}`}>
+    <View style={styles.emptyCard}>
       <View style={styles.emptyIconBox}>
-        <Ionicons name={icon} size={32} color={EMPTY_ICON_COLOR} />
+        <Ionicons name={icon} size={32} color={COLORS.purpleLight} />
       </View>
       <Text style={styles.emptyTitle}>{title}</Text>
       <Text style={styles.emptyText}>{text}</Text>
@@ -166,11 +148,8 @@ const styles = StyleSheet.create({
   statLabel: { fontSize: 11, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textSecondary, textTransform: 'uppercase', letterSpacing: 0.3, textAlign: 'center' },
 
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  sectionTitle: { fontSize: 18, fontFamily: FONTS.extraBold, fontWeight: '900', letterSpacing: 1, color: COLORS.textPrimary, flexShrink: 1, marginRight: 12 },
-  // padding grows the tap target to 44px (WCAG 2.5.8); the negative margin
-  // cancels it so the header keeps its existing visual rhythm.
-  sectionAction: { paddingVertical: 14, marginVertical: -14, paddingHorizontal: 4, marginHorizontal: -4 },
-  viewAllText: { color: COLORS.purpleDeep, fontSize: 14, fontFamily: FONTS.semiBold, fontWeight: '600' },
+  sectionTitle: { fontSize: 18, fontFamily: FONTS.extraBold, fontWeight: '900', letterSpacing: 1, color: COLORS.textPrimary },
+  viewAllText: { color: COLORS.purpleDeep, fontSize: 14, fontFamily: FONTS.extraBold, fontWeight: '500' },
 
   progressTrack: { width: '100%', overflow: 'hidden' },
   progressFill: { height: '100%' },
@@ -210,8 +189,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 14,
   },
-  emptyTitle: { color: EMPTY_TITLE_COLOR, fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700', marginBottom: 6, textAlign: 'center' },
-  emptyText: { color: EMPTY_TEXT_COLOR, fontSize: 13, fontFamily: FONTS.regular, textAlign: 'center', lineHeight: 19 },
+  emptyTitle: { color: COLORS.purpleDark, fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700', marginBottom: 6 },
+  emptyText: { color: COLORS.purpleLight, fontSize: 13, fontFamily: FONTS.regular, textAlign: 'center', lineHeight: 19 },
 });
 
 export { CARD_SHADOW };
