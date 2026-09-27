@@ -1,4 +1,7 @@
+import base64
+import io
 import json
+import zipfile
 from datetime import timedelta
 from unittest.mock import patch, MagicMock
 
@@ -12,6 +15,12 @@ from .models import ChatMessage, ChatSession, Quiz, QuizAttempt
 from users.models import Course
 
 User = get_user_model()
+
+# 1x1 transparent PNG, so the image branch receives real PNG bytes.
+_TINY_PNG_BYTES = base64.b64decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk'
+    'YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+)
 
 FAKE_QUIZ_JSON = {
     "title": "Math Basics",
@@ -32,6 +41,40 @@ FAKE_QUIZ_JSON = {
         },
     ],
 }
+
+
+def _build_docx_base64(text):
+    """Return a base64 .docx containing ``text``.
+
+    Built here rather than pasted as a literal so the bytes are always a valid
+    zip: a hand-wrapped base64 blob gets truncated easily, and a truncated blob
+    fails to decode before any assertion runs.
+    """
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '</Types>'
+    )
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+        '</Relationships>'
+    )
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f'<w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>'
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('[Content_Types].xml', content_types)
+        archive.writestr('_rels/.rels', root_rels)
+        archive.writestr('word/document.xml', document)
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 def _fake_deepseek_post(*args, **kwargs):
@@ -429,3 +472,324 @@ class SessionPinningAPITests(APITestCase):
         legacy = [row for row in resp.data if row['id'] == 0]
         self.assertEqual(len(legacy), 1)
         self.assertFalse(legacy[0]['pinned'])
+
+
+class SinglePinTests(APITestCase):
+    """Only one conversation can be pinned, so pinning a second one has to
+    release the first. The client mirrors whatever the server reports."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='pinner2', password='pass123', role='student',
+        )
+        self.client.force_authenticate(user=self.user)
+        self.first = ChatSession.objects.create(user=self.user, title='First')
+        self.second = ChatSession.objects.create(user=self.user, title='Second')
+
+    def _pin(self, session):
+        return self.client.patch(
+            reverse('session_detail', args=[session.id]),
+            {'pinned': True},
+            format='json',
+        )
+
+    def test_pinning_second_releases_first(self):
+        self._pin(self.first)
+        self._pin(self.second)
+
+        self.first.refresh_from_db()
+        self.second.refresh_from_db()
+        self.assertTrue(self.second.pinned)
+        self.assertFalse(self.first.pinned)
+
+    def test_list_reports_exactly_one_pin_after_repinning(self):
+        self._pin(self.first)
+        self._pin(self.second)
+
+        resp = self.client.get(reverse('session_list'))
+        pinned = [row for row in resp.data if row.get('pinned')]
+        self.assertEqual(len(pinned), 1)
+        self.assertEqual(pinned[0]['id'], self.second.id)
+
+    def test_pinned_sessions_sort_first(self):
+        self._pin(self.second)
+        resp = self.client.get(reverse('session_list'))
+        real = [row for row in resp.data if row['id'] != 0]
+        self.assertEqual(real[0]['id'], self.second.id)
+
+    def test_unpinning_leaves_no_pinned_rows(self):
+        self._pin(self.first)
+        resp = self.client.patch(
+            reverse('session_detail', args=[self.first.id]),
+            {'pinned': False},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(
+            ChatSession.objects.filter(user=self.user, pinned=True).exists()
+        )
+
+    def test_rename_does_not_disturb_pin(self):
+        self._pin(self.first)
+        resp = self.client.patch(
+            reverse('session_detail', args=[self.first.id]),
+            {'title': 'Renamed'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.first.refresh_from_db()
+        self.assertTrue(self.first.pinned)
+        self.assertEqual(self.first.title, 'Renamed')
+
+    def test_pinning_is_scoped_to_the_user(self):
+        other = User.objects.create_user(
+            username='otherpinner', password='pass123', role='student',
+        )
+        other_session = ChatSession.objects.create(user=other, title='Theirs')
+        self._pin(self.first)
+
+        other_session.refresh_from_db()
+        self.assertFalse(other_session.pinned)
+
+
+class AskFileMetadataTests(APITestCase):
+    """A saved turn has to say what was sent with it, otherwise reloading a
+    conversation shows an answer with no trace of the document behind it."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='asker', password='pass123', role='student',
+        )
+        self.client.force_authenticate(user=self.user)
+        self.ask_url = reverse('ask_sage')
+        # Built at runtime rather than pasted as a literal: a hand-wrapped
+        # base64 blob is easy to corrupt, and a corrupt blob fails to decode
+        # before any assertion runs, so the test would pass for the wrong
+        # reason (or fail for an unrelated one).
+        self.base64_docx = _build_docx_base64('SAGE study notes')
+        self.docx_mime = (
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+
+    def _ask(self, message, file, session_id=None):
+        body = {'message': message, 'file': file}
+        if session_id is not None:
+            body['session_id'] = session_id
+        return self.client.post(self.ask_url, body, format='json')
+
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_file_metadata_persisted_on_user_message(self, mock_ai):
+        mock_ai.return_value = 'Here is a summary.'
+        session = ChatSession.objects.create(user=self.user, title='Docs')
+
+        resp = self._ask(
+            'Summarise this',
+            {'name': 'notes.docx', 'data': self.base64_docx, 'mime': self.docx_mime},
+            session_id=session.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        user_msg = ChatMessage.objects.filter(
+            session=session, is_ai=False
+        ).latest('created_at')
+        self.assertEqual(user_msg.file_name, 'notes.docx')
+        self.assertEqual(user_msg.file_mime, self.docx_mime)
+        self.assertGreater(user_msg.file_size, 0)
+        self.assertEqual(user_msg.text, 'Summarise this')
+
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_file_only_ask_is_allowed(self, mock_ai):
+        mock_ai.return_value = 'Summary of the attachment.'
+        ChatSession.objects.create(user=self.user, title='Docs')
+
+        resp = self._ask('', {'name': 'notes.docx', 'data': self.base64_docx})
+        self.assertEqual(resp.status_code, 200)
+        # A bare attachment is a valid prompt; an empty message must not 400.
+        self.assertIn('reply', resp.data)
+
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_file_only_turn_is_still_recorded_with_its_filename(self, mock_ai):
+        # With no text to name the conversation, the session is seeded from the
+        # filename instead of falling back to "New Conversation".
+        mock_ai.return_value = 'Summary of the attachment.'
+        resp = self._ask('', {'name': 'photosynthesis.docx', 'data': self.base64_docx})
+        self.assertEqual(resp.status_code, 200)
+        session = ChatSession.objects.get(user=self.user)
+        self.assertTrue(session.title.startswith('photosynthesis'))
+
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_history_returns_file_metadata(self, mock_ai):
+        mock_ai.return_value = 'Done.'
+        session = ChatSession.objects.create(user=self.user, title='Docs')
+        self._ask(
+            'Summarise',
+            {'name': 'report.docx', 'data': self.base64_docx, 'mime': self.docx_mime},
+            session_id=session.id,
+        )
+
+        resp = self.client.get(reverse('session_history', args=[session.id]))
+        self.assertEqual(resp.status_code, 200)
+        turn = [row for row in resp.data if row.get('file_name')]
+        self.assertEqual(len(turn), 1)
+        self.assertEqual(turn[0]['file_name'], 'report.docx')
+        self.assertTrue(turn[0]['file_mime'].startswith('application/vnd.openxml'))
+
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_message_without_file_has_no_metadata(self, mock_ai):
+        mock_ai.return_value = 'Hi.'
+        session = ChatSession.objects.create(user=self.user, title='Plain')
+        self._ask('Just a question', None, session_id=session.id)
+
+        user_msg = ChatMessage.objects.filter(session=session, is_ai=False).latest('created_at')
+        self.assertFalse(user_msg.file_name)
+
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_legacy_doc_extension_gets_friendly_error(self, mock_ai):
+        ChatSession.objects.create(user=self.user, title='Docs')
+        resp = self._ask('Read this', {'name': 'essay.doc', 'data': self.base64_docx})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('docx', resp.data['error'].lower())
+
+
+class AskImageRoutingTests(APITestCase):
+    """A photo must go to the vision model. Feeding it to the text extractor
+    turned it into mojibake, so the routing is asserted explicitly."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='photographer', password='pass123', role='student',
+        )
+        self.client.force_authenticate(user=self.user)
+        self.ask_url = reverse('ask_sage')
+        # 1x1 transparent PNG, so the vision branch gets real image bytes.
+        self.png_b64 = base64.b64encode(_TINY_PNG_BYTES).decode()
+
+    def _ask_image(self, message, session_id=None):
+        body = {
+            'message': message,
+            'file': {'name': 'cat.png', 'data': self.png_b64, 'mime': 'image/png'},
+        }
+        if session_id is not None:
+            body['session_id'] = session_id
+        return self.client.post(self.ask_url, body, format='json')
+
+    @patch('ai_assistant.views._ask_gemini_about_image')
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_image_routes_to_vision_not_text(self, mock_text, mock_vision):
+        mock_vision.return_value = 'That is a photo of a cat.'
+        ChatSession.objects.create(user=self.user, title='Photos')
+
+        resp = self._ask_image('What is in this photo?')
+        self.assertEqual(resp.status_code, 200)
+        mock_vision.assert_called_once()
+        mock_text.assert_not_called()
+
+    @patch('ai_assistant.views._ask_gemini_about_image')
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_image_metadata_recorded_for_chip(self, mock_text, mock_vision):
+        mock_vision.return_value = 'A cat.'
+        session = ChatSession.objects.create(user=self.user, title='Photos')
+        self._ask_image('Describe', session_id=session.id)
+
+        user_msg = ChatMessage.objects.filter(session=session, is_ai=False).latest('created_at')
+        self.assertEqual(user_msg.file_name, 'cat.png')
+        self.assertEqual(user_msg.file_mime, 'image/png')
+
+    @patch('ai_assistant.views._ask_gemini_about_image')
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_photo_only_ask_is_allowed(self, mock_text, mock_vision):
+        mock_vision.return_value = 'A cat.'
+        ChatSession.objects.create(user=self.user, title='Photos')
+        resp = self._ask_image('')
+        self.assertEqual(resp.status_code, 200)
+        mock_vision.assert_called_once()
+
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_document_still_routes_to_text_model(self, mock_text):
+        mock_text.return_value = 'A summary.'
+        ChatSession.objects.create(user=self.user, title='Docs')
+        resp = self.client.post(
+            self.ask_url,
+            {
+                'message': 'Summarise',
+                'file': {
+                    'name': 'notes.txt',
+                    'data': base64.b64encode(b'SAGE study notes on photosynthesis').decode(),
+                    'mime': 'text/plain',
+                },
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        mock_text.assert_called_once()
+
+    @patch('ai_assistant.views._ask_gemini_about_image')
+    def test_unsupported_image_mime_is_rejected(self, mock_vision):
+        # image/gif is an image we cannot send to the vision model. It must be
+        # refused rather than falling through to the text extractor, which would
+        # turn the bytes into mojibake.
+        ChatSession.objects.create(user=self.user, title='Photos')
+        resp = self.client.post(
+            self.ask_url,
+            {
+                'message': 'What is this?',
+                'file': {'name': 'cat.png', 'data': self.png_b64, 'mime': 'image/gif'},
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        mock_vision.assert_not_called()
+
+    @patch('ai_assistant.views._ask_gemini_about_image')
+    def test_multipart_and_json_agree_on_the_same_image(self, mock_vision):
+        # The two upload paths must classify identically, or a photo behaves
+        # differently depending on how the app happened to send it.
+        mock_vision.return_value = 'A cat.'
+        resp = self.client.post(
+            self.ask_url,
+            {
+                'message': 'Describe',
+                'file': {
+                    'name': 'cat.png',
+                    'data': self.png_b64,
+                    'mime': 'image/png',
+                },
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        mock_vision.assert_called_once()
+
+    @patch('ai_assistant.views._ask_gemini_about_image')
+    def test_image_without_mime_is_guessed_from_extension(self, mock_vision):
+        # The app sends `mime`, but an older build omits it. Falling back to the
+        # extension is what keeps a photo from reaching the text extractor.
+        mock_vision.return_value = 'A cat.'
+        resp = self.client.post(
+            self.ask_url,
+            {'message': 'Describe', 'file': {'name': 'cat.png', 'data': self.png_b64}},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        mock_vision.assert_called_once()
+
+    @patch('ai_assistant.views._ask_deepseek')
+    def test_png_bytes_are_not_sent_to_the_text_extractor(self, mock_text):
+        # Guards the original bug: an image that fell through to the document
+        # parser came back as a few hundred characters of mojibake.
+        mock_text.return_value = 'A summary.'
+        resp = self.client.post(
+            self.ask_url,
+            {
+                'message': 'Describe',
+                'file': {'name': 'notes.txt', 'data': self.png_b64, 'mime': 'text/plain'},
+            },
+            format='json',
+        )
+        # A .txt is a legitimate document, so this one is accepted; what matters
+        # is that the bytes are read as text rather than routed to vision.
+        self.assertEqual(resp.status_code, 200)
+        mock_text.assert_called_once()

@@ -20,7 +20,7 @@ import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser, getCachedUserId } from '@/services/authService';
 import { getFirebaseUid } from '@/services/firebaseAuthService';
 import { getChatCache, setChatCache, clearChatCache, setCacheUserId, invalidateCachePrefix } from '@/services/apiCache';
-import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName } from '@/services/chatService';
+import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName, QuizEmbed } from '@/services/chatService';
 import { pfpSource } from '@/constants/pfps';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
@@ -49,6 +49,8 @@ interface GroupMessage {
   created_at: number | string | null; // ISO string (REST) or ms/µs epoch (Firestore)
   reactions: Record<string, string[]>; // emoji -> list of firebase uids
   attachments: Attachment[];
+  /** Quiz card shared into the chat, when this message carries one. */
+  quiz_embed?: QuizEmbed | null;
   local?: boolean; // true while this is an unsent optimistic echo
 }
 
@@ -58,11 +60,12 @@ const ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢'];
 const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 const MAX_ATTACHMENTS = 5;
 
-type RawMessage = Partial<Omit<GroupMessage, 'created_at' | 'reactions' | 'attachments'>> & {
+type RawMessage = Partial<Omit<GroupMessage, 'created_at' | 'reactions' | 'attachments' | 'quiz_embed'>> & {
   id: string | number;
   created_at?: GroupMessage['created_at'];
   reactions?: Record<string, string[]> | null;
   attachments?: Attachment[] | null;
+  quiz_embed?: QuizEmbed | null;
 };
 
 // Firestore may deliver ms or µs depending on platform; REST delivers ISO strings.
@@ -121,6 +124,8 @@ function mapMessage(raw: RawMessage): GroupMessage {
     created_at: raw.created_at ?? null,
     reactions: raw.reactions ?? {},
     attachments: raw.attachments ?? [],
+    // Older messages predate the field, and Firestore omits keys entirely.
+    quiz_embed: raw.quiz_embed ?? null,
     local: raw.local,
   };
 }
@@ -879,38 +884,39 @@ export default function GroupChatScreen() {
         </View>
       );
 
+const renderQuizCard = () => {
+  const embed = msg.quiz_embed;
+  if (!embed || !embed.id) return null;
+  return (
+    <TouchableOpacity
+      style={styles.quizEmbedCard}
+      onPress={() => router.push(`/course/quiz/${embed.id}`)}
+      activeOpacity={0.85}
+      accessibilityLabel={`Open quiz ${embed.title}`}
+    >
+      <View style={styles.quizEmbedHeader}>
+        <Ionicons name="document-text-outline" size={24} color={COLORS.purplePrimary} />
+        <Text style={styles.quizEmbedTitle} numberOfLines={2}>{embed.title || 'Quiz'}</Text>
+      </View>
+      <View style={styles.quizEmbedMeta}>
+        <Text style={styles.quizEmbedMetaText}>
+          {embed.question_count} {embed.question_count === 1 ? 'question' : 'questions'}
+          {embed.quiz_type ? ` · ${embed.quiz_type}` : ''}
+        </Text>
+      </View>
+      <View style={styles.quizEmbedAction}>
+        <Text style={styles.quizEmbedActionText}>Take Quiz</Text>
+        <Ionicons name="chevron-forward" size={16} color={COLORS.purplePrimary} />
+      </View>
+    </TouchableOpacity>
+  );
+};
+
 const renderAttachments = () => {
   if (!msg.attachments || msg.attachments.length === 0) return null;
   return (
     <View style={styles.attachmentList}>
       {msg.attachments.map((att, i) => {
-        // Quiz embed attachment
-        if (att.type === 'quiz_embed' && att.quiz_id) {
-          return (
-            <TouchableOpacity
-              key={`quiz-${att.quiz_id}`}
-              style={styles.quizEmbedCard}
-              onPress={() => router.push(`/course/quiz/${att.quiz_id}`)}
-              activeOpacity={0.85}
-              accessibilityLabel={`Open quiz ${att.title}`}
-            >
-              <View style={styles.quizEmbedHeader}>
-                <Ionicons name="document-text-outline" size={24} color={COLORS.purplePrimary} />
-                <Text style={styles.quizEmbedTitle}>{att.title || 'Quiz'}</Text>
-              </View>
-              <View style={styles.quizEmbedMeta}>
-                <Text style={styles.quizEmbedMetaText}>
-                  {att.question_count} questions · {att.quiz_type}
-                </Text>
-              </View>
-              <View style={styles.quizEmbedAction}>
-                <Text style={styles.quizEmbedActionText}>Take Quiz</Text>
-                <Ionicons name="chevron-forward" size={16} color={COLORS.purplePrimary} />
-              </View>
-            </TouchableOpacity>
-          );
-        }
-
         // Uploaded attachments carry an S3 `key` that needs resolving to a
         // short-lived presigned URL; the optimistic echo carries a local uri.
         const uri = att.key ? resolvedLinks[att.key] : att.url;
@@ -1013,6 +1019,10 @@ const renderAttachments = () => {
                 ) : null}
               </View>
             </TouchableOpacity>
+            {/* A quiz card is its own full-width card, not a bubble tint —
+                the previous version rendered it inside the message bubble as
+                a fake attachment, which the server had already stripped. */}
+            {renderQuizCard()}
             {renderPills()}
             {isGroupEnd && (
               <Text style={[styles.messageTime, isMe && styles.timeMe]}>

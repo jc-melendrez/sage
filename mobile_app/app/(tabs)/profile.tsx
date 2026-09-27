@@ -425,7 +425,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.textPrimary
   },
-  badgesRow: { flexDirection: 'row', gap: 12, paddingRight: 4 },
+  badgesRow: { flexDirection: 'row', gap: 12, paddingRight: 4, alignItems: 'stretch' },
   badgeCard: {
     width: 104,
     backgroundColor: COLORS.surface,
@@ -435,6 +435,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.border,
+    // Badge names wrap to one or two lines, so cards in the same row differ
+    // in height. Stretching them to a shared height plus pushing the
+    // "earned" pill to the bottom keeps every pill on one baseline.
+    flex: 1,
   },
   badgeIconContainer: {
     width: 56,
@@ -461,6 +465,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 12,
+    marginTop: 'auto',
   },
   earnedText: {
     fontSize: 10,

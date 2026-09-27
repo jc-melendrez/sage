@@ -25,6 +25,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { apiCall } from '@/services/apiClient';
 import { getQuizzes, type Quiz } from '@/services/quizService';
 import { describeDue } from '@/services/dueDate';
+import { useNotificationReadState } from '@/hooks/useNotificationRead';
 
 const COLORS = {
   bg: '#FFFFFF',
@@ -71,6 +72,8 @@ interface Props {
   activities?: any[];
   badges?: any[];
   recommendations?: any[];
+  /** Reports the unread count so the header bell can badge itself. */
+  onUnreadChange?: (count: number) => void;
 }
 
 interface GroupRow {
@@ -102,6 +105,7 @@ export default function NotificationSheet({
   activities = [],
   badges = [],
   recommendations = [],
+  onUnreadChange,
 }: Props) {
   const insets = useSafeAreaInsets();
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
@@ -195,6 +199,12 @@ export default function NotificationSheet({
     }
 
     for (const r of recommendations.slice(0, 5)) {
+      // Prefer the server's href, fall back to the course path, then
+      // Activities. Every card used to point at Activities regardless of what
+      // it recommended, so tapping a course suggestion was a no-op detour.
+      const href =
+        r.href ||
+        (r.course_id ? `/(tabs)/course/path/${r.course_id}` : '/(tabs)/activities');
       out.push({
         id: `rec-${r.id}`,
         kind: 'recommendation',
@@ -203,7 +213,7 @@ export default function NotificationSheet({
         title: r.title || 'Recommended for you',
         body: r.description || 'A new suggestion is waiting.',
         time: 'Suggested',
-        href: '/(tabs)/activities',
+        href,
       });
     }
 
@@ -226,6 +236,17 @@ export default function NotificationSheet({
     return out;
   }, [activities, badges, recommendations, quizzes, joinRequests]);
 
+  const itemIds = useMemo(() => items.map((n) => n.id), [items]);
+  const { isUnread, markAllRead, unreadCount } = useNotificationReadState(itemIds);
+
+  // The bell badge lives in the Dashboard header, outside this sheet. Report
+  // the count up rather than recomputing it there: this sheet is the only
+  // place that sees quizzes and join requests, so recomputing in the header
+  // would silently undercount.
+  useEffect(() => {
+    onUnreadChange?.(unreadCount);
+  }, [unreadCount, onUnreadChange]);
+
   if (!visible) return null;
 
   return (
@@ -236,9 +257,21 @@ export default function NotificationSheet({
         <View style={styles.grabber} />
         <View style={styles.header}>
           <Text style={styles.title}>Notifications</Text>
-          <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="close" size={22} color={COLORS.textMuted} />
-          </TouchableOpacity>
+          <View style={styles.headerActions}>
+            {unreadCount > 0 && (
+              <TouchableOpacity
+                onPress={markAllRead}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                accessibilityRole="button"
+                accessibilityLabel={`Mark all ${unreadCount} notifications as read`}
+              >
+                <Text style={styles.clearAll}>Clear all</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Ionicons name="close" size={22} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {loading && items.length === 0 ? (
@@ -252,26 +285,30 @@ export default function NotificationSheet({
           </View>
         ) : (
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.list}>
-            {items.map((n) => (
-              <TouchableOpacity
-                key={n.id}
-                style={[styles.row, n.urgent && styles.rowUrgent]}
-                activeOpacity={0.75}
-                onPress={() => {
-                  onClose();
-                  if (n.href && onOpenHref) onOpenHref(n.href);
-                }}
-              >
-                <View style={[styles.iconBox, { backgroundColor: n.color + '1A' }]}>
-                  <Ionicons name={n.icon} size={17} color={n.color} />
-                </View>
-                <View style={styles.rowBody}>
-                  <Text style={styles.rowTitle} numberOfLines={2}>{n.title}</Text>
-                  <Text style={styles.rowSub} numberOfLines={2}>{n.body}</Text>
-                  {n.time ? <Text style={[styles.rowTime, n.urgent && { color: n.color }]}>{n.time}</Text> : null}
-                </View>
-              </TouchableOpacity>
-            ))}
+            {items.map((n) => {
+              const unread = isUnread(n.id);
+              return (
+                <TouchableOpacity
+                  key={n.id}
+                  style={[styles.row, n.urgent && styles.rowUrgent, unread && styles.rowUnread]}
+                  activeOpacity={0.75}
+                  onPress={() => {
+                    onClose();
+                    if (n.href && onOpenHref) onOpenHref(n.href);
+                  }}
+                >
+                  <View style={[styles.iconBox, { backgroundColor: n.color + '1A' }]}>
+                    <Ionicons name={n.icon} size={17} color={unread ? n.color : COLORS.textMuted} />
+                  </View>
+                  <View style={styles.rowBody}>
+                    <Text style={[styles.rowTitle, unread && styles.rowTitleUnread]} numberOfLines={2}>{n.title}</Text>
+                    <Text style={styles.rowSub} numberOfLines={2}>{n.body}</Text>
+                    {n.time ? <Text style={[styles.rowTime, n.urgent && { color: n.color }]}>{n.time}</Text> : null}
+                  </View>
+                  {unread && <View style={styles.unreadDot} />}
+                </TouchableOpacity>
+              );
+            })}
           </ScrollView>
         )}
       </View>
@@ -308,6 +345,8 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
   },
   title: { fontSize: 18, fontFamily: FONTS.extraBold, fontWeight: '800', color: COLORS.textPrimary },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  clearAll: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.purpleVibrant },
   loadingBox: { paddingVertical: 40, alignItems: 'center' },
   emptyBox: { paddingVertical: 40, alignItems: 'center', gap: 10 },
   emptyText: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textMuted },
@@ -322,6 +361,15 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
   },
   rowUrgent: { borderColor: COLORS.purpleVibrant + '66' },
+  rowUnread: { backgroundColor: COLORS.purpleVibrant + '0A' },
+  rowTitleUnread: { color: COLORS.textPrimary },
+  unreadDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.purpleVibrant,
+    alignSelf: 'center',
+  },
   iconBox: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   rowBody: { flex: 1 },
   rowTitle: { fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary },

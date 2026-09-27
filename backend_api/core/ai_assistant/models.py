@@ -10,6 +10,17 @@ class ChatSession(models.Model):
 
     class Meta:
         ordering = ['-pinned', '-updated_at']
+        # Only one conversation may be pinned at a time. The API also clears
+        # the previous pin inside a transaction, but the database is what
+        # stops two pins from sneaking in through a concurrent request or a
+        # manual admin edit.
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user'],
+                condition=models.Q(pinned=True),
+                name='uniq_pinned_session_per_user',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.user.username} - {self.title}"
@@ -21,14 +32,25 @@ class ChatMessage(models.Model):
     # 🌟 We add the Session field, but make it optional (null=True, blank=True)
     session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name='messages', null=True, blank=True)
     
-    text = models.TextField()
+    text = models.TextField(blank=True, default="")
     is_ai = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    # Attachment metadata for the file the user uploaded with this turn.
+    # The extracted text is folded into `text` before it reaches the model,
+    # so reloading a conversation previously showed a bare AI answer with no
+    # trace of the document that prompted it. We store the metadata only --
+    # never the file bytes -- and the name is what the bubble chip renders.
+    file_name = models.CharField(max_length=255, blank=True, default="")
+    file_mime = models.CharField(max_length=100, blank=True, default="")
+    file_size = models.IntegerField(null=True, blank=True)
 
     class Meta:
         ordering = ['created_at']
 
     def __str__(self):
+        if self.file_name:
+            return f"{'AI' if self.is_ai else 'User'}: [{self.file_name}]"
         return f"{'AI' if self.is_ai else 'User'}: {self.text[:30]}"
 
 class Quiz(models.Model):

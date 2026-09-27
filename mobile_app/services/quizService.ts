@@ -116,7 +116,42 @@ export async function getQuiz(quizId: number): Promise<Quiz> {
 
 /** Get shareable data for a quiz (title, question count, deep link). */
 export async function getQuizShare(quizId: number): Promise<QuizShareData> {
-  return apiCall<QuizShareData>(`/ai/quizzes/${quizId}/share/`);
+  // Share metadata changes whenever the quiz is renamed or re-counted, so it
+  // must not be served from the 24h response cache.
+  return apiCall<QuizShareData>(`/ai/quizzes/${quizId}/share/`, { noCache: true });
+}
+
+/**
+ * Post a quiz card into a study group chat.
+ *
+ * The card goes in the top-level `quiz_embed` field. It used to be smuggled
+ * through `attachments`, where the server rejected it because it had no S3
+ * key — and because the response status was never checked, sharing looked
+ * like it worked while the message silently never arrived. The server now
+ * re-derives the title and counts from the quiz id, so only `id` is sent.
+ */
+export async function shareQuizToGroup(
+  groupId: string,
+  quizId: number,
+): Promise<{ sent: boolean; message: string }> {
+  const token = await getToken();
+  if (!token) throw new Error('Please sign in again to share.');
+
+  const shareData = await getQuizShare(quizId);
+  const response = await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      text: `📝 Quiz Shared: "${shareData.title}"`,
+      quiz_embed: { id: shareData.id },
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || data.detail || 'Could not send to that group');
+  }
+  return { sent: true, message: shareData.title };
 }
 
 /** Generate a quiz from a file (base64 JSON body) and optionally attach it to a class. */
@@ -176,22 +211,4 @@ export async function deleteQuiz(quizId: number): Promise<void> {
     throw new Error(data.error || 'Failed to delete quiz');
   }
   invalidateCachePrefix('/ai/quizzes');
-}
-
-/** Save a shared quiz to the user's account with deduplication.
- * If the user already has this quiz, returns the existing quiz.
- * Otherwise, saves the shared quiz to their account. */
-export async function saveSharedQuiz(quizId: number): Promise<{ quiz: Quiz; isNew: boolean }> {
-  const token = await getToken();
-  const response = await fetch(`${API_BASE_URL}/ai/quizzes/${quizId}/save-shared/`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || 'Failed to save shared quiz');
-  invalidateCachePrefix('/ai/quizzes');
-  return data as { quiz: Quiz; isNew: boolean };
 }

@@ -100,6 +100,18 @@ class Recommendation(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='recommendations')
     title = models.CharField(max_length=255)
     description = models.TextField()
+    # The course this card sends the learner to. Without it the "Start
+    # learning" button had nowhere to go, so every recommendation was a dead
+    # card. Null when the generator could not pick a course the learner is
+    # actually enrolled in -- the client then falls back to Activities rather
+    # than deep-linking somewhere that may not exist.
+    course = models.ForeignKey(
+        'Course',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='recommendations',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

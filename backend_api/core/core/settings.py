@@ -41,6 +41,11 @@ load_dotenv(ENV_FILE_PATH)
 # Now, safely pull your DeepSeek key into Django's settings
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
+# Gemini handles image questions in AI chat (DeepSeek is text-only). Unset
+# means the app tells the user photo questions are unavailable rather than
+# failing silently.
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+GEMINI_MODEL_NAME = os.environ.get('GEMINI_MODEL_NAME', 'gemini-2.0-flash')
 
 # Number of prior chat messages sent to the AI for conversation memory
 CHAT_MEMORY_LIMIT = int(os.environ.get('CHAT_MEMORY_LIMIT', 20))

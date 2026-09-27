@@ -2,13 +2,13 @@
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, Modal, KeyboardAvoidingView, Platform, FlatList } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams } from 'expo-router';
-import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
-import { getQuizzes, saveSharedQuiz } from '@/services/quizService';
+import { getQuizzes, shareQuizToGroup } from '@/services/quizService';
 import { getMyCourses } from '@/services/courseService';
+import { pickDocument, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
@@ -72,50 +72,6 @@ function parseDeadlineInput(text: string): Date | null {
   return date;
 }
 
-const openDeadlinePicker = (target: 'new' | 'edit') => {
-  const current = target === 'new' ? availableUntil : draft?.available_until;
-  const parsed = current ? parseDeadlineInput(current) : new Date();
-  setDeadlineTempDate(parsed || new Date());
-  setDeadlinePickerMode('date');
-  setDeadlinePickerTarget(target);
-  setShowDeadlinePicker(true);
-};
-
-const handleDeadlineChange = ({ nativeEvent }: any) => {
-  if (nativeEvent.type === 'dismissed') {
-    setShowDeadlinePicker(false);
-    return;
-  }
-  const newDate = nativeEvent.timestamp ? new Date(nativeEvent.timestamp) : deadlineTempDate;
-  setDeadlineTempDate(newDate);
-  if (deadlinePickerMode === 'date') {
-    setDeadlinePickerMode('time');
-  } else {
-    const combined = new Date(
-      deadlineTempDate.getFullYear(),
-      deadlineTempDate.getMonth(),
-      deadlineTempDate.getDate(),
-      newDate.getHours(),
-      newDate.getMinutes()
-    );
-    const formatted = toDeadlineInput(combined);
-    if (deadlinePickerTarget === 'new') {
-      setAvailableUntil(formatted);
-    } else if (draft) {
-      setDraft({ ...draft, available_until: formatted });
-    }
-    setShowDeadlinePicker(false);
-  }
-};
-
-const clearDeadline = (target: 'new' | 'edit') => {
-  if (target === 'new') {
-    setAvailableUntil('');
-  } else if (draft) {
-    setDraft({ ...draft, available_until: '' });
-  }
-};
-
 export default function QuizManagerScreen() {
   const params = useLocalSearchParams<{ course?: string; generate?: string }>();
 
@@ -129,7 +85,7 @@ export default function QuizManagerScreen() {
     params.course ? Number(params.course) : null,
   );
 
-  const [selectedFile, setSelectedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [selectedFile, setSelectedFile] = useState<PickedDocument | null>(null);
   const [difficulty, setDifficulty] = useState('Medium');
   const [questionCount, setQuestionCount] = useState('10');
   const [questionType, setQuestionType] = useState('Multiple Choice');
@@ -150,6 +106,52 @@ export default function QuizManagerScreen() {
   const [deadlinePickerMode, setDeadlinePickerMode] = useState<'date' | 'time'>('date');
   const [deadlineTempDate, setDeadlineTempDate] = useState<Date>(new Date());
   const [deadlinePickerTarget, setDeadlinePickerTarget] = useState<'new' | 'edit'>('new');
+
+  // These live inside the component because they drive the state above; at
+  // module scope they had no access to it and did not compile.
+  const openDeadlinePicker = (target: 'new' | 'edit') => {
+    const current = target === 'new' ? availableUntil : draft?.available_until;
+    const parsed = current ? parseDeadlineInput(current) : new Date();
+    setDeadlineTempDate(parsed || new Date());
+    setDeadlinePickerMode('date');
+    setDeadlinePickerTarget(target);
+    setShowDeadlinePicker(true);
+  };
+
+  const handleDeadlineChange = ({ nativeEvent }: any) => {
+    if (nativeEvent.type === 'dismissed') {
+      setShowDeadlinePicker(false);
+      return;
+    }
+    const newDate = nativeEvent.timestamp ? new Date(nativeEvent.timestamp) : deadlineTempDate;
+    setDeadlineTempDate(newDate);
+    if (deadlinePickerMode === 'date') {
+      setDeadlinePickerMode('time');
+    } else {
+      const combined = new Date(
+        deadlineTempDate.getFullYear(),
+        deadlineTempDate.getMonth(),
+        deadlineTempDate.getDate(),
+        newDate.getHours(),
+        newDate.getMinutes()
+      );
+      const formatted = toDeadlineInput(combined);
+      if (deadlinePickerTarget === 'new') {
+        setAvailableUntil(formatted);
+      } else if (draft) {
+        setDraft({ ...draft, available_until: formatted });
+      }
+      setShowDeadlinePicker(false);
+    }
+  };
+
+  const clearDeadline = (target: 'new' | 'edit') => {
+    if (target === 'new') {
+      setAvailableUntil('');
+    } else if (draft) {
+      setDraft({ ...draft, available_until: '' });
+    }
+  };
 
   // 3-dots menu state
   const [menuQuizId, setMenuQuizId] = useState<number | null>(null);
@@ -201,15 +203,16 @@ export default function QuizManagerScreen() {
 
   const pickFile = async () => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ['application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-        copyToCacheDirectory: true,
-      });
-      if (result.canceled) return;
-      setSelectedFile(result.assets[0]);
+      // Shared picker: one allowlist for the whole app. The old local
+      // getDocumentAsync hardcoded a MIME array that had no PPTX entry and
+      // relied on the exact MIME strings Android does not report reliably
+      // for Office files, so the label next to it was a lie.
+      const file = await pickDocument();
+      if (!file) return;
+      setSelectedFile(file);
     } catch (err) {
       console.error('File picker error:', err);
-      Alert.alert('Error', 'Failed to select file.');
+      Alert.alert('Unsupported File', describeFileError(err));
     }
   };
 
@@ -537,42 +540,11 @@ export default function QuizManagerScreen() {
     try {
       const token = await getToken();
       if (!token) return;
-      // Get quiz share data
-      const shareRes = await fetch(`${API_BASE_URL}/ai/quizzes/${shareQuizId}/share/`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!shareRes.ok) throw new Error('Failed to get share data');
-      const shareData = await shareRes.json();
-
-      await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          text: `📝 Quiz Shared: "${shareData.title}"`,
-          attachments: [{
-            type: 'quiz_embed',
-            quiz_id: shareData.id,
-            title: shareData.title,
-            question_count: shareData.question_count,
-            quiz_type: shareData.quiz_type,
-            deep_link: shareData.deep_link,
-          }],
-        }),
-      });
-
-      // Save shared quiz to user's account (with deduplication)
-      try {
-        const result = await saveSharedQuiz(shareData.id);
-        if (!result.isNew) {
-          Alert.alert('Already Saved', 'This quiz is already in your quiz list.');
-        }
-      } catch (saveErr) {
-        console.warn('Failed to save shared quiz:', saveErr);
-      }
+      const { message } = await shareQuizToGroup(groupId, shareQuizId);
 
       setShowShareModal(false);
       setShareQuizId(null);
-      Alert.alert('Shared!', 'Quiz sent to group chat.');
+      Alert.alert('Shared!', `"${message}" was sent to the group chat.`);
     } catch (err) {
       Alert.alert('Failed to share', err instanceof Error ? err.message : 'Please try again.');
     }
@@ -750,7 +722,7 @@ export default function QuizManagerScreen() {
                     <Text style={styles.materialMeta}>
                       {selectedFile
                         ? `${selectedFile.name.split('.').pop()?.toUpperCase() || 'FILE'} · ${selectedFile.size ? (selectedFile.size / (1024 * 1024)).toFixed(1) + ' MB' : 'Unknown size'}`
-                        : 'Select a PDF or text file'}
+                        : `Select a ${SUPPORTED_LABEL} file`}
                     </Text>
                   </View>
                   <TouchableOpacity style={styles.changeBtn} onPress={pickFile}>

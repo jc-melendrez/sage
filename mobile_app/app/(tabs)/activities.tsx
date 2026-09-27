@@ -17,8 +17,9 @@ import { completeQuiz } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
 import QuizInfoModal from '@/components/QuizInfoModal';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
-import { deleteQuiz, startQuizAttempt, getQuizShare, updateQuiz, parseDeadlineInput } from '@/services/quizService';
-import { pickDocument, readAsBase64, describeFileError, type PickedDocument } from '@/services/fileUpload';
+import { deleteQuiz, startQuizAttempt, shareQuizToGroup, updateQuiz, parseDeadlineInput } from '@/services/quizService';
+import { pickDocument, readAsBase64, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
+import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/JoinCodeInput';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 import { TabSkeleton } from '@/components/Skeleton';
 
@@ -79,16 +80,14 @@ export default function ActivitiesScreen() {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
-  const [joinCodeInput, setJoinCodeInput] = useState('');
+  const [joinCodeInput, setJoinCodeInput] = useState<string[]>(() => Array(JOIN_CODE_LENGTH).fill(''));
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // --- Join Class Modal (enrolled backend courses) ---
   const [isJoinCourseModalOpen, setIsJoinCourseModalOpen] = useState(false);
-  const [classCodeInput, setClassCodeInput] = useState('');
+  const [classCodeInput, setClassCodeInput] = useState<string[]>(() => Array(JOIN_CODE_LENGTH).fill(''));
   const [isJoiningClass, setIsJoiningClass] = useState(false);
 
-  const groupCodeRefs = useRef<any[]>([]);
-  const classCodeRefs = useRef<any[]>([]);
 
   // --- Quiz Player State ---
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
@@ -158,28 +157,13 @@ export default function ActivitiesScreen() {
     if (!shareTarget) return;
     try {
       setIsSharing(groupId);
-      const shareData = await getQuizShare(shareTarget.id);
-      const token = await getToken();
-      if (!token) return;
-      const res = await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          text: `📝 Quiz Shared: "${shareData.title}"`,
-          attachments: [{
-            type: 'quiz_embed',
-            quiz_id: shareData.id,
-            title: shareData.title,
-            question_count: shareData.question_count,
-            quiz_type: shareData.quiz_type,
-            deep_link: shareData.deep_link,
-          }],
-        }),
-      });
-      if (!res.ok) throw new Error('Could not send to that group');
+      const { message } = await shareQuizToGroup(groupId, shareTarget.id);
       setIsShareOpen(false);
-      Alert.alert('Shared!', `"${shareData.title}" was sent to the group chat.`);
+      Alert.alert('Shared!', `"${message}" was sent to the group chat.`);
     } catch (err) {
+      // shareQuizToGroup rethrows the server's own `error`/`detail`, so this
+      // shows the real reason (not a member, no access, quiz gone) instead of
+      // a blanket "please try again".
       Alert.alert('Failed to share', err instanceof Error ? err.message : 'Please try again.');
     } finally {
       setIsSharing(null);
@@ -449,7 +433,7 @@ export default function ActivitiesScreen() {
 
   const handleGenerateQuiz = async () => {
     if (!quizFile) {
-      Alert.alert("Material Required", "Please select a study material (PDF, DOCX, PPTX, TXT, MD or CSV) before generating a quiz.");
+      Alert.alert("Material Required", `Please select a study material (${SUPPORTED_LABEL}) before generating a quiz.`);
       return;
     }
     setIsGeneratingQuiz(true);
@@ -640,9 +624,12 @@ export default function ActivitiesScreen() {
   };
 
   const handleJoinGroup = async () => {
-    const code = joinCodeInput.trim().toUpperCase();
-    if (!code) {
-      Alert.alert('Code Required', 'Please enter the 6-character join code.');
+    const code = joinCodeToString(joinCodeInput);
+    if (code.length !== JOIN_CODE_LENGTH) {
+      Alert.alert(
+        'Code Required',
+        `Please enter the ${JOIN_CODE_LENGTH}-character join code. You've entered ${code.length}.`,
+      );
       return;
     }
     try {
@@ -655,7 +642,7 @@ export default function ActivitiesScreen() {
       });
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
-        setJoinCodeInput('');
+        setJoinCodeInput(Array(JOIN_CODE_LENGTH).fill(''));
         setIsJoinModalOpen(false);
         if (data?.status === 'pending') {
           Alert.alert('Request Sent', data.message || 'The group admin will approve your join request.');
@@ -675,15 +662,18 @@ export default function ActivitiesScreen() {
   };
 
   const handleJoinClass = async () => {
-    const code = classCodeInput.trim().toUpperCase();
-    if (!code) {
-      Alert.alert('Code Required', 'Please enter the join code shared by your educator.');
+    const code = joinCodeToString(classCodeInput);
+    if (code.length !== JOIN_CODE_LENGTH) {
+      Alert.alert(
+        'Code Required',
+        `Please enter the ${JOIN_CODE_LENGTH}-character join code shared by your educator. You've entered ${code.length}.`,
+      );
       return;
     }
     try {
       setIsJoiningClass(true);
       await joinCourseByCode(code);
-      setClassCodeInput('');
+      setClassCodeInput(Array(JOIN_CODE_LENGTH).fill(''));
       setIsJoinCourseModalOpen(false);
       await loadInitialData({ isRefresh: true });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -691,51 +681,6 @@ export default function ActivitiesScreen() {
       Alert.alert('Could Not Join Class', err instanceof Error ? err.message : 'Invalid join code.');
     } finally {
       setIsJoiningClass(false);
-    }
-  };
-
-  const handleGroupCodeChange = (t: string, i: number) => {
-    const char = t.slice(-1).toUpperCase();
-    const next = joinCodeInput.split('').slice(0, 6);
-    while (next.length < i) next.push('');
-    if (!char) {
-      next[i] = '';
-      if (i > 0) next[i - 1] = '';
-    } else {
-      next[i] = char;
-    }
-    setJoinCodeInput(next.join('').slice(0, 6));
-    if (char && i < 5) groupCodeRefs.current[i + 1]?.focus();
-    else if (!char && i > 0) groupCodeRefs.current[i - 1]?.focus();
-  };
-  const handleGroupCodeKeyPress = (e: any, i: number) => {
-    if (e.nativeEvent.key === 'Backspace' && !joinCodeInput[i] && i > 0) {
-      const next = joinCodeInput.split('');
-      next[i - 1] = '';
-      setJoinCodeInput(next.join(''));
-      groupCodeRefs.current[i - 1]?.focus();
-    }
-  };
-  const handleClassCodeChange = (t: string, i: number) => {
-    const char = t.slice(-1).toUpperCase();
-    const next = classCodeInput.split('').slice(0, 6);
-    while (next.length < i) next.push('');
-    if (!char) {
-      next[i] = '';
-      if (i > 0) next[i - 1] = '';
-    } else {
-      next[i] = char;
-    }
-    setClassCodeInput(next.join('').slice(0, 6));
-    if (char && i < 5) classCodeRefs.current[i + 1]?.focus();
-    else if (!char && i > 0) classCodeRefs.current[i - 1]?.focus();
-  };
-  const handleClassCodeKeyPress = (e: any, i: number) => {
-    if (e.nativeEvent.key === 'Backspace' && !classCodeInput[i] && i > 0) {
-      const next = classCodeInput.split('');
-      next[i - 1] = '';
-      setClassCodeInput(next.join(''));
-      classCodeRefs.current[i - 1]?.focus();
     }
   };
 
@@ -988,22 +933,15 @@ export default function ActivitiesScreen() {
               </TouchableOpacity>
               <Text style={styles.joinModalTitle}>JOIN GROUP</Text>
               <Text style={styles.joinModalSub}>Enter the code your classmate shared to join their study group.</Text>
-              <View style={styles.codeBoxes}>
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <TextInput
-                    key={i}
-                    ref={(r) => { groupCodeRefs.current[i] = r; }}
-                    style={[styles.codeBox, joinCodeInput[i] ? styles.codeBoxFilled : null]}
-                    value={joinCodeInput[i] || ''}
-                    onChangeText={(t) => handleGroupCodeChange(t, i)}
-                    onKeyPress={(e) => handleGroupCodeKeyPress(e, i)}
-                    maxLength={1}
-                    autoCapitalize="characters"
-                    autoCorrect={false}
-                    editable={!isSubmitting}
-                  />
-                ))}
-              </View>
+              <JoinCodeInput
+                slots={joinCodeInput}
+                onChange={setJoinCodeInput}
+                editable={!isSubmitting}
+                containerStyle={styles.codeBoxes}
+                boxStyle={styles.codeBox}
+                filledBoxStyle={styles.codeBoxFilled}
+                accessibilityLabel="Group code"
+              />
               <TouchableOpacity
                 style={[styles.joinSubmitBtn, isSubmitting && { opacity: 0.7 }]}
                 onPress={handleJoinGroup}
@@ -1029,22 +967,15 @@ export default function ActivitiesScreen() {
               </TouchableOpacity>
               <Text style={styles.joinModalTitle}>JOIN CLASS</Text>
               <Text style={styles.joinModalSub}>Enter the 6-character join code shared by your educator.</Text>
-              <View style={styles.codeBoxes}>
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <TextInput
-                    key={i}
-                    ref={(r) => { classCodeRefs.current[i] = r; }}
-                    style={[styles.codeBox, classCodeInput[i] ? styles.codeBoxFilled : null]}
-                    value={classCodeInput[i] || ''}
-                    onChangeText={(t) => handleClassCodeChange(t, i)}
-                    onKeyPress={(e) => handleClassCodeKeyPress(e, i)}
-                    maxLength={1}
-                    autoCapitalize="characters"
-                    autoCorrect={false}
-                    editable={!isJoiningClass}
-                  />
-                ))}
-              </View>
+              <JoinCodeInput
+                slots={classCodeInput}
+                onChange={setClassCodeInput}
+                editable={!isJoiningClass}
+                containerStyle={styles.codeBoxes}
+                boxStyle={styles.codeBox}
+                filledBoxStyle={styles.codeBoxFilled}
+                accessibilityLabel="Class code"
+              />
               <TouchableOpacity
                 style={[styles.joinSubmitBtn, isJoiningClass && { opacity: 0.7 }]}
                 onPress={handleJoinClass}
@@ -1120,7 +1051,7 @@ export default function ActivitiesScreen() {
                     <Text style={styles.quizGenMaterialMeta}>
                       {quizFile
                         ? `${quizFile.name.split('.').pop()?.toUpperCase() || 'FILE'} • ${quizFile.size ? (quizFile.size / (1024 * 1024)).toFixed(1) + ' MB' : 'Unknown size'}`
-                        : "Select a PDF or text file"}
+                        : `Select a ${SUPPORTED_LABEL} file`}
                     </Text>
                   </View>
                   <TouchableOpacity style={styles.quizGenChangeBtn} onPress={pickQuizFile}>
@@ -2035,7 +1966,7 @@ const styles = StyleSheet.create({
   closeInviteBtn: { position: 'absolute', top: 16, right: 16, padding: 4, zIndex: 10 },
   joinModalTitle: { fontSize: 20, fontFamily: FONTS.black, color: COLORS.purpleDeep, marginBottom: 6 },
   joinModalSub: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textMuted, textAlign: 'center', marginBottom: 24 },
-  codeBoxes: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 24 },
+  codeBoxes: { marginBottom: 24 },
   codeBox: {
     width: 40,
     height: 50,

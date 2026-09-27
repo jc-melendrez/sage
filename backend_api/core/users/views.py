@@ -915,19 +915,37 @@ def _generate_recommendations(user):
     if not GROQ_API_KEY:
         return None
 
+    # Every card has to land somewhere, so the model picks from the courses
+    # this learner is actually enrolled in. We validate the returned ids
+    # against the same set below, so a hallucinated id becomes a null course
+    # (client falls back to Activities) rather than a broken link.
+    enrolled = list(
+        Course.objects.filter(students=user)
+        .order_by('name')
+        .values_list('id', 'name')[:20]
+    )
+    enrolled_by_id = {cid: name for cid, name in enrolled}
+    course_choices = "\n".join(f"- {cid}: {name}" for cid, name in enrolled) or "(none)"
+
     system_prompt = (
         "You are SAGE, a Smart Assistant for Group-Based Education. "
         "You write short, personalized study recommendations for a student based on "
         "their real progress data. "
         "You MUST return ONLY valid JSON. Do not include any text or markdown outside the JSON. "
         "The JSON structure must be: "
-        '{"recommendations": [{"title": "Short actionable title", "description": "2-3 sentence explanation"}]} '
-        "Return exactly 3 to 4 recommendations that are specific to the data provided."
+        '{"recommendations": [{"course_id": 12, "title": "Short actionable title", '
+        '"description": "2-3 sentence explanation"}]} '
+        "Return exactly 3 to 4 recommendations that are specific to the data provided. "
+        "For every item, set course_id to the id of the enrolled course the learner "
+        "should start with, chosen from the list you are given. Never invent a course "
+        "id, and use null if none of the listed courses fit."
     )
 
     user_prompt = (
         "Here is the student's current progress:\n\n"
         f"{snapshot}\n\n"
+        "Courses this student is enrolled in (use these exact ids):\n"
+        f"{course_choices}\n\n"
         "Write personalized study recommendations based on this. "
         "Focus on the most useful next steps: topics to review or restart, "
         "strengths to build on, and consistent study habits."
@@ -965,8 +983,22 @@ def _generate_recommendations(user):
         for item in items:
             title = str(item.get('title', '')).strip()
             description = str(item.get('description', '')).strip()
-            if title:
-                Recommendation.objects.create(user=user, title=title, description=description)
+            if not title:
+                continue
+            # Never trust the model's id: an id outside the enrolled set would
+            # deep-link to a course the learner cannot open.
+            try:
+                course_id = int(item.get('course_id'))
+            except (TypeError, ValueError):
+                course_id = None
+            if course_id not in enrolled_by_id:
+                course_id = None
+            Recommendation.objects.create(
+                user=user,
+                title=title,
+                description=description,
+                course_id=course_id,
+            )
         return Recommendation.objects.filter(user=user)
     except Exception as e:
         import traceback
@@ -1120,6 +1152,51 @@ class GroupAttachmentUploadView(APIView):
         return Response(attachment, status=201)
 
 
+def _validate_quiz_embed(user, payload):
+    """Validate a `quiz_embed` posted alongside a group chat message.
+
+    Sharing a quiz into a group is a *reference*, not an upload: the client
+    posts the quiz id and we re-derive every display field server-side. That
+    matters because the previous implementation let the client send an
+    arbitrary title/question count, so anyone could spoof a card for a quiz
+    they do not own.
+
+    Returns ``(embed, error_response)``; exactly one is ever non-None.
+    """
+    if payload is None:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, Response({"error": "quiz_embed must be an object"}, status=400)
+
+    try:
+        quiz_id = int(payload.get('id') or 0)
+    except (TypeError, ValueError):
+        quiz_id = 0
+    if not quiz_id:
+        return None, Response({"error": "quiz_embed.id is required"}, status=400)
+
+    quiz = Quiz.objects.filter(id=quiz_id).first()
+    if not quiz:
+        return None, Response({"error": "Quiz not found"}, status=404)
+
+    # Same rule as QuizShareView: the owner, or anyone enrolled on its course.
+    if user != quiz.user:
+        course = quiz.course
+        if not course or not course.students.filter(id=user.id).exists():
+            return None, Response({"error": "Not authorized to share this quiz."}, status=403)
+
+    # Always recount. An earlier version accepted the client's question_count
+    # when it looked sane, which let anyone render a card claiming a 2-question
+    # quiz had 99 questions -- the exact spoof this function exists to stop.
+    return {
+        'id': quiz.id,
+        'title': (quiz.title or 'Untitled quiz')[:180],
+        'question_count': quiz.questions.count(),
+        'quiz_type': str(quiz.quiz_type or 'quiz')[:40],
+        'deep_link': f"sage://quiz/{quiz.id}",
+    }, None
+
+
 class GroupChatView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1138,7 +1215,10 @@ class GroupChatView(APIView):
     def post(self, request, group_id):
         text = request.data.get('text')
         has_attachments = 'attachments' in request.data
-        if not text and not has_attachments:
+        # A message can be a bare quiz card with no text, so the embed counts
+        # as content on its own.
+        has_quiz_embed = request.data.get('quiz_embed') is not None
+        if not text and not has_attachments and not has_quiz_embed:
             return Response({"error": "Message text is required"}, status=400)
 
         group = get_study_group(group_id)
@@ -1170,11 +1250,16 @@ class GroupChatView(APIView):
                     return Response({"error": "Attachments must be 10 MB or smaller."}, status=400)
                 attachments.append({'key': key, 'name': name, 'mime': mime, 'size': size})
 
+        quiz_embed, embed_error = _validate_quiz_embed(request.user, request.data.get('quiz_embed'))
+        if embed_error:
+            return embed_error
+
         sender_name = request.user.get_full_name() or request.user.username
         sender_avatar = request.user.avatar or ''
         msg_id = send_message(
             group_id, request.user.firebase_uid, text or '',
             sender_name, sender_avatar, attachments=attachments,
+            quiz_embed=quiz_embed,
         )
         return Response({
             "id": msg_id,
@@ -1183,6 +1268,7 @@ class GroupChatView(APIView):
             "sender_avatar": sender_avatar,
             "text": text,
             "attachments": attachments or [],
+            "quiz_embed": quiz_embed or {},
             "reactions": {},
             # Server timestamp resolves in Firestore moments later; give the
             # client an instant ISO timestamp to render with.

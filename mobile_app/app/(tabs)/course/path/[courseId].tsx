@@ -377,7 +377,9 @@ export default function CoursePathScreen() {
 
   const handleStartActivity = (nodeId: number) => {
     setSelectedNodeIndex(null);
-    router.push(`/course/node/${nodeId}` as any);
+    // Pass the course so the player can offer the next node on the path
+    // instead of dumping the student back at the top of the map.
+    router.push(`/course/node/${nodeId}?courseId=${courseId}` as any);
   };
 
   // Duolingo-style: auto-track the emphasized node as you scroll.

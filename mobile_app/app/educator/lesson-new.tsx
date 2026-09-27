@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useFocusEffect } from 'expo-router';
-import * as DocumentPicker from 'expo-document-picker';
+import { pickDocument, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
@@ -34,7 +34,7 @@ export default function CreateLessonScreen() {
   const [coursesLoading, setCoursesLoading] = useState(true);
   const [selectedCourse, setSelectedCourse] = useState<number | null>(null);
 
-  const [aiFile, setAiFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [aiFile, setAiFile] = useState<PickedDocument | null>(null);
   const [aiInstructions, setAiInstructions] = useState('');
   const [aiDifficulty, setAiDifficulty] = useState('beginner');
   const [aiNodeCount, setAiNodeCount] = useState('4');
@@ -62,15 +62,13 @@ export default function CreateLessonScreen() {
 
   const handlePickFile = async () => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'],
-        copyToCacheDirectory: true,
-      });
-      if (!result.canceled && result.assets[0]) {
-        setAiFile(result.assets[0]);
-      }
-    } catch {
-      Alert.alert('Error', 'Failed to pick file.');
+      // Shared picker: this had its own MIME array, which meant no allowlist
+      // at all and no PPTX, and the label below it under-advertised what the
+      // backend could actually read.
+      const file = await pickDocument();
+      if (file) setAiFile(file);
+    } catch (err) {
+      Alert.alert('Unsupported File', describeFileError(err));
     }
   };
 
@@ -88,7 +86,7 @@ export default function CreateLessonScreen() {
       const result = await generateTopic(selectedCourse, {
         uri: aiFile.uri,
         name: aiFile.name,
-        mimeType: aiFile.mimeType,
+        mimeType: aiFile.mimeType ?? undefined,
       }, {
         instructions: aiInstructions || undefined,
         difficulty: aiDifficulty,
@@ -193,7 +191,7 @@ export default function CreateLessonScreen() {
             <TouchableOpacity style={styles.fileBtn} activeOpacity={0.8} onPress={handlePickFile} disabled={generating}>
               <Ionicons name={aiFile ? 'document' : 'cloud-upload'} size={20} color={aiFile ? COLORS.success : COLORS.purpleVibrant} />
               <Text style={[styles.fileBtnText, aiFile && { color: COLORS.success }]}>
-                {aiFile ? aiFile.name : 'Pick a file (PDF, DOCX, TXT)'}
+                {aiFile ? aiFile.name : `Pick a file (${SUPPORTED_LABEL})`}
               </Text>
             </TouchableOpacity>
 

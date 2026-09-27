@@ -1,10 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Modal } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { getNode, completeNode } from '@/services/courseService';
-import { LearningNode, isLearnContent, isPracticeContent, NODE_TYPE_CONFIG } from '@/types/learning';
+import { getNode, getCoursePath, completeNode } from '@/services/courseService';
+import { LearningNode, CoursePathTopic, isLearnContent, isPracticeContent, NODE_TYPE_CONFIG } from '@/types/learning';
 import { ConceptBlockView, ExampleBlockView, InteractionBlockView, SummaryBlockView } from '@/components/lesson/BlockRenderer';
 import QuizRunner, { QuestionResult } from '@/components/lesson/QuizRunner';
 import ResultsSummary from '@/components/lesson/ResultsSummary';
@@ -31,8 +31,20 @@ const FONTS = {
 
 type ScreenPhase = 'loading' | 'lesson' | 'quiz' | 'results' | 'error';
 
+/**
+ * Flatten a course path into reading order. The path is a vertical list of
+ * topics, each holding its own nodes, so "the next node" means "the next entry
+ * in this flat list" — which naturally crosses a topic boundary. Comparing
+ * nodes against their own topic would have stopped at every topic edge.
+ */
+function flattenPath(topics: CoursePathTopic[]): LearningNode[] {
+  return [...topics]
+    .sort((a, b) => a.order - b.order)
+    .flatMap(topic => [...topic.nodes].sort((a, b) => a.order - b.order));
+}
+
 export default function NodePlayerScreen() {
-  const { nodeId, preview } = useLocalSearchParams<{ nodeId: string; preview?: string }>();
+  const { nodeId, preview, courseId } = useLocalSearchParams<{ nodeId: string; preview?: string; courseId?: string }>();
   const isPreview = preview === '1';
   const router = useRouter();
 
@@ -46,6 +58,10 @@ export default function NodePlayerScreen() {
   // screen treats a number as authoritative, so a lesson would report 0%.
   const [quizScore, setQuizScore] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Next node on the path, resolved lazily on the results screen.
+  const [nextNode, setNextNode] = useState<LearningNode | null>(null);
+  const [nextNodeTopic, setNextNodeTopic] = useState<string>('');
+  const [showNextPreview, setShowNextPreview] = useState(false);
 
   useEffect(() => {
     loadNode();
@@ -130,8 +146,59 @@ export default function NodePlayerScreen() {
   };
 
   const handleContinue = () => {
+    // Preview runs have no progress to continue, so go straight back.
+    if (isPreview) {
+      router.back();
+      return;
+    }
+    if (nextNode) {
+      setShowNextPreview(true);
+      return;
+    }
     router.back();
   };
+
+  const handleStartNext = () => {
+    if (!nextNode) return;
+    const id = nextNode.id;
+    setShowNextPreview(false);
+    // Replace this screen so backing out of the next node does not walk
+    // through every completed activity again.
+    router.replace(
+      (courseId
+        ? `/course/node/${id}?courseId=${courseId}`
+        : `/course/node/${id}`) as any
+    );
+  };
+
+  const loadNextNode = useCallback(async () => {
+    if (!courseId) return;
+    try {
+      const topics = await getCoursePath(Number(courseId));
+      const ordered = [...topics].sort((a, b) => a.order - b.order);
+      const flat = flattenPath(ordered);
+      const index = flat.findIndex(n => n.id === Number(nodeId));
+      if (index === -1) return;
+      const upcoming = flat[index + 1];
+      if (!upcoming) return;
+      // Label the card with the upcoming node's own topic, which differs from
+      // the finished node's whenever the path crosses a topic boundary.
+      const topic = ordered.find(t => t.id === upcoming.topic);
+      setNextNodeTopic(topic ? topic.title : '');
+      setNextNode(upcoming);
+    } catch {
+      // A failed lookup must not block finishing the lesson.
+      setNextNode(null);
+    }
+  }, [courseId, nodeId]);
+
+  // Resolve the next node once the results screen is up, so the modal is
+  // already populated the moment "Continue" is tapped.
+  useEffect(() => {
+    if (phase === 'results' && !isPreview) {
+      loadNextNode();
+    }
+  }, [phase, isPreview, loadNextNode]);
 
   const cfg = node ? NODE_TYPE_CONFIG[node.node_type] : null;
 
@@ -178,6 +245,13 @@ export default function NodePlayerScreen() {
           onRetry={handleRetry}
           onContinue={handleContinue}
           onClose={handleContinue}
+        />
+        <NextNodePreview
+          visible={showNextPreview}
+          node={nextNode}
+          topicTitle={nextNodeTopic}
+          onStart={handleStartNext}
+          onDismiss={() => setShowNextPreview(false)}
         />
       </View>
     );
@@ -263,6 +337,88 @@ export default function NodePlayerScreen() {
   return null;
 }
 
+/**
+ * Preview of the upcoming node. Nothing starts on its own — the student has to
+ * press Start, because a "continue" that silently launches a different
+ * activity (often in another topic) is disorienting.
+ */
+function NextNodePreview({
+  visible,
+  node,
+  topicTitle,
+  onStart,
+  onDismiss,
+}: {
+  visible: boolean;
+  node: LearningNode | null;
+  topicTitle: string;
+  onStart: () => void;
+  onDismiss: () => void;
+}) {
+  if (!visible || !node) return null;
+  const cfg = NODE_TYPE_CONFIG[node.node_type];
+  const isNextLesson = isLearnContent(node.content_json);
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onDismiss}
+    >
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHandle} />
+          <Text style={styles.modalEyebrow}>Up next{topicTitle ? ` · ${topicTitle}` : ''}</Text>
+          <Text style={styles.modalTitle}>{node.title}</Text>
+          {!!node.description && (
+            <Text style={styles.modalDescription} numberOfLines={3}>
+              {node.description}
+            </Text>
+          )}
+
+          <View style={styles.modalMetaRow}>
+            <View style={styles.modalMeta}>
+              <Ionicons
+                name={isNextLesson ? 'book-outline' : 'help-circle-outline'}
+                size={14}
+                color={cfg?.color || COLORS.purpleVibrant}
+              />
+              <Text style={styles.modalMetaText}>
+                {isNextLesson
+                  ? 'Lesson'
+                  : isPracticeContent(node.content_json)
+                    ? `${node.content_json.questions.length} questions`
+                    : 'Activity'}
+              </Text>
+            </View>
+            <View style={styles.modalMeta}>
+              <Ionicons name="hourglass-outline" size={14} color={COLORS.textMuted} />
+              <Text style={styles.modalMetaText}>{node.estimated_minutes} min</Text>
+            </View>
+            <View style={styles.modalMeta}>
+              <Ionicons name="star-outline" size={14} color={COLORS.textMuted} />
+              <Text style={styles.modalMetaText}>+{node.xp_reward} XP</Text>
+            </View>
+          </View>
+
+          <TouchableOpacity
+            style={[styles.modalStart, { backgroundColor: cfg?.color || COLORS.purpleVibrant }]}
+            onPress={onStart}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.modalStartText}>Start</Text>
+            <Ionicons name="arrow-forward" size={18} color="white" />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.modalDismiss} onPress={onDismiss}>
+            <Text style={styles.modalDismissText}>Back to path</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   center: { flex: 1, backgroundColor: COLORS.bg, justifyContent: 'center', alignItems: 'center', gap: 12 },
@@ -314,4 +470,67 @@ const styles = StyleSheet.create({
   errorText: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.textMuted, textAlign: 'center' },
   retryBtn: { backgroundColor: COLORS.purpleDark, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 12, marginTop: 8 },
   retryText: { color: 'white', fontFamily: FONTS.semiBold, fontSize: 13 },
+
+  // Next-node preview
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(26, 10, 56, 0.55)',
+    justifyContent: 'flex-end',
+  },
+  modalCard: {
+    backgroundColor: COLORS.bg,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingHorizontal: 24,
+    paddingTop: 12,
+    paddingBottom: 36,
+  },
+  modalHandle: {
+    alignSelf: 'center',
+    width: 44,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(148,163,184,0.4)',
+    marginBottom: 18,
+  },
+  modalEyebrow: {
+    fontSize: 12,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: COLORS.purpleVibrant,
+    marginBottom: 6,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontFamily: FONTS.extraBold,
+    fontWeight: '800',
+    color: COLORS.textPrimary,
+    marginBottom: 8,
+  },
+  modalDescription: {
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  modalMetaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 16,
+    marginBottom: 22,
+  },
+  modalMeta: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  modalMetaText: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted },
+  modalStart: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 15,
+    borderRadius: 16,
+  },
+  modalStartText: { fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700', color: 'white' },
+  modalDismiss: { alignItems: 'center', paddingVertical: 14, marginTop: 4 },
+  modalDismissText: { fontSize: 14, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textMuted },
 });

@@ -5,7 +5,7 @@ import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
 import { LinearGradient } from 'expo-linear-gradient';
 import Markdown from '@ronradtke/react-native-markdown-display';
-import { pickDocument, readAsBase64, describeFileError, type PickedDocument } from '@/services/fileUpload';
+import { pickDocument, pickImage, readAsBase64, describeFileError, isImageUri, SUPPORTED_LABEL, SUPPORTED_IMAGE_LABEL, type PickedDocument } from '@/services/fileUpload';
 
 // 🌟 Enable Layout Animations for Android
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -129,12 +129,36 @@ interface Message {
   type: 'user' | 'ai';
   text: string;
   time: string;
+  /**
+   * Name of the document or photo the user sent with this turn. The server
+   * stores it, so reloading a conversation shows the attachment chip again
+   * instead of a bare answer with no trace of what prompted it.
+   */
+  fileName?: string;
+  fileMime?: string;
+  fileSize?: number | null;
 }
 
 interface ChatSession {
   id: number;
   title: string;
   pinned?: boolean;
+  updated_at?: string;
+}
+
+/**
+ * Pinned conversations first, then most recently updated. The server already
+ * orders this way, but pinning or unpinning only patched one row locally, so
+ * the list did not move until the next reload.
+ */
+function sortSessionsPinnedFirst(sessions: ChatSession[]): ChatSession[] {
+  return [...sessions].sort((a, b) => {
+    if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+    const aTime = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+    const bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+    if (aTime !== bTime) return bTime - aTime;
+    return a.id - b.id;
+  });
 }
 
 export default function AIAssistantScreen() {
@@ -195,7 +219,7 @@ export default function AIAssistantScreen() {
       });
       if (res.ok) {
         const data = await res.json();
-        setSessions(data);
+        setSessions(sortSessionsPinnedFirst(data));
         if (data.length > 0 && !activeSessionId) {
           loadHistory(data[0].id);
         } else if (data.length === 0) {
@@ -272,7 +296,13 @@ export default function AIAssistantScreen() {
     closeMenu();
     try {
       const data = await patchSession(sessionId, { pinned: !currentlyPinned });
-      setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, pinned: data.pinned } : s));
+      setSessions(prev => {
+        // The server keeps at most one pin, so applying its answer to *all*
+        // rows is what mirrors reality: previously whatever was pinned before
+        // stayed pinned here, so the list showed two pins until a reload.
+        const next = prev.map(s => ({ ...s, pinned: s.id === sessionId ? data.pinned : false }));
+        return sortSessionsPinnedFirst(next);
+      });
     } catch (err) {
       console.error('Failed to pin session:', err);
       Alert.alert('Could not pin', err instanceof Error ? err.message : 'Please try again.');
@@ -348,8 +378,11 @@ export default function AIAssistantScreen() {
       id: Date.now(),
       type: 'user',
       // No typed text means the chip alone represents the turn.
-      text: textToSend || (attachedFileName ? `📎 ${attachedFileName}` : ''),
+      text: textToSend,
       time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+      fileName: attachedFileName || undefined,
+      fileMime: attachedFile?.mimeType || undefined,
+      fileSize: attachedFile?.size ?? null,
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -361,15 +394,17 @@ export default function AIAssistantScreen() {
     setAttachedFile(null);
     setAttachedFileName(null);
 
-    // Base64 the file and let the server extract the text. Doing it here
-    // client-side meant we could only ever read .txt, and every other
-    // document reached the model as nothing but a filename.
-    let filePayload: { name: string; data: string } | null = null;
+    // Base64 the file and let the server decide what to do with it. Doing the
+    // reading client-side meant we could only ever read .txt, and every other
+    // document reached the model as nothing but a filename. Photos go to the
+    // vision model; the server routes on MIME.
+    let filePayload: { name: string; data: string; mime?: string } | null = null;
     if (fileToProcess) {
       try {
         filePayload = {
           name: fileToProcess.name,
           data: await readAsBase64(fileToProcess.uri),
+          mime: fileToProcess.mimeType || undefined,
         };
       } catch (err) {
         console.error("File read failed:", err);
@@ -466,6 +501,32 @@ export default function AIAssistantScreen() {
       console.error("File processing error:", err);
       Alert.alert("Unsupported file", describeFileError(err));
     }
+  };
+
+  // Photos go to a vision model, which is a different server path from
+  // documents. Sharing one button would have sent photos down the text
+  // extractor, where they came out as mojibake.
+  const handlePhotoPick = async () => {
+    try {
+      const photo = await pickImage();
+      if (!photo) return;
+
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setAttachedFile(photo);
+      setAttachedFileName(photo.name);
+    } catch (err) {
+      console.error("Photo picker error:", err);
+      Alert.alert("Can't attach photo", describeFileError(err));
+    }
+  };
+
+  // Long-press the paperclip for photos, tap for documents.
+  const handleAttachmentMenu = () => {
+    Alert.alert('Attach', 'What do you want to send?', [
+      { text: `Document (${SUPPORTED_LABEL})`, onPress: handleFileUpload },
+      { text: `Photo (${SUPPORTED_IMAGE_LABEL})`, onPress: handlePhotoPick },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
 
   const clearAttachment = () => {
@@ -707,6 +768,22 @@ export default function AIAssistantScreen() {
                   <Text style={styles.aiLabel}>SAGE AI</Text>
                 </View>
               )}
+              {message.type === 'user' && message.fileName && (
+                <View style={styles.messageFileChip}>
+                  <Ionicons
+                    name={
+                      (message.fileMime || '').startsWith('image/')
+                        ? 'image-outline'
+                        : 'document-text-outline'
+                    }
+                    size={14}
+                    color="white"
+                  />
+                  <Text style={styles.messageFileName} numberOfLines={1}>
+                    {message.fileName}
+                  </Text>
+                </View>
+              )}
               {message.type === 'ai' ? (
                 <Markdown style={markdownStyles}>{message.text}</Markdown>
               ) : (
@@ -772,7 +849,11 @@ export default function AIAssistantScreen() {
                 end={{ x: 1, y: 1 }}
                 style={styles.attachmentIcon}
               >
-                <Ionicons name="document" size={14} color="white" />
+                <Ionicons
+                  name={isImageUri(attachedFileName) ? 'image' : 'document'}
+                  size={14}
+                  color="white"
+                />
               </LinearGradient>
               <Text style={styles.attachmentName} numberOfLines={1}>{attachedFileName}</Text>
               <TouchableOpacity onPress={clearAttachment} style={styles.removeAttachment}>
@@ -784,11 +865,22 @@ export default function AIAssistantScreen() {
 
         <View style={styles.inputBox}>
           <TouchableOpacity 
-            onPress={handleFileUpload} 
+            onPress={handleAttachmentMenu} 
             style={styles.attachButton}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Attach a document or photo"
           >
             <Ionicons name="attach" size={24} color={COLORS.purpleVibrant} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={handlePhotoPick}
+            style={styles.attachButton}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Attach a photo for SAGE to look at"
+          >
+            <Ionicons name="camera-outline" size={23} color={COLORS.purpleVibrant} />
           </TouchableOpacity>
           <View style={styles.inputField}>
             <TextInput 
@@ -1152,6 +1244,27 @@ sessionMenuButton: {
     justifyContent: 'center', 
     alignItems: 'center',
     marginBottom: 4,
+  },
+
+  // Attachment chip inside a sent message bubble
+  messageFileChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 8,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+  },
+  messageFileName: {
+    flexShrink: 1,
+    fontSize: 12,
+    fontFamily: FONTS.semiBold,
+    fontWeight: '600',
+    color: 'white',
   },
   
   // Attachment

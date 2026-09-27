@@ -87,6 +87,10 @@ interface Recommendation {
   id: number;
   title: string;
   description: string;
+  /** Course this recommendation is about, when the backend could resolve one. */
+  course_id?: number | null;
+  /** Server-computed deep link. Falls back to course_id, then Activities. */
+  href?: string | null;
 }
 interface Activity {
   id: number;
@@ -149,6 +153,7 @@ export default function Dashboard() {
   const [lesson, setLesson] = useState<any>(null);
   const [showLessonGenerator, setShowLessonGenerator] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   // Carousel state
   const [currentPage, setCurrentPage] = useState(0);
@@ -176,14 +181,6 @@ export default function Dashboard() {
       description: `${streakCount} days ${streakCount > 0 ? '– keep it up! 🔥' : '– start your journey today!'}`,
       color: '#FBBF24',
       route: null,
-    },
-    {
-      id: 'leaderboard',
-      icon: 'podium',
-      title: 'Leaderboard',
-      description: 'See where you stand among the top students.',
-      color: '#FBBF24',
-      route: '/leaderboard',
     },
     {
       id: 'quiz',
@@ -352,6 +349,23 @@ export default function Dashboard() {
     refreshingRecs.current = false;
   };
 
+  /**
+   * A "Start learning" card that goes nowhere is worse than no card. Prefer
+   * the server's href, fall back to the resolved course path, and only then to
+   * Activities so the tap is never dead.
+   */
+  const handleOpenRecommendation = (rec: Recommendation) => {
+    if (rec.href) {
+      router.push(rec.href as any);
+      return;
+    }
+    if (rec.course_id) {
+      router.push(`/(tabs)/course/path/${rec.course_id}` as any);
+      return;
+    }
+    router.push('/(tabs)/activities');
+  };
+
   if (loading && !user) {
     return (
       <View style={styles.loadingContainer}>
@@ -420,8 +434,21 @@ export default function Dashboard() {
               style={styles.headerIconBtn}
               activeOpacity={0.7}
               onPress={() => setShowNotifications(true)}
+              accessibilityRole="button"
+              accessibilityLabel={
+                unreadCount > 0
+                  ? `Notifications, ${unreadCount} unread`
+                  : 'Notifications'
+              }
             >
               <Ionicons name="notifications-outline" size={22} color={COLORS.textSecondary} />
+              {unreadCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText} numberOfLines={1}>
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </Text>
+                </View>
+              )}
             </TouchableOpacity>
           </View>
         </View>
@@ -586,7 +613,13 @@ export default function Dashboard() {
                   ['#FEF3C7', '#FDE68A'],
                 ];
                 return (
-                  <TouchableOpacity key={rec.id} activeOpacity={0.7}>
+                  <TouchableOpacity
+                    key={rec.id}
+                    activeOpacity={0.7}
+                    onPress={() => handleOpenRecommendation(rec)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${rec.title}. Start learning`}
+                  >
                     <LinearGradient
                       colors={gradients[index % gradients.length]}
                       start={{ x: 0, y: 0 }}
@@ -702,7 +735,11 @@ export default function Dashboard() {
                 </LinearGradient>
                 <Text style={styles.sectionTitle}>Badges</Text>
               </View>
-              <TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => router.push('/(tabs)/profile')}
+                accessibilityRole="button"
+                accessibilityLabel="View all badges"
+              >
                 <Text style={styles.viewAllText}>View all</Text>
               </TouchableOpacity>
             </View>
@@ -738,6 +775,7 @@ export default function Dashboard() {
         visible={showNotifications}
         onClose={() => setShowNotifications(false)}
         onOpenHref={(href) => router.push(href as any)}
+        onUnreadChange={setUnreadCount}
         activities={activities}
         badges={badges}
         recommendations={recommendations}
@@ -839,6 +877,27 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.15)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  bellBadge: {
+    position: 'absolute',
+    top: 3,
+    right: 3,
+    minWidth: 17,
+    height: 17,
+    paddingHorizontal: 4,
+    borderRadius: 9,
+    backgroundColor: '#EF4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: COLORS.purpleDark,
+  },
+  bellBadgeText: {
+    color: 'white',
+    fontSize: 9,
+    lineHeight: 12,
+    fontFamily: 'Montserrat-ExtraBold',
+    fontWeight: '900',
   },
 
   carouselWrapper: {

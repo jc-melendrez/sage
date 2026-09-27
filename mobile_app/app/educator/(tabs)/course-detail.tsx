@@ -23,6 +23,7 @@ import { getCoursePath, createTopic, createNode, generateTopic, GenerateTopicRes
 import { getQuizzes, Quiz } from '@/services/quizService';
 import { getCourseActivities, createActivity, deleteActivity, updateActivity, ClassActivity, ActivityKind } from '@/services/activityService';
 import { describeDue } from '@/services/dueDate';
+import { pickDocument, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
 import { CoursePathTopic, LearningNode, NODE_TYPE_CONFIG } from '@/types/learning';
 import CourseLeaderboardView from '@/components/courses/CourseLeaderboard';
 
@@ -100,7 +101,7 @@ export default function CourseDetailScreen() {
 
   // AI generation modal
   const [aiModalVisible, setAiModalVisible] = useState(false);
-  const [aiFile, setAiFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [aiFile, setAiFile] = useState<PickedDocument | null>(null);
   const [aiInstructions, setAiInstructions] = useState('');
   const [aiDifficulty, setAiDifficulty] = useState('beginner');
   const [aiNodeCount, setAiNodeCount] = useState('4');
@@ -359,15 +360,13 @@ export default function CourseDetailScreen() {
 
   const handlePickFile = async () => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'],
-        copyToCacheDirectory: true,
-      });
-      if (!result.canceled && result.assets[0]) {
-        setAiFile(result.assets[0]);
-      }
-    } catch {
-      Alert.alert('Error', 'Failed to pick file.');
+      // Shared picker — this had its own MIME array with no allowlist and no
+      // PPTX. Note the S3 assignment picker further down is a different
+      // upload path and deliberately still accepts images.
+      const file = await pickDocument();
+      if (file) setAiFile(file);
+    } catch (err) {
+      Alert.alert('Unsupported File', describeFileError(err));
     }
   };
 
@@ -381,7 +380,7 @@ export default function CourseDetailScreen() {
       const result = await generateTopic(cid, {
         uri: aiFile.uri,
         name: aiFile.name,
-        mimeType: aiFile.mimeType,
+        mimeType: aiFile.mimeType ?? undefined,
       }, {
         instructions: aiInstructions || undefined,
         difficulty: aiDifficulty,
@@ -1017,7 +1016,7 @@ export default function CourseDetailScreen() {
             <TouchableOpacity style={styles.fileBtn} activeOpacity={0.8} onPress={handlePickFile} disabled={generating}>
               <Ionicons name={aiFile ? 'document' : 'cloud-upload'} size={20} color={aiFile ? COLORS.success : COLORS.purpleVibrant} />
               <Text style={[styles.fileBtnText, aiFile && { color: COLORS.success }]}>
-                {aiFile ? aiFile.name : 'Pick a file (PDF, DOCX, TXT)'}
+                {aiFile ? aiFile.name : `Pick a file (${SUPPORTED_LABEL})`}
               </Text>
             </TouchableOpacity>
 

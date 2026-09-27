@@ -64,9 +64,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 
 class RecommendationSerializer(serializers.ModelSerializer):
+    # Server-computed so the app never has to rebuild the route (and get it
+    # wrong) from the course id.
+    href = serializers.SerializerMethodField()
+
     class Meta:
         model = Recommendation
-        fields = ['id', 'title', 'description', 'created_at']
+        fields = ['id', 'title', 'description', 'course', 'course_id', 'href', 'created_at']
+
+    def get_href(self, obj):
+        if not obj.course_id:
+            return None
+        return f"/(tabs)/course/path/{obj.course_id}"
 
 class SessionSerializer(serializers.ModelSerializer):
     class Meta:

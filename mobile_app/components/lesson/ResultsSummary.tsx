@@ -177,13 +177,17 @@ export default function ResultsSummary({
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 20, paddingBottom: 40, alignItems: 'center' },
+  // flexGrow lets the hero's free space collapse, and the top padding drops
+  // the score ring a little further down the screen instead of pinning it to
+  // the very top edge.
+  container: { flexGrow: 1, padding: 20, paddingTop: 48, paddingBottom: 40, alignItems: 'center' },
   hero: {
     width: '100%',
     borderRadius: 24,
     padding: 28,
     alignItems: 'center',
     marginBottom: 24,
+    flexShrink: 0,
   },
   heroRingOverlay: { position: 'absolute', top: 28, width: 100, height: 100, justifyContent: 'center', alignItems: 'center' },
   heroScore: { fontSize: 28, fontFamily: FONTS.extraBold, fontWeight: '900', color: 'white' },

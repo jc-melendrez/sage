@@ -26,9 +26,23 @@ SUPPORTED_EXTENSIONS = (
     ".pdf", ".docx", ".pptx", *TEXT_EXTENSIONS
 )
 
+# Images are not text. If one reaches this module it is on its way to a vision
+# model, and the last-resort UTF-8 decode below would turn a photo into a few
+# hundred characters of mojibake and send that to the model as the document.
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".gif")
+
 
 class UnsupportedDocumentFormat(Exception):
     """Raised when a file is a recognised-but-unreadable office format."""
+
+
+def _reject_image(extension: str):
+    """Raise if the upload is an image, which belongs on the vision path."""
+    if extension in IMAGE_EXTENSIONS:
+        raise UnsupportedDocumentFormat(
+            f"{extension} images can't be read as text. "
+            f"Send the image as a photo question instead."
+        )
 
 
 def _extension(filename: str) -> str:
@@ -115,6 +129,8 @@ def extract_text_from_bytes(raw: bytes, filename: str) -> str:
             f"{replacement} and try again."
         )
 
+    _reject_image(extension)
+
     if extension == ".pdf":
         return _extract_pdf(raw)
 
@@ -142,6 +158,8 @@ def extract_text_from_file(uploaded_file) -> str:
             f"{extension} files cannot be read. Please save the file as "
             f"{replacement} and try again."
         )
+
+    _reject_image(extension)
 
     if extension in TEXT_EXTENSIONS:
         uploaded_file.seek(0)
