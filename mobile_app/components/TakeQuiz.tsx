@@ -257,22 +257,6 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
                 </Text>
               )}
 
-              {reward && reward.xp > 0 && (
-                <View style={styles.xpRow}>
-                  <Ionicons name="flash" size={16} color="#F59E0B" />
-                  <Text style={styles.xpText}>+{reward.xp} XP earned</Text>
-                </View>
-              )}
-
-              {reward && reward.badges.length > 0 && (
-                <View style={styles.badgesRow}>
-                  {reward.badges.map(b => (
-                    <View key={b.name} style={styles.badgeChip}>
-                      <Text style={styles.badgeChipText}>{b.icon} {b.name}</Text>
-                    </View>
-                  ))}
-                </View>
-              )}
             </View>
 
             <TouchableOpacity
@@ -448,27 +432,6 @@ const styles = StyleSheet.create({
   resultsTitle: { fontSize: 24, fontWeight: 'bold', color: '#1F2937', marginBottom: 8 },
   resultsSubtitle: { fontSize: 14, color: '#6B7280', textAlign: 'center', lineHeight: 20 },
   resultsPercent: { fontSize: 15, fontWeight: '700', color: '#6D28D9', marginTop: 8 },
-  xpRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 8,
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-  },
-  xpText: { fontSize: 13, fontWeight: '700', color: '#B45309' },
-  badgesRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10, justifyContent: 'center' },
-  badgeChip: {
-    backgroundColor: 'rgba(109, 40, 217, 0.08)',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(109, 40, 217, 0.2)',
-  },
-  badgeChipText: { fontSize: 12, fontWeight: '600', color: '#6D28D9' },
   finishButton: {
     backgroundColor: '#6D28D9',
     paddingVertical: 16,

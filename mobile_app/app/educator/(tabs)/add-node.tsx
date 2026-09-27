@@ -54,9 +54,7 @@ export default function AddNodeScreen() {
   const [nodeType, setNodeType] = useState<NodeType>('learn');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [xpReward, setXpReward] = useState('25');
   const [requiredScore, setRequiredScore] = useState('70');
-  const [estimatedMinutes, setEstimatedMinutes] = useState('5');
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [editOrder, setEditOrder] = useState(nodeOrder);
@@ -80,9 +78,7 @@ export default function AddNodeScreen() {
         setNodeType(node.node_type);
         setTitle(node.title);
         setDescription(node.description || '');
-        setXpReward(String(node.xp_reward ?? 25));
         setRequiredScore(String(node.required_score ?? 70));
-        setEstimatedMinutes(String(node.estimated_minutes ?? 5));
         setEditOrder(node.order);
         if (isLearnContent(node.content_json)) {
           setBlocks(node.content_json.blocks || []);
@@ -133,9 +129,7 @@ export default function AddNodeScreen() {
         description: description.trim(),
         content_json: contentJson,
         order: editOrder,
-        xp_reward: Number(xpReward) || 25,
         required_score: Number(requiredScore) || 70,
-        estimated_minutes: Number(estimatedMinutes) || 5,
       };
       if (editing) {
         await updateNode(nid, payload);
@@ -540,17 +534,6 @@ export default function AddNodeScreen() {
 
         <View style={styles.settingsRow}>
           <View style={styles.settingsField}>
-            <Text style={styles.fieldLabel}>XP</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="25"
-              placeholderTextColor={COLORS.textMuted}
-              value={xpReward}
-              onChangeText={setXpReward}
-              keyboardType="numeric"
-            />
-          </View>
-          <View style={styles.settingsField}>
             <Text style={styles.fieldLabel}>Pass %</Text>
             <TextInput
               style={styles.input}
@@ -558,17 +541,6 @@ export default function AddNodeScreen() {
               placeholderTextColor={COLORS.textMuted}
               value={requiredScore}
               onChangeText={setRequiredScore}
-              keyboardType="numeric"
-            />
-          </View>
-          <View style={styles.settingsField}>
-            <Text style={styles.fieldLabel}>Minutes</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="5"
-              placeholderTextColor={COLORS.textMuted}
-              value={estimatedMinutes}
-              onChangeText={setEstimatedMinutes}
               keyboardType="numeric"
             />
           </View>
@@ -697,7 +669,7 @@ const styles = StyleSheet.create({
   textArea: { minHeight: 70, textAlignVertical: 'top' },
 
   settingsRow: { flexDirection: 'row', gap: 10 },
-  settingsField: { flex: 1 },
+  settingsField: { flex: 1, maxWidth: 160 },
 
   // Block cards
   blockCard: {

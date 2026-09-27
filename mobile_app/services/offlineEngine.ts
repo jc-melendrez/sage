@@ -1,5 +1,10 @@
 export type PowerupKey = 'freeze' | 'hint' | 'doublePoints' | 'shield';
 
+const POWERUP_KEYS: PowerupKey[] = ['freeze', 'hint', 'doublePoints', 'shield'];
+
+/** A powerup is guaranteed on every Nth consecutive correct answer. */
+export const STREAK_REWARD_INTERVAL = 3;
+
 export interface GameQuestion {
   type: 'mcq' | 'identification';
   question: string;
@@ -141,24 +146,18 @@ export class OfflineGame {
     if (isCorrect) {
       this.correctCount += 1;
       const base = Math.floor(1000 * (1 - (timeTaken / this.timePerQuestion) * 0.5));
-      let earned = Math.max(base, 500);
-      if (flags.useDoublePoints) earned *= 2;
+      const earned = flags.useDoublePoints ? Math.max(base, 500) * 2 : Math.max(base, 500);
       const newStreak = this.streak + 1;
       this.streak = newStreak;
       this.score += earned;
 
       let powerupEarned: PowerupKey | null = null;
-      const triggerChance = Math.min(0.3 + newStreak * 0.05, 0.45);
-      if (newStreak === 3 || newStreak === 5 || newStreak === 10 || Math.random() < triggerChance) {
-        const roll = Math.random();
-        const ptype: PowerupKey = roll < 0.4 ? 'freeze' : roll < 0.7 ? 'hint' : roll < 0.9 ? 'doublePoints' : 'shield';
-        if (this.powerups[ptype] === 0) {
-          this.powerups[ptype] = 1;
-          powerupEarned = ptype;
-        } else {
-          earned += 50;
-          this.score += 50;
-        }
+      // Guaranteed reward on every 3rd consecutive correct answer — the
+      // streak itself is the reward, there is no probabilistic trigger.
+      // Never on the final question: the game ends immediately after, so
+      // the reward could never be used.
+      if (!this.isComplete && newStreak >= STREAK_REWARD_INTERVAL && newStreak % STREAK_REWARD_INTERVAL === 0) {
+        powerupEarned = this.grantPowerup();
       }
 
       const outcome: AnswerOutcome = {
@@ -188,5 +187,19 @@ export class OfflineGame {
     if (this.powerups[key] <= 0) return false;
     this.powerups[key] -= 1;
     return true;
+  }
+
+  /**
+   * Award a powerup. Unowned types are all at count 0, which is the lowest
+   * count, so this single expression covers both policies: prefer a type the
+   * player does not own, and once all four are held, stack onto whichever is
+   * rarest. Never degrades to a points consolation.
+   */
+  private grantPowerup(): PowerupKey {
+    const lowest = Math.min(...POWERUP_KEYS.map(k => this.powerups[k]));
+    const pool = POWERUP_KEYS.filter(k => this.powerups[k] === lowest);
+    const ptype = pool[Math.floor(Math.random() * pool.length)];
+    this.powerups[ptype] += 1;
+    return ptype;
   }
 }

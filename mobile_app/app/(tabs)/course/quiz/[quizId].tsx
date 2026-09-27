@@ -191,10 +191,6 @@ export default function CourseQuizScreen() {
                   <Text style={styles.introMetaText}>Closes {new Date(quiz.available_until).toLocaleString()}</Text>
                 </View>
               )}
-              <View style={styles.introMetaItem}>
-                <Ionicons name="star-outline" size={16} color="#F59E0B" />
-                <Text style={styles.introMetaText}>25 XP reward</Text>
-              </View>
             </View>
 
             <TouchableOpacity

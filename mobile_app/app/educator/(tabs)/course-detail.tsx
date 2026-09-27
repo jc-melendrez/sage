@@ -19,12 +19,16 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, EmptyState, Pill, FilterChip } from '@/components/educator/EducatorPrimitives';
+import { QuizDetailModal } from '@/components/educator/QuizDetailModal';
+import { QuizOverflowButton, QuizOverflowMenu } from '@/components/educator/QuizOverflowMenu';
+import { QuizEditorSheet } from '@/components/educator/QuizEditorSheet';
+import { QuizGeneratorSheet } from '@/components/educator/QuizGeneratorSheet';
 import { getCoursePath, createTopic, createNode, generateTopic, GenerateTopicResponse, getCourseLeaderboard, CourseLeaderboard, LeaderboardSort } from '@/services/courseService';
 import { getQuizzes, Quiz } from '@/services/quizService';
 import { getCourseActivities, createActivity, deleteActivity, updateActivity, ClassActivity, ActivityKind } from '@/services/activityService';
 import { describeDue } from '@/services/dueDate';
 import { pickDocument, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
-import { CoursePathTopic, LearningNode, NODE_TYPE_CONFIG } from '@/types/learning';
+import { CoursePathTopic, LearningNode, NodeType, NODE_TYPE_CONFIG } from '@/types/learning';
 import CourseLeaderboardView from '@/components/courses/CourseLeaderboard';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -43,6 +47,21 @@ const ACTIVITY_META: Record<ActivityKind, { label: string; icon: any }> = {
 };
 
 const BUILDER_KINDS: ActivityKind[] = ['quiz', 'task'];
+
+/* One chip per node *type* rather than one per node: a topic with 8 practice
+ * nodes reads as "8 Practice" instead of 8 identical chips across 3 rows.
+ * Bounded by NODE_TYPE_CONFIG's key count, so a card can never grow with
+ * however many nodes an educator adds. */
+function countNodesByType(nodes: LearningNode[]) {
+  const counts = new Map<NodeType, number>();
+  for (const node of nodes) {
+    const type = node.node_type in NODE_TYPE_CONFIG ? node.node_type : 'learn';
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([type, count]) => ({ count, cfg: NODE_TYPE_CONFIG[type] }))
+    .sort((a, b) => b.count - a.count);
+}
 
 type GeneratedNode = GenerateTopicResponse['nodes'][number];
 
@@ -66,6 +85,15 @@ export default function CourseDetailScreen() {
   // Class quizzes + activities
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const [activities, setActivities] = useState<ClassActivity[]>([]);
+
+  // Quiz detail sheet + per-quiz options menu
+  const [detailQuiz, setDetailQuiz] = useState<Quiz | null>(null);
+  const [menuQuiz, setMenuQuiz] = useState<Quiz | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(null);
+
+  // Quiz editor + AI generator sheets, overlaid on this class
+  const [editingQuiz, setEditingQuiz] = useState<Quiz | null>(null);
+  const [generatingQuiz, setGeneratingQuiz] = useState(false);
 
   // Class leaderboard
   const [leaderboard, setLeaderboard] = useState<CourseLeaderboard | null>(null);
@@ -172,12 +200,35 @@ export default function CourseDetailScreen() {
 
   useFocusEffect(useCallback(() => { loadAll(); }, [loadAll]));
 
-  const openQuizManager = (generate: boolean) => {
-    router.push({
-      pathname: '/educator/quiz-manager',
-      params: { course: String(cid), ...(generate ? { generate: '1' } : {}) },
-    });
+  /** Open the AI generator as a sheet over this class. */
+  const openQuizGenerator = () => {
+    setMenuQuiz(null);
+    setMenuAnchor(null);
+    setGeneratingQuiz(true);
   };
+
+  /** Open a specific quiz's editor as a sheet over this class. */
+  const editQuiz = (quiz: Quiz) => {
+    setDetailQuiz(null);
+    setMenuQuiz(null);
+    setMenuAnchor(null);
+    setEditingQuiz(quiz);
+  };
+
+  const openQuizMenu = (quiz: Quiz, anchor: { x: number; y: number }) => {
+    if (menuQuiz?.id === quiz.id) {
+      setMenuQuiz(null);
+      setMenuAnchor(null);
+      return;
+    }
+    setMenuQuiz(quiz);
+    setMenuAnchor(anchor);
+  };
+
+  const closeQuizMenu = useCallback(() => {
+    setMenuQuiz(null);
+    setMenuAnchor(null);
+  }, []);
 
   /** Quick presets land on the end of the target day; custom keeps its time. */
   const endOfDay = (date: Date): Date => {
@@ -455,7 +506,7 @@ export default function CourseDetailScreen() {
         showBack
         rightIcon="add"
         onRightPress={() => {
-          if (section === 'quizzes') openQuizManager(true);
+          if (section === 'quizzes') openQuizGenerator();
           else if (section === 'activities') setActVisible(true);
           else if (section === 'topics') setModalVisible(true);
         }}
@@ -516,15 +567,17 @@ export default function CourseDetailScreen() {
                       <TouchableOpacity
                         style={styles.previewBtn}
                         activeOpacity={0.7}
-                        onPress={() => router.push({
-                          pathname: '/course/topic/[topicId]',
-                          params: {
-                            topicId: topic.id,
-                            courseId: cid,
-                            title: topic.title,
-                            preview: '1',
-                          },
-                        })}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          router.push({
+                            pathname: '/educator/(tabs)/topic-preview',
+                            params: {
+                              topicId: String(topic.id),
+                              courseId: String(cid),
+                              title: topic.title,
+                            },
+                          } as any);
+                        }}
                       >
                         <Ionicons name="eye" size={14} color={COLORS.purpleVibrant} />
                         <Text style={styles.previewBtnText}>Preview</Text>
@@ -534,17 +587,14 @@ export default function CourseDetailScreen() {
 
                     {topic.nodes.length > 0 ? (
                       <View style={styles.nodeRow}>
-                        {topic.nodes.map((node: LearningNode) => {
-                          const cfg = NODE_TYPE_CONFIG[node.node_type] || NODE_TYPE_CONFIG.learn;
-                          return (
-                            <Pill
-                              key={node.id}
-                              label={cfg.label}
-                              color={cfg.color}
-                              icon={cfg.icon as any}
-                            />
-                          );
-                        })}
+                        {countNodesByType(topic.nodes).map(({ count, cfg }) => (
+                          <Pill
+                            key={cfg.label}
+                            label={`${count} ${cfg.label}`}
+                            color={cfg.color}
+                            icon={cfg.icon as any}
+                          />
+                        ))}
                       </View>
                     ) : (
                       <Text style={styles.noNodes}>No nodes yet — tap to add content</Text>
@@ -576,32 +626,33 @@ export default function CourseDetailScreen() {
 
         {section === 'quizzes' && (
           <>
-            <SectionHeader title="Quizzes" actionLabel="Generate" onAction={() => openQuizManager(true)} />
+            <SectionHeader title="Quizzes" actionLabel="Generate" onAction={openQuizGenerator} />
             {quizzes.length > 0 ? (
               <View style={{ gap: 12 }}>
                 {quizzes.map((quiz) => (
-                  <TouchableOpacity
-                    key={quiz.id}
-                    activeOpacity={0.75}
-                    style={styles.topicCard}
-                    onPress={() => openQuizManager(false)}
-                  >
-                    <View style={styles.topicHeader}>
-                      <View style={styles.topicIconBg}>
-                        <Ionicons name="help-circle" size={20} color={COLORS.purpleVibrant} />
+                  <View key={quiz.id} style={styles.topicCard}>
+                    <TouchableOpacity
+                      activeOpacity={0.75}
+                      style={{ flex: 1 }}
+                      onPress={() => setDetailQuiz(quiz)}
+                    >
+                      <View style={styles.topicHeader}>
+                        <View style={styles.topicIconBg}>
+                          <Ionicons name="help-circle" size={20} color={COLORS.purpleVibrant} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.topicName}>{quiz.title}</Text>
+                          <Text style={styles.topicDesc}>
+                            {quiz.questions.length} question{quiz.questions.length === 1 ? '' : 's'}
+                          </Text>
+                        </View>
+                        <Pill
+                          label={QUIZ_TYPE_LABELS[quiz.quiz_type] || quiz.quiz_type}
+                          color={COLORS.purpleVibrant}
+                        />
                       </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.topicName}>{quiz.title}</Text>
-                        <Text style={styles.topicDesc}>
-                          {quiz.questions.length} question{quiz.questions.length === 1 ? '' : 's'}
-                        </Text>
-                      </View>
-                      <Pill
-                        label={QUIZ_TYPE_LABELS[quiz.quiz_type] || quiz.quiz_type}
-                        color={COLORS.purpleVibrant}
-                      />
-                    </View>
-                    <View style={styles.activityBadges}>
+                    </TouchableOpacity>
+                    <View style={styles.quizRowFooter}>
                       <TouchableOpacity
                         onPress={() => router.push({
                           pathname: '/educator/(tabs)/quiz-attempts',
@@ -612,7 +663,7 @@ export default function CourseDetailScreen() {
                           },
                         } as any)}
                         activeOpacity={0.8}
-                        style={styles.activityStatusRow}
+                        style={[styles.activityStatusRow, { marginTop: 0 }]}
                       >
                         <Ionicons name="analytics-outline" size={13} color={COLORS.purpleVibrant} />
                         <Text style={[styles.activityStatusText, { color: COLORS.purpleVibrant, marginLeft: 2 }]}>
@@ -624,8 +675,10 @@ export default function CourseDetailScreen() {
                           avg {quiz.class_average_percent}%
                         </Text>
                       )}
+                      <View style={{ flex: 1 }} />
+                      <QuizOverflowButton quiz={quiz} onOpen={openQuizMenu} />
                     </View>
-                  </TouchableOpacity>
+                  </View>
                 ))}
               </View>
             ) : (
@@ -1151,6 +1204,35 @@ export default function CourseDetailScreen() {
           onChange={handleDateChange}
         />
       )}
+
+      <QuizDetailModal
+        quiz={detailQuiz}
+        onClose={() => setDetailQuiz(null)}
+        onEdit={editQuiz}
+        onChanged={loadQuizzes}
+      />
+
+      <QuizOverflowMenu
+        quiz={menuQuiz}
+        anchor={menuAnchor}
+        onClose={closeQuizMenu}
+        onPreview={setDetailQuiz}
+        onEdit={editQuiz}
+        onChanged={loadQuizzes}
+      />
+
+      <QuizGeneratorSheet
+        visible={generatingQuiz}
+        initialCourseId={cid}
+        onClose={() => setGeneratingQuiz(false)}
+        onGenerated={loadQuizzes}
+      />
+
+      <QuizEditorSheet
+        quiz={editingQuiz}
+        onClose={() => setEditingQuiz(null)}
+        onSaved={loadQuizzes}
+      />
     </View>
   );
 }
@@ -1210,6 +1292,7 @@ const styles = StyleSheet.create({
   activityStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 12 },
   activityBadges: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', columnGap: 16 },
   activityStatusText: { fontSize: 12, fontFamily: FONTS.semiBold, fontWeight: '600' },
+  quizRowFooter: { flexDirection: 'row', alignItems: 'center', columnGap: 16, marginTop: 12 },
 
   kindRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   kindChip: {

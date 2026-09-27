@@ -6,7 +6,7 @@ import { HapticTab } from '@/components/haptic-tab';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
 // 🔥 Import Tabler icons
-import { IconHome, IconSchool, IconClipboardList, IconUser } from '@tabler/icons-react-native';
+import { IconHome, IconSchool, IconSparkles, IconUser } from '@tabler/icons-react-native';
 
 export const unstable_settings = {
   initialRouteName: 'dashboard',
@@ -70,10 +70,10 @@ export default function EducatorTabLayout() {
       />
       <Tabs.Screen name="create" options={{ href: null }} />
       <Tabs.Screen
-        name="assignments"
+        name="ai-assistant"
         options={{
-          title: 'Activities',
-          tabBarIcon: ({ color }) => <IconClipboardList size={24} color={color} />,
+          title: 'AI Assistant',
+          tabBarIcon: ({ color }) => <IconSparkles size={24} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -97,9 +97,12 @@ export default function EducatorTabLayout() {
       <Tabs.Screen name="analytics" options={{ href: null }} />
       <Tabs.Screen name="course-detail" options={{ href: null }} />
       <Tabs.Screen name="topic-detail" options={{ href: null }} />
+      <Tabs.Screen name="topic-preview" options={{ href: null }} />
+      <Tabs.Screen name="node-preview" options={{ href: null }} />
       <Tabs.Screen name="task-submissions" options={{ href: null }} />
       <Tabs.Screen name="quiz-attempts" options={{ href: null }} />
       <Tabs.Screen name="activity-detail" options={{ href: null }} />
+      <Tabs.Screen name="assignments" options={{ href: null }} />
       <Tabs.Screen name="add-node" options={{ href: null }} />
     </Tabs>
   );

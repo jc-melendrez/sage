@@ -24,6 +24,13 @@ def generate_room_code():
 MAX_PLAYERS = 20
 TEAM_COLORS = ['#22D3EE', '#10B981', '#F59E0B', '#A78BFA']
 
+# Powerup reward rules. A powerup is guaranteed on every Nth consecutive
+# correct answer. Keep in sync with STREAK_REWARD_INTERVAL in
+# mobile_app/services/offlineEngine.ts — solo/LAN runs the TS engine and
+# multiplayer runs this one, so the two must not drift.
+POWERUP_KEYS = ('freeze', 'hint', 'doublePoints', 'shield')
+STREAK_REWARD_INTERVAL = 3
+
 
 def get_display_name(user):
     return f"{user.first_name} {user.last_name}".strip() or user.username
@@ -434,6 +441,18 @@ class AnswerQuestionView(APIView):
                 data = snapshot.to_dict() or {}
                 answered = data.get('answeredQuestions', [])
 
+                # 2. Determine whether this answer is on the last question
+                #    for THIS player. StartGameView assigns a unique shuffled
+                #    questionOrder per player, so "last" is not simply
+                #    len(questions) - 1; we read it from the player doc
+                #    that the transaction already loaded.
+                question_order = data.get('questionOrder') or []
+                is_last_question = (
+                    question_order[-1] == question_index
+                    if question_order
+                    else question_index >= len(questions) - 1
+                )
+
                 # 1. IDEMPOTENCY CHECK: If already answered, return cached result
                 if question_index in answered:
                     cached = data.get('lastAnswerResult', {})
@@ -469,27 +488,27 @@ class AnswerQuestionView(APIView):
                     # Powerup Reward Logic
                     current_streak = data.get('streak', 0)
                     new_streak = current_streak + 1
-                    
-                    # Guaranteed at 3, 5, 10 streak, otherwise probabilistic
-                    trigger_chance = min(0.30 + (new_streak * 0.05), 0.45)
-                    
-                    if new_streak in (3, 5, 10) or rng.random() < trigger_chance:
-                        roll = rng.random()
-                        if roll < 0.40: ptype = 'freeze'
-                        elif roll < 0.70: ptype = 'hint'
-                        elif roll < 0.90: ptype = 'doublePoints'
-                        else: ptype = 'shield'
 
+                    # Guaranteed reward on every 3rd consecutive correct
+                    # answer — the streak itself is the reward, there is no
+                    # probabilistic trigger. Never on the final question,
+                    # which for this player is the last entry of their own
+                    # shuffled questionOrder: the game ends immediately
+                    # after, so the reward could never be used.
+                    if (not is_last_question
+                            and new_streak >= STREAK_REWARD_INTERVAL
+                            and new_streak % STREAK_REWARD_INTERVAL == 0):
+                        # Unowned types are all at count 0, which is the
+                        # lowest count, so this single expression covers both
+                        # policies: prefer a type the player does not own,
+                        # and once all four are held, stack onto whichever is
+                        # rarest. Never degrades to a points consolation.
                         current_powerups = data.get('powerups', {})
-                        
-                        # Only award if they don't already have one of this type
-                        if current_powerups.get(ptype, 0) == 0:
-                            updates[f'powerups.{ptype}'] = fs.Increment(1)
-                            powerup_earned = ptype
-                        else:
-                            # Consolation prize: +50 points
-                            updates['score'] = fs.Increment(50)
-                            earned_points += 50
+                        lowest = min(current_powerups.get(k, 0) for k in POWERUP_KEYS)
+                        pool = [k for k in POWERUP_KEYS if current_powerups.get(k, 0) == lowest]
+                        ptype = pool[rng.randrange(len(pool))]
+                        updates[f'powerups.{ptype}'] = fs.Increment(1)
+                        powerup_earned = ptype
 
                 else:
                     # Wrong Answer Logic

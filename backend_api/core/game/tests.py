@@ -288,3 +288,174 @@ class TeamModeGameTests(TestCase):
         self.client.post(reverse('offline-results'), payload, format='json')
         self.client.post(reverse('offline-results'), payload, format='json')
         self.assertEqual(Activity.objects.filter(user=self.host, kind='offline_game').count(), 1)
+
+
+class PowerupRewardTests(TestCase):
+    """Classic-mode streak rewards: a powerup is guaranteed on every
+    STREAK_REWARD_INTERVAL-th consecutive correct answer. These constants
+    mirror the rule in game/views.py; keep the two in sync."""
+
+    STREAK_REWARD_INTERVAL = 3
+    POWERUP_KEYS = ('freeze', 'hint', 'doublePoints', 'shield')
+    ROOM_CODE = 'STREAK1'
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='host', password='pass')
+        self.player = User.objects.create_user(username='player', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.url = reverse('answer-question')
+
+    def seed_room(self, question_count=8, powerups=None):
+        """Seed a non-team classic room with a straight questionOrder so the
+        player's own question index is predictable."""
+        room_ref = self.store.collection('gameRooms').document(self.ROOM_CODE)
+        room_ref.set({
+            'status': 'active',
+            'hostId': self.host.id,
+            'teamMode': False,
+            'timePerQuestion': 15,
+            'questions': [
+                {'type': 'mcq', 'question': f'Q{i}', 'choices': ['A. yes', 'B. no'], 'correctAnswer': 'A. yes'}
+                for i in range(question_count)
+            ],
+        })
+        player_ref = room_ref.collection('players').document(str(self.player.id))
+        player_ref.set({
+            'displayName': 'Player', 'score': 0, 'answeredCount': 0, 'streak': 0,
+            'questionOrder': list(range(question_count)),
+            'isReady': True, 'isFinished': False,
+            'powerups': powerups or {k: 0 for k in self.POWERUP_KEYS},
+        })
+        return player_ref
+
+    def answer(self, index, correct=True):
+        self.client.force_authenticate(user=self.player)
+        return self.client.post(self.url, {
+            'roomCode': self.ROOM_CODE,
+            'questionIndex': index,
+            'answer': 'A. yes' if correct else 'B. no',
+            'timeTaken': '1',
+        }, format='json')
+
+    def player_doc(self, player_ref):
+        return player_ref.get().to_dict()
+
+    def total_powerups(self, player_ref):
+        data = self.player_doc(player_ref)
+        return sum(data['powerups'].get(k, 0) for k in self.POWERUP_KEYS)
+
+    def test_no_powerup_below_threshold(self):
+        player_ref = self.seed_room()
+        for i in range(self.STREAK_REWARD_INTERVAL - 1):
+            resp = self.answer(i)
+            self.assertTrue(resp.json()['correct'])
+            self.assertIsNone(resp.json()['powerupEarned'])
+        self.assertEqual(self.total_powerups(player_ref), 0)
+
+    def test_powerup_guaranteed_at_threshold(self):
+        player_ref = self.seed_room()
+        for i in range(self.STREAK_REWARD_INTERVAL):
+            resp = self.answer(i)
+        body = resp.json()
+        self.assertTrue(body['correct'])
+        # Not a probability — this must be deterministic.
+        self.assertIn(body['powerupEarned'], self.POWERUP_KEYS)
+        self.assertEqual(self.total_powerups(player_ref), 1)
+        self.assertEqual(self.player_doc(player_ref)['powerups'][body['powerupEarned']], 1)
+
+    def test_powerup_every_nth_streak_only(self):
+        interval = self.STREAK_REWARD_INTERVAL
+        # One spare question so the second award is not on the final index,
+        # which is deliberately never rewarded.
+        player_ref = self.seed_room(question_count=interval * 2 + 1)
+        awarded = []
+        for i in range(interval * 2):
+            body = self.answer(i).json()
+            if body['powerupEarned']:
+                awarded.append((i, body['powerupEarned']))
+
+        # Exactly two awards, landing on the 3rd and 6th correct answers.
+        self.assertEqual([i for i, _ in awarded], [interval - 1, interval * 2 - 1])
+        self.assertEqual(self.total_powerups(player_ref), 2)
+        self.assertEqual(self.player_doc(player_ref)['streak'], interval * 2)
+
+    def test_wrong_answer_resets_streak_and_drops_reward(self):
+        player_ref = self.seed_room()
+        self.answer(0)
+        self.answer(1)
+        self.assertFalse(self.answer(2, correct=False).json()['correct'])
+        # Streak restarted, so the 3rd correct answer is now question index 5.
+        self.assertIsNone(self.answer(3).json()['powerupEarned'])
+        self.assertIsNone(self.answer(4).json()['powerupEarned'])
+        self.assertIsNotNone(self.answer(5).json()['powerupEarned'])
+        self.assertEqual(self.total_powerups(player_ref), 1)
+
+    def test_prefers_unowned_type(self):
+        player_ref = self.seed_room(
+            powerups={'freeze': 4, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        )
+        for i in range(self.STREAK_REWARD_INTERVAL):
+            resp = self.answer(i)
+        earned = resp.json()['powerupEarned']
+        self.assertNotEqual(earned, 'freeze')
+        powerups = self.player_doc(player_ref)['powerups']
+        self.assertEqual(powerups[earned], 1)
+        self.assertEqual(powerups['freeze'], 4)
+
+    def test_stacks_onto_rarest_when_all_owned(self):
+        player_ref = self.seed_room(
+            powerups={'freeze': 2, 'hint': 3, 'doublePoints': 5, 'shield': 3},
+        )
+        for i in range(self.STREAK_REWARD_INTERVAL):
+            resp = self.answer(i)
+        earned = resp.json()['powerupEarned']
+        # Lowest count is freeze at 2, so that is what gets stacked.
+        self.assertEqual(earned, 'freeze')
+        powerups = self.player_doc(player_ref)['powerups']
+        self.assertEqual(powerups['freeze'], 3)
+        self.assertEqual(powerups['doublePoints'], 5)
+        # No points consolation was substituted for the powerup: the score
+        # must be exactly the base award with no extra bonus.
+        per_answer = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
+        self.assertEqual(
+            self.player_doc(player_ref)['score'],
+            self.STREAK_REWARD_INTERVAL * per_answer,
+        )
+
+    def test_no_powerup_on_last_question(self):
+        count = 6
+        player_ref = self.seed_room(question_count=count)
+        for i in range(count - 1):
+            self.answer(i)
+        before = self.total_powerups(player_ref)
+        resp = self.answer(count - 1)
+        self.assertTrue(resp.json()['correct'])
+        self.assertIsNone(resp.json()['powerupEarned'])
+        self.assertEqual(self.total_powerups(player_ref), before)
+
+    def test_retry_does_not_award_twice(self):
+        player_ref = self.seed_room()
+        interval = self.STREAK_REWARD_INTERVAL
+        for i in range(interval - 1):
+            self.assertIsNone(self.answer(i).json()['powerupEarned'])
+
+        threshold = interval - 1
+        self.assertIsNotNone(self.answer(threshold).json()['powerupEarned'])
+        self.assertEqual(self.total_powerups(player_ref), 1)
+
+        # A network retry of the same question must not grant a second one.
+        self.client.force_authenticate(user=self.player)
+        resp = self.client.post(self.url, {
+            'roomCode': self.ROOM_CODE, 'questionIndex': threshold,
+            'answer': 'A. yes', 'timeTaken': '1',
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()['powerupEarned'])
+        self.assertEqual(self.total_powerups(player_ref), 1)
+        self.assertEqual(self.player_doc(player_ref)['answeredCount'], interval)

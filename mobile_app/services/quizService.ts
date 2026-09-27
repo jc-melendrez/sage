@@ -72,6 +72,12 @@ export interface QuizShareData {
   deep_link: string;
 }
 
+/** Format a Date as a local "YYYY-MM-DD HH:MM" string for editing. */
+export function toDeadlineInput(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 /** Parse a "YYYY-MM-DD HH:MM" string into a Date, or null if invalid/empty. */
 export function parseDeadlineInput(text: string): Date | null {
   const trimmed = text.trim();

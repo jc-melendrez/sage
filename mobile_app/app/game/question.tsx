@@ -137,6 +137,20 @@ const POWERUP_ITEMS = [
   { key: 'shield', icon: '🛡️', label: 'Shield', color: '#34D399' },
 ];
 
+/**
+ * Whether a LAN roster entry is the local player. Shared by the roster seed and
+ * the leaderboard broadcast so the two can never disagree about which row is
+ * "you" — the standings drawer marks the own row by comparing to the literal
+ * id 'me', so an un-remapped row silently loses its "(You)" tag.
+ *
+ * Falls back to name matching because getLanPlayerId() is only populated once
+ * the host's 'welcome' message arrives, which can be after the first render.
+ */
+const isMyLanPlayer = (p: LanPlayer) => {
+  const myId = getLanPlayerId();
+  return myId ? p.id === myId : p.name === lanGame.playerName;
+};
+
 export default function QuestionScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -210,6 +224,10 @@ export default function QuestionScreen() {
   const revealTimerRef = useRef<any>(null);
   const spinDelayRef = useRef(60);
   const cyclesRef = useRef(0);
+  // Session-scoped: the first powerup award of a game gets the full roulette,
+  // every later one gets a fast spin. Deliberately not reset per question in
+  // handleNext — this tracks "has this player already won one", not "this round".
+  const hasWonPowerupRef = useRef(false);
 
   // ✨ NEW: Timer urgency animation (shake + pulse at ≤5s)
   const urgencyAnim = useSharedValue(0);
@@ -234,16 +252,20 @@ export default function QuestionScreen() {
   const applyLanLeaderboard = (players: LanPlayer[]) => {
     lanPlayersRef.current = players;
     const sorted = [...players].sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || a.name.localeCompare(b.name));
-    const myId = getLanPlayerId();
+    const mine = getCurrentOfflineGame();
     const rows = sorted.map((p, i) => {
       const prev = lanPrevStandingsRef.current[p.id];
-      const isMe = myId ? p.id === myId : p.name === lanGame.playerName;
+      const isMe = isMyLanPlayer(p);
       return {
         id: isMe ? 'me' : p.id,
         displayName: p.name,
         avatar: p.avatar,
-        score: p.score ?? 0,
-        streak: 0,
+        // Your own row is driven by the local engine. LAN scoring is entirely
+        // client-side, so the host's broadcast never carries your live
+        // score/streak — prefer the local values and fall back to what the
+        // host reported if the engine is somehow gone.
+        score: isMe ? (mine?.score ?? p.score ?? 0) : p.score ?? 0,
+        streak: isMe ? (mine?.streak ?? 0) : 0,
         movement: 0,
         prevScore: prev ? prev.score : 0,
       };
@@ -365,10 +387,23 @@ export default function QuestionScreen() {
         } else {
           const roster = getLastLanRoster();
           // Seed the LAN player list so the final standings show everyone,
-          // even if no leaderboard broadcast has been received yet.
+          // even if no leaderboard broadcast has been received yet. Your own
+          // row is seeded with the real local score/streak, remapped to id
+          // 'me' so the drawer tags it "(You)".
           lanPlayersRef.current = roster;
           setStandings(roster.length
-            ? roster.map(p => ({ id: p.id, displayName: p.name, avatar: p.avatar, score: 0, streak: 0, movement: 0, prevScore: 0 }))
+            ? roster.map(p => {
+                const isMe = isMyLanPlayer(p);
+                return {
+                  id: isMe ? 'me' : p.id,
+                  displayName: p.name,
+                  avatar: p.avatar,
+                  score: isMe ? game.score : 0,
+                  streak: isMe ? game.streak : 0,
+                  movement: 0,
+                  prevScore: 0,
+                };
+              })
             : []);
         }
         return;
@@ -549,9 +584,18 @@ export default function QuestionScreen() {
     spinDelayRef.current = 60;
     cyclesRef.current = 0;
 
+    // A powerup is now guaranteed on every 3rd consecutive correct answer, so
+    // the full ~6s roulette would fire on a large share of the remaining
+    // questions. The first award keeps the full drama; repeat awards (which
+    // the player is now expecting) spin fast and get out of the way.
+    const isRepeatAward = hasWonPowerupRef.current;
+    hasWonPowerupRef.current = true;
+    const totalCycles = isRepeatAward ? 4 : 18;
+    const revealHoldMs = isRepeatAward ? 800 : 2000;
+
     const tick = () => {
       cyclesRef.current++;
-      if (cyclesRef.current >= 18) {
+      if (cyclesRef.current >= totalCycles) {
         const targetIdx = POWERUP_ITEMS.findIndex(i => i.key === rouletteTarget);
         setSpinIndex(targetIdx);
         setRoulettePhase('revealed');
@@ -559,7 +603,7 @@ export default function QuestionScreen() {
           setShowRoulette(false);
           setRouletteTarget(null);
           setRoulettePhase('idle');
-        }, 2000);
+        }, revealHoldMs);
         return;
       }
       setSpinIndex(prev => (prev + 1) % POWERUP_ITEMS.length);
@@ -635,6 +679,13 @@ export default function QuestionScreen() {
   /* ── auto-advance: countdown then skip ── */
   useEffect(() => {
     if (!result) { setAutoCountdown(0); return; }
+
+    // If the powerup roulette is already showing, pause the countdown
+    // so the reward is actually visible before we auto-advance. The
+    // roulette timer will later clear showRoulette, at which point this
+    // effect re-runs and the countdown resumes.
+    if (showRoulette) { setAutoCountdown(0); return; }
+
     const isLast = currentIndex + 1 >= questionOrder.length;
     const total = isLast ? 3 : 2;
     setAutoCountdown(total);
@@ -650,7 +701,7 @@ export default function QuestionScreen() {
       });
     }, 1000);
     return () => { if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; } };
-  }, [result]);
+  }, [result, showRoulette]);
 
   /* ── all handlers below are UNCHANGED ── */
   const joinWithSpaces = (chars: string[]) => {
@@ -791,6 +842,16 @@ export default function QuestionScreen() {
           movement: 0,
           prevScore: 0,
         }]);
+      } else {
+        // LAN: only your own row moves. Everyone else stays on the roster
+        // until the host broadcasts a leaderboard at the end of the game.
+        // Matching on name as well as id makes the row self-heal if the seed
+        // ran before 'welcome' gave us a player id to compare against.
+        setStandings(prev => prev.map(r =>
+          (r.id === 'me' || r.displayName === lanGame.playerName)
+            ? { ...r, id: 'me', score: game.score, streak: game.streak }
+            : r
+        ));
       }
       if (outcome.powerupEarned) {
         setShowRoulette(true);

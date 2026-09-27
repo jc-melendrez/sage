@@ -413,7 +413,7 @@ function RankRow({
           </View>
         </View>
 
-        {(entry.streak ?? 0) >= 2 && (
+        {(entry.streak ?? 0) >= 3 && (
           <View style={styles.streakBadge}>
             <Text style={styles.streakText}>🔥 {entry.streak}</Text>
           </View>

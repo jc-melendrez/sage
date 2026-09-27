@@ -193,7 +193,7 @@ export function LanPlaySurface({
             <Ionicons name="star" size={14} color="#FBBF24" />
             <Text style={styles.scoreText}>{score.toLocaleString()}</Text>
           </View>
-          {streak >= 2 && (
+          {streak >= 3 && (
             <View style={styles.streakChip}>
               <Ionicons name="flame" size={14} color={COLORS.warning} />
               <Text style={styles.streakText}>{streak}</Text>
