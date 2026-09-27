@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -6,16 +6,18 @@ import {
   ScrollView,
   TouchableOpacity,
   ActivityIndicator,
+  RefreshControl,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
+import { COLORS, FONTS, RADIUS, tint, composite, readableOn, SPACE } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
-import { SectionHeader, EmptyState } from '@/components/educator/EducatorPrimitives';
+import { SectionHeader, EmptyState, Pill } from '@/components/educator/EducatorPrimitives';
 import { CreateQuickActions } from '@/components/educator/CreateQuickActions';
 import { getCurrentUser } from '@/services/authService';
 import { getMyCourses, CourseSummary } from '@/services/courseService';
 import { getActivities, ClassActivity, ActivityKind } from '@/services/activityService';
+import { describeDue } from '@/services/dueDate';
 
 const ACTIVITY_META: Record<ActivityKind, { icon: any; color: string }> = {
   quiz: { icon: 'help-circle', color: COLORS.purpleVibrant },
@@ -23,6 +25,20 @@ const ACTIVITY_META: Record<ActivityKind, { icon: any; color: string }> = {
   game: { icon: 'game-controller', color: COLORS.success },
   task: { icon: 'document-text', color: COLORS.warning },
 };
+
+const REVIEW_COLOR = COLORS.warning;
+const OVERDUE_COLOR = COLORS.danger;
+
+const OVERDUE_TEXT = readableOn(OVERDUE_COLOR, COLORS.surface);
+const REVIEW_TEXT = readableOn(REVIEW_COLOR, COLORS.surface);
+// The shared textMuted token is 4.45:1 on surface — a hair under AA, and it
+// is used far too widely to change. Resolve a local step for this row instead.
+const DUE_TEXT = readableOn(COLORS.textMuted, COLORS.surface);
+const RETRY_TEXT = readableOn(COLORS.purpleVibrant, composite(COLORS.purpleVibrant, 0.15, COLORS.surface));
+
+/** How many rows each list shows before deferring to the full Assignments tab. */
+const REVIEW_PREVIEW = 3;
+const ACTIVITY_PREVIEW = 5;
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -34,11 +50,6 @@ function relativeTime(iso: string): string {
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d ago`;
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
-
-function dueLabel(iso: string | null): string {
-  if (!iso) return '';
-  return `Due ${new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
 }
 
 function greeting(): string {
@@ -54,6 +65,39 @@ function initialsOf(name: string): string {
   return parts.slice(0, 2).map((p) => p[0]).join('').toUpperCase();
 }
 
+/** Submissions still waiting on a grade. Backed by the same fields the API already returns. */
+function ungradedCount(a: ClassActivity): number {
+  return Math.max(0, (a.submission_count ?? 0) - (a.graded_count ?? 0));
+}
+
+interface Ranked {
+  activity: ClassActivity;
+  due: ReturnType<typeof describeDue>;
+}
+
+/**
+ * Urgency order: overdue first, then soonest deadline, then undated.
+ * Ties break on the most submissions waiting, then newest first. Every
+ * activity appears exactly once, so no section repeats another.
+ */
+function rankActivities(list: ClassActivity[]): Ranked[] {
+  const rows: Ranked[] = list.map((activity) => ({ activity, due: describeDue(activity.due_date) }));
+
+  const tier = (r: Ranked) => (r.due.isOverdue ? 0 : Number.isFinite(r.due.daysLeft) ? 1 : 2);
+
+  return rows.sort((x, y) => {
+    const tx = tier(x);
+    const ty = tier(y);
+    if (tx !== ty) return tx - ty;
+    if (tx === 1 && x.due.daysLeft !== y.due.daysLeft) return x.due.daysLeft - y.due.daysLeft;
+
+    const waiting = ungradedCount(y.activity) - ungradedCount(x.activity);
+    if (waiting !== 0) return waiting;
+
+    return new Date(y.activity.created_at).getTime() - new Date(x.activity.created_at).getTime();
+  });
+}
+
 export default function EducatorDashboardScreen() {
   const router = useRouter();
 
@@ -61,6 +105,10 @@ export default function EducatorDashboardScreen() {
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [activities, setActivities] = useState<ClassActivity[]>([]);
   const [loadingClasses, setLoadingClasses] = useState(true);
+  const [loadingActivities, setLoadingActivities] = useState(true);
+  const [classesFailed, setClassesFailed] = useState(false);
+  const [activitiesFailed, setActivitiesFailed] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const loadTeacher = useCallback(async () => {
     try {
@@ -77,8 +125,11 @@ export default function EducatorDashboardScreen() {
   const loadCourses = useCallback(async () => {
     try {
       setCourses(await getMyCourses());
+      setClassesFailed(false);
     } catch {
-      /* class preview stays empty; dedicated Classes tab shows the error state */
+      // Previously swallowed, which made an outage look identical to an
+      // empty account. Surface it so the educator knows to retry.
+      setClassesFailed(true);
     } finally {
       setLoadingClasses(false);
     }
@@ -87,10 +138,19 @@ export default function EducatorDashboardScreen() {
   const loadActivities = useCallback(async () => {
     try {
       setActivities(await getActivities());
+      setActivitiesFailed(false);
     } catch {
-      /* activity sections stay empty */
+      setActivitiesFailed(true);
+    } finally {
+      setLoadingActivities(false);
     }
   }, []);
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    await Promise.all([loadTeacher(), loadCourses(), loadActivities()]);
+    setRefreshing(false);
+  }, [loadTeacher, loadCourses, loadActivities]);
 
   useFocusEffect(
     useCallback(() => {
@@ -100,13 +160,16 @@ export default function EducatorDashboardScreen() {
     }, [loadTeacher, loadCourses, loadActivities])
   );
 
-  const activeActivities = activities
-    .filter((a) => a.status === 'published')
-    .slice(0, 4);
-
-  const recentActivity = [...activities]
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(0, 5);
+  // Two disjoint slices of one ranked list. Splitting on "is there grading
+  // to do" keeps the queue actionable and stops the same activity appearing
+  // under two headings, which is what the old two-section feed did.
+  const { reviewQueue, upcoming } = useMemo(() => {
+    const ranked = rankActivities(activities);
+    return {
+      reviewQueue: ranked.filter((r) => ungradedCount(r.activity) > 0),
+      upcoming: ranked.filter((r) => ungradedCount(r.activity) === 0),
+    };
+  }, [activities]);
 
   const openCourse = (course: CourseSummary) =>
     router.push({
@@ -114,109 +177,259 @@ export default function EducatorDashboardScreen() {
       params: { courseId: course.id, courseName: course.name },
     });
 
+  /**
+   * Row taps resolve to the same destinations the Assignments tab already
+   * uses, with the same params. An activity with work waiting goes straight
+   * to its grading screen; everything else opens the activity.
+   */
+  const openActivity = (a: ClassActivity) => {
+    if (ungradedCount(a) > 0 && a.kind === 'task') {
+      router.push({
+        pathname: '/educator/(tabs)/task-submissions',
+        params: {
+          taskId: a.id,
+          taskTitle: a.title,
+          courseName: a.course_name,
+          maxPoints: String(a.max_points),
+        },
+      } as any);
+      return;
+    }
+    if (ungradedCount(a) > 0 && a.kind === 'quiz' && a.ref_id != null) {
+      router.push({
+        pathname: '/educator/(tabs)/quiz-attempts',
+        params: {
+          quizId: String(a.ref_id),
+          quizTitle: a.title,
+          courseId: a.course != null ? String(a.course) : undefined,
+        },
+      } as any);
+      return;
+    }
+    // Cast matches assignments.tsx: expo-router's generated route types lag
+    // behind the activity-detail screen.
+    router.push({
+      pathname: '/educator/(tabs)/activity-detail',
+      params: { activityId: String(a.id) },
+    } as any);
+  };
+
+  const renderActivityRow = (entry: Ranked, key: string) => {
+    const a = entry.activity;
+    const meta = ACTIVITY_META[a.kind] || ACTIVITY_META.quiz;
+    const waiting = ungradedCount(a);
+    const isDraft = a.status === 'draft';
+    const submitted = a.submission_count ?? 0;
+    const graded = a.graded_count ?? 0;
+
+    return (
+      <TouchableOpacity
+        key={key}
+        style={styles.row}
+        activeOpacity={0.75}
+        onPress={() => openActivity(a)}
+        accessibilityRole="button"
+        accessibilityLabel={`${a.title}, ${a.course_name}. ${entry.due.label}. ${
+          submitted > 0 ? `${submitted} submitted, ${graded} graded.` : 'No submissions yet.'
+        }`}
+      >
+        <View style={[styles.rowIcon, { backgroundColor: tint(meta.color) }]}>
+          <Ionicons name={meta.icon} size={16} color={meta.color} />
+        </View>
+
+        <View style={styles.rowBody}>
+          <Text style={styles.rowTitle} numberOfLines={2}>
+            {a.title}
+          </Text>
+          <Text style={styles.rowMeta} numberOfLines={2}>
+            {a.course_name}
+            {` · created ${relativeTime(a.created_at)}`}
+          </Text>
+          <View style={styles.rowTags}>
+            {isDraft && <Pill label="Draft" />}
+            {waiting > 0 && <Pill label={`${waiting} ungraded`} color={REVIEW_COLOR} icon="alert-circle" />}
+            {waiting === 0 && submitted > 0 && <Pill label="All graded" color={COLORS.success} icon="checkmark-circle" />}
+          </View>
+        </View>
+
+        <View style={styles.rowTrail}>
+          {entry.due.isOverdue ? (
+            <Text style={[styles.rowDue, { color: OVERDUE_TEXT }]} numberOfLines={1}>
+              Overdue
+            </Text>
+          ) : (
+            <Text style={styles.rowDueNeutral} numberOfLines={1}>
+              {entry.due.short}
+            </Text>
+          )}
+          <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
+  const renderRetry = (onRetry: () => void) => (
+    <View style={styles.errorCard}>
+      <Ionicons name="cloud-offline-outline" size={22} color={OVERDUE_TEXT} />
+      <View style={styles.errorBody}>
+        <Text style={styles.errorTitle}>Could not load</Text>
+        <Text style={styles.errorText}>Check your connection and try again.</Text>
+      </View>
+      <TouchableOpacity style={styles.retryBtn} onPress={onRetry} accessibilityRole="button" accessibilityLabel="Retry">
+        <Text style={styles.retryText}>Retry</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
   return (
     <View style={styles.container}>
       <EducatorHeader
         title={greeting()}
-        subtitle={`${teacherName}`}
+        subtitle={teacherName}
         avatar={initialsOf(teacherName)}
         onAvatarPress={() => router.navigate('/educator/profile')}
         showNotifications
         onNotificationsPress={() => router.push('/educator/announcements' as any)}
       />
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-        {/* 1 — Quick actions */}
-        <View style={styles.section}>
-          <SectionHeader title="Quick Actions" />
-          <CreateQuickActions />
-        </View>
+      <ScrollView
+        style={styles.content}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={refresh}
+            tintColor={COLORS.purpleVibrant}
+            colors={[COLORS.purpleVibrant]}
+          />
+        }
+      >
+        {/* 1 — Grading queue. Only rendered when there is real work waiting. */}
+        {reviewQueue.length > 0 && (
+          <View style={styles.section}>
+            <SectionHeader
+              title="Needs Review"
+              actionLabel="See all"
+              onAction={() => router.navigate('/educator/assignments')}
+            />
+            <Text style={styles.sectionNote}>
+              {reviewQueue.reduce((sum, r) => sum + ungradedCount(r.activity), 0)} submissions waiting
+            </Text>
+            {reviewQueue.slice(0, REVIEW_PREVIEW).map((r) =>
+              renderActivityRow(r, `review-${r.activity.id}`)
+            )}
+            {reviewQueue.length > REVIEW_PREVIEW && (
+              <TouchableOpacity
+                style={styles.moreRow}
+                onPress={() => router.navigate('/educator/assignments')}
+                accessibilityRole="button"
+              >
+                <Text style={styles.moreText}>
+                  {reviewQueue.length - REVIEW_PREVIEW} more waiting to review
+                </Text>
+                <Ionicons name="chevron-forward" size={15} color={REVIEW_TEXT} />
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
 
-        {/* 2 — My Classes */}
+        {/* 2 — Classes. Vertical rows so every class is reachable without
+             swiping a carousel and discovering the ones off-screen. */}
         <View style={styles.section}>
-          <SectionHeader title="My Classes" actionLabel="See all" onAction={() => router.navigate('/educator/courses')} />
+          <SectionHeader
+            title="Your Classes"
+            actionLabel="See all"
+            onAction={() => router.navigate('/educator/courses')}
+          />
 
           {loadingClasses ? (
             <View style={styles.loadingBox}>
               <ActivityIndicator color={COLORS.purpleVibrant} />
             </View>
+          ) : classesFailed ? (
+            renderRetry(loadCourses)
           ) : courses.length === 0 ? (
             <EmptyState
               icon="school-outline"
               title="No classes yet"
-              text='Create a course and share its join code so students can enroll.'
+              text="Create a course and share its join code so students can enroll."
             />
           ) : (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ paddingRight: 4 }}
-            >
-              {courses.map((c) => (
-                <TouchableOpacity key={c.id} style={styles.classCard} activeOpacity={0.85} onPress={() => openCourse(c)}>
+            <View style={styles.card}>
+              {courses.map((c, i) => (
+                <TouchableOpacity
+                  key={c.id}
+                  style={[styles.classRow, i > 0 && styles.divider]}
+                  activeOpacity={0.75}
+                  onPress={() => openCourse(c)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${c.name}, ${c.student_count} students, join code ${c.join_code}`}
+                >
                   <View style={[styles.classIconBg, { backgroundColor: tint(COLORS.purpleVibrant) }]}>
                     <Ionicons name="people" size={18} color={COLORS.purpleVibrant} />
                   </View>
-                  <Text style={styles.className} numberOfLines={1}>{c.name}</Text>
-                  <Text style={styles.classMeta}>
-                    {c.student_count} student{c.student_count === 1 ? '' : 's'}
-                  </Text>
+                  <View style={styles.rowBody}>
+                    <Text style={styles.rowTitle} numberOfLines={1}>
+                      {c.name}
+                    </Text>
+                    <Text style={styles.rowMeta} numberOfLines={1}>
+                      {c.student_count} student{c.student_count === 1 ? '' : 's'}
+                      {c.join_code ? ` · Code ${c.join_code}` : ''}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
                 </TouchableOpacity>
               ))}
-            </ScrollView>
+            </View>
           )}
         </View>
 
-        {/* 3 — Active Activities */}
-        {activeActivities.length > 0 && (
-          <View style={styles.section}>
-            <SectionHeader title="Active Activities" actionLabel="See all" onAction={() => router.navigate('/educator/assignments')} />
+        {/* 3 — One merged, urgency-ranked list. Replaces the old overlapping
+             "Active Activities" and "Recent Activity" sections. */}
+        <View style={styles.section}>
+          <SectionHeader
+            title="Activities"
+            actionLabel="See all"
+            onAction={() => router.navigate('/educator/assignments')}
+          />
 
-            {activeActivities.map((a) => {
-              const meta = ACTIVITY_META[a.kind] || ACTIVITY_META.quiz;
-              return (
-                <View key={a.id} style={styles.assignmentCard}>
-                  <View style={styles.assignmentTop}>
-                    <View style={[styles.activityIconBg, { backgroundColor: tint(meta.color) }]}>
-                      <Ionicons name={meta.icon} size={16} color={meta.color} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.assignmentTitle}>{a.title}</Text>
-                      <Text style={styles.assignmentMeta}>
-                        {a.course_name}
-                        {dueLabel(a.due_date) ? ` · ${dueLabel(a.due_date)}` : ''}
-                      </Text>
-                    </View>
-                  </View>
-                </View>
-              );
-            })}
-          </View>
-        )}
-
-        {/* 4 — Recent Activity */}
-        {recentActivity.length > 0 && (
-          <View style={styles.section}>
-            <SectionHeader title="Recent Activity" actionLabel="See all" onAction={() => router.navigate('/educator/assignments')} />
-            <View style={styles.activityCard}>
-              {recentActivity.map((item, idx) => {
-                const meta = ACTIVITY_META[item.kind] || ACTIVITY_META.quiz;
-                return (
-                  <View key={item.id} style={[styles.activityRow, idx > 0 && styles.activityBorderTop]}>
-                    <View style={[styles.activityIconBg, { backgroundColor: tint(meta.color) }]}>
-                      <Ionicons name={meta.icon} size={16} color={meta.color} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.activityText} numberOfLines={2}>{item.title}</Text>
-                      <Text style={styles.activitySub}>{item.course_name}</Text>
-                    </View>
-                    <Text style={styles.activityTime}>{relativeTime(item.created_at)}</Text>
-                  </View>
-                );
-              })}
+          {loadingActivities ? (
+            <View style={styles.loadingBox}>
+              <ActivityIndicator color={COLORS.purpleVibrant} />
             </View>
-          </View>
-        )}
+          ) : activitiesFailed ? (
+            renderRetry(loadActivities)
+          ) : upcoming.length === 0 ? (
+            <EmptyState
+              icon="file-tray-outline"
+              title="Nothing scheduled"
+              text="Published quizzes, lessons, games and tasks will appear here, soonest deadline first."
+            />
+          ) : (
+            <View style={styles.card}>
+              {upcoming.slice(0, ACTIVITY_PREVIEW).map((r) =>
+                renderActivityRow(r, `activity-${r.activity.id}`)
+              )}
+              {upcoming.length > ACTIVITY_PREVIEW && (
+                <TouchableOpacity
+                  style={[styles.moreRow, styles.divider]}
+                  onPress={() => router.navigate('/educator/assignments')}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.moreText}>{upcoming.length - ACTIVITY_PREVIEW} more in Assignments</Text>
+                  <Ionicons name="chevron-forward" size={15} color={REVIEW_TEXT} />
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+        </View>
+
+        {/* 4 — Creation, demoted below the work that needs attention. */}
+        <View style={styles.section}>
+          <SectionHeader title="Create" />
+          <CreateQuickActions />
+        </View>
       </ScrollView>
     </View>
   );
@@ -224,52 +437,88 @@ export default function EducatorDashboardScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
-  content: { flex: 1, paddingHorizontal: 20, paddingTop: 20 },
+  content: { flex: 1, paddingHorizontal: SPACE.xl, paddingTop: SPACE.md },
   scrollContent: { paddingBottom: 44 },
   section: { marginBottom: 26 },
+  sectionNote: {
+    fontSize: 13,
+    fontFamily: FONTS.regular,
+    color: COLORS.textSecondary,
+    marginTop: -8,
+    marginBottom: SPACE.md,
+  },
   loadingBox: { paddingVertical: 32, alignItems: 'center' },
 
-  /* Class preview card */
-  classCard: {
-    width: 150,
+  card: {
     backgroundColor: COLORS.surface,
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: RADIUS.lg,
-    padding: 14,
-    marginRight: 12,
+    paddingHorizontal: SPACE.lg,
   },
-  classIconBg: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center', marginBottom: 10 },
-  className: { fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary, marginBottom: 3 },
-  classMeta: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted },
+  divider: { borderTopWidth: 1, borderTopColor: COLORS.border },
 
-  /* Assignment preview card */
-  assignmentCard: {
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: RADIUS.lg,
-    padding: 16,
-    marginBottom: 12,
+  /* Shared list row shape for both activity lists and classes */
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACE.md,
+    paddingVertical: 13,
+    minHeight: 44,
   },
-  assignmentTop: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
-  assignmentTitle: { fontSize: 14.5, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary, marginBottom: 3 },
-  assignmentMeta: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textSecondary },
-  assignmentPercent: { fontSize: 15, fontFamily: FONTS.black, fontWeight: '900', color: COLORS.purpleDeep },
-  assignmentSub: { fontSize: 11.5, fontFamily: FONTS.medium, fontWeight: '500', color: COLORS.textMuted, marginTop: 8 },
+  rowBody: { flex: 1 },
+  rowTitle: { fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary, lineHeight: 19 },
+  rowMeta: {
+    fontSize: 12,
+    fontFamily: FONTS.regular,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+    lineHeight: 17,
+  },
+  rowTags: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 7 },
+  rowIcon: { width: 32, height: 32, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
+  rowTrail: { alignItems: 'flex-end', gap: 4, maxWidth: 96 },
+  rowDue: { fontSize: 11, fontFamily: FONTS.bold, fontWeight: '700' },
+  rowDueNeutral: { fontSize: 11, fontFamily: FONTS.medium, fontWeight: '500', color: DUE_TEXT },
 
-  /* Activity feed */
-  activityCard: {
+  classRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACE.md,
+    paddingVertical: 13,
+    minHeight: 44,
+  },
+  classIconBg: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+
+  moreRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 13,
+    minHeight: 44,
+  },
+  moreText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: REVIEW_TEXT },
+
+  errorCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACE.md,
     backgroundColor: COLORS.surface,
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: RADIUS.lg,
-    paddingHorizontal: 16,
+    padding: SPACE.lg,
   },
-  activityRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 13 },
-  activityBorderTop: { borderTopWidth: 1, borderTopColor: COLORS.border },
-  activityIconBg: { width: 32, height: 32, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
-  activityText: { fontSize: 13, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.textPrimary, lineHeight: 18 },
-  activitySub: { fontSize: 11, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 2 },
-  activityTime: { fontSize: 11, fontFamily: FONTS.medium, fontWeight: '500', color: COLORS.textMuted },
+  errorBody: { flex: 1 },
+  errorTitle: { fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary },
+  errorText: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textSecondary, marginTop: 2 },
+  retryBtn: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: SPACE.lg,
+    borderRadius: RADIUS.md,
+    backgroundColor: tint(COLORS.purpleVibrant),
+  },
+  retryText: { fontSize: 13, fontFamily: FONTS.bold, fontWeight: '700', color: RETRY_TEXT },
 });

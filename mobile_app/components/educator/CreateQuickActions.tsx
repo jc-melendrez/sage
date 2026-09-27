@@ -18,8 +18,11 @@ interface Action {
 const CREATE_ACTIONS: Action[] = [
   { id: 'lesson', label: 'Create Lesson', icon: 'book-outline', color: COLORS.purpleVibrant, route: '/educator/lesson-new' },
   { id: 'quiz', label: 'Create Quiz', icon: 'help-circle-outline', color: COLORS.accent, route: '/educator/quiz-manager' },
-  { id: 'game', label: 'Create Game', icon: 'game-controller-outline', color: '#F59E0B', route: '/educator/host-game' },
-  { id: 'activity', label: 'Create Activity', icon: 'document-text-outline', color: '#10B981', route: '/educator/assignments' },
+  // Labels say what the educator is going to do, not which object is created.
+  // Routes are unchanged: host-game is still the game setup flow, and
+  // assignments is the shared create activity form.
+  { id: 'game', label: 'Host Game', icon: 'game-controller-outline', color: COLORS.warning, route: '/educator/host-game' },
+  { id: 'activity', label: 'Assignments', icon: 'document-text-outline', color: COLORS.success, route: '/educator/assignments' },
 ];
 
 export function CreateQuickActions() {
@@ -33,6 +36,8 @@ export function CreateQuickActions() {
           style={styles.tile}
           activeOpacity={0.85}
           onPress={() => router.push(a.route as any)}
+          accessibilityRole="button"
+          accessibilityLabel={a.label}
         >
           <View style={[styles.iconBg, { backgroundColor: tint(a.color) }]}>
             <Ionicons name={a.icon} size={22} color={a.color} />
