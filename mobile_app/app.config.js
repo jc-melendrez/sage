@@ -1,11 +1,67 @@
-const googleServicesFile = process.env.GOOGLE_SERVICES_JSON ?? './google-services.json';
-const googleServiceInfoPlist = process.env.GOOGLE_SERVICE_INFO_PLIST ?? './GoogleService-Info.plist';
+const fs = require('fs');
+const path = require('path');
+
+/**
+ * The @react-native-firebase/app plugin takes NO options object -- it reads
+ * `android.googleServicesFile` and `ios.googleServicesFile` straight off the
+ * Expo config. Anything passed to the plugin entry is silently ignored, which is
+ * why both paths are declared on `expo.android` / `expo.ios` below.
+ */
+function resolveFirebaseFile(envValue, fallback, label) {
+  const relativePath = envValue ?? fallback;
+  const absolutePath = path.resolve(__dirname, relativePath);
+  return { relativePath, absolutePath, exists: fs.existsSync(absolutePath) };
+}
+
+const androidGoogleServices = resolveFirebaseFile(
+  process.env.GOOGLE_SERVICES_JSON,
+  './google-services.json',
+  'google-services.json'
+);
+
+const iosGoogleServices = resolveFirebaseFile(
+  process.env.GOOGLE_SERVICE_INFO_PLIST,
+  './GoogleService-Info.plist',
+  'GoogleService-Info.plist'
+);
+
+// Android is the primary target, so a missing file must fail the build loudly
+// rather than ship an APK with no Firebase app (auth would then throw
+// "No Firebase App '[DEFAULT]' has been created" at runtime).
+if (!androidGoogleServices.exists) {
+  throw new Error(
+    `[SAGE] google-services.json not found at ${androidGoogleServices.absolutePath}. ` +
+      'Set the GOOGLE_SERVICES_JSON env var to a valid path, or place the file at ./google-services.json.'
+  );
+}
+
+// iOS is optional for now: app.config.js is evaluated for every platform, so
+// throwing here would break Android builds too. Warn instead -- the Firebase
+// plugin still fails the iOS build with its own "GoogleService-Info.plist doesn't
+// exist" error, but this message explains what to do about it.
+if (!iosGoogleServices.exists) {
+  console.warn(
+    `[SAGE] GoogleService-Info.plist not found at ${iosGoogleServices.absolutePath}. ` +
+      'Android builds are unaffected, but iOS builds will fail. Download the plist from the Firebase ' +
+      'console and either place it at ./GoogleService-Info.plist or point GOOGLE_SERVICE_INFO_PLIST at it.'
+  );
+}
 
 module.exports = {
   expo: {
     name: "SAGE Learning",
     slug: "SAGE-Learning",
     version: "1.0.0",
+    // OTA updates are keyed to the native app version, so an update published
+    // for 1.0.0 only ever reaches the build whose version is 1.0.0. This pairs
+    // with `appVersionSource: "remote"` + `autoIncrement` in eas.json, which
+    // gives every build a unique version (and therefore a unique runtime).
+    runtimeVersion: { policy: "appVersion" },
+    updates: {
+      // EAS Update server for this project. Set explicitly rather than relying on
+      // inference from extra.eas.projectId so `eas update` works predictably.
+      url: "https://u.expo.dev/215db58a-f74b-44a9-91cb-4b34cbcc2fcf"
+    },
     orientation: "portrait",
     icon: "./assets/images/icon.png",
     scheme: "sage-learning",
@@ -15,6 +71,7 @@ module.exports = {
     ios: {
       supportsTablet: true,
       bundleIdentifier: "com.sage.learning",
+      googleServicesFile: iosGoogleServices.relativePath,
       infoPlist: {
         NSLocalNetworkUsageDescription: "SAGE Learning uses your local network so nearby phones can join offline multiplayer games."
       }
@@ -37,7 +94,7 @@ module.exports = {
       softwareKeyboardLayoutMode: 'pan',
       predictiveBackGestureEnabled: false,
       package: "com.sage.learning",
-      googleServicesFile
+      googleServicesFile: androidGoogleServices.relativePath
     },
     web: {
       output: "static",
@@ -75,17 +132,7 @@ module.exports = {
           }
         }
       ],
-      [
-        "@react-native-firebase/app",
-        {
-          "android": {
-            "googleServicesFile": googleServicesFile
-          },
-          "ios": {
-            "googleServiceInfoPlist": googleServiceInfoPlist
-          }
-        }
-      ],
+      "@react-native-firebase/app",
       "@react-native-firebase/auth",
       "expo-sqlite"
     ],
