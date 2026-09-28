@@ -1027,6 +1027,28 @@ def _generate_recommendations(user):
     enrolled_by_id = {cid: name for cid, name in enrolled}
     course_choices = "\n".join(f"- {cid}: {name}" for cid, name in enrolled) or "(none)"
 
+    # The model can only point at a topic it has been given the id of. Without
+    # this it saw topic *titles* inside the progress snapshot but no ids, so it
+    # could never resolve a title back to a row. Capped because a large
+    # enrolment would otherwise blow the prompt up with hundreds of lines and
+    # start getting ignored.
+    TOPICS_PER_COURSE = 10
+    MAX_COURSES_WITH_TOPICS = 8
+    topics_by_course = {}
+    topic_lines = []
+    for cid, name in enrolled[:MAX_COURSES_WITH_TOPICS]:
+        rows = list(
+            Topic.objects.filter(course_id=cid)
+            .order_by('order')
+            .values_list('id', 'title')[:TOPICS_PER_COURSE]
+        )
+        if not rows:
+            continue
+        topics_by_course[cid] = {tid for tid, _ in rows}
+        inner = "\n".join(f"      topic {tid}: {title}" for tid, title in rows)
+        topic_lines.append(f"- Course {cid} ({name}):\n{inner}")
+    topic_choices = "\n".join(topic_lines) or "(no topics available)"
+
     # Asking for an explicit priority order lets the model's own ranking of
     # "what this learner should do next" survive into the response.
     system_prompt = (
@@ -1035,12 +1057,16 @@ def _generate_recommendations(user):
         "their real progress data. "
         "You MUST return ONLY valid JSON. Do not include any text or markdown outside the JSON. "
         "The JSON structure must be: "
-        '{"recommendations": [{"course_id": 12, "title": "Short actionable title", '
+        '{"recommendations": [{"course_id": 12, "topic_id": 34, "title": "Short actionable title", '
         '"description": "2-3 sentence explanation"}]} '
         "Return exactly 3 to 4 recommendations, ordered most to least useful. "
         "For every item, set course_id to the id of the enrolled course the learner "
         "should start with, chosen from the list you are given. Never invent a course "
         "id, and use null if none of the listed courses fit. "
+        "Also set topic_id to the single most specific topic id that item is about, "
+        "taken from the topic list I give you. The topic MUST belong to the course_id "
+        "you picked in the same item. Use null when you are not confident, or when the "
+        "suggestion is about the course as a whole rather than one topic. "
         "Weigh the study habits in the prompt: if the learner reliably studies at a "
         "particular time, phrase that suggestion around it rather than inventing a new habit."
     )
@@ -1050,6 +1076,8 @@ def _generate_recommendations(user):
         f"{snapshot}\n\n"
         "Courses this student is enrolled in (use these exact ids):\n"
         f"{course_choices}\n\n"
+        "Topics inside those courses (use these exact ids, and only with their own course):\n"
+        f"{topic_choices}\n\n"
         "Write personalized study recommendations based on this. "
         "Focus on the most useful next steps: topics to review or restart, "
         "strengths to build on, and consistent study habits."
@@ -1097,11 +1125,28 @@ def _generate_recommendations(user):
                 course_id = None
             if course_id not in enrolled_by_id:
                 course_id = None
+
+            # Same rule for the topic, plus one more: a topic is only meaningful
+            # within its own course, and the path route is addressed by course
+            # id. A mismatched pair means the model combined a real topic id
+            # with the wrong course, so keep the course and drop the topic --
+            # the card still opens the right course, just not scrolled to a
+            # specific topic.
+            topic_id = None
+            if course_id is not None:
+                try:
+                    candidate_topic = int(item.get('topic_id'))
+                except (TypeError, ValueError):
+                    candidate_topic = None
+                if candidate_topic in topics_by_course.get(course_id, ()):
+                    topic_id = candidate_topic
+
             Recommendation.objects.create(
                 user=user,
                 title=title,
                 description=description,
                 course_id=course_id,
+                topic_id=topic_id,
             )
         return Recommendation.objects.filter(user=user)
     except Exception as e:
@@ -1131,7 +1176,12 @@ def user_recommendations(request, user_id):
             print(f"[Recommendation Generation Critical Error] {e}")
 
     recommendations = _daily_rotation(
-        Recommendation.objects.filter(user_id=user_id).order_by('created_at', 'id'),
+        # select_related: the serializer dereferences rec.topic to check that
+        # the topic belongs to the same course, which would otherwise be one
+        # extra query per card.
+        Recommendation.objects.filter(user_id=user_id)
+        .select_related('course', 'topic')
+        .order_by('created_at', 'id'),
         user,
     )
     serializer = RecommendationSerializer(recommendations, many=True)

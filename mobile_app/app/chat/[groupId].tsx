@@ -132,13 +132,60 @@ function mapMessage(raw: RawMessage): GroupMessage {
   };
 }
 
-// Merge server messages with any still-unsent optimistic echoes. A local echo
-// is dropped as soon as the server copy (same sender + text) shows up.
+// Merge an incoming batch of server messages with what is already on screen,
+// keyed by message id rather than replacing the list wholesale.
+//
+// Replacing was the cause of the "shared quiz cards disappear" bug. Three
+// writers feed this state (the SQLite cache, the REST history fetch, and the
+// Firestore snapshot) and they do not all carry the same fields -- Firestore
+// omits keys that are absent on a document, and the REST page and the cache
+// have different limits. A whole-list replacement meant whichever writer landed
+// last silently deleted every field the other two had supplied: a message that
+// arrived with quiz_embed from REST lost it as soon as the snapshot ran.
+//
+// So: union the ids, and for an id present in both, let the incoming copy win
+// but keep any field it does not carry from the copy already on screen.
 function mergeMessages(prev: GroupMessage[], incoming: GroupMessage[]): GroupMessage[] {
+  // A local echo is dropped as soon as the server copy (same sender + text)
+  // shows up.
   const unsyncedLocal = prev.filter(m => m.local).filter(m =>
     !incoming.some(f => f.sender_uid === m.sender_uid && f.text === m.text),
   );
-  return [...incoming, ...unsyncedLocal];
+
+  const prevById = new Map(prev.filter(m => !m.local).map(m => [m.id, m]));
+  const merged = incoming.map(msg => {
+    const existing = prevById.get(msg.id);
+    if (!existing) return msg;
+    // React needs identity stability for list items, so preserve the old object
+    // when nothing actually changed.
+    const changed = (Object.keys(msg) as (keyof GroupMessage)[]).some(
+      k => !Object.is(msg[k], existing[k]),
+    );
+    return changed ? { ...existing, ...msg } : existing;
+  });
+
+  // An incoming page can be a strict subset of what is loaded (Firestore has no
+  // limit, REST returns one page), so anything already on screen that the batch
+  // did not mention has to survive too.
+  const incomingIds = new Set(incoming.map(m => m.id));
+  const untouched = prev.filter(m => !m.local && !incomingIds.has(m.id));
+
+  // The list is rendered in array order by a plain ScrollView, so the union has
+  // to come back chronologically. Concatenating the two halves would interleave
+  // them wrongly. Undated rows keep their relative order at the end, and
+  // optimistic echoes stay pinned to the bottom so they remain under the
+  // composer where the user just typed them.
+  const combined = [...merged, ...untouched];
+  combined.sort((a, b) => {
+    const at = toTimestamp(a.created_at);
+    const bt = toTimestamp(b.created_at);
+    if (at == null && bt == null) return 0;
+    if (at == null) return 1;
+    if (bt == null) return -1;
+    return at - bt;
+  });
+
+  return [...combined, ...unsyncedLocal];
 }
 
 function memberInitials(member?: GroupMember | null, name?: string): string {
@@ -391,6 +438,15 @@ export default function GroupChatScreen() {
               created_at: createdAt,
               reactions: data?.reactions,
               attachments: data?.attachments,
+              // This key is what makes shared quiz cards render. It was missing
+              // here, so the realtime snapshot produced messages with
+              // quiz_embed: null; the mapper's own comment even notes that
+              // "Firestore omits keys entirely". Because mergeMessages replaced
+              // the whole list, any REST payload that HAD the embed had it
+              // erased the moment this snapshot landed -- and onSnapshot re-fires
+              // on every new message, so cards appeared and vanished as people
+              // typed.
+              quiz_embed: data?.quiz_embed,
             });
           });
 

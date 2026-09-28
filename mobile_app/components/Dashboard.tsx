@@ -29,7 +29,6 @@ import NotificationSheet from './NotificationSheet';
 import { getCurrentUser } from '@/services/authService';
 import { useCurrentUser } from '@/contexts/UserContext';
 import { apiCall } from '@/services/apiClient';
-import { getEnrolledCourses } from '@/services/courseService';
 import { dailyCheckIn } from '@/services/gamificationService';
 import BottomSheet from './BottomSheet';
 
@@ -97,7 +96,9 @@ interface Recommendation {
   description: string;
   /** Course this recommendation is about, when the backend could resolve one. */
   course_id?: number | null;
-  /** Server-computed deep link. Unused for "Start learning" (see below). */
+  /** Specific topic inside that course; `href` already carries it as ?topicId=. */
+  topic_id?: number | null;
+  /** Server-computed deep link, already carrying ?topicId= when known. */
   href?: string | null;
 }
 interface Activity {
@@ -397,28 +398,41 @@ export default function Dashboard() {
    * way to pick something else. The path screen already scrolls to and
    * highlights the first unpassed node, so it is a strictly better landing
    * spot: they choose the node and tap Start themselves.
+   *
+   * The route must be built from the card that was tapped. It previously fell
+   * back to `enrolled[0]` when `course_id` was absent, and because the backend
+   * serves enrolled courses newest-first that made every course-less card open
+   * the student's most recent course -- so tapping card 3 of 4 landed on the
+   * same place as card 1. `course_id` is null fairly often by design (the
+   * recommendation prompt tells the model to return null rather than invent an
+   * id it is not sure about), which is why this showed up as a bug at all.
+   *
+   * `href` is the server's own deep link for the card and is preferred when
+   * present. If neither it nor `course_id` identifies a course there is nothing
+   * specific to open, so say so instead of silently substituting a different
+   * course the student did not tap.
    */
   const handleOpenRecommendation = useCallback(async (rec: Recommendation) => {
     if (isOpeningRecommendation) return;
     setIsOpeningRecommendation(true);
     try {
+      if (rec.href) {
+        router.push(rec.href as any);
+        return;
+      }
+
       if (rec.course_id) {
         router.push(`/(tabs)/course/path/${rec.course_id}` as any);
         return;
       }
 
-      // The model could not tie this suggestion to a class (or the class has
-      // since been deleted). Rather than bounce to an unrelated screen, use
-      // whatever the student is actually enrolled in.
-      const enrolled = await getEnrolledCourses();
-      if (enrolled.length > 0) {
-        router.push(`/(tabs)/course/path/${enrolled[0].id}` as any);
-        return;
-      }
-
+      // The model could not tie this suggestion to a class, or the class has
+      // since been deleted. The card is still worth showing, but there is no
+      // course behind it to open, and picking an arbitrary enrolled course
+      // would take the student somewhere they did not ask to go.
       Alert.alert(
-        'Nothing to start yet',
-        'Enrol in a course first and your next step will show up here.',
+        'Nothing specific to open yet',
+        'This suggestion is not linked to a class. Enrol in a course and your next step will show up here.',
       );
     } catch {
       Alert.alert('Could not open that', 'Please try again in a moment.');

@@ -244,6 +244,13 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
   const [menuSessionId, setMenuSessionId] = useState<number | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<number | null>(null);
   const [editTitle, setEditTitle] = useState('');
+  // The row the 3-dots menu is currently anchored to, plus the button's measured
+  // window coords. The menu is a single instance positioned against these, so
+  // the tapped row's title/pinned state has to be held here rather than read
+  // from the render closure that opened it.
+  const [menuAnchor, setMenuAnchor] = useState<{ id: number; title: string; pinned: boolean } | null>(null);
+  const [menuAnchorRect, setMenuAnchorRect] = useState<{ x: number; y: number; y2: number; w: number } | null>(null);
+  const menuButtonRefs = useRef<Record<number, View | null>>({});
   
   // --- Message State ---
   const [messages, setMessages] = useState<Message[]>([]);
@@ -358,13 +365,75 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
   };
 
   // Session Menu Actions
-  const toggleMenu = (sessionId: number) => {
-    setMenuSessionId(menuSessionId === sessionId ? null : sessionId);
+
+  // Sidebar/panel geometry for placing the single dropdown. Measured lazily
+  // rather than hardcoded: the modal is 80% width and the header height depends
+  // on the platform safe-area padding, so a magic `top: 50` cannot be correct
+  // for more than the one row it happened to be tuned against.
+  const [panelLayout, setPanelLayout] = useState({ x: 0, y: 0, width: 0, height: 0 });
+
+  const MENU_W = 140;
+  const MENU_H = 146;   // 3 items + padding + the Delete separator
+  const MENU_GAP = 6;
+
+  /**
+   * Open the 3-dots menu for a session, anchored to that row's button.
+   *
+   * `measureInWindow` gives window coords; the dropdown is absolutely
+   * positioned inside the sidebar panel, so the window origin is subtracted
+   * back out. When the button sits too low for the menu to fit beneath it, the
+   * menu flips above instead of being clipped.
+   */
+  const openMenu = (sessionId: number) => {
+    const session = sessions.find(s => s.id === sessionId);
+    if (!session) return;
+
+    if (menuSessionId === sessionId) {
+      closeMenu();
+      return;
+    }
+
+    const node = menuButtonRefs.current[sessionId];
+    if (!node) {
+      // No measured anchor: fall back to opening it rather than silently
+      // doing nothing, which is what the old unpositioned menu did.
+      setMenuSessionId(sessionId);
+      setMenuAnchor({ id: sessionId, title: session.title, pinned: !!session.pinned });
+      return;
+    }
+
+    node.measureInWindow((x, y, w, h) => {
+      setMenuAnchorRect({ x, y, y2: y + h, w });
+      setMenuAnchor({ id: sessionId, title: session.title, pinned: !!session.pinned });
+      setMenuSessionId(sessionId);
+    });
   };
 
   const closeMenu = () => {
     setMenuSessionId(null);
+    setMenuAnchor(null);
+    setMenuAnchorRect(null);
   };
+
+  // Derived placement for the single dropdown.
+  const menuTop = (() => {
+    if (!menuAnchorRect) return 0;
+    const relY = menuAnchorRect.y - panelLayout.y;
+    const relBottom = menuAnchorRect.y2 - panelLayout.y;
+    const below = relBottom + MENU_GAP;
+    if (below + MENU_H <= panelLayout.height) return below;
+    // Flip above the button, but never push it off the top of the panel.
+    return Math.max(relY - MENU_GAP - MENU_H, 4);
+  })();
+
+  const menuLeft = (() => {
+    if (!menuAnchorRect) return 0;
+    // Right-align to the button's right edge (that is where the ellipsis is),
+    // then keep the whole menu inside the panel.
+    const relX = menuAnchorRect.x - panelLayout.x;
+    const max = Math.max(4, panelLayout.width - MENU_W - 4);
+    return Math.min(Math.max(relX + menuAnchorRect.w - MENU_W, 4), max);
+  })();
 
   /**
    * The backend is the single source of truth for pinning: only one session
@@ -660,7 +729,13 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
       {/* 🌟 Sidebar Modal */}
       <Modal visible={isMenuVisible} animationType="fade" transparent={true}>
         <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+          <View
+            style={styles.modalContent}
+            onLayout={(e) => {
+              const { x, y, width, height } = e.nativeEvent.layout;
+              setPanelLayout({ x, y, width, height });
+            }}
+          >
             <LinearGradient
               colors={[COLORS.purpleDeep, COLORS.purpleDark]}
               start={{ x: 0, y: 0 }}
@@ -746,44 +821,68 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
                       )}
 
                       <TouchableOpacity
+                        ref={(r) => { menuButtonRefs.current[session.id] = r; }}
                         style={styles.sessionMenuButton}
-                        onPress={(e) => { e.stopPropagation(); toggleMenu(session.id); }}
+                        onPress={(e) => { e.stopPropagation(); openMenu(session.id); }}
                         activeOpacity={0.7}
                         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                       >
                         <Ionicons name="ellipsis-horizontal" size={22} color={isActive ? "rgba(255,255,255,0.7)" : COLORS.textMuted} />
                       </TouchableOpacity>
-
-                      {isActive && !isEditing && (
-                        <View style={styles.activeIndicator}>
-                          <View style={styles.activeDot} />
-                        </View>
-                      )}
                     </TouchableOpacity>
-
-                    {/* 3-dots dropdown menu */}
-                    {isMenuOpen && (
-                      <TouchableOpacity style={styles.menuOverlay} onPress={closeMenu} activeOpacity={1}>
-                        <View style={[styles.menuDropdown, { top: 50 }]} pointerEvents="box-only">
-                          <TouchableOpacity style={styles.menuItem} onPress={() => handlePinSession(session.id, session.pinned || false)} activeOpacity={0.7}>
-                            <Ionicons name={session.pinned ? "pin-outline" : "pin"} size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
-                            <Text style={styles.menuItemText}>{session.pinned ? 'Unpin' : 'Pin'}</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity style={styles.menuItem} onPress={() => startRenameSession(session.id, session.title)} activeOpacity={0.7}>
-                            <Ionicons name="create-outline" size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
-                            <Text style={styles.menuItemText}>Rename</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity style={[styles.menuItem, styles.menuItemDanger]} onPress={() => handleDeleteSession(session.id)} activeOpacity={0.7}>
-                            <Ionicons name="trash-outline" size={18} color={COLORS.danger} style={styles.menuItemIcon} />
-                            <Text style={[styles.menuItemText, { color: COLORS.danger }]}>Delete</Text>
-                          </TouchableOpacity>
-                        </View>
-                      </TouchableOpacity>
-                    )}
                   </View>
                 );
               })}
             </ScrollView>
+
+            {/*
+              The 3-dots menu is rendered HERE, as a single instance on top of
+              the session list, not once per row inside it.
+
+              Rendering it per-row put the dropdown inside a ScrollView item, and
+              that could not work: `menuOverlay` was an absolute fill of
+              `sessionItemWrapper`, which is only one row tall, so a 3-item
+              ~138px dropdown overflowed its own overlay by ~70px; and RN
+              `zIndex` cannot lift a nested child above a *later sibling of its
+              ancestor*, so every row below the tapped one painted over the
+              bottom of the menu. Delete was the bottom item, which is why Pin
+              and Rename sometimes worked and Delete did not.
+
+              One menu on top of the list has no such neighbour to fight, and its
+              position comes from the tapped button's measured coords.
+            */}
+            {menuSessionId !== null && menuAnchor && (
+              <>
+                <TouchableOpacity
+                  style={styles.menuBackdrop}
+                  onPress={closeMenu}
+                  activeOpacity={1}
+                  accessibilityLabel="Close menu"
+                />
+                <View
+                  style={[
+                    styles.menuDropdown,
+                    {
+                      top: menuTop,
+                      left: menuLeft,
+                    },
+                  ]}
+                >
+                  <TouchableOpacity style={styles.menuItem} onPress={() => handlePinSession(menuSessionId, menuAnchor?.pinned || false)} activeOpacity={0.7}>
+                    <Ionicons name={menuAnchor?.pinned ? "pin-outline" : "pin"} size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
+                    <Text style={styles.menuItemText}>{menuAnchor?.pinned ? 'Unpin' : 'Pin'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.menuItem} onPress={() => startRenameSession(menuSessionId, menuAnchor?.title || '')} activeOpacity={0.7}>
+                    <Ionicons name="create-outline" size={18} color={COLORS.textPrimary} style={styles.menuItemIcon} />
+                    <Text style={styles.menuItemText}>Rename</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.menuItem, styles.menuItemDanger]} onPress={() => handleDeleteSession(menuSessionId)} activeOpacity={0.7}>
+                    <Ionicons name="trash-outline" size={18} color={COLORS.danger} style={styles.menuItemIcon} />
+                    <Text style={[styles.menuItemText, { color: COLORS.danger }]}>Delete</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
           </View>
 
           <TouchableOpacity 
@@ -1104,16 +1203,6 @@ sessionMenuButton: {
     fontFamily: FONTS.bold,
     fontWeight: '700',
   },
-  activeIndicator: {
-    marginLeft: 4,
-  },
-  activeDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: 'white',
-  },
-
   // Messages
   messagesContainer: { 
     flex: 1,
@@ -1388,17 +1477,18 @@ sessionMenuButton: {
     borderRadius: 8,
     backgroundColor: 'transparent',
   },
-  menuOverlay: {
+  // The 3-dots menu backdrop. Covers the whole panel so a tap anywhere else
+  // dismisses the menu, and sits behind it so it never steals the item taps.
+  menuBackdrop: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
-    zIndex: 10,
+    zIndex: 20,
   },
   menuDropdown: {
     position: 'absolute',
-    right: 0,
     backgroundColor: COLORS.surface,
     borderRadius: 12,
     borderWidth: 1,

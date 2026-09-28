@@ -112,6 +112,20 @@ class Recommendation(models.Model):
         blank=True,
         related_name='recommendations',
     )
+    # The specific topic inside `course` that the card is about. The generator
+    # used to pick a course only, so a card titled "Review Quadratics" still
+    # dropped the student on whatever node happened to be first-unpassed in that
+    # course. A null topic just falls back to the course-level deep link, which
+    # is what every recommendation created before this field did.
+    # Always set alongside `course`; the serializer drops a topic whose course
+    # does not match, since the path route is addressed by course id.
+    topic = models.ForeignKey(
+        'Topic',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='recommendations',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

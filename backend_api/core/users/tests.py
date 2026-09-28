@@ -952,6 +952,84 @@ class RecommendationCourseTargetTests(APITestCase):
         })
         self.assertIsNone(recs[0].course_id)
 
+    def test_valid_topic_id_is_kept(self):
+        topic = Topic.objects.create(course=self.biology, title='Photosynthesis', order=0)
+        recs, _ = self._run_generator({
+            'recommendations': [
+                {
+                    'title': 'Revisit photosynthesis', 'description': 'Weak area.',
+                    'course_id': self.biology.id, 'topic_id': topic.id,
+                },
+            ]
+        })
+        self.assertEqual(recs[0].topic_id, topic.id)
+        self.assertEqual(recs[0].course_id, self.biology.id)
+
+    def test_topic_from_another_course_is_dropped(self):
+        """A real topic id paired with the wrong course still has to be refused:
+        the path route is addressed by course id, so honouring it would scroll
+        to a topic that is not in the target course's path."""
+        foreign = Topic.objects.create(course=self.history, title='Industrial Revolution', order=0)
+        recs, _ = self._run_generator({
+            'recommendations': [
+                {
+                    'title': 'Mixed up', 'description': 'n/a',
+                    'course_id': self.biology.id, 'topic_id': foreign.id,
+                },
+            ]
+        })
+        self.assertIsNone(recs[0].topic_id)
+        # The course survives, so the card is still not a dead link.
+        self.assertEqual(recs[0].course_id, self.biology.id)
+
+    def test_hallucinated_topic_id_becomes_null(self):
+        recs, _ = self._run_generator({
+            'recommendations': [
+                {
+                    'title': 'Imaginary', 'description': 'n/a',
+                    'course_id': self.biology.id, 'topic_id': 987654,
+                },
+            ]
+        })
+        self.assertIsNone(recs[0].topic_id)
+
+    def test_non_numeric_topic_id_becomes_null(self):
+        recs, _ = self._run_generator({
+            'recommendations': [
+                {
+                    'title': 'Vague', 'description': 'n/a',
+                    'course_id': self.biology.id, 'topic_id': 'Photosynthesis',
+                },
+            ]
+        })
+        self.assertIsNone(recs[0].topic_id)
+
+    def test_topic_is_dropped_when_the_course_is_rejected(self):
+        topic = Topic.objects.create(course=self.biology, title='Photosynthesis', order=0)
+        recs, _ = self._run_generator({
+            'recommendations': [
+                {
+                    'title': 'Unenrolled course', 'description': 'n/a',
+                    'course_id': self.history.id, 'topic_id': topic.id,
+                },
+            ]
+        })
+        self.assertIsNone(recs[0].course_id)
+        self.assertIsNone(recs[0].topic_id)
+
+    def test_prompt_gives_the_model_real_topic_ids(self):
+        """The model can only return a topic id it was shown, so the ids have to
+        be in the prompt -- it previously saw topic titles in the progress
+        snapshot with no ids at all."""
+        topic = Topic.objects.create(course=self.biology, title='Photosynthesis', order=0)
+        # A topic in a course the student is NOT enrolled in, to prove the
+        # prompt does not hand out ids the validation would later reject.
+        hidden = Topic.objects.create(course=self.history, title='Industrial Revolution', order=0)
+        _, mock_post = self._run_generator({'recommendations': []})
+        sent = mock_post.call_args.kwargs['json']['messages'][1]['content']
+        self.assertIn(f'topic {topic.id}: Photosynthesis', sent)
+        self.assertNotIn(f'topic {hidden.id}:', sent)
+
     def test_prompt_lists_only_enrolled_courses(self):
         _, mock_post = self._run_generator({'recommendations': []})
         sent = mock_post.call_args.kwargs['json']['messages'][1]['content']
@@ -1015,6 +1093,50 @@ class RecommendationSerializerHrefTests(APITestCase):
         # Null, not a broken string: the app falls back to Activities.
         self.assertIsNone(data['href'])
         self.assertIsNone(data['course_id'])
+
+    def test_href_carries_topic_id_when_the_topic_belongs_to_the_course(self):
+        topic = Topic.objects.create(course=self.course, title='Optics', order=0)
+        rec = Recommendation.objects.create(
+            user=self.student, title='Review Optics', description='x',
+            course=self.course, topic=topic,
+        )
+        data = RecommendationSerializer(rec).data
+        # The path screen reads ?topicId= and scrolls to that topic, so the card
+        # lands on the topic it names instead of the first unpassed node.
+        self.assertEqual(
+            data['href'], f'/(tabs)/course/path/{self.course.id}?topicId={topic.id}',
+        )
+        self.assertEqual(data['topic_id'], topic.id)
+
+    def test_href_omits_a_topic_that_belongs_to_another_course(self):
+        other = Course.objects.create(
+            name='Chemistry', educator=self.educator, join_code='CHE999',
+        )
+        foreign_topic = Topic.objects.create(course=other, title='Acids', order=0)
+        rec = Recommendation.objects.create(
+            user=self.student, title='Mixed up', description='x',
+            course=self.course, topic=foreign_topic,
+        )
+        data = RecommendationSerializer(rec).data
+        # Following a foreign topic id would scroll to a topic that is not in
+        # this course's path, so the topic is dropped and the course kept.
+        self.assertEqual(data['href'], f'/(tabs)/course/path/{self.course.id}')
+        self.assertIsNone(data['topic_id'])
+
+    def test_deleting_a_topic_keeps_the_recommendation(self):
+        topic = Topic.objects.create(course=self.course, title='Optics', order=0)
+        rec = Recommendation.objects.create(
+            user=self.student, title='Review Optics', description='x',
+            course=self.course, topic=topic,
+        )
+        topic.delete()
+        rec.refresh_from_db()
+        # Falls back to the course-level link rather than losing the card.
+        self.assertIsNone(rec.topic_id)
+        self.assertEqual(
+            RecommendationSerializer(rec).data['href'],
+            f'/(tabs)/course/path/{self.course.id}',
+        )
 
     def test_deleting_a_course_keeps_the_recommendation(self):
         rec = Recommendation.objects.create(

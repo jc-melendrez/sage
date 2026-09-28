@@ -61,8 +61,12 @@ const AMP = PATH_W / 2 - 62; // Horizontal swing amplitude
 
 // Popup bubble
 const POPUP_W = 288;
+// Only used for the first frame, before onLayout reports the real height.
 const POPUP_H_EST = 300;
 const TAIL = 14;
+/** Gap between the node and the card, and the minimum screen margin. */
+const POPUP_GAP = 14;
+const EDGE_PAD = 12;
 
 // Calculate X position based on index (Sine wave pattern)
 const getNodeX = (index: number) => {
@@ -317,6 +321,12 @@ export default function TopicPathView({
 
   const [selectedNodeIndex, setSelectedNodeIndex] = useState<number | null>(null);
   const [nodeCenters, setNodeCenters] = useState<Record<number, { cx: number; cy: number }>>({});
+  // The popup's real rendered height. Positioning used to be computed from a
+  // hardcoded POPUP_H_EST, which silently pushed the card off the bottom of the
+  // screen whenever the real card was taller than the guess (wrapped title, or a
+  // description that filled its 3 lines) -- the tail was still pointing at the
+  // node but the Start button was below the fold and untappable.
+  const [popupHeight, setPopupHeight] = useState(0);
 
   useFocusEffect(
     useCallback(() => {
@@ -466,14 +476,32 @@ export default function TopicPathView({
 
         const { cx, cy } = nodeCenters[selectedNode.id] ?? { cx: getNodeX(selectedNodeIndex), cy: getNodeY(selectedNodeIndex) };
 
-        const fitsBelow = cy + R + 5 + POPUP_H_EST < SCREEN_H;
-        const above = !fitsBelow;
-        const popupTop = above
-          ? Math.max(cy - R - 5 - POPUP_H_EST, HEADER_H + 8)
-          : Math.min(cy + R + 5, SCREEN_H - POPUP_H_EST);
-        const popupLeft = Math.min(Math.max(cx - POPUP_W / 2, 12), SCREEN_W - POPUP_W - 12);
+        // Real height once the card has laid out; the estimate only covers the
+        // very first frame, before onLayout has reported anything.
+        const h = popupHeight || POPUP_H_EST;
 
-        const tailLeft = Math.min(Math.max(cx - popupLeft - TAIL / 2, 16), POPUP_W - 16 - TAIL);
+        // Sit BESIDE the node, horizontally, rather than above or below it.
+        // Below-the-node placement put the card in the bottom third of the
+        // screen for the last few nodes, where there was no room left to grow.
+        const roomOnRight = SCREEN_W - EDGE_PAD - (cx + R + POPUP_GAP);
+        const placeOnRight = roomOnRight >= POPUP_W;
+        const rawLeft = placeOnRight
+          ? cx + R + POPUP_GAP
+          : cx - R - POPUP_GAP - POPUP_W;
+        const maxLeft = Math.max(EDGE_PAD, SCREEN_W - POPUP_W - EDGE_PAD);
+        const popupLeft = Math.min(Math.max(rawLeft, EDGE_PAD), maxLeft);
+
+        // Vertically centred on the node, then clamped into the visible band.
+        const minTop = HEADER_H + 8;
+        const maxTop = Math.max(minTop, SCREEN_H - h - 8);
+        const popupTop = Math.min(Math.max(cy - h / 2, minTop), maxTop);
+
+        // Tail points back at the node, so it sits on the near vertical edge of
+        // the card and is aligned to the node's centre line.
+        const tailTop = Math.min(
+          Math.max(cy - popupTop - TAIL / 2, 12),
+          Math.max(12, h - TAIL - 12),
+        );
 
         const startLabel =
           st === 'completed' ? 'Review'
@@ -487,6 +515,12 @@ export default function TopicPathView({
                 styles.popupCard,
                 { top: popupTop, left: popupLeft, opacity: st === 'locked' ? 0.96 : 1 },
               ]}
+              onLayout={(e) => {
+                const measured = e.nativeEvent.layout.height;
+                if (measured > 0 && Math.abs(measured - popupHeight) > 0.5) {
+                  setPopupHeight(measured);
+                }
+              }}
             >
               <LinearGradient
                 colors={[cfg.color + '14', 'transparent']}
@@ -499,11 +533,16 @@ export default function TopicPathView({
               <View
                 style={[
                   styles.popupTail,
-                  above
-                    ? { bottom: -(TAIL / 2), borderBottomWidth: 1, borderRightWidth: 1 }
-                    : { top: -(TAIL / 2), borderTopWidth: 1, borderLeftWidth: 1 },
+                  // The tail square is coloured on its top+left edges, which
+                  // makes an upward-pointing triangle at rotate(0). Rotating it
+                  // -45deg aims the point at a node to the LEFT of the card, and
+                  // 135deg at a node to the RIGHT -- the two cases now that the
+                  // card sits beside the node instead of above or below it.
+                  placeOnRight
+                    ? { left: -(TAIL / 2), top: tailTop, transform: [{ rotate: '-45deg' }] }
+                    : { right: -(TAIL / 2), top: tailTop, transform: [{ rotate: '135deg' }] },
+                  { borderTopWidth: 1, borderLeftWidth: 1 },
                   { borderColor: COLORS.glassBorder },
-                  { left: tailLeft },
                 ]}
               />
 
@@ -803,7 +842,8 @@ const styles = StyleSheet.create({
     width: TAIL,
     height: TAIL,
     backgroundColor: '#FFFFFF',
-    transform: [{ rotate: '45deg' }],
+    // No transform here on purpose: the rotation depends on which side of the
+    // card the node is on, so it is supplied inline at the call site.
     elevation: 10,
   },
   popupHeader: {

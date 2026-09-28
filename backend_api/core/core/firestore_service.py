@@ -277,13 +277,25 @@ def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '
 
 def get_messages(group_id: str, limit: int = 50, resolve_users: callable = None) -> list:
     db = get_db()
+    # Order DESCENDING and take the newest `limit`, then reverse back to
+    # ascending. Ordering ascending and applying .limit() first returned the 50
+    # OLDEST messages in the group, so once a group passed 50 messages a freshly
+    # shared quiz never appeared in this payload at all -- and the mobile
+    # Firestore listener that supplements this fetch is unbounded, so the two
+    # paths disagreed about which messages existed.
     docs = (db.collection('studyGroups').document(group_id)
             .collection('messages')
-            .order_by('created_at')
+            # Pass the direction as a string. google-cloud-firestore defines
+            # ASCENDING/DESCENDING as plain strings in
+            # google.cloud.firestore_v1.base_query and does not re-export them
+            # from the google.cloud.firestore namespace, so `firestore.DESCENDING`
+            # raises AttributeError -- and order_by() here is a Firestore call,
+            # not the Django ORM's -field-name form.
+            .order_by('created_at', direction='DESCENDING')
             .limit(limit)
             .stream())
     messages = []
-    for d in docs:
+    for d in reversed(list(docs)):
         data = d.to_dict() or {}
         # Serialize the Firestore Timestamp to ISO-8601 — raw Timestamp
         # objects are not always JSON-serializable by DRF.

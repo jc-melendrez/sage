@@ -74,15 +74,34 @@ class RecommendationSerializer(serializers.ModelSerializer):
     # Server-computed so the app never has to rebuild the route (and get it
     # wrong) from the course id.
     href = serializers.SerializerMethodField()
+    # Exposed as a method field rather than the plain model field so it cannot
+    # disagree with `href`. A topic from a different course is meaningless here
+    # (the path route is addressed by course id), so it is reported as null.
+    topic_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Recommendation
-        fields = ['id', 'title', 'description', 'course', 'course_id', 'href', 'created_at']
+        fields = ['id', 'title', 'description', 'course', 'course_id', 'topic_id', 'href', 'created_at']
+
+    def _valid_topic_id(self, obj):
+        if not obj.course_id or not obj.topic_id:
+            return None
+        if obj.topic.course_id != obj.course_id:
+            return None
+        return obj.topic_id
+
+    def get_topic_id(self, obj):
+        return self._valid_topic_id(obj)
 
     def get_href(self, obj):
         if not obj.course_id:
             return None
-        return f"/(tabs)/course/path/{obj.course_id}"
+        # The path screen reads ?topicId= and scrolls to and highlights that
+        # topic, so a card that named one lands exactly there instead of on the
+        # course's first unpassed node.
+        topic_id = self._valid_topic_id(obj)
+        base = f"/(tabs)/course/path/{obj.course_id}"
+        return f"{base}?topicId={topic_id}" if topic_id else base
 
 class SessionSerializer(serializers.ModelSerializer):
     class Meta:
