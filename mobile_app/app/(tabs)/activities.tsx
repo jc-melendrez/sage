@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
   TextInput, ActivityIndicator, Alert, Platform, StatusBar, RefreshControl,
@@ -18,7 +18,7 @@ import { completeQuiz } from '@/services/gamificationService';
 import TakeQuiz from '../../components/TakeQuiz';
 import QuizInfoModal from '@/components/QuizInfoModal';
 import { getEnrolledCourses, joinCourseByCode, CourseSummary } from '@/services/courseService';
-import { deleteQuiz, startQuizAttempt, shareQuizToGroup, updateQuiz, parseDeadlineInput } from '@/services/quizService';
+import { deleteQuiz, startQuizAttempt, shareQuizToGroup, updateQuiz } from '@/services/quizService';
 import { notify } from '@/services/notify';
 import { pickDocument, readAsBase64, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
 import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/JoinCodeInput';
@@ -61,7 +61,10 @@ interface EditQuestion {
 interface EditDraft {
   id: number;
   title: string;
-  available_until: string;
+  // No available_until: the editor does not surface a deadline, and keeping it
+  // in the draft invited someone to "clear" it by blanking the textbox. Saves
+  // echo editTarget's existing value instead, so removing the field cannot wipe
+  // a deadline that is already set.
   questions: EditQuestion[];
 }
 
@@ -178,9 +181,6 @@ export default function ActivitiesScreen() {
     const draft: EditDraft = {
       id: quiz.id,
       title: quiz.title,
-      available_until: quiz.available_until
-        ? new Date(quiz.available_until).toISOString().slice(0, 16).replace('T', ' ')
-        : '',
       questions: (quiz.questions || []).map((q) => ({
         id: q.id,
         question_text: q.question_text || '',
@@ -234,8 +234,6 @@ export default function ActivitiesScreen() {
   };
 
   const updateDraftTitle = (title: string) => setEditDraft((d) => (d ? { ...d, title } : d));
-
-  const updateDraftDeadline = (text: string) => setEditDraft((d) => (d ? { ...d, available_until: text } : d));
 
   const updateEditQuestion = (index: number, field: 'question_text' | 'correct_answer' | 'explanation', value: string) => {
     setEditDraft((d) => {
@@ -353,25 +351,13 @@ export default function ActivitiesScreen() {
       }
     }
 
-    let available_until: string | null = null;
-    if (editDraft.available_until.trim()) {
-      const parsed = parseDeadlineInput(editDraft.available_until);
-      if (!parsed) {
-        Alert.alert('Invalid Deadline', 'Enter the deadline as YYYY-MM-DD HH:MM (24-hour), or leave it blank.');
-        return;
-      }
-      if (parsed.getTime() <= Date.now()) {
-        Alert.alert('Invalid Deadline', 'The deadline must be in the future.');
-        return;
-      }
-      available_until = parsed.toISOString();
-    }
-
     try {
       setIsSavingEdit(true);
       const updated = await updateQuiz(editDraft.id, {
         title,
-        available_until,
+        // Echoed, not cleared. The editor has no deadline field, so sending null
+        // here would silently wipe a deadline the user never touched.
+        available_until: editTarget?.available_until ?? null,
         questions: editDraft.questions.map((q) => ({
           id: q.id,
           question_text: q.question_text.trim(),
@@ -1208,207 +1194,186 @@ export default function ActivitiesScreen() {
         onRequestClose={requestCloseEditor}
       >
         <KeyboardSafeView style={styles.editorRoot}>
-          {editView === 'list' ? (
-            <ModalScreenHeader
-              title="Edit Quiz"
-              backgroundColor={COLORS.surface}
-              borderColor={COLORS.border}
-              titleStyle={styles.editorHeaderTitle}
-              left={
-                <TouchableOpacity onPress={requestCloseEditor} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
-                  <Ionicons name="close" size={24} color={COLORS.textPrimary} />
-                </TouchableOpacity>
-              }
-              right={
-                <TouchableOpacity
-                  style={[styles.editorSaveBtn, isSavingEdit && { opacity: 0.6 }]}
-                  onPress={handleSaveEdit}
-                  disabled={isSavingEdit}
-                >
-                  {isSavingEdit ? <ActivityIndicator size="small" color="white" /> : <Text style={styles.editorSaveText}>Save</Text>}
-                </TouchableOpacity>
-              }
-            />
-          ) : (
-            <ModalScreenHeader
-              title={editQIndex !== null ? `Question ${editQIndex + 1}` : 'Question'}
-              backgroundColor={COLORS.surface}
-              borderColor={COLORS.border}
-              titleStyle={styles.editorHeaderTitle}
-              left={
-                <TouchableOpacity onPress={goToList} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
-                  <Ionicons name="arrow-back" size={24} color={COLORS.textPrimary} />
-                </TouchableOpacity>
-              }
-              right={
-                <TouchableOpacity onPress={removeActiveQuestion} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
-                  <Ionicons name="trash-outline" size={22} color={COLORS.danger} />
-                </TouchableOpacity>
-              }
-            />
-          )}
+          <View style={styles.editorCard}>
+            {editView === 'list' ? (
+              <ModalScreenHeader
+                title="Edit Quiz"
+                backgroundColor={COLORS.surface}
+                borderColor={COLORS.border}
+                titleStyle={styles.editorHeaderTitle}
+                left={
+                  <TouchableOpacity onPress={requestCloseEditor} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                    <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+                  </TouchableOpacity>
+                }
+                right={
+                  <TouchableOpacity
+                    style={[styles.editorSaveBtn, isSavingEdit && { opacity: 0.6 }]}
+                    onPress={handleSaveEdit}
+                    disabled={isSavingEdit}
+                  >
+                    {isSavingEdit ? <ActivityIndicator size="small" color="white" /> : <Text style={styles.editorSaveText}>Save</Text>}
+                  </TouchableOpacity>
+                }
+              />
+            ) : (
+              <ModalScreenHeader
+                title={editQIndex !== null ? `Question ${editQIndex + 1}` : 'Question'}
+                backgroundColor={COLORS.surface}
+                borderColor={COLORS.border}
+                titleStyle={styles.editorHeaderTitle}
+                left={
+                  <TouchableOpacity onPress={goToList} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                    <Ionicons name="arrow-back" size={24} color={COLORS.textPrimary} />
+                  </TouchableOpacity>
+                }
+                right={
+                  <TouchableOpacity onPress={removeActiveQuestion} style={styles.editorHeaderBtn} disabled={isSavingEdit}>
+                    <Ionicons name="trash-outline" size={22} color={COLORS.danger} />
+                  </TouchableOpacity>
+                }
+              />
+            )}
 
-          <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.editorContent}>
-            {editDraft && editView === 'list' && (
-              <>
-                <Text style={styles.editorLabel}>Quiz Title</Text>
-                <TextInput
-                  style={styles.editorTitleInput}
-                  value={editDraft.title}
-                  onChangeText={updateDraftTitle}
-                  placeholder="Quiz title"
-                  placeholderTextColor={COLORS.textMuted}
-                  editable={!isSavingEdit}
-                />
-
-                <Text style={styles.editorLabel}>Deadline (Optional) · YYYY-MM-DD HH:MM</Text>
-                <View style={styles.editorDeadlineRow}>
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.editorContent}>
+              {editDraft && editView === 'list' && (
+                <>
+                  <Text style={styles.editorLabel}>Quiz Title</Text>
                   <TextInput
-                    style={[styles.editorInput, { flex: 1 }]}
-                    value={editDraft.available_until}
-                    onChangeText={updateDraftDeadline}
-                    placeholder="e.g. 2026-10-01 23:59 — blank = no deadline"
+                    style={styles.editorTitleInput}
+                    value={editDraft.title}
+                    onChangeText={updateDraftTitle}
+                    placeholder="Quiz title"
                     placeholderTextColor={COLORS.textMuted}
-                    autoCapitalize="none"
-                    autoCorrect={false}
                     editable={!isSavingEdit}
                   />
-                  {editDraft.available_until !== '' && (
-                    <TouchableOpacity
-                      style={styles.editorDeadlineClear}
-                      onPress={() => updateDraftDeadline('')}
-                      disabled={isSavingEdit}
-                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    >
-                      <Ionicons name="close-circle" size={24} color={COLORS.textMuted} />
-                    </TouchableOpacity>
+
+                  <Text style={styles.editorMeta}>
+                    {editDraft.questions.length} {editDraft.questions.length === 1 ? 'question' : 'questions'} · {editTarget?.quiz_type || 'quiz'} · Tap a question to edit it
+                  </Text>
+
+                  {editDraft.questions.length === 0 && (
+                    <View style={styles.editorEmpty}>
+                      <Ionicons name="help-circle-outline" size={40} color={COLORS.textMuted} />
+                      <Text style={styles.editorEmptyText}>No questions yet — tap {"\u201CAdd Question\u201D"} below.</Text>
+                    </View>
                   )}
-                </View>
-                <Text style={styles.editorMeta}>
-                  {editDraft.questions.length} {editDraft.questions.length === 1 ? 'question' : 'questions'} · {editTarget?.quiz_type || 'quiz'} · Tap a question to edit it
-                </Text>
 
-                {editDraft.questions.length === 0 && (
-                  <View style={styles.editorEmpty}>
-                    <Ionicons name="help-circle-outline" size={40} color={COLORS.textMuted} />
-                    <Text style={styles.editorEmptyText}>No questions yet — tap {"\u201CAdd Question\u201D"} below.</Text>
-                  </View>
-                )}
-
-                {editDraft.questions.map((question, qIndex) => (
-                  <TouchableOpacity
-                    key={question.id ?? `new-${qIndex}`}
-                    style={styles.questionRow}
-                    onPress={() => openQuestion(qIndex)}
-                    activeOpacity={0.7}
-                  >
-                    <View style={styles.questionRowNum}>
-                      <Text style={styles.questionRowNumText}>{qIndex + 1}</Text>
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.questionRowText} numberOfLines={2}>
-                        {question.question_text.trim() || 'Untitled question'}
-                      </Text>
-                      <Text style={styles.questionRowMeta} numberOfLines={1}>
-                        Answer: {question.correct_answer.trim() || 'not set'}
-                      </Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-                  </TouchableOpacity>
-                ))}
-
-                <TouchableOpacity style={styles.addQuestionBtn} onPress={addEditQuestion} disabled={isSavingEdit}>
-                  <Ionicons name="add-circle-outline" size={18} color={COLORS.purplePrimary} />
-                  <Text style={styles.addQuestionText}>Add Question</Text>
-                </TouchableOpacity>
-              </>
-            )}
-
-            {editDraft && editView === 'question' && editQIndex !== null && editDraft.questions[editQIndex] && (
-              (() => {
-                const question = editDraft.questions[editQIndex];
-                const qIndex = editQIndex;
-                return (
-                  <>
-                    <Text style={styles.editorLabel}>Question</Text>
-                    <TextInput
-                      style={[styles.editorInput, styles.questionTextInput]}
-                      value={question.question_text}
-                      onChangeText={(text) => updateEditQuestion(qIndex, 'question_text', text)}
-                      placeholder="Enter the question"
-                      placeholderTextColor={COLORS.textMuted}
-                      multiline
-                      editable={!isSavingEdit}
-                    />
-
-                    {question.options.length > 0 ? (
-                      <>
-                        <Text style={styles.editorLabel}>Options</Text>
-                        {question.options.map((option, oIndex) => {
-                          const isCorrect = option === question.correct_answer && !!option;
-                          return (
-                            <View key={oIndex} style={styles.optionRow}>
-                              <TouchableOpacity onPress={() => setEditCorrect(qIndex, option)} style={styles.optionCheck}>
-                                <Ionicons
-                                  name={isCorrect ? 'checkmark-circle' : 'ellipse-outline'}
-                                  size={20}
-                                  color={isCorrect ? COLORS.success : COLORS.textMuted}
-                                />
-                              </TouchableOpacity>
-                              <TextInput
-                                style={styles.optionInput}
-                                value={option}
-                                onChangeText={(text) => updateEditOption(qIndex, oIndex, text)}
-                                placeholder={`Option ${oIndex + 1}`}
-                                placeholderTextColor={COLORS.textMuted}
-                                editable={!isSavingEdit}
-                              />
-                              <TouchableOpacity onPress={() => removeEditOption(qIndex, oIndex)} style={styles.optionRemove} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                                <Ionicons name="close-circle" size={20} color={COLORS.textMuted} />
-                              </TouchableOpacity>
-                            </View>
-                          );
-                        })}
-                        <TouchableOpacity style={styles.addOptionBtn} onPress={() => addEditOption(qIndex)} disabled={isSavingEdit}>
-                          <Ionicons name="add" size={16} color={COLORS.purplePrimary} />
-                          <Text style={styles.addOptionText}>Add Option</Text>
-                        </TouchableOpacity>
-                        <Text style={styles.editorHint}>Tap the circle next to an option to mark it as the correct answer.</Text>
-                      </>
-                    ) : (
-                      <>
-                        <Text style={styles.editorLabel}>Answer</Text>
-                        <TextInput
-                          style={styles.editorInput}
-                          value={question.correct_answer}
-                          onChangeText={(text) => updateEditQuestion(qIndex, 'correct_answer', text)}
-                          placeholder="Enter the correct answer"
-                          placeholderTextColor={COLORS.textMuted}
-                          editable={!isSavingEdit}
-                        />
-                      </>
-                    )}
-
-                    <Text style={styles.editorLabel}>Explanation (Optional)</Text>
-                    <TextInput
-                      style={[styles.editorInput, styles.explanationInput]}
-                      value={question.explanation}
-                      onChangeText={(text) => updateEditQuestion(qIndex, 'explanation', text)}
-                      placeholder="Brief explanation why"
-                      placeholderTextColor={COLORS.textMuted}
-                      multiline
-                      editable={!isSavingEdit}
-                    />
-
-                    <TouchableOpacity style={styles.qDoneBtn} onPress={goToList} disabled={isSavingEdit}>
-                      <Ionicons name="checkmark" size={18} color="white" />
-                      <Text style={styles.qDoneBtnText}>Done</Text>
+                  {editDraft.questions.map((question, qIndex) => (
+                    <TouchableOpacity
+                      key={question.id ?? `new-${qIndex}`}
+                      style={styles.questionRow}
+                      onPress={() => openQuestion(qIndex)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.questionRowNum}>
+                        <Text style={styles.questionRowNumText}>{qIndex + 1}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.questionRowText} numberOfLines={2}>
+                          {question.question_text.trim() || 'Untitled question'}
+                        </Text>
+                        <Text style={styles.questionRowMeta} numberOfLines={1}>
+                          Answer: {question.correct_answer.trim() || 'not set'}
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
                     </TouchableOpacity>
-                  </>
-                );
-              })()
-            )}
-          </ScrollView>
+                  ))}
+
+                  <TouchableOpacity style={styles.addQuestionBtn} onPress={addEditQuestion} disabled={isSavingEdit}>
+                    <Ionicons name="add-circle-outline" size={18} color={COLORS.purplePrimary} />
+                    <Text style={styles.addQuestionText}>Add Question</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+
+              {editDraft && editView === 'question' && editQIndex !== null && editDraft.questions[editQIndex] && (
+                (() => {
+                  const question = editDraft.questions[editQIndex];
+                  const qIndex = editQIndex;
+                  return (
+                    <>
+                      <Text style={styles.editorLabel}>Question</Text>
+                      <TextInput
+                        style={[styles.editorInput, styles.questionTextInput]}
+                        value={question.question_text}
+                        onChangeText={(text) => updateEditQuestion(qIndex, 'question_text', text)}
+                        placeholder="Enter the question"
+                        placeholderTextColor={COLORS.textMuted}
+                        multiline
+                        editable={!isSavingEdit}
+                      />
+
+                      {question.options.length > 0 ? (
+                        <>
+                          <Text style={styles.editorLabel}>Options</Text>
+                          {question.options.map((option, oIndex) => {
+                            const isCorrect = option === question.correct_answer && !!option;
+                            return (
+                              <View key={oIndex} style={styles.optionRow}>
+                                <TouchableOpacity onPress={() => setEditCorrect(qIndex, option)} style={styles.optionCheck}>
+                                  <Ionicons
+                                    name={isCorrect ? 'checkmark-circle' : 'ellipse-outline'}
+                                    size={20}
+                                    color={isCorrect ? COLORS.success : COLORS.textMuted}
+                                  />
+                                </TouchableOpacity>
+                                <TextInput
+                                  style={styles.optionInput}
+                                  value={option}
+                                  onChangeText={(text) => updateEditOption(qIndex, oIndex, text)}
+                                  placeholder={`Option ${oIndex + 1}`}
+                                  placeholderTextColor={COLORS.textMuted}
+                                  editable={!isSavingEdit}
+                                />
+                                <TouchableOpacity onPress={() => removeEditOption(qIndex, oIndex)} style={styles.optionRemove} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                                  <Ionicons name="close-circle" size={20} color={COLORS.textMuted} />
+                                </TouchableOpacity>
+                              </View>
+                            );
+                          })}
+                          <TouchableOpacity style={styles.addOptionBtn} onPress={() => addEditOption(qIndex)} disabled={isSavingEdit}>
+                            <Ionicons name="add" size={16} color={COLORS.purplePrimary} />
+                            <Text style={styles.addOptionText}>Add Option</Text>
+                          </TouchableOpacity>
+                          <Text style={styles.editorHint}>Tap the circle next to an option to mark it as the correct answer.</Text>
+                        </>
+                      ) : (
+                        <>
+                          <Text style={styles.editorLabel}>Answer</Text>
+                          <TextInput
+                            style={styles.editorInput}
+                            value={question.correct_answer}
+                            onChangeText={(text) => updateEditQuestion(qIndex, 'correct_answer', text)}
+                            placeholder="Enter the correct answer"
+                            placeholderTextColor={COLORS.textMuted}
+                            editable={!isSavingEdit}
+                          />
+                        </>
+                      )}
+
+                      <Text style={styles.editorLabel}>Explanation (Optional)</Text>
+                      <TextInput
+                        style={[styles.editorInput, styles.explanationInput]}
+                        value={question.explanation}
+                        onChangeText={(text) => updateEditQuestion(qIndex, 'explanation', text)}
+                        placeholder="Brief explanation why"
+                        placeholderTextColor={COLORS.textMuted}
+                        multiline
+                        editable={!isSavingEdit}
+                      />
+
+                      <TouchableOpacity style={styles.qDoneBtn} onPress={goToList} disabled={isSavingEdit}>
+                        <Ionicons name="checkmark" size={18} color="white" />
+                        <Text style={styles.qDoneBtnText}>Done</Text>
+                      </TouchableOpacity>
+                    </>
+                  );
+                })()
+              )}
+            </ScrollView>
+          </View>
         </KeyboardSafeView>
       </Modal>
 
@@ -1760,7 +1725,27 @@ const styles = StyleSheet.create({
   infoModalStartBtnText: { color: 'white', fontFamily: FONTS.bold, fontSize: 15 },
 
   // Quiz editor (Edit own quiz)
-  editorRoot: { flex: 1, backgroundColor: COLORS.bg },
+  editorRoot: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  // Centred and height-bounded so the header (X + Save) is always on screen and
+  // a long quiz scrolls inside the card instead of pushing the header out of
+  // the modal. flexShrink lets the ScrollView yield height to the header.
+  editorCard: {
+    width: '100%',
+    maxWidth: 560,
+    maxHeight: '90%',
+    flexShrink: 1,
+    backgroundColor: COLORS.bg,
+    borderRadius: 20,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
   editorHeaderBtn: { padding: 6 },
   editorHeaderTitle: { fontFamily: FONTS.bold, color: COLORS.textPrimary },
   editorSaveBtn: {
@@ -1802,8 +1787,6 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.semiBold,
     color: COLORS.textPrimary,
   },
-  editorDeadlineRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  editorDeadlineClear: { padding: 4 },
   editorMeta: { fontSize: 12, color: COLORS.textMuted, marginTop: 10, fontFamily: FONTS.regular, lineHeight: 17 },
   editorHint: { fontSize: 12, color: COLORS.textMuted, marginTop: 8, fontFamily: FONTS.regular, lineHeight: 17 },
   editorEmpty: { alignItems: 'center', paddingVertical: 36, gap: 10 },

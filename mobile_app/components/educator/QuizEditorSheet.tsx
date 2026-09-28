@@ -9,11 +9,13 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
+  Platform,
 } from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { updateQuiz, type Quiz } from '@/services/quizService';
+import { updateQuiz, parseDeadlineInput, toDeadlineInput, type Quiz } from '@/services/quizService';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 
 interface EditableQuestion {
@@ -28,12 +30,7 @@ interface EditableQuiz {
   id: number;
   title: string;
   quiz_type: string;
-  /**
-   * The quiz's existing ISO deadline, or '' for none. There is no deadline UI
-   * here any more, so this is carried through untouched on every save -- the
-   * field is not in the draft to be edited but to avoid destroying a deadline
-   * this screen never displays.
-   */
+  /** User-facing deadline text ("YYYY-MM-DD HH:MM") or '' for no deadline. */
   available_until: string;
   questions: EditableQuestion[];
 }
@@ -58,6 +55,11 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
   const [draft, setDraft] = useState<EditableQuiz | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
+  // Deadline picker state
+  const [showDeadlinePicker, setShowDeadlinePicker] = useState(false);
+  const [deadlinePickerMode, setDeadlinePickerMode] = useState<'date' | 'time'>('date');
+  const [deadlineTempDate, setDeadlineTempDate] = useState<Date>(new Date());
+
   // Seed the draft whenever a different quiz is opened.
   useEffect(() => {
     if (!quiz) {
@@ -68,7 +70,7 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
       id: quiz.id,
       title: quiz.title,
       quiz_type: quiz.quiz_type,
-      available_until: quiz.available_until || '',
+      available_until: quiz.available_until ? toDeadlineInput(new Date(quiz.available_until)) : '',
       questions: (quiz.questions || []).map((q) => ({
         id: q.id,
         question_text: q.question_text,
@@ -77,12 +79,46 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
         explanation: q.explanation || '',
       })),
     });
+    setShowDeadlinePicker(false);
   }, [quiz]);
 
   const close = () => {
     if (isSaving) return;
     setDraft(null);
     onClose();
+  };
+
+  const openDeadlinePicker = () => {
+    const parsed = draft?.available_until ? parseDeadlineInput(draft.available_until) : null;
+    setDeadlineTempDate(parsed || new Date());
+    setDeadlinePickerMode('date');
+    setShowDeadlinePicker(true);
+  };
+
+  const clearDeadline = () => {
+    if (draft) setDraft({ ...draft, available_until: '' });
+  };
+
+  const handleDeadlineChange = ({ nativeEvent }: { nativeEvent: { type?: string; timestamp?: number } }) => {
+    if (nativeEvent.type === 'dismissed') {
+      setShowDeadlinePicker(false);
+      return;
+    }
+    const newDate = nativeEvent.timestamp ? new Date(nativeEvent.timestamp) : deadlineTempDate;
+    setDeadlineTempDate(newDate);
+    if (deadlinePickerMode === 'date') {
+      setDeadlinePickerMode('time');
+      return;
+    }
+    const combined = new Date(
+      deadlineTempDate.getFullYear(),
+      deadlineTempDate.getMonth(),
+      deadlineTempDate.getDate(),
+      newDate.getHours(),
+      newDate.getMinutes(),
+    );
+    setDraft((d) => (d ? { ...d, available_until: toDeadlineInput(combined) } : d));
+    setShowDeadlinePicker(false);
   };
 
   const updateQuestion = (index: number, field: keyof EditableQuestion, value: string | string[]) => {
@@ -165,12 +201,20 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
 
     setIsSaving(true);
     try {
+      let deadlineIso: string | null = null;
+      if (draft.available_until.trim()) {
+        const parsed = parseDeadlineInput(draft.available_until);
+        if (!parsed) {
+          Alert.alert('Invalid Deadline', 'Enter the deadline as YYYY-MM-DD HH:MM (24-hour), or leave it blank.');
+          setIsSaving(false);
+          return;
+        }
+        deadlineIso = parsed.toISOString();
+      }
+
       await updateQuiz(draft.id, {
         title: draft.title.trim(),
-        // Round-tripped, not edited. Omitting the key entirely would also be
-        // safe, but passing the original through keeps this call honest about
-        // what the save actually persists.
-        available_until: draft.available_until || null,
+        available_until: deadlineIso,
         questions: draft.questions.map((q) => ({
           id: q.id,
           question_text: q.question_text.trim(),
@@ -233,6 +277,27 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
                 placeholder="Quiz title"
                 placeholderTextColor={COLORS.textMuted}
               />
+
+              <Text style={styles.label}>Deadline (Optional) · YYYY-MM-DD HH:MM</Text>
+              <View style={styles.deadlineRow}>
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  value={draft.available_until}
+                  onChangeText={(text) => setDraft({ ...draft, available_until: text })}
+                  placeholder="e.g. 2026-10-01 23:59 — blank = no deadline"
+                  placeholderTextColor={COLORS.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                <TouchableOpacity style={styles.pickerBtn} activeOpacity={0.8} onPress={openDeadlinePicker} disabled={isSaving}>
+                  <Ionicons name="calendar" size={22} color={COLORS.purplePrimary} />
+                </TouchableOpacity>
+                {!!draft.available_until && (
+                  <TouchableOpacity style={styles.pickerBtn} activeOpacity={0.8} onPress={clearDeadline} disabled={isSaving}>
+                    <Ionicons name="close-circle" size={22} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                )}
+              </View>
 
               <Text style={styles.meta}>
                 {draft.questions.length} questions · {draft.quiz_type} · Tap an option to mark the correct answer
@@ -324,6 +389,16 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
           </View>
         </KeyboardSafeView>
       </Modal>
+
+      {showDeadlinePicker && Platform.OS !== 'web' && (
+        <DateTimePicker
+          testID="deadlinePicker"
+          value={deadlineTempDate}
+          mode={deadlinePickerMode}
+          is24Hour={true}
+          onChange={handleDeadlineChange}
+        />
+      )}
     </>
   );
 }
@@ -458,4 +533,7 @@ const styles = StyleSheet.create({
     backgroundColor: tint(COLORS.purplePrimary),
   },
   addQuestionText: { fontSize: 14, fontFamily: FONTS.semiBold, fontWeight: '600', color: COLORS.purplePrimary },
+
+  deadlineRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  pickerBtn: { padding: 6 },
 });

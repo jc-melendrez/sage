@@ -93,15 +93,27 @@ function HeaderInner({
 
 export default function ModalScreenHeader(props: ModalScreenHeaderProps) {
   return (
-    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+    // flex: 0 is load-bearing, not a tweak. SafeAreaProvider renders its
+    // NativeSafeAreaProvider with `style={[styles.fill, style]}` and `fill` is
+    // `{ flex: 1 }`. With no override that wrapper is greedy, so inside a
+    // full-screen modal it consumed every pixel of the column and pushed this
+    // header -- and with it the X and Save controls -- off the bottom of the
+    // screen. It is here only to supply insets; it must not participate in
+    // layout, hence flex: 0 rather than leaving the default.
+    <SafeAreaProvider initialMetrics={initialWindowMetrics} style={FILL_NONE}>
       <HeaderInner {...props} />
     </SafeAreaProvider>
   );
 }
 
+const FILL_NONE = { flex: 0 } as const;
+
 const styles = StyleSheet.create({
   header: {
     borderBottomWidth: 1,
+    // Never let a parent shrink the header. The X and Save buttons live in here
+    // and losing height to a flex parent is what made them unreachable.
+    flexShrink: 0,
   },
   row: {
     flexDirection: 'row',

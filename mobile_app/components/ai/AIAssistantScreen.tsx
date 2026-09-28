@@ -394,13 +394,10 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
     }
 
     const node = menuButtonRefs.current[sessionId];
-    if (!node) {
-      // No measured anchor: fall back to opening it rather than silently
-      // doing nothing, which is what the old unpositioned menu did.
-      setMenuSessionId(sessionId);
-      setMenuAnchor({ id: sessionId, title: session.title, pinned: !!session.pinned });
-      return;
-    }
+    // A missing ref means this row has not been laid out yet. Bail rather than
+    // falling back: opening unpositioned would drop the menu at 0,0, which reads
+    // as "the 3 dots don't work" just as much as not opening at all.
+    if (!node) return;
 
     node.measureInWindow((x, y, w, h) => {
       setMenuAnchorRect({ x, y, y2: y + h, w });
@@ -1489,13 +1486,21 @@ sessionMenuButton: {
   },
   menuDropdown: {
     position: 'absolute',
+    // Must outrank menuBackdrop (zIndex 20). RN resolves zIndex between
+    // siblings, not by document order: a child with zIndex 0 still paints
+    // *under* a sibling at zIndex 20. Without this the menu rendered behind the
+    // full-panel backdrop, every tap on Pin/Rename/Delete landed on the
+    // backdrop instead, and the menu just closed again -- which is exactly the
+    // "the 3 dots don't work" symptom.
+    zIndex: 21,
     backgroundColor: COLORS.surface,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: COLORS.border,
     paddingVertical: 6,
     width: 140,
-    elevation: 8,
+    // Android stacks on elevation, and the backdrop already sets 20.
+    elevation: 21,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.15,
