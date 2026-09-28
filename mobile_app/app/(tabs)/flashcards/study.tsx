@@ -19,7 +19,7 @@ import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, FONTS, GRADIENT_COLORS, PURPLE_HEADER_GRADIENT } from '@/constants/gameTheme';
 import FlashBanner, { BannerType } from '@/components/FlashBanner';
-import { Rating, RATINGS, CardState, intervalLabel, RATING_LABELS } from '@/services/srs';
+import { Rating, RATINGS, CardState, RATING_LABELS } from '@/services/srs';
 import {
   Card,
   Deck,
@@ -33,7 +33,6 @@ import {
   deleteCard,
   getCard,
   updateCard,
-  getCardState,
 } from '@/services/flashcardService';
 
 type Phase = 'setup' | 'study' | 'results';
@@ -202,6 +201,21 @@ export default function StudyScreen() {
   const totalReviewed = Object.values(counts).reduce((a, b) => a + b, 0);
   const accuracy = totalReviewed > 0 ? Math.round(((counts.good + counts.easy) / totalReviewed) * 100) : 0;
 
+  const topRating = useMemo(() => {
+    let best: Rating | null = null;
+    let bestCount = 0;
+    // Walked easy -> again so a tie resolves to the better rating; iterating
+    // RATINGS forwards would report "Again" whenever it merely matched the top.
+    for (let i = RATINGS.length - 1; i >= 0; i--) {
+      const r = RATINGS[i];
+      if (counts[r] > bestCount) {
+        best = r;
+        bestCount = counts[r];
+      }
+    }
+    return best ? { rating: best, count: bestCount } : null;
+  }, [counts]);
+
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
@@ -249,7 +263,7 @@ export default function StudyScreen() {
           <View style={styles.setupStats}>
             <View style={styles.setupStat}>
               <Text style={[styles.setupStatValue, { color: COLORS.purplePrimary }]}>{summary?.total ?? 0}</Text>
-              <Text style={styles.setupStatLabel}>TOTAL</Text>
+              <Text style={styles.setupStatLabel}>CARDS</Text>
             </View>
             <View style={styles.setupStat}>
               <Text style={[styles.setupStatValue, { color: COLORS.accentBright }]}>{summary?.newCount ?? 0}</Text>
@@ -345,7 +359,6 @@ export default function StudyScreen() {
             <View style={styles.ratingRow}>
               {RATINGS.map((rating) => {
                 const style = RATING_STYLE[rating];
-                const state = currentCard ? getCardState(currentCard.id) : undefined;
                 return (
                   <TouchableOpacity
                     key={rating}
@@ -358,9 +371,6 @@ export default function StudyScreen() {
                       <Ionicons name={style.icon} size={15} color={style.color} />
                     </View>
                     <Text style={[styles.ratingLabel, { color: style.color }]}>{RATING_LABELS[rating]}</Text>
-                    {flipped && state && (
-                      <Text style={styles.ratingInterval}>{intervalLabel(state, rating)}</Text>
-                    )}
                   </TouchableOpacity>
                 );
               })}
@@ -375,7 +385,8 @@ export default function StudyScreen() {
             </View>
             <Text style={styles.resultsTitle}>Session complete!</Text>
             <Text style={styles.resultsSub}>
-              You reviewed {totalReviewed} {totalReviewed === 1 ? 'card' : 'cards'}.
+              You reviewed {totalReviewed} {totalReviewed === 1 ? 'card' : 'cards'}
+              {deck ? ` from ${deck.name}` : ''}.
             </Text>
           </View>
 
@@ -387,6 +398,24 @@ export default function StudyScreen() {
               </View>
             ))}
           </View>
+
+          {topRating && (
+            <View style={styles.topRatingCard}>
+              <Ionicons
+                name={RATING_STYLE[topRating.rating].icon}
+                size={16}
+                color={RATING_STYLE[topRating.rating].color}
+              />
+              <Text style={styles.topRatingText}>
+                Most picked:{' '}
+                <Text style={{ color: RATING_STYLE[topRating.rating].color, fontFamily: FONTS.bold }}>
+                  {RATING_LABELS[topRating.rating]}
+                </Text>
+                {' · '}
+                {topRating.count} {topRating.count === 1 ? 'card' : 'cards'}
+              </Text>
+            </View>
+          )}
 
           <View style={styles.accuracyCard}>
             <Text style={styles.accuracyValue}>{accuracy}%</Text>
@@ -473,7 +502,9 @@ export default function StudyScreen() {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
+  // Painted white so the purple header's bottom border-radius rounds over this
+  // background instead of over nothing (which showed the black window behind).
+  root: { flex: 1, backgroundColor: COLORS.bg },
   headerBand: {
     overflow: 'hidden',
     borderBottomLeftRadius: 28,
@@ -516,14 +547,16 @@ const styles = StyleSheet.create({
   },
   deckBannerTitle: { color: COLORS.textPrimary, fontSize: 22, fontFamily: FONTS.black, textAlign: 'center' },
   deckBannerSub: { color: COLORS.textMuted, fontSize: 13, fontFamily: FONTS.medium, marginTop: 4 },
-  setupStats: { flexDirection: 'row', gap: 10, marginBottom: 20 },
+  // 2x2 rather than 4-across: "LEARNING" was cramped at 9px on narrow phones.
+  setupStats: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 20 },
   setupStat: {
-    flex: 1,
+    flexBasis: '47%',
+    flexGrow: 1,
     backgroundColor: COLORS.surface,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: COLORS.cardBorder,
-    paddingVertical: 14,
+    paddingVertical: 16,
     alignItems: 'center',
   },
   setupStatValue: { fontSize: 22, fontFamily: FONTS.black },
@@ -655,9 +688,11 @@ const styles = StyleSheet.create({
   ratingBtn: {
     flex: 1,
     borderRadius: 14,
-    paddingVertical: 12,
+    minHeight: 64,
+    paddingVertical: 14,
     alignItems: 'center',
-    gap: 5,
+    justifyContent: 'center',
+    gap: 6,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.2,
@@ -667,7 +702,6 @@ const styles = StyleSheet.create({
   ratingBtnDisabled: { opacity: 0.5 },
   ratingIconWrap: { width: 28, height: 28, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
   ratingLabel: { fontSize: 13, fontFamily: FONTS.extraBold },
-  ratingInterval: { color: 'rgba(255,255,255,0.85)', fontSize: 10, fontFamily: FONTS.semiBold },
 
   // Results
   resultsScroll: { flex: 1 },
@@ -698,6 +732,19 @@ const styles = StyleSheet.create({
   },
   statValue: { fontSize: 22, fontFamily: FONTS.black, marginBottom: 4 },
   statLabel: { color: COLORS.textMuted, fontSize: 9, fontFamily: FONTS.bold, letterSpacing: 1 },
+  topRatingCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    paddingVertical: 12,
+    marginBottom: 16,
+  },
+  topRatingText: { color: COLORS.textSecondary, fontSize: 13, fontFamily: FONTS.semiBold },
   accuracyCard: {
     backgroundColor: 'rgba(16,185,129,0.15)',
     borderRadius: 14,

@@ -457,7 +457,9 @@ export default function FlashcardsHome() {
 
 const styles = StyleSheet.create({
   keyboardWrap: { flex: 1 },
-  root: { flex: 1 },
+  // Painted white so the purple header's bottom border-radius rounds over this
+  // background instead of over nothing (which showed the black window behind).
+  root: { flex: 1, backgroundColor: COLORS.bg },
   headerBand: {
     overflow: 'hidden',
     borderBottomLeftRadius: 28,
