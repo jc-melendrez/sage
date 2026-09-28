@@ -2,8 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
   TextInput, ActivityIndicator, Alert, Platform, StatusBar, RefreshControl,
-  KeyboardAvoidingView, Pressable
+  Pressable
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
@@ -914,7 +915,7 @@ export default function ActivitiesScreen() {
 
       {/* Create Group Modal */}
       <Modal visible={isCreateModalOpen} animationType="fade" transparent={true}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+        <KeyboardSafeView style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Create Group</Text>
@@ -925,14 +926,13 @@ export default function ActivitiesScreen() {
               {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={styles.modalSubmitBtnText}>Create</Text>}
             </TouchableOpacity>
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
 
       {/* Join Group Modal */}
       <Modal visible={isJoinModalOpen} animationType="fade" transparent={true}>
         <View style={styles.joinOverlay}>
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          <KeyboardSafeView
             style={styles.joinKeyboardWrap}
           >
             <View style={[styles.modalContent, styles.joinModalCard]}>
@@ -958,15 +958,14 @@ export default function ActivitiesScreen() {
                 {isSubmitting ? <ActivityIndicator color="white" /> : <Text style={styles.joinSubmitBtnText}>Join Group</Text>}
               </TouchableOpacity>
             </View>
-          </KeyboardAvoidingView>
+          </KeyboardSafeView>
         </View>
       </Modal>
 
       {/* Join Class Modal (educator courses) */}
       <Modal visible={isJoinCourseModalOpen} animationType="fade" transparent={true}>
         <View style={styles.joinOverlay}>
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          <KeyboardSafeView
             style={styles.joinKeyboardWrap}
           >
             <View style={[styles.modalContent, styles.joinModalCard]}>
@@ -992,7 +991,7 @@ export default function ActivitiesScreen() {
                 {isJoiningClass ? <ActivityIndicator color="white" /> : <Text style={styles.joinSubmitBtnText}>Join Class</Text>}
               </TouchableOpacity>
             </View>
-          </KeyboardAvoidingView>
+          </KeyboardSafeView>
         </View>
       </Modal>
 
@@ -1027,7 +1026,7 @@ export default function ActivitiesScreen() {
         visible={isGenerateQuizModalOpen}
         onRequestClose={() => setIsGenerateQuizModalOpen(false)}
       >
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.quizGenModalOverlay}>
+        <KeyboardSafeView style={styles.quizGenModalOverlay}>
           <View style={styles.quizGenModalContent}>
             <View style={styles.quizGenModalHeader}>
               <Text style={styles.quizGenModalTitle}>Quiz Generator</Text>
@@ -1146,7 +1145,7 @@ export default function ActivitiesScreen() {
               </ScrollView>
             )}
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
 
       {/* Share own quiz to a study group */}
@@ -1157,8 +1156,7 @@ export default function ActivitiesScreen() {
         onRequestClose={() => setIsShareOpen(false)}
       >
         <View style={styles.modalOverlay}>
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          <KeyboardSafeView
             style={styles.shareSheet}
           >
             <View style={styles.shareSheetHeader}>
@@ -1199,7 +1197,7 @@ export default function ActivitiesScreen() {
                 ))}
               </ScrollView>
             )}
-          </KeyboardAvoidingView>
+          </KeyboardSafeView>
         </View>
       </Modal>
 
@@ -1209,7 +1207,7 @@ export default function ActivitiesScreen() {
         animationType="slide"
         onRequestClose={requestCloseEditor}
       >
-        <KeyboardAvoidingView style={styles.editorRoot} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <KeyboardSafeView style={styles.editorRoot}>
           {editView === 'list' ? (
             <ModalScreenHeader
               title="Edit Quiz"
@@ -1411,7 +1409,7 @@ export default function ActivitiesScreen() {
               })()
             )}
           </ScrollView>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
 
       {/* Quiz Info — in-tree overlay (a nested <Modal> would be dropped on Android) */}

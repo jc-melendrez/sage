@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Modal } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Alert, TextInput, Platform, Modal } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
@@ -14,6 +14,7 @@ import {
   TaskSubmissionFile,
   TaskSubmissionFull,
 } from '@/services/taskService';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { formatBytes, shareBase64File } from '@/services/fileShare';
 
 function getScoreColor(score: number | null | undefined, maxPoints: number): string {
@@ -246,8 +247,7 @@ export default function TaskSubmissionsScreen() {
           visible={true}
           onRequestClose={closeGradingModal}
         >
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          <KeyboardSafeView
             style={styles.modalOverlay}
           >
             <View style={styles.modalContent}>
@@ -356,7 +356,7 @@ export default function TaskSubmissionsScreen() {
                 )}
               </View>
             </View>
-          </KeyboardAvoidingView>
+          </KeyboardSafeView>
         </Modal>
       )}
     </View>

@@ -9,9 +9,9 @@ import {
   Modal,
   Alert,
   ActivityIndicator,
-  KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
@@ -814,7 +814,7 @@ export default function CourseDetailScreen() {
 
       {/* Add topic modal */}
       <Modal animationType="slide" transparent visible={modalVisible} onRequestClose={() => setModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
+        <KeyboardSafeView style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Add Topic</Text>
@@ -860,12 +860,12 @@ export default function CourseDetailScreen() {
               )}
             </TouchableOpacity>
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
 
       {/* Add activity modal */}
       <Modal animationType="slide" transparent visible={actVisible} onRequestClose={() => !creatingActivity && setActVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
+        <KeyboardSafeView style={styles.modalOverlay}>
           <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Add Activity</Text>
@@ -1051,12 +1051,12 @@ export default function CourseDetailScreen() {
               )}
             </TouchableOpacity>
           </ScrollView>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
 
       {/* AI generation modal */}
       <Modal animationType="slide" transparent visible={aiModalVisible} onRequestClose={() => !generating && setAiModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
+        <KeyboardSafeView style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Generate with AI</Text>
@@ -1133,7 +1133,7 @@ export default function CourseDetailScreen() {
               )}
             </TouchableOpacity>
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
 
       {/* AI preview modal */}

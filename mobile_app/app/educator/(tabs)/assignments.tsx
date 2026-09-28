@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, ActivityIndicator, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -10,6 +10,7 @@ import {
   getActivities, createActivity, deleteActivity,
   ClassActivity, ActivityKind, UploadFile,
 } from '@/services/activityService';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { getMyCourses } from '@/services/courseService';
 import { getQuizzes, Quiz } from '@/services/quizService';
 import { describeDue } from '@/services/dueDate';
@@ -249,7 +250,7 @@ export default function ActivitiesScreen() {
   };
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.container}>
       <View style={styles.container}>
         <EducatorHeader
           title="Activities"
@@ -560,7 +561,7 @@ export default function ActivitiesScreen() {
           onChange={handleDateChange}
         />
       )}
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

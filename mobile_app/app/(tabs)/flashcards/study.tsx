@@ -10,8 +10,8 @@ import {
   Platform,
   TextInput,
   Modal,
-  KeyboardAvoidingView,
-} from 'react-native';
+  } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -419,7 +419,7 @@ export default function StudyScreen() {
 
       {/* EDIT MODAL */}
       <Modal visible={editOpen} transparent animationType="fade" onRequestClose={() => setEditOpen(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+        <KeyboardSafeView style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Edit card</Text>
@@ -464,7 +464,7 @@ export default function StudyScreen() {
               </TouchableOpacity>
             </View>
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
       </View>
       </LinearGradient>

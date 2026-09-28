@@ -10,8 +10,8 @@ import {
   Modal,
   Platform,
   Alert,
-  KeyboardAvoidingView,
-} from 'react-native';
+  } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -150,7 +150,7 @@ export default function EditDeckScreen() {
   };
 
   return (
-    <KeyboardAvoidingView style={styles.keyboardWrap} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.keyboardWrap}>
     <View style={styles.root}>
     <LinearGradient colors={PURPLE_HEADER_GRADIENT} style={styles.headerBand}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
@@ -306,7 +306,7 @@ export default function EditDeckScreen() {
       </View>
       </LinearGradient>
     </View>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

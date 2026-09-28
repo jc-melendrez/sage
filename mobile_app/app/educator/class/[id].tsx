@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
@@ -18,6 +18,7 @@ import {
   WeekUnlockMode,
   MockQuizQuestion,
 } from '@/mock/classroomStore';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 
 export default function EducatorClassDetailScreen() {
   const router = useRouter();
@@ -95,7 +96,7 @@ export default function EducatorClassDetailScreen() {
   };
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.container}>
     <View style={styles.container}>
       <EducatorHeader
         title={classroom.name}
@@ -332,7 +333,7 @@ export default function EducatorClassDetailScreen() {
         </View>
       </ScrollView>
     </View>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

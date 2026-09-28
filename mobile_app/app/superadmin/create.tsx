@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, Alert, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, Alert, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AdminHeader from '@/components/admin/AdminHeader';
 import { COLORS, FONTS } from '@/constants/adminTheme';
 import { superadminService, Role } from '@/services/adminService';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 
 const ROLE_OPTIONS: { role: Role; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { role: 'superadmin', label: 'Superadmin', icon: 'shield-checkmark-outline' },
@@ -60,7 +61,7 @@ export default function SuperAdminCreateUser() {
         variant="superadmin"
       />
 
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+      <KeyboardSafeView style={{ flex: 1 }}>
         <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40, gap: 12 }}>
           <Text style={styles.sectionLabel}>ROLE</Text>
           <View style={styles.roleGrid}>
@@ -102,7 +103,7 @@ export default function SuperAdminCreateUser() {
             {!submitting && <Text style={styles.submitBtnText}>Create User</Text>}
           </TouchableOpacity>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardSafeView>
     </View>
   );
 }

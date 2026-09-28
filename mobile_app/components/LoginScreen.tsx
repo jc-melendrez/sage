@@ -2,8 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { 
   View, Text, TextInput, TouchableOpacity, StyleSheet, 
-  ActivityIndicator, Alert, StatusBar, KeyboardAvoidingView, Platform 
+  ActivityIndicator, Alert, StatusBar, Platform 
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -180,8 +181,7 @@ export default function LoginScreen() {
     >
       <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
       <SafeAreaView style={{ flex: 1 }}>
-        <KeyboardAvoidingView 
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        <KeyboardSafeView
           style={{ flex: 1 }}
         >
           <View style={styles.content}>
@@ -461,7 +461,7 @@ export default function LoginScreen() {
               </Text>
             </View>
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </SafeAreaView>
     </LinearGradient>
   );

@@ -6,9 +6,8 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  KeyboardAvoidingView,
-  Platform,
-} from 'react-native';
+  } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
 import { GameQuestion, AnswerOutcome, PowerupKey } from '@/services/offlineEngine';
 
@@ -177,7 +176,7 @@ export function LanPlaySurface({
   const pct = Math.max(0, Math.min(100, (remaining / timeLimit) * 100));
 
   return (
-    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
+    <KeyboardSafeView style={styles.container}>
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.statusRow}>
           <Text style={styles.progressText}>
@@ -296,7 +295,7 @@ export function LanPlaySurface({
           </View>
         )}
       </ScrollView>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

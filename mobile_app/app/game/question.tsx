@@ -11,9 +11,9 @@ import {
   Dimensions,
   ActivityIndicator,
   Platform,
-  KeyboardAvoidingView,
   Image,
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 // ✨ NEW: Reanimated imports for timer shake/pulse
 import Animated, {
   useSharedValue,
@@ -1025,9 +1025,8 @@ export default function QuestionScreen() {
      RENDER
      ═══════════════════════════════════════════════════════════ */
   return (
-    <KeyboardAvoidingView
+    <KeyboardSafeView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <View style={[styles.container, styles.containerSafe, { paddingTop: insets.top + 16 }]}>
       {/* ── frozen screen tint ── */}
@@ -1454,7 +1453,7 @@ export default function QuestionScreen() {
           onComplete={() => setShowTeamReveal(false)}
         />
       )}
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

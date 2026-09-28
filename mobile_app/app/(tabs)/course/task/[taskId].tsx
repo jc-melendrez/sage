@@ -7,10 +7,9 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView,
-  Platform,
   TextInput,
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -245,9 +244,8 @@ export default function TaskSubmitScreen() {
         <View style={{ width: 32 }} />
       </LinearGradient>
 
-      <KeyboardAvoidingView
+      <KeyboardSafeView
         style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
           contentContainerStyle={styles.content}
@@ -489,7 +487,7 @@ export default function TaskSubmitScreen() {
             )}
           </View>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardSafeView>
     </View>
   );
 }

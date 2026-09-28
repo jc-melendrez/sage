@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 
 const RECIPIENT_OPTIONS = ['Entire Class', 'Selected Classes', 'Study Groups'];
 
@@ -18,7 +19,7 @@ export default function AnnouncementsScreen() {
   const [message, setMessage] = useState('');
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.container}>
     <View style={styles.container}>
       <EducatorHeader title="Announcements" subtitle="Keep your class in the loop" showBack />
 
@@ -77,7 +78,7 @@ export default function AnnouncementsScreen() {
         </View>
       </ScrollView>
     </View>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

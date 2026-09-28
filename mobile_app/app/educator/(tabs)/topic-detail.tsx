@@ -9,9 +9,8 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
-  KeyboardAvoidingView,
-  Platform,
-} from 'react-native';
+  } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
@@ -207,7 +206,7 @@ export default function TopicDetailScreen() {
 
       {/* Edit topic modal */}
       <Modal visible={editOpen} transparent animationType="fade" onRequestClose={() => setEditOpen(false)}>
-        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <KeyboardSafeView style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Edit Topic</Text>
@@ -251,7 +250,7 @@ export default function TopicDetailScreen() {
               )}
             </TouchableOpacity>
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
     </View>
   );

@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, StatusBar, Animated
+  StyleSheet, ActivityIndicator, Alert, Platform, ScrollView, StatusBar, Animated
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
@@ -400,9 +401,8 @@ export default function ClassicGameSetupScreen() {
      CREATE / JOIN
      â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   return (
-    <KeyboardAvoidingView
+    <KeyboardSafeView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <LinearGradient
         colors={[COLORS.bg, COLORS.bgSecondary]}
@@ -727,7 +727,7 @@ export default function ClassicGameSetupScreen() {
           </Animated.View>
         </ScrollView>
       </LinearGradient>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

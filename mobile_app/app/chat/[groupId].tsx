@@ -1,8 +1,9 @@
 import React, { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput,
-  KeyboardAvoidingView, Platform, StatusBar, ActivityIndicator, Alert, Modal, Switch, Image, Keyboard,
+  Platform, StatusBar, ActivityIndicator, Alert, Modal, Switch, Image,
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import * as DocumentPicker from 'expo-document-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -234,19 +235,6 @@ export default function GroupChatScreen() {
 
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
-  const [keyboardBottom, setKeyboardBottom] = useState(0);
-
-  // Android's edge-to-edge mode (targetSdk 35+) stops resizing the window for
-  // the keyboard, so we track its height ourselves and pad the layout up.
-  useEffect(() => {
-    if (Platform.OS !== 'android') return;
-    const show = Keyboard.addListener('keyboardDidShow', (e) => setKeyboardBottom(e.endCoordinates.height));
-    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboardBottom(0));
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, []);
 
   const scrollToEnd = useCallback((animated = false) => {
     // Let content layout settle instead of relying on fixed timeouts.
@@ -1045,11 +1033,9 @@ const renderAttachments = () => {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={[styles.container, Platform.OS === 'android' && { paddingBottom: keyboardBottom }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      contentContainerStyle={{ flex: 1 }}
-    >
+      <KeyboardSafeView
+        style={styles.container}
+        >
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} />
 
       {/* Chat Header */}
@@ -1495,7 +1481,7 @@ const renderAttachments = () => {
         questionCount={sharedQuiz?.question_count}
         quizType={sharedQuiz?.quiz_type}
       />
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

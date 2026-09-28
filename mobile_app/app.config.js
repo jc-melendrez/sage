@@ -27,6 +27,14 @@ module.exports = {
         monochromeImage: "./assets/images/android-icon-monochrome.png"
       },
       edgeToEdgeEnabled: true,
+      // 'resize' is the default and is wrong next to edge-to-edge: edge-to-edge
+      // calls WindowCompat.setDecorFitsSystemWindows(window, false), which stops
+      // Android resizing the window for the keyboard, so adjustResize silently
+      // does nothing. 'pan' makes Android match iOS -- the keyboard floats over
+      // the content and KeyboardSafeView owns the offset. Without this the
+      // window resize and the view's own padding fight each other and the
+      // layout jumps twice on every focus.
+      softwareKeyboardLayoutMode: 'pan',
       predictiveBackGestureEnabled: false,
       package: "com.sage.learning",
       googleServicesFile

@@ -13,9 +13,9 @@ import {
   Alert,
   Animated,
   TextInput,
-  KeyboardAvoidingView,
   Image,
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -1394,8 +1394,7 @@ export default function GameCenterScreen() {
         {/* --- JOIN ROOM MODAL --- */}
         <Modal visible={showJoinModal} animationType="fade" transparent={true}>
             <View style={styles.joinModalOverlay}>
-                <KeyboardAvoidingView
-                    behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+                <KeyboardSafeView
                     style={styles.joinModalKeyboardWrap}
                 >
                 <View style={[styles.inviteModalCard, styles.joinModalCard]}>
@@ -1434,7 +1433,7 @@ export default function GameCenterScreen() {
                         )}
                     </TouchableOpacity>
                 </View>
-                </KeyboardAvoidingView>
+                </KeyboardSafeView>
             </View>
         </Modal>
 

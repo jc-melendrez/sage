@@ -9,9 +9,9 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
-  KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -243,7 +243,7 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
           by default, so this bottom-anchored sheet (maxHeight 90%) put its
           header -- the X and Save -- underneath the status bar. */}
       <Modal visible={!!quiz} animationType="slide" transparent statusBarTranslucent onRequestClose={close}>
-        <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <KeyboardSafeView style={styles.overlay}>
           <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={close} />
           <View style={[styles.sheet, { paddingTop: insets.top }]}>
             <View style={styles.grabber} />
@@ -387,7 +387,7 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
               </TouchableOpacity>
             </ScrollView>
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
 
       {showDeadlinePicker && Platform.OS !== 'web' && (

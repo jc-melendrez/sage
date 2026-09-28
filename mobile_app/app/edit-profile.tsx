@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator,
-  Platform, KeyboardAvoidingView, Image, TextInput, Modal,
+  Platform, Image, TextInput, Modal,
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -148,8 +149,7 @@ export default function EditProfileScreen() {
         <Text style={styles.avatarHint}>Tap to change your profile picture</Text>
       </LinearGradient>
 
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      <KeyboardSafeView
         style={{ flex: 1 }}
       >
         <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 48 }}>
@@ -202,7 +202,7 @@ export default function EditProfileScreen() {
             )}
           </TouchableOpacity>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardSafeView>
 
       <Modal
         visible={pickerOpen}

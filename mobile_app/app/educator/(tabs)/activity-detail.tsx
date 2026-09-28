@@ -2,8 +2,6 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView,
-  Platform,
   ScrollView,
   StyleSheet,
   Switch,
@@ -12,6 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
@@ -238,9 +237,8 @@ export default function ActivityDetailScreen() {
         showBack
       />
 
-      <KeyboardAvoidingView
+      <KeyboardSafeView
         style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
           contentContainerStyle={styles.content}
@@ -425,7 +423,7 @@ export default function ActivityDetailScreen() {
             <Text style={styles.deleteBtnText}>Delete this {meta.label.toLowerCase()}</Text>
           </TouchableOpacity>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardSafeView>
     </View>
   );
 }

@@ -9,9 +9,9 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
-  KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -218,7 +218,7 @@ export function QuizGeneratorSheet({
         transparent
         onRequestClose={close}
       >
-        <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <KeyboardSafeView style={styles.overlay}>
           <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={close} />
           <View style={styles.sheet}>
             <View style={styles.grabber} />
@@ -385,7 +385,7 @@ export function QuizGeneratorSheet({
               </ScrollView>
             )}
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
 
       {showDeadlinePicker && Platform.OS !== 'web' && (

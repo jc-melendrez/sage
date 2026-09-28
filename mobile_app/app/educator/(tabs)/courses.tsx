@@ -10,9 +10,9 @@ import {
   Alert,
   ActivityIndicator,
   RefreshControl,
-  KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
@@ -163,7 +163,7 @@ export default function EducatorCoursesScreen() {
 
       {/* Create course modal */}
       <Modal animationType="slide" transparent visible={modalVisible} onRequestClose={() => setModalVisible(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+        <KeyboardSafeView style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Create Course</Text>
@@ -209,7 +209,7 @@ export default function EducatorCoursesScreen() {
               )}
             </TouchableOpacity>
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardSafeView>
       </Modal>
 
       {/* Join code reveal modal */}

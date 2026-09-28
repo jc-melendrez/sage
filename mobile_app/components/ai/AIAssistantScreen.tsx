@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar, KeyboardAvoidingView } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
@@ -12,6 +12,7 @@ import {
   type PickedDocument,
   type PickedImage,
 } from '@/services/fileUpload';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { LinearGradient } from 'expo-linear-gradient';
 import Markdown from '@ronradtke/react-native-markdown-display';
 
@@ -614,10 +615,8 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
   };
 
   return (
-    <KeyboardAvoidingView
+    <KeyboardSafeView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      contentContainerStyle={{ flex: 1 }}
     >
     <LinearGradient
       colors={['#FFFFFF', '#FFFFFF']}
@@ -957,7 +956,7 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
         </View>
       </View>
     </LinearGradient>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

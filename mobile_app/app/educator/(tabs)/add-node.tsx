@@ -9,8 +9,8 @@ import {
   Alert,
   ActivityIndicator,
   Platform,
-  KeyboardAvoidingView,
-} from 'react-native';
+  } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
@@ -476,7 +476,7 @@ export default function AddNodeScreen() {
   }
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.container}>
     <View style={styles.container}>
       <EducatorHeader title={editing ? 'Edit Node' : 'Add Node'} showBack />
 
@@ -617,7 +617,7 @@ export default function AddNodeScreen() {
         </TouchableOpacity>
       </View>
     </View>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

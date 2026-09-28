@@ -10,8 +10,8 @@ import {
   TextInput,
   Modal,
   Platform,
-  KeyboardAvoidingView,
-} from 'react-native';
+  } from 'react-native';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -149,7 +149,7 @@ export default function FlashcardsHome() {
   const totalCards = decks.reduce((sum, d) => sum + (summaries[d.id]?.total ?? 0), 0);
 
   return (
-    <KeyboardAvoidingView style={styles.keyboardWrap} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.keyboardWrap}>
     <View style={styles.root}>
       {/* PURPLE HEADER BAND */}
       <LinearGradient colors={PURPLE_HEADER_GRADIENT} style={styles.headerBand}>
@@ -451,7 +451,7 @@ export default function FlashcardsHome() {
       </View>
       </LinearGradient>
     </View>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

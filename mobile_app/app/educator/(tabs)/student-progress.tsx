@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { View, StyleSheet, ScrollView, TextInput, TouchableOpacity, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, StyleSheet, ScrollView, TextInput, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS } from '@/constants/educatorTheme';
@@ -7,6 +7,7 @@ import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { StatCard, SectionHeader, FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
 import { StudentRow, StudentSummary } from '@/components/educator/StudentRow';
 import { ROSTER, CLASS_LABEL } from '@/constants/educatorMockData';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 
 type StatusFilter = 'all' | StudentSummary['status'];
 
@@ -35,7 +36,7 @@ export default function StudentProgressScreen() {
   }, [query, filter]);
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.container}>
     <View style={styles.container}>
       <EducatorHeader title="Students" subtitle={`${CLASS_LABEL} · ${ROSTER.length} students`} />
 
@@ -97,7 +98,7 @@ export default function StudentProgressScreen() {
         </View>
       </ScrollView>
     </View>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

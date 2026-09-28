@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS, RADIUS, STATUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, Pill, FilterChip, ProgressBar, EmptyState } from '@/components/educator/EducatorPrimitives';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 
 type Tab = 'quizzes' | 'assignments';
 type QuizStatus = 'draft' | 'assigned' | 'closed';
@@ -60,7 +61,7 @@ export default function ContentScreen() {
   const filteredAssignments = assignFilter === 'all' ? ASSIGNMENTS : ASSIGNMENTS.filter((a) => a.status === assignFilter);
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.container}>
     <View style={styles.container}>
       <EducatorHeader
         title="Content"
@@ -263,7 +264,7 @@ export default function ContentScreen() {
         )}
       </ScrollView>
     </View>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 

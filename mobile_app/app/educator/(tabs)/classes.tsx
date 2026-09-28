@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { Avatar, Pill, SectionHeader, EmptyState } from '@/components/educator/EducatorPrimitives';
 import { getClassrooms, createClassroom, MockClassroom } from '@/mock/classroomStore';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 
 const CLASS_COLORS = ['#7C3AED', '#22D3EE', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6'];
 
@@ -32,7 +33,7 @@ export default function ClassesScreen() {
   };
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardSafeView style={styles.container}>
     <View style={styles.container}>
       <EducatorHeader
         title="My Classes"
@@ -118,7 +119,7 @@ export default function ClassesScreen() {
         )}
       </ScrollView>
     </View>
-    </KeyboardAvoidingView>
+    </KeyboardSafeView>
   );
 }
 
