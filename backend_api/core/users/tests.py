@@ -488,15 +488,8 @@ class ActivityFeedTests(TestCase):
         activity = Activity.objects.get(user=self.user)
         self.assertEqual(activity.kind, 'game')
         self.assertEqual(activity.xp_earned, 100)
+        self.assertEqual(activity.payload, {'route': '/games'})
         self.assertIn('ABC123', activity.title)
-        # The rank and badges are stored in the payload because this row is
-        # also how a game reward is read back: the final screen queries a
-        # read-only endpoint for an award that a later player's finish
-        # request settled, matching on the "(ROOM_CODE)" title suffix. The
-        # route key is unchanged for the activity feed's own consumers.
-        self.assertEqual(activity.payload['route'], '/games')
-        self.assertEqual(activity.payload['rank'], 1)
-        self.assertEqual(activity.payload['badges'][0]['name'], 'Game Champion')
 
     def test_activity_endpoint_returns_newest_first_with_meta(self):
         gamification.record_quiz_completion(self.user, score=3, total=5)

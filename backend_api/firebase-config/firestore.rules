@@ -2,17 +2,13 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ─── SCOPING NOTE (this header was stale) ─────────────────────
-    // This used to describe a per-school tenant model: a custom token
-    // embedding `schoolId`, written by `users.views.sync_user_to_firestore`.
-    // That model has been removed. `schoolId` no longer appears anywhere in
-    // the backend, no school is written to any document, and the only claim
-    // minted is `role` (see set_role_claim). The studyGroups and quizzes
-    // blocks below still reference `schoolId` and are therefore now
-    // DENY-ALL in practice: the rules engine errors on the missing claim.
-    // They are left as-is here so this diff stays scoped to the game room,
-    // but they need the same treatment before those features work again.
-    // See the gameRooms block for a worked example.
+    // ─── TENANT ISOLATION NOTE ───────────────────────────────────
+    // Firestore is read by the mobile app directly. Django is the only
+    // writer and must issue a Firebase custom token that embeds:
+    //   { schoolId: <school_id>, role: 'superadmin'|'admin'|... }
+    // (see users.views.sync_user_to_firestore — sync `schoolId` there).
+    // Without `schoolId` in the token, non-superadmin users only see
+    // their own school's documents below.
     // ──────────────────────────────────────────────────────────────
 
     // Users can only read/write their own profile
@@ -54,42 +50,16 @@ service cloud.firestore {
       allow write: if request.auth != null;
     }
 
-    // ─── GAME ROOMS ─────────────────────────────────────────────────
-    // Room codes are unguessable 6-character secrets, so a signed-in player
-    // holding one is entitled to read that room.
-    //
-    // The previous rule was
-    //     allow read, write: if request.auth.token.schoolId == resource.data.schoolId
-    // `schoolId` was removed from the codebase (the School model and the
-    // school-scoped admin role are gone) and is now written to no document and
-    // minted into no token. Measured against the Firestore emulator
-    // (firebase-config/rules.test.js), that rule denied client reads and
-    // writes outright, because the rules engine errors on the missing
-    // `token.schoolId` property rather than treating it as null -- so the
-    // condition never evaluated true. It failed closed, not open: the room was
-    // unreadable from the app, not world-writable.
-    //
-    // The real defect was therefore availability, not exposure: the game could
-    // not read its own rooms. The rule below makes the intended policy
-    // explicit instead of depending on an error. Writes are denied outright
-    // because Django owns the room document.
+    // Game rooms — same-school players only (superadmin bypass)
     match /gameRooms/{roomCode} {
-      // The room document itself is server-owned. Every client write goes
-      // through Django (create/join/start/answer/finish), which uses the Admin
-      // SDK and bypasses these rules, so denying writes here costs the app
-      // nothing -- verified against all 30 `gameRooms` references in
-      // mobile_app, every one of which is a read or a subcollection write.
-      allow read: if request.auth != null;
-      allow write: if false;
+      allow read, write: if request.auth != null &&
+                            (request.auth.token.schoolId == resource.data.schoolId ||
+                             request.auth.token.role == 'superadmin');
 
       match /players/{playerId} {
-        // Player document ids are Django primary keys, not Firebase UIDs, so
-        // a rules-level "is this my document" check cannot be expressed: the
-        // two id spaces do not overlap. Left writable for the team-assignment
-        // flow (mobile/app/game/lobby.tsx and index.tsx write teamId directly).
-        // Closing this means storing firebaseUid on each player doc, which
-        // belongs with the server-authoritative timer work.
-        allow read, write: if request.auth != null;
+        allow read, write: if request.auth != null &&
+                              (request.auth.token.schoolId == resource.data.schoolId ||
+                               request.auth.token.role == 'superadmin');
       }
 
       // Teams (group classic mode) — any authenticated user can read/create;
@@ -100,24 +70,6 @@ service cloud.firestore {
         allow update: if request.auth != null &&
           resource.data.memberIds.size() <
             get(/databases/$(database)/documents/gameRooms/$(roomCode)).data.maxTeamSize;
-      }
-
-      // Per-question answer distribution, written only by the Django answer
-      // endpoint. Read by every client so the final screen can show what share
-      // of the class picked each option.
-      match /answers/{questionId} {
-        allow read: if request.auth != null;
-        allow write: if false;
-      }
-
-      // Mid-game emoji reactions. Doc id is "{questionIndex}_{userId}" so one
-      // player holds at most one reaction per question and a different emoji
-      // overwrites their own. That bounds the collection at
-      // questions x players with no cleanup job.
-      match /reactions/{reactionId} {
-        allow read: if request.auth != null;
-        allow create, update: if request.auth != null;
-        allow delete: if request.auth != null;
       }
     }
   }
