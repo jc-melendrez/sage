@@ -941,13 +941,30 @@ export default function QuestionScreen() {
         return;
       }
       const token = await getToken();
-      await fetch(`${API_BASE_URL}/game/finish/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ roomCode }),
-      });
+      // The response carries this player's real placement award (or
+      // placementPending when a later player's request is what settles the
+      // room). It is passed on so the final screen can show the amount that
+      // was actually paid rather than a locally recomputed one; the final
+      // screen also re-reads it, so a failed or pending response is not fatal.
+      let rankParam = '';
+      try {
+        const res = await fetch(`${API_BASE_URL}/game/finish/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ roomCode }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.rank) rankParam = String(data.rank);
+        }
+      } catch {
+        // Navigate regardless: the final screen resolves the award itself.
+      }
       navigatedRef.current = true;
-      router.replace({ pathname: '/game/final', params: { roomCode } });
+      router.replace({
+        pathname: '/game/final',
+        params: rankParam ? { roomCode, rank: rankParam } : { roomCode },
+      });
       return;
     }
     isAnimatingRef.current = true;

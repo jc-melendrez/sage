@@ -330,13 +330,17 @@ def record_game_finish(user, rank, room_code=None):
         if champ:
             badges.append(_badge_dicts([champ])[0])
 
+    # The activity row is also how a game reward is *read back*: the final
+    # screen polls a read-only endpoint for an award that a later player's
+    # request settled, and matches this row by its "(ROOM_CODE)" suffix. So the
+    # rank and badges are stored in the payload rather than only in the title.
     log_activity(
         user,
         kind='game',
         title=f"#{rank} in live game" + (f" ({room_code})" if room_code else ""),
         description='Multiplayer game finished',
         xp=result['xp'],
-        payload={'route': '/games'},
+        payload={'route': '/games', 'rank': rank, 'badges': badges},
     )
 
     return {
