@@ -88,7 +88,9 @@ class TeamModeGameTests(TestCase):
         room = room_ref.get().to_dict()
         self.assertTrue(room['teamMode'])
         self.assertEqual(room['teamCount'], 3)
-        self.assertEqual(room['maxTeamSize'], 7)
+        # Capacity is derived from the roster, not from a fictional headcount,
+        # so it is only fixed once the game starts.
+        self.assertNotIn('maxTeamSize', room)
 
         teams = list(room_ref.collection('teams').stream())
         by_id = {t.id: t.to_dict() for t in teams}
@@ -97,6 +99,13 @@ class TeamModeGameTests(TestCase):
         self.assertEqual(by_id['1']['color'], '#22D3EE')
         self.assertEqual(by_id['2']['color'], '#10B981')
         self.assertEqual(by_id['3']['color'], '#F59E0B')
+        # Every team starts with an empty shared powerup pool and x1 momentum,
+        # not just a score.
+        self.assertEqual(by_id['1']['multiplier'], 1.0)
+        self.assertEqual(by_id['1']['teamCorrect'], 0)
+        self.assertEqual(by_id['1']['powerups'], {k: 0 for k in
+                                                 ('freeze', 'hint', 'doublePoints', 'shield')})
+        self.assertFalse(by_id['1']['nameLocked'])
 
         player = room_ref.collection('players').document(str(self.host.id)).get().to_dict()
         self.assertIsNone(player['teamId'])
@@ -459,3 +468,670 @@ class PowerupRewardTests(TestCase):
         self.assertIsNone(resp.json()['powerupEarned'])
         self.assertEqual(self.total_powerups(player_ref), 1)
         self.assertEqual(self.player_doc(player_ref)['answeredCount'], interval)
+
+
+class TeamMomentumTests(TestCase):
+    """Team mode has to reward playing as a team, otherwise it is just an
+    individual race with coloured labels."""
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='host', password='pass')
+        self.a = User.objects.create_user(username='a', password='pass')
+        self.b = User.objects.create_user(username='b', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('MOOD1')
+        self.room_ref.set({
+            'status': 'active',
+            'hostId': self.host.id,
+            'teamMode': True,
+            'teamCount': 2,
+            'timePerQuestion': 15,
+            'questions': [
+                {'type': 'mcq', 'question': f'Q{i}', 'choices': ['A. yes', 'B. no'],
+                 'correctAnswer': 'A. yes'} for i in range(30)
+            ],
+        })
+        teams = self.room_ref.collection('teams')
+        teams.document('1').set({
+            'name': 'Alphas', 'color': '#22D3EE', 'score': 0, 'correctCount': 0,
+            'answeredCount': 0, 'memberIds': [str(self.a.id), str(self.b.id)], 'memberCount': 2,
+            'teamCorrect': 0, 'teamStreak': 0, 'bestStreak': 0, 'multiplier': 1.0,
+            'maxMultiplier': 1.0,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+        teams.document('2').set({
+            'name': 'Betas', 'color': '#10B981', 'score': 0, 'correctCount': 0,
+            'answeredCount': 0, 'memberIds': [], 'memberCount': 0,
+            'teamCorrect': 0, 'multiplier': 1.0,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+        for i, user in enumerate((self.a, self.b)):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': f'P{i}', 'score': 0, 'answeredCount': 0, 'correctCount': 0,
+                'streak': 0, 'questionOrder': list(range(30)), 'teamId': '1', 'isFinished': False,
+                'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            })
+
+    def team(self, team_id='1'):
+        return self.room_ref.collection('teams').document(team_id).get().to_dict()
+
+    def answer(self, index, user, answer='A. yes', **extra):
+        self.client.force_authenticate(user=user)
+        payload = {'roomCode': 'MOOD1', 'questionIndex': index, 'answer': answer, 'timeTaken': '1'}
+        payload.update(extra)
+        return self.client.post(reverse('answer-question'), payload, format='json')
+
+    def test_multiplier_lifts_the_team_but_not_a_solo_room(self):
+        self.answer(0, self.a)
+        self.assertEqual(self.team()['multiplier'], 1.0)
+        self.assertEqual(self.answer(0, self.a).json()['multiplier'], 1.0)
+
+        # Ten correct team answers puts the team on the x1.4 rung, and the
+        # NEXT answer is the one that is boosted.
+        for i in range(1, 11):
+            self.assertEqual(self.answer(i, self.a).status_code, 200)
+        self.assertEqual(self.team()['multiplier'], 1.4)
+        self.assertEqual(self.team()['teamCorrect'], 11)
+
+        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
+        boosted = self.answer(11, self.b)
+        self.assertEqual(boosted.json()['multiplier'], 1.4)
+        self.assertEqual(boosted.json()['pointsAwarded'], round(base * 1.4))
+
+    def test_miss_drops_one_rung_and_breaks_the_team_flame(self):
+        for i in range(5):
+            self.answer(i, self.a)
+        self.assertEqual(self.team()['multiplier'], 1.2)
+        self.assertEqual(self.team()['teamStreak'], 5)
+
+        self.answer(5, self.a, answer='B. no')
+        self.assertEqual(self.team()['multiplier'], 1.0)
+        self.assertEqual(self.team()['teamStreak'], 0)
+        # The ladder is not reset: the team's correct count survives the miss.
+        self.assertEqual(self.team()['teamCorrect'], 5)
+
+    def test_peak_multiplier_and_best_streak_are_remembered(self):
+        for i in range(5):
+            self.answer(i, self.a)
+        self.answer(5, self.a, answer='B. no')
+        for i in range(6, 11):
+            self.answer(i, self.a)
+        team = self.team()
+        # The demotion to x1.0 is remembered even though the team climbed back
+        # past it, so the final screen can show how high they actually got.
+        self.assertEqual(team['maxMultiplier'], 1.4)
+        self.assertEqual(team['bestStreak'], 5)
+        self.assertEqual(team['multiplier'], 1.4)
+
+    def test_streak_rewards_go_to_the_shared_pool(self):
+        for i in range(3):
+            resp = self.answer(i, self.a)
+        self.assertIsNotNone(resp.json()['powerupEarned'])
+        pool = self.team()['powerups']
+        self.assertEqual(sum(pool.values()), 1)
+        # A teammate's reward is spendable by the other member — this is the
+        # mechanic that forces them to talk.
+        self.assertEqual(
+            self.room_ref.collection('players').document(str(self.b.id)).get().to_dict()['powerups'],
+            {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        )
+
+    def test_double_points_spends_from_the_team_pool(self):
+        self.room_ref.collection('teams').document('1').update(
+            {'powerups.doublePoints': 1})
+        resp = self.answer(0, self.a, useDoublePoints='true')
+        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
+        self.assertEqual(resp.json()['pointsAwarded'], base * 2)
+        self.assertEqual(self.team()['powerups']['doublePoints'], 0)
+
+    def test_double_points_is_refused_when_the_pool_is_empty(self):
+        # The use-flags are client-supplied, so claiming a powerup the team
+        # does not own must be a no-op rather than free points.
+        resp = self.answer(0, self.a, useDoublePoints='true')
+        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
+        self.assertEqual(resp.json()['pointsAwarded'], base)
+        self.assertEqual(self.team()['powerups']['doublePoints'], 0)
+
+    def test_hint_is_charged_when_the_reveal_is_claimed(self):
+        self.room_ref.collection('teams').document('1').update({'powerups.hint': 1})
+        self.answer(0, self.a, useHint='true')
+        self.assertEqual(self.team()['powerups']['hint'], 0)
+
+    def test_shield_saves_the_team_flame(self):
+        for i in range(3):
+            self.answer(i, self.a)
+        self.assertEqual(self.team()['teamStreak'], 3)
+        self.assertEqual(self.team()['multiplier'], 1.0)
+
+        self.room_ref.collection('teams').document('1').update({'powerups.shield': 1})
+        self.answer(3, self.a, answer='B. no', useShield='true')
+        team = self.team()
+        # A shield keeps the flame alive rather than extending it, and spares
+        # the team the momentum demotion.
+        self.assertEqual(team['teamStreak'], 3)
+        self.assertEqual(team['correctCount'], 3)
+        self.assertEqual(team['powerups']['shield'], 0)
+
+    def test_unshielded_miss_demotes_and_breaks_the_flame(self):
+        for i in range(5):
+            self.answer(i, self.a)
+        self.assertEqual(self.team()['multiplier'], 1.2)
+        self.answer(5, self.a, answer='B. no')
+        team = self.team()
+        self.assertEqual(team['teamStreak'], 0)
+        self.assertEqual(team['multiplier'], 1.0)
+
+    def test_negative_time_taken_cannot_exceed_the_cap(self):
+        resp = self.answer(0, self.a, timeTaken='-1000')
+        # Without the clamp this scores ~34,000 points.
+        self.assertLessEqual(resp.json()['pointsAwarded'], 1000 * 2)
+        self.assertGreaterEqual(resp.json()['pointsAwarded'], 500)
+
+    def test_answers_are_rejected_outside_an_active_room(self):
+        self.room_ref.update({'status': 'waiting'})
+        resp = self.answer(0, self.a)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.team()['answeredCount'], 0)
+
+    def test_replayed_answer_cannot_drain_the_hint_pool(self):
+        """A retried submission must not buy a fresh hint each time.
+
+        The hint has no separate endpoint — it is claimed on the answer call —
+        so charging it before the idempotency check let a client with a flaky
+        connection empty the team pool for free by re-posting.
+        """
+        self.room_ref.collection('teams').document('1').update({'powerups.hint': 3})
+        self.answer(0, self.a, useHint='true')
+        self.assertEqual(self.team()['powerups']['hint'], 2)
+
+        for _ in range(5):
+            self.answer(0, self.a, useHint='true')
+        self.assertEqual(self.team()['powerups']['hint'], 2)
+
+    def test_boost_doubles_a_named_teammates_next_answer(self):
+        self.room_ref.collection('teams').document('1').update({'powerups.doublePoints': 1})
+        self.client.force_authenticate(user=self.a)
+        resp = self.client.post(
+            reverse('boost-teammate'),
+            {'roomCode': 'MOOD1', 'playerId': str(self.b.id)},
+            format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.team()['powerups']['doublePoints'], 0)
+        self.assertEqual(self.team()['boostTarget'], str(self.b.id))
+        # b has answered nothing, so the boost lands on question 0.
+        self.assertEqual(self.team()['boostQuestion'], 0)
+
+        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
+        answered = self.answer(0, self.b)
+        self.assertEqual(answered.json()['pointsAwarded'], base * 2)
+        # One-shot: a later answer is back to normal.
+        self.assertEqual(self.answer(1, self.b).json()['pointsAwarded'], base)
+        self.assertIsNone(self.team()['boostTarget'])
+
+    def test_boost_cannot_be_aimed_at_an_opponent_or_self(self):
+        self.room_ref.collection('teams').document('1').update({'powerups.doublePoints': 3})
+        self.client.force_authenticate(user=self.a)
+        for target in (str(self.a.id), str(self.host.id)):
+            resp = self.client.post(
+                reverse('boost-teammate'),
+                {'roomCode': 'MOOD1', 'playerId': target},
+                format='json')
+            self.assertEqual(resp.status_code, 400 if target == str(self.a.id) else 403)
+        self.assertEqual(self.team()['powerups']['doublePoints'], 3)
+
+    def test_boost_is_refused_with_an_empty_pool(self):
+        self.client.force_authenticate(user=self.a)
+        resp = self.client.post(
+            reverse('boost-teammate'),
+            {'roomCode': 'MOOD1', 'playerId': str(self.b.id)},
+            format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIsNone(self.team().get('boostTarget'))
+
+
+class TeamLobbyTests(TestCase):
+    """The lobby columns let students pick their own team; the server has to
+    own that move or the roster drifts."""
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='host', password='pass')
+        self.p1 = User.objects.create_user(username='p1', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('LOB1')
+        self.room_ref.set({
+            'status': 'waiting', 'hostId': self.host.id, 'teamMode': True,
+            'teamCount': 2, 'topic': 't', 'questionCount': 1, 'timePerQuestion': 15,
+            'questions': [{'type': 'mcq', 'question': 'q', 'choices': ['A. y'], 'correctAnswer': 'A. y'}],
+        })
+        for i in (1, 2):
+            self.room_ref.collection('teams').document(str(i)).set({
+                'name': f'Team {i}', 'color': '#22D3EE', 'score': 0, 'correctCount': 0,
+                'answeredCount': 0, 'memberIds': [], 'memberCount': 0,
+                'teamCorrect': 0, 'multiplier': 1.0, 'nameLocked': False,
+                'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            })
+        for user in (self.host, self.p1):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': 0, 'teamId': None, 'isFinished': False,
+            })
+
+    def team(self, team_id):
+        return self.room_ref.collection('teams').document(team_id).get().to_dict()
+
+    def player(self, user):
+        return self.room_ref.collection('players').document(str(user.id)).get().to_dict()
+
+    def test_assign_moves_the_player_and_updates_both_teams(self):
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('assign-team'),
+                                {'roomCode': 'LOB1', 'teamId': '1'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.player(self.p1)['teamId'], '1')
+        self.assertEqual(self.team('1')['memberIds'], [str(self.p1.id)])
+        self.assertEqual(self.team('1')['memberCount'], 1)
+
+        # Switching must not leave the player in both rosters.
+        self.client.post(reverse('assign-team'),
+                         {'roomCode': 'LOB1', 'teamId': '2'}, format='json')
+        self.assertEqual(self.player(self.p1)['teamId'], '2')
+        self.assertEqual(self.team('1')['memberIds'], [])
+        self.assertEqual(self.team('1')['memberCount'], 0)
+        self.assertEqual(self.team('2')['memberCount'], 1)
+
+    def test_assigning_to_the_same_team_is_a_noop(self):
+        self.client.force_authenticate(user=self.p1)
+        self.client.post(reverse('assign-team'), {'roomCode': 'LOB1', 'teamId': '1'}, format='json')
+        resp = self.client.post(reverse('assign-team'), {'roomCode': 'LOB1', 'teamId': '1'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.team('1')['memberCount'], 1)
+
+    def test_full_team_rejects_a_move(self):
+        # Capacity is 2 for a 2-player / 2-team room, so the third joiner is
+        # refused rather than silently piling on.
+        extra = User.objects.create_user(username='extra', password='pass')
+        self.room_ref.collection('players').document(str(extra.id)).set(
+            {'displayName': 'extra', 'teamId': None, 'score': 0})
+        self.room_ref.collection('teams').document('1').set(
+            {'memberIds': [str(self.host.id), str(extra.id)], 'memberCount': 2}, merge=True)
+
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('assign-team'),
+                                {'roomCode': 'LOB1', 'teamId': '1'}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('full', resp.json()['error'])
+        self.assertIsNone(self.player(self.p1)['teamId'])
+
+    def test_teams_lock_once_the_game_starts(self):
+        self.room_ref.update({'status': 'active'})
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('assign-team'),
+                                {'roomCode': 'LOB1', 'teamId': '1'}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIsNone(self.player(self.p1)['teamId'])
+
+    def test_host_can_rename_but_a_renamed_team_is_locked(self):
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('rename-team'),
+                                {'roomCode': 'LOB1', 'teamId': '1', 'name': 'The Brainy Bunch'},
+                                format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.team('1')['name'], 'The Brainy Bunch')
+        self.assertTrue(self.team('1')['nameLocked'])
+
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('rename-team'),
+                                {'roomCode': 'LOB1', 'teamId': '1', 'name': 'Something Else'},
+                                format='json')
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.team('1')['name'], 'The Brainy Bunch')
+
+    def test_rename_validates_length(self):
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('rename-team'),
+                                {'roomCode': 'LOB1', 'teamId': '1', 'name': ''}, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reaction_must_be_on_the_allowlist(self):
+        self.client.force_authenticate(user=self.p1)
+        bad = self.client.post(reverse('react'),
+                               {'roomCode': 'LOB1', 'emoji': '<script>'}, format='json')
+        self.assertEqual(bad.status_code, 400)
+
+        good = self.client.post(reverse('react'),
+                                {'roomCode': 'LOB1', 'emoji': '\U0001F525'}, format='json')
+        self.assertEqual(good.status_code, 200)
+        reactions = list(self.room_ref.collection('reactions').stream())
+        self.assertEqual(len(reactions), 1)
+        self.assertEqual(reactions[0].to_dict()['userId'], str(self.p1.id))
+
+    def test_start_keeps_picked_teams_and_deals_the_stragglers(self):
+        self.client.force_authenticate(user=self.p1)
+        self.client.post(reverse('assign-team'), {'roomCode': 'LOB1', 'teamId': '1'}, format='json')
+
+        self.client.force_authenticate(user=self.host)
+        # The host never picked, so a plain start is refused.
+        resp = self.client.post(reverse('start-game'), {'roomCode': 'LOB1'}, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+        # Forcing it keeps player1's choice and deals the host into the emptier team.
+        resp = self.client.post(reverse('start-game'),
+                                {'roomCode': 'LOB1', 'force': 'true'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.player(self.p1)['teamId'], '1')
+        self.assertEqual(self.player(self.host)['teamId'], '2')
+
+        assignments = self.room_ref.get().to_dict()['teamAssignments']
+        self.assertEqual(len(assignments), 2)
+        self.assertEqual({a['teamId'] for a in assignments}, {'1', '2'})
+        # The reveal payload carries the real team name, not a hardcoded one.
+        self.room_ref.collection('teams').document('1').update({'name': 'The Brainy Bunch'})
+        self.assertEqual(
+            self.client.post(reverse('start-game'), {'roomCode': 'LOB1'}, format='json').status_code,
+            400)  # already started
+
+
+class TeamPlacementXpTests(TestCase):
+    def setUp(self):
+        self.host = User.objects.create_user(username='host', password='pass')
+        self.winner = User.objects.create_user(username='winner', password='pass')
+        self.loser = User.objects.create_user(username='loser', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('XP1')
+        self.room_ref.set({
+            'status': 'active', 'hostId': self.host.id, 'teamMode': True,
+            'teamCount': 2, 'topic': 't', 'questionCount': 1, 'questions': [],
+        })
+        self.room_ref.collection('teams').document('1').set({
+            'name': 'Winners', 'color': '#22D3EE', 'score': 900,
+            'correctCount': 3, 'answeredCount': 3, 'memberIds': [str(self.winner.id)],
+        })
+        self.room_ref.collection('teams').document('2').set({
+            'name': 'Chasers', 'color': '#10B981', 'score': 100,
+            'correctCount': 0, 'answeredCount': 2, 'memberIds': [str(self.loser.id)],
+        })
+        for user, score, team in ((self.winner, 900, '1'), (self.loser, 100, '2')):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': score, 'teamId': team, 'isFinished': True,
+            })
+
+    def test_team_placement_pays_every_member_of_the_winning_team(self):
+        self.client.force_authenticate(user=self.loser)
+        resp = self.client.post(reverse('finish-game'), {'roomCode': 'XP1'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        # The finishing player is told their TEAM's placement, not their own.
+        self.assertEqual(resp.json()['teamRank'], 2)
+        self.assertEqual(resp.json()['teamId'], '2')
+
+        winner_activity = Activity.objects.filter(user=self.winner, kind='game').first()
+        self.assertIsNotNone(winner_activity)
+        self.assertIn('Winners', winner_activity.title)
+        self.assertNotIn('Chasers', winner_activity.title)
+
+    def test_team_results_carry_accuracy_and_contribution(self):
+        self.client.force_authenticate(user=self.loser)
+        self.client.post(reverse('finish-game'), {'roomCode': 'XP1'}, format='json')
+        results = self.room_ref.get().to_dict()['teamResults']
+        self.assertEqual([r['name'] for r in results], ['Winners', 'Chasers'])
+        self.assertEqual(results[0]['accuracy'], 100)
+        self.assertEqual(results[1]['accuracy'], 0)
+        winner_row = results[0]['members'][0]
+        self.assertEqual(winner_row['userId'], str(self.winner.id))
+        self.assertEqual(winner_row['contribution'], 100)
+
+
+class FreezePowerupTests(TestCase):
+    """A freeze is charged by the server, out of the shared pool in team mode.
+
+    It used to be a raw client-side `increment(-1)` on the player's own
+    document, which let a team freeze indefinitely and could drive the count
+    negative.
+    """
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='fhost', password='pass')
+        self.a = User.objects.create_user(username='fa', password='pass')
+        self.b = User.objects.create_user(username='fb', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('FRZ1')
+        self.room_ref.set({
+            'status': 'active',
+            'hostId': self.host.id,
+            'teamMode': True,
+            'timePerQuestion': 15,
+            'questions': [
+                {'type': 'mcq', 'question': f'Q{i}', 'choices': ['A. yes', 'B. no'],
+                 'correctAnswer': 'A. yes'} for i in range(10)
+            ],
+        })
+        team = self.room_ref.collection('teams').document('1')
+        team.set({
+            'name': 'Frost', 'color': '#22D3EE', 'score': 0,
+            'memberIds': [str(self.a.id), str(self.b.id)], 'memberCount': 2,
+            'powerups': {'freeze': 2, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+        for i, user in enumerate((self.a, self.b)):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': f'F{i}', 'score': 0, 'teamId': '1', 'isFinished': False,
+                'questionOrder': list(range(10)),
+                'powerups': {'freeze': 5, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            })
+
+    def team(self):
+        return self.room_ref.collection('teams').document('1').get().to_dict()
+
+    def player(self, user):
+        return self.room_ref.collection('players').document(str(user.id)).get().to_dict()
+
+    def freeze(self, user, index=3):
+        self.client.force_authenticate(user=user)
+        return self.client.post(reverse('freeze-timer'), {
+            'roomCode': 'FRZ1', 'questionIndex': index,
+        }, format='json')
+
+    def test_freeze_spends_the_shared_team_pool_not_the_player(self):
+        response = self.freeze(self.a)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.team()['powerups']['freeze'], 1)
+        # The player's own personal count is deliberately left untouched.
+        self.assertEqual(self.player(self.a)['powerups']['freeze'], 5)
+
+    def test_freeze_records_the_question_so_a_teammate_does_not_inherit_it(self):
+        self.assertEqual(self.freeze(self.a, index=3).status_code, 200)
+        self.assertEqual(self.player(self.a)['frozenQuestion'], 3)
+        # A different teammate freezing is their own charge, not a free carry-over.
+        self.assertEqual(self.freeze(self.b, index=3).status_code, 200)
+        self.assertEqual(self.team()['powerups']['freeze'], 0)
+        self.assertEqual(self.player(self.b)['frozenQuestion'], 3)
+
+    def test_freeze_is_rejected_when_the_pool_is_empty(self):
+        self.team()['powerups']['freeze'] = 0
+        self.room_ref.collection('teams').document('1').set(self.team())
+        response = self.freeze(self.a)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.team()['powerups']['freeze'], 0)
+
+    def test_freeze_requires_the_room_to_be_running(self):
+        self.room_ref.set({'status': 'waiting', 'teamMode': True}, merge=True)
+        self.assertEqual(self.freeze(self.a).status_code, 400)
+
+    def test_freeze_works_in_solo_mode_from_the_personal_pool(self):
+        self.room_ref.set({'status': 'active', 'teamMode': False}, merge=True)
+        response = self.freeze(self.a)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.player(self.a)['powerups']['freeze'], 4)
+        # The team pool is not consulted at all in solo play.
+        self.assertEqual(self.team()['powerups']['freeze'], 2)
+
+    def test_freeze_rejects_a_player_outside_the_room(self):
+        self.room_ref.collection('players').document(str(self.b.id)).delete()
+        self.assertEqual(self.freeze(self.b).status_code, 403)
+
+
+class CustomLobbyQuizTests(TestCase):
+    """A CODM-style custom lobby creates the room first and picks the quiz
+    afterwards, so creation has to tolerate an empty question set and start has
+    to refuse to run until a host has chosen one."""
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='chost', password='pass')
+        self.p1 = User.objects.create_user(username='cp1', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.host)
+
+    def make_quiz(self, count=4, title='Custom Quiz'):
+        quiz = Quiz.objects.create(user=self.host, title=title)
+        for i in range(count):
+            QuizQuestion.objects.create(
+                quiz=quiz, question_text=f'Q{i}',
+                options=['yes', 'no'], correct_answer='yes',
+            )
+        return quiz
+
+    def create_room(self, **extra):
+        payload = {'teamMode': True, 'teamCount': 2, 'deferQuiz': True, 'timePerQuestion': 15}
+        payload.update(extra)
+        return self.client.post(reverse('create-game'), payload, format='json')
+
+    def room(self, code):
+        return self.store.collection('gameRooms').document(code).get().to_dict()
+
+    def seat_host(self, code, team_id='1'):
+        """Start refuses to run while anyone is unassigned, which is a separate
+        guard from the quiz one. Put the host on a team so the quiz logic is
+        what these tests are actually exercising."""
+        self.store.collection('gameRooms').document(code)\
+            .collection('players').document(str(self.host.id)).update({'teamId': team_id})
+
+    def test_create_defers_the_quiz(self):
+        resp = self.create_room()
+        self.assertEqual(resp.status_code, 200)
+        code = resp.data['roomCode']
+
+        room = self.room(code)
+        self.assertTrue(room['quizPending'])
+        self.assertEqual(room['questions'], [])
+        self.assertNotIn('quizId', room)
+        # Teams exist immediately so players can fill the columns.
+        self.assertTrue(room['teamMode'])
+        self.assertEqual(room['teamCount'], 2)
+
+    def test_set_quiz_materialises_questions(self):
+        quiz = self.make_quiz()
+        code = self.create_room().data['roomCode']
+
+        resp = self.client.post(reverse('set-quiz'),
+                                {'roomCode': code, 'quizId': quiz.id}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data['quizPending'])
+        self.assertEqual(resp.data['questionCount'], 4)
+
+        room = self.room(code)
+        self.assertEqual(len(room['questions']), 4)
+        self.assertEqual(room['topic'], 'Custom Quiz')
+        self.assertEqual(room['quizId'], quiz.id)
+        self.assertFalse(room['quizPending'])
+
+    def test_set_quiz_rejects_a_non_host(self):
+        quiz = self.make_quiz()
+        code = self.create_room().data['roomCode']
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('set-quiz'),
+                                {'roomCode': code, 'quizId': quiz.id}, format='json')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_set_quiz_rejects_someone_elses_quiz(self):
+        quiz = Quiz.objects.create(user=self.p1, title='Not Mine')
+        QuizQuestion.objects.create(quiz=quiz, question_text='Q',
+                                    options=['yes', 'no'], correct_answer='yes')
+        code = self.create_room().data['roomCode']
+        resp = self.client.post(reverse('set-quiz'),
+                                {'roomCode': code, 'quizId': quiz.id}, format='json')
+        self.assertEqual(resp.status_code, 404)
+
+    def test_set_quiz_rejects_a_quiz_too_short_for_the_teams(self):
+        quiz = self.make_quiz(count=1)
+        code = self.create_room(teamCount=3).data['roomCode']
+        resp = self.client.post(reverse('set-quiz'),
+                                {'roomCode': code, 'quizId': quiz.id}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Not enough questions', resp.data['error'])
+
+    def test_start_without_a_quiz_is_refused(self):
+        code = self.create_room().data['roomCode']
+        self.seat_host(code)
+        resp = self.client.post(reverse('start-game'), {'roomCode': code}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Choose a quiz', resp.data['error'])
+
+    def test_start_after_set_quiz_succeeds(self):
+        quiz = self.make_quiz()
+        code = self.create_room().data['roomCode']
+        self.client.post(reverse('set-quiz'),
+                         {'roomCode': code, 'quizId': quiz.id}, format='json')
+        self.seat_host(code)
+        resp = self.client.post(reverse('start-game'), {'roomCode': code}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.room(code)['status'], 'active')
+
+    def test_start_rebuilds_questions_if_the_set_quiz_write_was_lost(self):
+        # Simulates an interrupted set-quiz: the room remembers the quiz but
+        # never got its questions, so start has to materialise them itself.
+        quiz = self.make_quiz()
+        code = self.create_room().data['roomCode']
+        self.store.collection('gameRooms').document(code).set(
+            {'quizId': quiz.id, 'questions': [], 'questionCount': 0, 'quizPending': True},
+            merge=True)
+        self.seat_host(code)
+        resp = self.client.post(reverse('start-game'), {'roomCode': code}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(self.room(code)['questions']), 4)
+
+    def test_join_reports_a_pending_quiz_and_persists_team_capacity(self):
+        code = self.create_room().data['roomCode']
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('join-game'), {'roomCode': code}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['quizPending'])
+        # The waiting lobby renders columns from the room document, so the
+        # capacity has to live there too.
+        self.assertIn('maxTeamSize', self.room(code))
+        self.assertEqual(resp.data['maxTeamSize'], self.room(code)['maxTeamSize'])
+
+    def test_join_drops_the_pending_flag_once_a_quiz_is_set(self):
+        quiz = self.make_quiz()
+        code = self.create_room().data['roomCode']
+        self.client.post(reverse('set-quiz'),
+                         {'roomCode': code, 'quizId': quiz.id}, format='json')
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('join-game'), {'roomCode': code}, format='json')
+        self.assertNotIn('quizPending', resp.data)

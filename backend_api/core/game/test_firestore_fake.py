@@ -17,8 +17,8 @@ google.cloud.firestore, which requires the transaction object to expose
 ``_id``, ``_commit()`` and ``_rollback()``.
 
 Transforms are resolved eagerly on write: ``Increment`` adds to the existing
-value, ``ArrayUnion`` appends non-duplicate members, and ``SERVER_TIMESTAMP``
-becomes a sentinel object.
+value, ``ArrayUnion`` appends non-duplicate members, ``ArrayRemove`` drops
+them, and ``SERVER_TIMESTAMP`` becomes a sentinel object.
 """
 
 from google.cloud.firestore_v1 import transforms as fs_transforms
@@ -113,6 +113,9 @@ class FakeStore:
                 if item not in current:
                     current.append(item)
             return current
+        if isinstance(value, fs_transforms.ArrayRemove):
+            removals = set(value.values)
+            return [item for item in (existing or []) if item not in removals]
         if value is fs_transforms.SERVER_TIMESTAMP:
             return value
         return value
@@ -146,11 +149,24 @@ class FakeCollectionReference:
         self._path = path
         self.id = path[-1] if path else None
 
-    def document(self, doc_id):
+    def document(self, doc_id=None):
+        # Real Firestore allows document() with no argument to mint an
+        # auto-ID. The game views rely on that for reactions.
+        if doc_id is None:
+            doc_id = f'auto-{len(self._store._docs) + 1}'
         return FakeDocumentReference(self._store, self._path + (doc_id,))
 
     def stream(self, transaction=None):
         return self._store.stream(self._path)
+
+    def list_documents(self):
+        # Used to clear the ephemeral reactions subcollection on finish. Real
+        # Firestore returns document references without reading them, so this
+        # must not materialise a snapshot.
+        return [
+            self.document(snap.id)
+            for snap in self._store.stream(self._path)
+        ]
 
 
 class FakeTransaction:

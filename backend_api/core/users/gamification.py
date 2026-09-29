@@ -319,8 +319,14 @@ def record_daily_checkin(user):
     }
 
 
-def record_game_finish(user, rank, room_code=None):
-    """Award placement XP after a multiplayer game finishes."""
+def record_game_finish(user, rank, room_code=None, context=None):
+    """Award placement XP after a multiplayer game finishes.
+
+    `context` is a human-readable placement label. In team mode the rank is
+    the team's finishing position, so the activity feed says e.g.
+    "#1 with The Brainy Bunch" rather than implying the student individually
+    came first against every other student in the room.
+    """
     xp = GAME_PLACEMENT_XP.get(rank, GAME_DEFAULT_XP)
     result = award_xp(user, xp, source='game')
 
@@ -333,7 +339,7 @@ def record_game_finish(user, rank, room_code=None):
     log_activity(
         user,
         kind='game',
-        title=f"#{rank} in live game" + (f" ({room_code})" if room_code else ""),
+        title=f"{context or f'#{rank} in live game'}" + (f" ({room_code})" if room_code else ""),
         description='Multiplayer game finished',
         xp=result['xp'],
         payload={'route': '/games'},

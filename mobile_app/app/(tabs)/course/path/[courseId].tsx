@@ -1,5 +1,5 @@
-import { useState, useCallback, useRef, useEffect, type ComponentRef } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Dimensions, Pressable, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Dimensions, Pressable, useWindowDimensions, NativeSyntheticEvent, NativeScrollEvent, type HostInstance } from 'react-native';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -51,6 +51,8 @@ const FONTS = {
 };
 
 // --- Geometry ---
+// Read once for the static path layout maths; the popup also uses the live
+// `useWindowDimensions()` values so rotation and Android insets are honoured.
 const SCREEN_W = Dimensions.get('window').width;
 const SCREEN_H = Dimensions.get('window').height;
 const HEADER_H = 128;
@@ -145,16 +147,14 @@ type NodeButtonProps = {
   x: number;
   y: number;
   onPress: () => void;
-  onMeasure: (cx: number, cy: number) => void;
 };
 
-function NodeButton({ node, status, selected, active, x, y, onPress, onMeasure }: NodeButtonProps) {
+function NodeButton({ node, status, selected, active, x, y, onPress }: NodeButtonProps) {
   const cfg = NODE_TYPE_CONFIG[node.node_type];
   const color = cfg.color;
   const R = NODE_SIZE / 2;
   const isCurrent = active && status !== 'locked';
 
-  const btnRef = useRef<ComponentRef<typeof Pressable> | null>(null);
   const pressed = useSharedValue(0);
   const pulse = useSharedValue(0);
   const spin = useSharedValue(0);
@@ -203,12 +203,6 @@ function NodeButton({ node, status, selected, active, x, y, onPress, onMeasure }
     opacity: 0.32 * (1 - rippleB.value),
   }));
 
-  const handleMeasure = useCallback(() => {
-    btnRef.current?.measureInWindow((mx, my, mw, mh) => {
-      if (mh > 0) onMeasure(mx + mw / 2, my + mh / 2);
-    });
-  }, [onMeasure]);
-
   const shadowColor =
     status === 'completed' ? COLORS.successDeep
     : status === 'locked' ? 'transparent'
@@ -216,8 +210,6 @@ function NodeButton({ node, status, selected, active, x, y, onPress, onMeasure }
 
   return (
     <Pressable
-      ref={(r) => { btnRef.current = r; }}
-      onLayout={handleMeasure}
       onPressIn={() => { pressed.value = withTiming(1, { duration: 90 }); }}
       onPressOut={() => { pressed.value = withSpring(0, { damping: 14, stiffness: 240 }); }}
       onPress={onPress}
@@ -306,11 +298,21 @@ export default function CoursePathScreen() {
   const [loading, setLoading] = useState(true);
 
   const [selectedNodeIndex, setSelectedNodeIndex] = useState<number | null>(null);
-  const [nodeCenters, setNodeCenters] = useState<Record<number, { cx: number; cy: number }>>({});
   const [activeNodeIndex, setActiveNodeIndex] = useState<number | null>(null);
+  // Real card height, so the popup can be clamped against what it actually
+  // occupies rather than a fixed guess that long titles overflow.
+  const [popupHeight, setPopupHeight] = useState(0);
   const scrollRef = useRef<ScrollView | null>(null);
+  // ScrollView's own ref type does not expose the measure* methods, but the
+  // underlying host view does.
+  const scrollHost = useRef<HostInstance | null>(null);
   const scrollY = useRef(0);
+  // Window-space y of the scroll container's top edge. The header above it is
+  // fixed, so one measurement stays valid; node positions are then derived
+  // from the content layout plus the live scroll offset.
+  const scrollTop = useRef(HEADER_H);
   const scrollViewH = useRef(SCREEN_H - HEADER_H);
+  const { width: winW, height: winH } = useWindowDimensions();
 
   useFocusEffect(
     useCallback(() => {
@@ -373,6 +375,9 @@ export default function CoursePathScreen() {
   const handleNodePress = (index: number) => {
     setSelectedNodeIndex(prev => (prev === index ? null : index));
     setActiveNodeIndex(index);
+    // Re-measure the container in case the header height shifted (rotation,
+    // font scaling) since mount, so the popup anchors to the right place.
+    handleScrollViewLayout();
   };
 
   const handleStartActivity = (nodeId: number) => {
@@ -381,6 +386,15 @@ export default function CoursePathScreen() {
     // instead of dumping the student back at the top of the map.
     router.push(`/course/node/${nodeId}?courseId=${courseId}` as any);
   };
+
+  // One-shot measurement of the scroll container's window offset. The header
+  // above it never moves, so this stays valid for the life of the screen and
+  // gives the popup a trustworthy origin to convert content coords into.
+  const handleScrollViewLayout = useCallback(() => {
+    scrollHost.current?.measureInWindow((_x, y) => {
+      if (y > 0) scrollTop.current = y;
+    });
+  }, []);
 
   // Duolingo-style: auto-track the emphasized node as you scroll.
   const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -446,7 +460,7 @@ export default function CoursePathScreen() {
       </LinearGradient>
 
       <ScrollView
-        ref={scrollRef}
+        collapsable={false}
         // minHeight, not height: a fixed height swallowed paddingBottom, which
         // is what let the last node hide behind the tab bar.
         style={styles.trailBody}
@@ -455,6 +469,11 @@ export default function CoursePathScreen() {
         scrollEventThrottle={16}
         onScroll={handleScroll}
         onScrollBeginDrag={() => setSelectedNodeIndex(null)}
+        ref={(r) => {
+          scrollRef.current = r;
+          scrollHost.current = r as unknown as HostInstance | null;
+        }}
+        onLayout={handleScrollViewLayout}
       >
         {flat.length === 0 && (
           <View style={styles.emptyState}>
@@ -494,9 +513,6 @@ export default function CoursePathScreen() {
             x={getNodeX(i)}
             y={getNodeY(i)}
             onPress={() => handleNodePress(i)}
-            onMeasure={(cx, cy) =>
-              setNodeCenters(prev => ({ ...prev, [f.node.id]: { cx, cy } }))
-            }
           />
         ))}
 
@@ -537,16 +553,39 @@ export default function CoursePathScreen() {
         const st = statuses[selectedNodeIndex];
         const R = NODE_SIZE / 2;
 
-        const { cx, cy } = nodeCenters[selectedNode.node.id] ?? { cx: getNodeX(selectedNodeIndex), cy: getNodeY(selectedNodeIndex) };
+        // Derive the node's window position from the content layout and the live
+        // scroll offset. The previous onLayout/measureInWindow approach cached
+        // window coords that never refreshed after a scroll, and its fallback
+        // fed raw content-space Y in as if it were a window coordinate, which
+        // threw the card to the bottom of the screen.
+        const cx = getNodeX(selectedNodeIndex);
+        const cy = scrollTop.current + getNodeY(selectedNodeIndex) - scrollY.current;
 
-        const fitsBelow = cy + R + 5 + POPUP_H_EST < SCREEN_H;
-        const above = !fitsBelow;
-        const popupTop = above
-          ? Math.max(cy - R - 5 - POPUP_H_EST, HEADER_H + 8)
-          : Math.min(cy + R + 5, SCREEN_H - POPUP_H_EST);
-        const popupLeft = Math.min(Math.max(cx - POPUP_W / 2, 12), SCREEN_W - POPUP_W - 12);
+        // Real height once the card has laid out; the estimate only covers the
+        // very first frame, before onLayout has reported anything.
+        const h = popupHeight || POPUP_H_EST;
+
+        // The tab bar is 70px tall and sits above this absolute overlay, so the
+        // usable band stops short of it. Ignoring this is what let the Start
+        // button end up underneath the tab bar, where taps never reached it.
+        const EDGE_PAD = 12;
+        const minTop = scrollTop.current + EDGE_PAD;
+        const maxTop = Math.max(minTop, winH - h - TAB_BAR_CLEARANCE - EDGE_PAD);
+
+        // Prefer below the node, fall back to above, then clamp into the band
+        // either way. Clamping both directions is the fix: the old code bounded
+        // only the top, so a low node could push the card off the bottom.
+        const belowTop = cy + R + 5;
+        const aboveTop = cy - R - 5 - h;
+        const above = belowTop + h > maxTop && aboveTop >= minTop;
+        const popupTop = Math.min(Math.max(above ? aboveTop : belowTop, minTop), maxTop);
+
+        const popupLeft = Math.min(Math.max(cx - POPUP_W / 2, EDGE_PAD), Math.max(EDGE_PAD, winW - POPUP_W - EDGE_PAD));
 
         const tailLeft = Math.min(Math.max(cx - popupLeft - TAIL / 2, 16), POPUP_W - 16 - TAIL);
+        // After clamping, the card can end up vertically overlapping the node,
+        // which would leave the tail pointing at the card's own body.
+        const showTail = above ? cy <= popupTop + 4 : cy >= popupTop + h - 4;
 
         const startLabel =
           st === 'completed' ? 'Review'
@@ -556,6 +595,7 @@ export default function CoursePathScreen() {
         return (
           <Pressable style={styles.overlay} onPress={() => setSelectedNodeIndex(null)}>
             <View
+              onLayout={(e) => setPopupHeight(e.nativeEvent.layout.height)}
               style={[
                 styles.popupCard,
                 { top: popupTop, left: popupLeft, opacity: st === 'locked' ? 0.96 : 1 },
@@ -569,16 +609,18 @@ export default function CoursePathScreen() {
                 pointerEvents="none"
               />
 
-              <View
-                style={[
-                  styles.popupTail,
-                  above
-                    ? { bottom: -(TAIL / 2), borderBottomWidth: 1, borderRightWidth: 1 }
-                    : { top: -(TAIL / 2), borderTopWidth: 1, borderLeftWidth: 1 },
-                  { borderColor: COLORS.glassBorder },
-                  { left: tailLeft },
-                ]}
-              />
+              {showTail && (
+                <View
+                  style={[
+                    styles.popupTail,
+                    above
+                      ? { bottom: -(TAIL / 2), borderBottomWidth: 1, borderRightWidth: 1 }
+                      : { top: -(TAIL / 2), borderTopWidth: 1, borderLeftWidth: 1 },
+                    { borderColor: COLORS.glassBorder },
+                    { left: tailLeft },
+                  ]}
+                />
+              )}
 
               <Pressable onPress={(e) => e.stopPropagation()}>
                 <View style={styles.popupHeader}>
@@ -598,7 +640,7 @@ export default function CoursePathScreen() {
                   </View>
                 )}
 
-                <Text style={styles.popupTitle}>{selectedNode.node.title}</Text>
+                  <Text style={styles.popupTitle} numberOfLines={2}>{selectedNode.node.title}</Text>
                 <Text style={styles.popupDesc} numberOfLines={3}>
                   {selectedNode.node.description || 'Tap start to begin this activity.'}
                 </Text>
@@ -889,6 +931,8 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'transparent',
     zIndex: 100,
+    // zIndex alone does not lift a view above the tab bar on Android.
+    elevation: 100,
   },
 
   popupCard: {

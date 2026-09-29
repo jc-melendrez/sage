@@ -22,7 +22,18 @@ def generate_room_code():
 
 
 MAX_PLAYERS = 20
-TEAM_COLORS = ['#22D3EE', '#10B981', '#F59E0B', '#A78BFA']
+MAX_TEAMS = 20
+
+# One distinct colour per team slot. The team-count UI allows up to MAX_TEAMS,
+# so this list must not wrap — a short list silently gives teams 5+ the same
+# colours as teams 1-4, which makes the lobby columns indistinguishable.
+TEAM_COLORS = [
+    '#22D3EE', '#10B981', '#F59E0B', '#A78BFA',
+    '#F472B6', '#38BDF8', '#FB923C', '#4ADE80',
+    '#E879F9', '#FBBF24', '#2DD4BF', '#A3E635',
+    '#FB7185', '#818CF8', '#34D399', '#FCD34D',
+    '#C084FC', '#60A5FA', '#F97316', '#5EEAD4',
+]
 
 # Powerup reward rules. A powerup is guaranteed on every Nth consecutive
 # correct answer. Keep in sync with STREAK_REWARD_INTERVAL in
@@ -30,6 +41,99 @@ TEAM_COLORS = ['#22D3EE', '#10B981', '#F59E0B', '#A78BFA']
 # multiplayer runs this one, so the two must not drift.
 POWERUP_KEYS = ('freeze', 'hint', 'doublePoints', 'shield')
 STREAK_REWARD_INTERVAL = 3
+
+# ── Team momentum ────────────────────────────────────────────────────────
+# In team mode the multiplier is a *cumulative ladder* driven by how many
+# answers the team has got right, not a resettable streak. A resettable
+# streak is meaningless in the multiplayer loop: every player races their own
+# shuffled question order on a private timer (see StartGameView), so a
+# teammate's wrong answer would wipe the multiplier at a moment the player
+# could not anticipate or plan around. The ladder is monotonic, so it is
+# something a team can actually strategise around ("we're one miss from
+# dropping off x1.6"), and the miss penalty below gives wrong answers teeth
+# without ever eliminating a team.
+TEAM_MOMENTUM_TIERS = (
+    (20, 2.0),
+    (15, 1.6),
+    (10, 1.4),
+    (5, 1.2),
+    (0, 1.0),
+)
+
+# Emoji reactions available during a game. Kept server-side so the client
+# cannot write arbitrary values into the reactions subcollection.
+REACTION_EMOJIS = ('\U0001F525', '\U0001F44F', '\U0001F92F', '\U0001F622', '\U0001F4AA')
+
+TEAM_NAME_MAX_LEN = 20
+TEAM_NAME_MIN_LEN = 2
+
+
+def team_color(team_id):
+    """Stable colour for a 1-based team id. Never wraps into a duplicate."""
+    try:
+        index = int(team_id) - 1
+    except (TypeError, ValueError):
+        index = 0
+    return TEAM_COLORS[max(0, index) % len(TEAM_COLORS)]
+
+
+def team_multiplier(team_correct):
+    """Momentum multiplier for a team that has answered `team_correct` right."""
+    for threshold, multiplier in TEAM_MOMENTUM_TIERS:
+        if team_correct >= threshold:
+            return multiplier
+    return 1.0
+
+
+def demote_multiplier(current_multiplier):
+    """The rung one step below `current_multiplier`, floored at x1.0."""
+    for threshold, multiplier in reversed(TEAM_MOMENTUM_TIERS):
+        if current_multiplier > multiplier:
+            return multiplier
+    return 1.0
+
+
+def next_momentum_tier(team_correct):
+    """(points_to_next_tier, multiplier_of_next_tier) or None at the cap."""
+    for threshold, multiplier in reversed(TEAM_MOMENTUM_TIERS):
+        if team_correct < threshold:
+            return threshold, multiplier
+    return None
+
+
+def team_capacity(room_data, player_count):
+    """How many players one team may hold, given the roster that turned up.
+
+    Previously this was ceil(MAX_PLAYERS / team_count), which ignored the room
+    entirely: a 4-player / 3-team room advertised "1/7" and never rendered a
+    FULL state. Capacity is now derived from the players actually present, with
+    a floor of 2 so a team can never be locked out of taking a second member,
+    and a ceiling at the hard roster limit.
+    """
+    team_count = max(1, room_data.get('teamCount') or 2)
+    even = -(-max(0, player_count) // team_count)
+    return max(2, min(MAX_PLAYERS, even))
+
+
+def serialize_team(team_id, data):
+    """Wire shape for a team document, shared by join/start/leaderboard."""
+    return {
+        'id': team_id,
+        'name': data.get('name', f'Team {team_id}'),
+        'color': data.get('color') or team_color(team_id),
+        'score': data.get('score', 0),
+        'correctCount': data.get('correctCount', 0),
+        'answeredCount': data.get('answeredCount', 0),
+        'memberIds': data.get('memberIds', []) or [],
+        'memberCount': len(data.get('memberIds', []) or []),
+        'multiplier': data.get('multiplier', 1.0) or 1.0,
+        'teamCorrect': data.get('teamCorrect', 0) or 0,
+        'teamStreak': data.get('teamStreak', 0) or 0,
+        'bestStreak': data.get('bestStreak', 0) or 0,
+        'powerups': {k: (data.get('powerups') or {}).get(k, 0) for k in POWERUP_KEYS},
+        'namedBy': data.get('namedBy'),
+        'nameLocked': bool(data.get('nameLocked', False)),
+    }
 
 
 def get_display_name(user):
@@ -42,7 +146,23 @@ def _is_teacher_host(room_data):
     if not host_id:
         return False
     role = User.objects.filter(id=host_id).values_list('role', flat=True).first()
-    return role != 'student'
+    return role in ('educator', 'superadmin')
+
+
+def empty_powerups():
+    return {key: 0 for key in POWERUP_KEYS}
+
+
+def _team_stats(team_data):
+    """Accuracy / best-streak / peak-multiplier for a team document."""
+    correct = team_data.get('correctCount', 0) or 0
+    answered = team_data.get('answeredCount', 0) or 0
+    return {
+        'accuracy': round(correct / answered * 100) if answered else 0,
+        'bestStreak': team_data.get('bestStreak', 0) or 0,
+        'maxMultiplier': team_data.get('maxMultiplier', 1.0) or 1.0,
+        'memberCount': len(team_data.get('memberIds', []) or []),
+    }
 
 
 def snapshot_team_results(room_ref, room_data):
@@ -57,9 +177,57 @@ def snapshot_team_results(room_ref, room_data):
         'score': d.get('score', 0),
         'correctCount': d.get('correctCount', 0),
         'answeredCount': d.get('answeredCount', 0),
+        **_team_stats(d),
+        # Per-member contribution, so the final screen can show "who did the
+        # work inside this team" without ever ranking players across teams.
+        'members': [{
+            'userId': p.id,
+            'displayName': (pd or {}).get('displayName', 'Player'),
+            'score': (pd or {}).get('score', 0),
+            'correctCount': (pd or {}).get('correctCount', 0),
+            'answeredCount': (pd or {}).get('answeredCount', 0),
+        } for p in room_ref.collection('players').stream()
+            for pd in [p.to_dict() or {}]
+            if str(pd.get('teamId')) == str(t.id)],
     } for t in teams for d in [t.to_dict() or {}]]
+    for result in results:
+        total = sum(m['score'] for m in result['members']) or 1
+        for member in result['members']:
+            member['contribution'] = round(member['score'] / total * 100)
     results.sort(key=lambda r: r['score'], reverse=True)
     room_ref.update({'teamResults': results})
+
+
+def build_questions_from_quiz(quiz):
+    """Serialise a Quiz's questions into the shape a game room stores.
+
+    Shared by room creation and by the host picking a quiz in the lobby, so a
+    quiz selected after the room exists is built exactly like one chosen upfront.
+    """
+    questions = []
+    for q in quiz.questions.all():
+        if q.options and len(q.options) > 0:
+            letters = ['A', 'B', 'C', 'D']
+            choices = [f"{letters[i]}. {opt}" for i, opt in enumerate(q.options)]
+            correct_idx = -1
+            for i, opt in enumerate(q.options):
+                if opt.strip().lower() == q.correct_answer.strip().lower():
+                    correct_idx = i
+                    break
+            correct_answer = choices[correct_idx] if correct_idx >= 0 else choices[0]
+            questions.append({
+                'type': 'mcq',
+                'question': q.question_text,
+                'choices': choices,
+                'correctAnswer': correct_answer,
+            })
+        else:
+            questions.append({
+                'type': 'identification',
+                'question': q.question_text,
+                'correctAnswer': q.correct_answer,
+            })
+    return questions
 
 
 class CreateGameView(APIView):
@@ -70,9 +238,12 @@ class CreateGameView(APIView):
         time_per_question = int(request.data.get('timePerQuestion', 15))
         team_mode = str(request.data.get('teamMode', 'false')).lower() == 'true'
         team_count = int(request.data.get('teamCount', 2))
+        # A custom lobby creates the room first and picks the quiz afterwards, so
+        # nothing is required up front. The host must set one before starting.
+        defer_quiz = str(request.data.get('deferQuiz', 'false')).lower() == 'true'
 
-        if team_mode and not (2 <= team_count <= MAX_PLAYERS):
-            return Response({'error': 'teamCount must be between 2 and 20'}, status=400)
+        if team_mode and not (2 <= team_count <= MAX_TEAMS):
+            return Response({'error': f'teamCount must be between 2 and {MAX_TEAMS}'}, status=400)
 
         if quiz_id:
             from ai_assistant.models import Quiz
@@ -82,31 +253,14 @@ class CreateGameView(APIView):
                 return Response({'error': 'Quiz not found'}, status=404)
 
             topic = quiz.title
-            questions = []
-            for q in quiz.questions.all():
-                if q.options and len(q.options) > 0:
-                    letters = ['A', 'B', 'C', 'D']
-                    choices = [f"{letters[i]}. {opt}" for i, opt in enumerate(q.options)]
-                    correct_idx = -1
-                    for i, opt in enumerate(q.options):
-                        if opt.strip().lower() == q.correct_answer.strip().lower():
-                            correct_idx = i
-                            break
-                    correct_answer = choices[correct_idx] if correct_idx >= 0 else choices[0]
-                    questions.append({
-                        'type': 'mcq',
-                        'question': q.question_text,
-                        'choices': choices,
-                        'correctAnswer': correct_answer,
-                    })
-                else:
-                    questions.append({
-                        'type': 'identification',
-                        'question': q.question_text,
-                        'correctAnswer': q.correct_answer,
-                    })
-
+            questions = build_questions_from_quiz(quiz)
             question_count = len(questions)
+        elif defer_quiz:
+            # Questions are materialised in StartGameView once the host picks a
+            # quiz in the lobby.
+            topic = 'Quiz pending'
+            questions = []
+            question_count = 0
         else:
             uploaded_file = request.FILES.get('file')
             question_count = int(request.data.get('questionCount', 10))
@@ -126,7 +280,9 @@ class CreateGameView(APIView):
             topic = ai_data.get('topic', 'Study Quiz')
             questions = ai_data.get('questions', [])
 
-        if team_mode and question_count < team_count:
+        # A deferred room has no questions yet, so there is nothing to check
+        # against the team count until the host picks a quiz.
+        if team_mode and not defer_quiz and question_count < team_count:
             return Response({'error': 'Not enough questions for that many teams'}, status=400)
 
         room_code = generate_room_code()
@@ -149,7 +305,13 @@ class CreateGameView(APIView):
         if team_mode:
             room_data['teamMode'] = True
             room_data['teamCount'] = team_count
-            room_data['maxTeamSize'] = -(-MAX_PLAYERS // team_count)
+            if quiz_id:
+                # Lets StartGameView rebuild the questions for a lobby that was
+                # created without one.
+                room_data['quizId'] = int(quiz_id)
+        if defer_quiz:
+            # Signals to the lobby that the host still has to choose a quiz.
+            room_data['quizPending'] = True
         db.collection('gameRooms').document(room_code).set(room_data)
 
         if team_mode:
@@ -163,6 +325,16 @@ class CreateGameView(APIView):
                     'answeredCount': 0,
                     'memberIds': [],
                     'memberCount': 0,
+                    # Team-mode momentum state. Correct counts are team-wide so
+                    # a member's answer lifts the whole team up the ladder.
+                    'teamCorrect': 0,
+                    'teamStreak': 0,
+                    'bestStreak': 0,
+                    'multiplier': 1.0,
+                    'maxMultiplier': 1.0,
+                    'powerups': empty_powerups(),
+                    'namedBy': None,
+                    'nameLocked': False,
                 })
 
         player_data = {
@@ -190,6 +362,7 @@ class CreateGameView(APIView):
         }
         if team_mode:
             response_data['teamMode'] = True
+            response_data['teamCount'] = team_count
             response_data['teams'] = [
                 {'id': str(i + 1), 'name': f'Team {i + 1}', 'color': TEAM_COLORS[i % len(TEAM_COLORS)]}
                 for i in range(team_count)
@@ -265,12 +438,26 @@ class JoinGameView(APIView):
         if not room.exists:
             return Response({'error': 'Room not found'}, status=404)
 
-        room_data = room.to_dict()
+        room_data = room.to_dict() or {}
 
-        if room_data['status'] != 'waiting':
+        if room_data.get('status') != 'waiting':
             return Response({'error': 'Game already started'}, status=400)
 
         is_team_mode = bool(room_data.get('teamMode', False))
+        uid = str(request.user.id)
+        player_ref = room_ref.collection('players').document(uid)
+
+        # Refuse a *new* player once the roster is full, but let an existing
+        # member re-join (a page refresh, a flaky connection) without being
+        # locked out of their own game.
+        existing = player_ref.get().to_dict()
+        player_count = sum(1 for _ in room_ref.collection('players').stream())
+        if existing is None and player_count >= MAX_PLAYERS:
+            return Response(
+                {'error': f'Room is full ({MAX_PLAYERS} players)',
+                 'playerCount': player_count, 'maxPlayers': MAX_PLAYERS},
+                status=400,
+            )
 
         # Add player to room
         player_data = {
@@ -278,14 +465,17 @@ class JoinGameView(APIView):
             'avatar': request.user.avatar or '',
             'score': 0,
             'answeredCount': 0,
+            'correctCount': 0,
             'questionOrder': [],
             'isReady': True,
             'isFinished': False,
-            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            'powerups': empty_powerups(),
         }
         if is_team_mode:
             player_data['teamId'] = None
-        room_ref.collection('players').document(str(request.user.id)).set(player_data)
+        # merge=True so a re-join refreshes the profile without wiping a score
+        # that was already banked (a plain .set() used to zero it).
+        player_ref.set(player_data, merge=True)
 
         response = {
             'roomCode': room_code,
@@ -294,22 +484,84 @@ class JoinGameView(APIView):
         }
         if is_team_mode:
             response['teamMode'] = True
-            response['teams'] = [
-                {
-                    'id': t.id,
-                    'name': d.get('name', f'Team {t.id}'),
-                    'color': d.get('color'),
-                    'score': d.get('score', 0),
-                    'correctCount': d.get('correctCount', 0),
-                    'answeredCount': d.get('answeredCount', 0),
-                    'memberIds': d.get('memberIds', []),
-                    'memberCount': d.get('memberCount', 0),
-                }
-                for t in room_ref.collection('teams').stream()
-                for d in [t.to_dict() or {}]
-            ]
+            response['teamCount'] = room_data.get('teamCount', 2)
+            # A returning player is already counted in player_count, so only a
+            # genuinely new arrival grows the roster. Using player_count + 1
+            # unconditionally let a re-join report one more seat than the team
+            # actually had, and the lobby columns would never look full.
+            capacity = team_capacity(
+                room_data, player_count if existing is not None else player_count + 1)
+            response['maxTeamSize'] = capacity
+            response['teams'] = [serialize_team(t.id, d) for t in room_ref.collection('teams').stream()
+                                 for d in [t.to_dict() or {}]]
+            # Persist it: the waiting lobby renders team columns straight off the
+            # room document, so without this the columns had no ceiling to
+            # compare against and never showed FULL.
+            room_ref.update({'maxTeamSize': capacity})
+            # The client only has a room code, not the room doc, so tell it
+            # whether the host still owes the room a quiz. Without this the
+            # lobby would show "Quiz pending" with no way to know if a pick is
+            # possible yet.
+            if room_data.get('quizPending'):
+                response['quizPending'] = True
 
         return Response(response)
+
+
+class SetQuizView(APIView):
+    """Host picks the quiz for a room that was created with deferQuiz."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = request.data.get('roomCode', '').upper()
+        quiz_id = request.data.get('quizId')
+        if not room_code or quiz_id in (None, ''):
+            return Response({'error': 'roomCode and quizId are required'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+
+        room_data = room.to_dict() or {}
+        if room_data.get('hostId') != request.user.id:
+            return Response({'error': 'Only the host can choose the quiz'}, status=403)
+        if room_data.get('status') != 'waiting':
+            return Response({'error': 'Game already started'}, status=400)
+
+        from ai_assistant.models import Quiz
+        try:
+            quiz = Quiz.objects.get(id=quiz_id, user=request.user)
+        except (Quiz.DoesNotExist, ValueError, TypeError):
+            return Response({'error': 'Quiz not found'}, status=404)
+
+        questions = build_questions_from_quiz(quiz)
+        if not questions:
+            return Response({'error': 'That quiz has no questions yet'}, status=400)
+
+        # Same rule as creation: every team needs at least one question, or a
+        # team would sit out the round entirely.
+        if room_data.get('teamMode'):
+            team_count = room_data.get('teamCount') or 2
+            if len(questions) < team_count:
+                return Response({'error': 'Not enough questions for that many teams'}, status=400)
+
+        room_ref.update({
+            'quizId': int(quiz.id),
+            'topic': quiz.title,
+            'questions': questions,
+            'questionCount': len(questions),
+            'quizPending': False,
+        })
+        return Response({
+            'roomCode': room_code,
+            'quizId': int(quiz.id),
+            'topic': quiz.title,
+            'questionCount': len(questions),
+            'quizPending': False,
+        })
 
 
 class StartGameView(APIView):
@@ -324,52 +576,105 @@ class StartGameView(APIView):
         if not room.exists:
             return Response({'error': 'Room not found'}, status=404)
 
-        room_data = room.to_dict()
+        room_data = room.to_dict() or {}
 
-        if room_data['hostId'] != request.user.id:
+        if room_data.get('hostId') != request.user.id:
             return Response({'error': 'Only the host can start the game'}, status=403)
 
-        if room_data['status'] != 'waiting':
+        if room_data.get('status') != 'waiting':
             return Response({'error': 'Game already started'}, status=400)
 
+        # A lobby created with deferQuiz has no questions until the host picks
+        # one. Re-materialise from the stored quizId so the room is playable
+        # even if the set-quiz write was interrupted.
+        if not (room_data.get('questions') or []):
+            quiz_id = room_data.get('quizId')
+            if not quiz_id:
+                return Response({'error': 'Choose a quiz before starting the game'}, status=400)
+            from ai_assistant.models import Quiz
+            try:
+                quiz = Quiz.objects.get(id=quiz_id, user=request.user)
+            except (Quiz.DoesNotExist, ValueError, TypeError):
+                return Response({'error': 'Choose a quiz before starting the game'}, status=400)
+            questions = build_questions_from_quiz(quiz)
+            if not questions:
+                return Response({'error': 'That quiz has no questions yet'}, status=400)
+            room_ref.update({
+                'questions': questions,
+                'questionCount': len(questions),
+                'topic': quiz.title,
+                'quizPending': False,
+            })
+            room_data = room_ref.get().to_dict() or room_data
+
         players = list(room_ref.collection('players').stream())
+        team_mode = bool(room_data.get('teamMode', False))
+        team_count = max(1, room_data.get('teamCount') or 2)
+        auto_assign = bool(room_data.get('autoAssignTeams', False))
 
-        auto_assign = room_data.get('autoAssignTeams', False)
+        # The host may explicitly wave through students who never picked a
+        # team, rather than letting one absent-minded joiner deadlock the room.
+        force = str(request.data.get('force', 'false')).lower() == 'true'
+        unassigned = [p for p in players if team_mode and not (p.to_dict() or {}).get('teamId')]
+        if team_mode and unassigned and not (auto_assign or force):
+            return Response({
+                'error': 'All players must join a team before starting',
+                'unassigned': [len(unassigned)],
+            }, status=400)
 
-        if auto_assign and room_data.get('teamMode', False):
-            team_count = room_data.get('teamCount', 2)
-            player_ids = [p.id for p in players]
-            rng.shuffle(player_ids)
-            assignments = []
-            for idx, pid in enumerate(player_ids):
-                team_id = str((idx % team_count) + 1)
-                team_color = TEAM_COLORS[(int(team_id) - 1) % len(TEAM_COLORS)]
-                player_snap = next((p for p in players if p.id == pid), None)
-                display_name = (player_snap.to_dict() or {}).get('displayName', 'Player') if player_snap else 'Player'
+        assignments = []
+        if team_mode:
+            team_docs = {t.id: (t.to_dict() or {}) for t in room_ref.collection('teams').stream()}
+
+            def place(player_snap, team_id):
                 player_snap.reference.update({'teamId': team_id})
-                assignments.append({
-                    'id': pid,
-                    'displayName': display_name,
-                    'teamId': team_id,
-                    'teamName': f'Team {team_id}',
-                    'teamColor': team_color,
-                })
-            for t in room_ref.collection('teams').stream():
-                t.reference.update({
-                    'memberIds': [],
-                    'memberCount': 0,
-                })
-            for a in assignments:
-                team_ref = room_ref.collection('teams').document(a['teamId'])
-                team_ref.update({
-                    'memberIds': fs.ArrayUnion([a['id']]),
+                room_ref.collection('teams').document(team_id).update({
+                    'memberIds': fs.ArrayUnion([player_snap.id]),
                     'memberCount': fs.Increment(1),
                 })
 
-        if not auto_assign and room_data.get('teamMode', False):
-            for player in players:
-                if not (player.to_dict() or {}).get('teamId'):
-                    return Response({'error': 'All players must join a team before starting'}, status=400)
+            if auto_assign:
+                # Full shuffle: every player is dealt at random. Start from a
+                # clean slate so a reshuffled roster never double-counts.
+                for tid in team_docs:
+                    room_ref.collection('teams').document(tid).update({
+                        'memberIds': [], 'memberCount': 0,
+                    })
+                shuffled = list(players)
+                rng.shuffle(shuffled)
+                for i, player_snap in enumerate(shuffled):
+                    place(player_snap, str((i % team_count) + 1))
+            else:
+                # Honour the teams students picked in the lobby columns, then
+                # deal anyone left over into the emptiest team. Sorting by
+                # (size, id) and walking the list keeps team sizes within one
+                # of each other instead of piling leftovers onto team 1.
+                leftovers = list(unassigned)
+                rng.shuffle(leftovers)
+                load = {
+                    tid: len((team_docs.get(tid) or {}).get('memberIds', []) or [])
+                    for tid in team_docs
+                }
+                for player_snap in leftovers:
+                    if not load:
+                        break
+                    target = min(load, key=lambda tid: (load[tid], tid))
+                    load[target] += 1
+                    place(player_snap, target)
+
+            # Rebuild the reveal payload from final state, so it is correct
+            # whether teams were dealt, picked, or a mix of the two.
+            assignments = [{
+                'id': p.id,
+                'displayName': (pd or {}).get('displayName', 'Player'),
+                'teamId': tid,
+                'teamName': (team_docs.get(tid) or {}).get('name') or f'Team {tid}',
+                'teamColor': (team_docs.get(tid) or {}).get('color') or team_color(tid),
+            } for p in room_ref.collection('players').stream()
+                for pd in [p.to_dict() or {}]
+                for tid in [str(pd.get('teamId')) if pd.get('teamId') else None]
+                if tid]
+            assignments.sort(key=lambda a: (a['teamId'], a['displayName']))
 
         # Assign shuffled question order to each player
         count = len(room_data.get('questions', []))
@@ -382,11 +687,16 @@ class StartGameView(APIView):
             'status': 'active',
             'startedAt': fs.SERVER_TIMESTAMP,
         }
-        if auto_assign and room_data.get('teamMode', False):
+        if team_mode:
             update_fields['teamAssignments'] = assignments
+            update_fields['maxTeamSize'] = team_capacity(room_data, len(players))
         room_ref.update(update_fields)
 
-        return Response({'message': 'Game started!'})
+        return Response({
+            'message': 'Game started!',
+            'teamMode': team_mode,
+            'teamAssignments': assignments if team_mode else None,
+        })
 
 
 class AnswerQuestionView(APIView):
@@ -411,11 +721,22 @@ class AnswerQuestionView(APIView):
             if not room_doc.exists:
                 return Response({'error': 'Game room not found'}, status=404)
 
-            room = room_doc.to_dict()
+            room = room_doc.to_dict() or {}
             questions = room.get('questions', [])
+            time_per_q = max(1, room.get('timePerQuestion', 15) or 15)
+
+            if room.get('status') != 'active':
+                return Response({'error': 'Game is not in progress'}, status=400)
 
             if question_index < 0 or question_index >= len(questions):
                 return Response({'error': 'Invalid question index'}, status=400)
+
+            # timeTaken is client-reported, so it cannot be trusted for either
+            # scoring or bounds. Clamping into [0, timePerQuestion] makes the
+            # documented 500-1000 range real; without it a negative value
+            # inflates the score without limit and the team momentum
+            # multiplier would compound that.
+            time_taken = min(max(time_taken, 0.0), float(time_per_q))
 
             correct_answer = questions[question_index]['correctAnswer']
             q_type = questions[question_index].get('type', 'mcq')
@@ -427,13 +748,38 @@ class AnswerQuestionView(APIView):
                 is_correct = answer == correct_answer
 
             player_ref = room_ref.collection('players').document(str(request.user.id))
+            team_mode = bool(room.get('teamMode', False))
 
+            player_data = player_ref.get().to_dict() or {}
             team_ref = None
-            if room.get('teamMode', False):
-                player_data = player_ref.get().to_dict() or {}
-                team_id = player_data.get('teamId')
-                if team_id:
-                    team_ref = room_ref.collection('teams').document(str(team_id))
+            team_snapshot = {}
+            if team_mode and player_data.get('teamId'):
+                team_ref = room_ref.collection('teams').document(str(player_data['teamId']))
+                team_snapshot = team_ref.get().to_dict() or {}
+
+            # Powerups are spent from the TEAM pool in team mode, so a member
+            # can use a teammate's reward (and vice versa). The client's
+            # use-flags are self-asserted, so they are only honoured when the
+            # pool can actually pay for them.
+            if team_ref is not None:
+                pool = dict(team_snapshot.get('powerups') or {})
+            else:
+                pool = dict(player_data.get('powerups') or {})
+
+            def can_use(flag, key):
+                return bool(flag) and (pool.get(key, 0) or 0) > 0
+
+            use_double = can_use(use_double, 'doublePoints')
+            use_shield = can_use(use_shield, 'shield')
+            use_hint = can_use(use_hint, 'hint')
+
+            # The hint narrows the choices on the client *before* the answer is
+            # submitted, so there is no separate server call to charge. It is
+            # settled inside the answer transaction below, after the
+            # idempotency check — charging it here meant a retried submission
+            # (the `answeredQuestions` cache hit path) could still debit a
+            # fresh hint each time, draining the team pool for free.
+            hint_charge = use_hint
 
             @fs.transactional
             def answer_in_transaction(transaction, player_ref, team_ref):
@@ -461,29 +807,90 @@ class AnswerQuestionView(APIView):
                         'correctAnswer': cached.get('correctAnswer', ''),
                         'pointsAwarded': cached.get('pointsAwarded', 0),
                         'powerupEarned': None, # Don't re-award powerups
+                        'multiplier': cached.get('multiplier', 1.0),
                         'scored': False,
                     }
 
                 # 2. SCORING LOGIC (Moved inside transaction)
                 earned_points = 0
                 powerup_earned = None
-                
+                # Seeded before the correct/wrong branch so a team powerup
+                # reward earned in that branch survives into the team update
+                # further down.
+                team_updates = {}
+                multiplier = 1.0
+                # Where the spend lands: the team pool in team mode, the
+                # player's own pool otherwise.
+                powerups_spent = {}
+                if hint_charge:
+                    powerups_spent['powerups.hint'] = fs.Increment(-1)
+                if use_shield:
+                    powerups_spent['powerups.shield'] = fs.Increment(-1)
+
+                # One consistent view of the team for the whole transaction.
+                # Read up front because the boost check has to happen before
+                # scoring, while the momentum update further down still needs
+                # the pre-answer values.
+                team_now = (transaction.get(team_ref).to_dict() or {}) if team_ref is not None else {}
+
+                # Is a teammate's boost aimed at this player, on this question?
+                # A boost the player is already covering with their own 2x is
+                # not honoured, so the team cannot double-spend one charge.
+                boosted = (
+                    str(team_now.get('boostTarget') or '') == str(request.user.id)
+                    and team_now.get('boostQuestion') == question_index
+                    and not use_double
+                )
+                if boosted:
+                    # One-shot either way: a boost the target then gets wrong
+                    # must not carry over to a later question.
+                    team_updates['boostTarget'] = None
+                    team_updates['boostQuestion'] = None
+                    team_updates['boostedBy'] = None
+
                 if is_correct:
                     # Base score calculation
-                    time_per_q = room.get('timePerQuestion', 15)
                     # Formula: 1000 pts max, decaying by 50% over the full time limit
                     base_score = int(1000 * (1 - (time_taken / time_per_q) * 0.5))
                     earned_points = max(base_score, 500) # Minimum 500 pts
+
+                    if team_ref is not None:
+                        # Team momentum: the multiplier the whole team has
+                        # earned so far applies to this answer. It is the
+                        # single biggest reason to play as a team — a team
+                        # that grinds correct answers together scores far more
+                        # per question than four players soloing.
+                        #
+                        # Read the multiplier from the transactional team
+                        # state, not the pre-transaction read: two teammates
+                        # answering in the same instant must not both be
+                        # scored against the same stale `teamCorrect`, or the
+                        # second answer silently loses the tier it just earned.
+                        team_correct = (team_now.get('teamCorrect', 0) or 0)
+                        multiplier = team_multiplier(team_correct)
+                        earned_points = int(round(earned_points * multiplier))
 
                     # Apply 2x Multiplier
                     if use_double:
                         earned_points *= 2
 
+                    # A teammate spent the shared 2x on this exact answer.
+                    # Already paid for at BoostTeammateView time, so this only
+                    # applies the effect; a player who also armed their own
+                    # 2x keeps the better of the two rather than stacking.
+                    if boosted and not use_double:
+                        earned_points *= 2
+                        team_updates['boostApplied'] = True
+
                     updates = {
                         'score': fs.Increment(earned_points),
                         'answeredCount': fs.Increment(1),
+                        'correctCount': fs.Increment(1),
                         'streak': fs.Increment(1),
                     }
+                    for flag, key in ((use_double, 'doublePoints'),):
+                        if flag:
+                            powerups_spent[f'powerups.{key}'] = fs.Increment(-1)
 
                     # Powerup Reward Logic
                     current_streak = data.get('streak', 0)
@@ -500,14 +907,27 @@ class AnswerQuestionView(APIView):
                             and new_streak % STREAK_REWARD_INTERVAL == 0):
                         # Unowned types are all at count 0, which is the
                         # lowest count, so this single expression covers both
-                        # policies: prefer a type the player does not own,
+                        # policies: prefer a type the pool does not own,
                         # and once all four are held, stack onto whichever is
                         # rarest. Never degrades to a points consolation.
-                        current_powerups = data.get('powerups', {})
-                        lowest = min(current_powerups.get(k, 0) for k in POWERUP_KEYS)
-                        pool = [k for k in POWERUP_KEYS if current_powerups.get(k, 0) == lowest]
-                        ptype = pool[rng.randrange(len(pool))]
-                        updates[f'powerups.{ptype}'] = fs.Increment(1)
+                        if team_ref is not None:
+                            # From the transactional read, so simultaneous
+                            # streak rewards don't all resolve to the same
+                            # "lowest" type against a stale pool.
+                            owned = team_now.get('powerups') or {}
+                        else:
+                            owned = data.get('powerups') or {}
+                        lowest = min((owned.get(k, 0) or 0) for k in POWERUP_KEYS)
+                        candidates = [k for k in POWERUP_KEYS if (owned.get(k, 0) or 0) == lowest]
+                        ptype = candidates[rng.randrange(len(candidates))]
+                        if team_ref is not None:
+                            # Team pool: anyone on the team can spend it, which
+                            # is what lets a teammate cover for a player who is
+                            # stuck. This is the mechanic that makes members
+                            # have to talk to each other.
+                            team_updates[f'powerups.{ptype}'] = fs.Increment(1)
+                        else:
+                            updates[f'powerups.{ptype}'] = fs.Increment(1)
                         powerup_earned = ptype
 
                 else:
@@ -523,12 +943,17 @@ class AnswerQuestionView(APIView):
                 final_updates = updates if is_correct else {'answeredCount': fs.Increment(1)}
                 if not is_correct and not use_shield:
                      final_updates['streak'] = 0
-                
+                if team_ref is None:
+                    # Classic mode: the player pays for their own powerups.
+                    final_updates.update(powerups_spent)
+                    powerups_spent = {}
+
                 final_updates['answeredQuestions'] = fs.ArrayUnion([question_index])
                 final_updates['lastAnswerResult'] = {
                     'correct': is_correct,
                     'correctAnswer': correct_answer,
                     'pointsAwarded': earned_points,
+                    'multiplier': multiplier if is_correct else 1.0,
                 }
 
                 # 3. TEAM SCORE — inside the SAME transaction as the player update.
@@ -537,13 +962,42 @@ class AnswerQuestionView(APIView):
                 #    idempotency check above (answeredQuestions) keeps this from
                 #    double-counting on retries.
                 if team_ref is not None:
-                    transaction.get(team_ref)
-                    team_updates = {'answeredCount': fs.Increment(1)}
+                    # Read the team inside the transaction so the running
+                    # maxima and the demotion below are computed from a
+                    # consistent view, not the pre-transaction read.
+                    team_updates['answeredCount'] = fs.Increment(1)
+                    team_updates.update(powerups_spent)
+                    powerups_spent = {}
+
+                    prior_correct = team_now.get('teamCorrect', 0) or 0
+                    prior_streak = team_now.get('teamStreak', 0) or 0
+                    prior_multiplier = team_now.get('multiplier', 1.0) or 1.0
+
                     if is_correct:
                         score_increment = updates.get('score')
                         if isinstance(score_increment, fs.Increment):
                             team_updates['score'] = fs.Increment(score_increment.value)
                         team_updates['correctCount'] = fs.Increment(1)
+
+                        new_correct = prior_correct + 1
+                        next_multiplier = team_multiplier(new_correct)
+                        new_streak = prior_streak + 1
+                        team_updates['teamCorrect'] = new_correct
+                        team_updates['multiplier'] = next_multiplier
+                        team_updates['maxMultiplier'] = max(
+                            team_now.get('maxMultiplier', 1.0) or 1.0, next_multiplier)
+                        # A shield spends itself keeping the team flame alive;
+                        # a correct answer otherwise pushes it up.
+                        team_updates['teamStreak'] = new_streak
+                        team_updates['bestStreak'] = max(
+                            team_now.get('bestStreak', 0) or 0, new_streak)
+                    else:
+                        if not use_shield:
+                            # A miss breaks the team flame and drops the team
+                            # one rung of the momentum ladder. Soft by design:
+                            # recoverable, never elimination.
+                            team_updates['teamStreak'] = 0
+                            team_updates['multiplier'] = demote_multiplier(prior_multiplier)
                     transaction.update(team_ref, team_updates)
 
                 # Perform the single atomic update
@@ -554,6 +1008,7 @@ class AnswerQuestionView(APIView):
                     'correctAnswer': correct_answer,
                     'pointsAwarded': earned_points,
                     'powerupEarned': powerup_earned,
+                    'multiplier': multiplier if is_correct else 1.0,
                     'scored': True,
                 }
 
@@ -569,6 +1024,7 @@ class AnswerQuestionView(APIView):
                 'correctAnswer': result['correctAnswer'],
                 'pointsAwarded': result['pointsAwarded'],
                 'powerupEarned': result['powerupEarned'],
+                'multiplier': result.get('multiplier', 1.0),
             })
 
         except ValueError as e:
@@ -595,22 +1051,48 @@ class FinishGameView(APIView):
             if not room_doc.exists:
                 return Response({'error': 'Game room not found'}, status=404)
 
-            room_data = room_doc.to_dict()
+            room_data = room_doc.to_dict() or {}
             player_ref = room_ref.collection('players').document(str(request.user.id))
+            team_mode = bool(room_data.get('teamMode', False))
 
             player_ref.update({'isFinished': True})
 
             room_data = room_ref.get().to_dict() or {}
             host_id = str(room_data.get('hostId'))
 
-            if str(request.user.id) == host_id:
-                # Host can end the session at any time
+            def clear_reactions():
+                """Drop the ephemeral cheer subcollection on finish.
+
+                Reactions are only ever read as a rolling few-second window,
+                but nothing else prunes them, so a long game would otherwise
+                leave a subcollection growing for every question.
+                """
+                try:
+                    for doc in room_ref.collection('reactions').list_documents():
+                        doc.delete()
+                except Exception as e:  # never fail a finished game over this
+                    print(f'[FinishGame] reaction cleanup failed: {e}')
+
+            def settle():
+                """Close the room out, pay everyone once, snapshot teams."""
                 room_ref.update({
                     'status': 'finished',
                     'finishedAt': fs.SERVER_TIMESTAMP,
                 })
+                self._award_placement_xp(room_ref, room_code, team_mode)
                 snapshot_team_results(room_ref, room_data)
-                return Response({'message': 'Marked as finished', 'allFinished': True})
+                clear_reactions()
+                return self._rank_of_caller(room_ref, room_data, team_mode)
+
+            if str(request.user.id) == host_id:
+                # Host can end the session at any time. This used to return
+                # early without paying anyone, so "End Session Now" silently
+                # skipped the whole XP award.
+                return Response({
+                    'message': 'Marked as finished',
+                    'allFinished': True,
+                    **settle(),
+                })
 
             # Check if all non-host players are finished
             players = room_ref.collection('players').stream()
@@ -621,42 +1103,47 @@ class FinishGameView(APIView):
             # Only award placement XP on the transition to finished (once per room)
             already_finished = room_data.get('status') == 'finished'
             if all_finished and not already_finished:
-                room_ref.update({
-                    'status': 'finished',
-                    'finishedAt': fs.SERVER_TIMESTAMP,
-                })
-                self._award_placement_xp(room_ref, room_code)
-                snapshot_team_results(room_ref, room_data)
-
-            # Re-read standings to compute the caller's rank
-            standings = self._get_standings(room_ref)
-            rank = 0
-            for i, entry in enumerate(standings):
-                if entry['user_id'] == request.user.id:
-                    rank = i + 1
-                    break
+                caller = settle()
+            else:
+                caller = self._rank_of_caller(room_ref, room_data, team_mode)
 
             return Response({
                 'message': 'Marked as finished',
                 'allFinished': all_finished,
-                'rank': rank,
+                **caller,
             })
         except Exception as e:
             print(f'[FinishGame Error] {e}')
             return Response({'error': 'Failed to finish game'}, status=500)
+
+    def _rank_of_caller(self, room_ref, room_data, team_mode):
+        """The finishing player's placement.
+
+        In team mode the rank is the rank of their TEAM, not of themselves:
+        team mode is a team game, so the individual number that used to be
+        returned here (and shown as "You finished #2") was actively wrong.
+        """
+        if team_mode:
+            return self._get_team_standings(room_ref, room_data)
+        standings = self._get_standings(room_ref, room_data)
+        for i, entry in enumerate(standings):
+            if entry['user_id'] == self.request.user.id:
+                return {'rank': i + 1, 'teamRank': None, 'teamId': None}
+        return {'rank': 0, 'teamRank': None, 'teamId': None}
 
     def _get_standings(self, room_ref, room_data):
         """Sorted (rank-ordered) players by score, descending.
         The host is excluded if they are an educator (so they do not shift
         students' placement ranks or appear on the final leaderboard)."""
         players = room_ref.collection('players').stream()
+        teacher_host = _is_teacher_host(room_data)
         entries = []
         for p in players:
             data = p.to_dict() or {}
             user_id = int(p.id)
             # Exclude the host if they are an educator; students who host
             # remain on the leaderboard as real participants.
-            if _is_teacher_host(room_data) and user_id == room_data.get('hostId'):
+            if teacher_host and user_id == room_data.get('hostId'):
                 continue
             entries.append({
                 'user_id': user_id,
@@ -666,34 +1153,88 @@ class FinishGameView(APIView):
         entries.sort(key=lambda e: e['score'], reverse=True)
         return entries
 
-    def _award_placement_xp(self, room_ref, room_code):
-        """Award XP to every participant based on final placement."""
-        standings = self._get_standings(room_ref)
+    def _get_team_standings(self, room_ref, room_data):
+        """Rank-ordered teams, plus the caller's team placement."""
+        teams = [{
+            'team_id': t.id,
+            'name': (d or {}).get('name', f'Team {t.id}'),
+            'score': (d or {}).get('score', 0),
+            'member_ids': [str(uid) for uid in ((d or {}).get('memberIds', []) or [])],
+        } for t in room_ref.collection('teams').stream() for d in [t.to_dict() or {}]]
+        teams.sort(key=lambda t: t['score'], reverse=True)
 
-        # Standard competition ranking (ties share the same rank)
+        uid = str(self.request.user.id)
+        mine = next((t for t in teams if uid in t['member_ids']), None)
+        team_rank = (teams.index(mine) + 1) if mine else 0
+        return {
+            # In team mode there is no individual placement to report, so both
+            # keys carry the team's finishing position. This is what the final
+            # screen and the placement XP both key off.
+            'rank': team_rank,
+            'teamRank': team_rank,
+            'teamId': mine['team_id'] if mine else None,
+        }
+
+    @staticmethod
+    def _competition_ranks(scores):
+        """Standard competition ranking: 1,2,2,4. Ties share a rank and the
+        next rank skips accordingly, so the XP a client is told about and the
+        XP actually paid can never disagree."""
         ranks = []
         prev_score = None
         prev_rank = 0
-        for i, entry in enumerate(standings):
-            if entry['score'] != prev_score:
-                rank = i + 1
-                prev_rank = rank
-                prev_score = entry['score']
-            else:
-                rank = prev_rank
-            ranks.append(rank)
+        for i, score in enumerate(scores):
+            if score != prev_score:
+                prev_rank = i + 1
+                prev_score = score
+            ranks.append(prev_rank)
+        return ranks
 
+    def _award_placement_xp(self, room_ref, room_code, team_mode=False):
+        """Award XP to every participant based on final placement.
+
+        In team mode placement is the TEAM's finishing position, and every
+        member is paid that team's placement. Ranking players individually
+        here is what made team mode still read as an individual game.
+        """
+        if team_mode:
+            team_doc = {}
+            for t in room_ref.collection('teams').stream():
+                data = t.to_dict() or {}
+                team_doc[t.id] = data
+            team_ids = list(team_doc)
+            ordered = sorted(team_ids, key=lambda tid: team_doc[tid].get('score', 0) or 0, reverse=True)
+            ranks = self._competition_ranks([team_doc[tid].get('score', 0) or 0 for tid in ordered])
+            team_rank = dict(zip(ordered, ranks))
+
+            for p in room_ref.collection('players').stream():
+                data = p.to_dict() or {}
+                if not data.get('teamId'):
+                    continue
+                team_id = str(data['teamId'])
+                if team_id not in team_rank:
+                    continue
+                self._pay(user_id=p.id, rank=team_rank[team_id], room_code=room_code,
+                          label=f"#{team_rank[team_id]} with {team_doc[team_id].get('name') or f'Team {team_id}'}")
+            return
+
+        standings = self._get_standings(room_ref, room_ref.get().to_dict() or {})
+        ranks = self._competition_ranks([e['score'] for e in standings])
         for entry, rank in zip(standings, ranks):
-            user = User.objects.filter(id=entry['user_id']).first()
-            if user:
-                try:
-                    record_game_finish(user, rank, room_code=room_code)
-                except Exception as e:
-                    print(f'[FinishGame XP Award Error] user {entry["user_id"]}: {e}')
+            self._pay(user_id=entry['user_id'], rank=rank, room_code=room_code, label=f'#{rank}')
+
+    def _pay(self, user_id, rank, room_code, label):
+        user = User.objects.filter(id=user_id).first()
+        if not user:
+            return
+        try:
+            record_game_finish(user, rank, room_code=room_code, context=label)
+        except Exception as e:
+            print(f'[FinishGame XP Award Error] user {user_id}: {e}')
 
 
 class RoomLeaderboardView(APIView):
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, room_code):
         room_code = room_code.upper()
@@ -704,18 +1245,21 @@ class RoomLeaderboardView(APIView):
         if not room.exists:
             return Response({'error': 'Room not found'}, status=404)
 
-        room_data = room.to_dict()
+        room_data = room.to_dict() or {}
+        teacher_host = _is_teacher_host(room_data)
 
         players = []
         for p in room_ref.collection('players').stream():
             d = p.to_dict() or {}
-            if _is_teacher_host(room_data) and str(p.id) == str(room_data.get('hostId')):
+            if teacher_host and str(p.id) == str(room_data.get('hostId')):
                 continue
             players.append({
                 'id': p.id,
                 'displayName': d.get('displayName', 'Player'),
+                'avatar': d.get('avatar', ''),
                 'score': d.get('score', 0),
                 'answeredCount': d.get('answeredCount', 0),
+                'correctCount': d.get('correctCount', 0),
                 'streak': d.get('streak', 0),
                 'isFinished': bool(d.get('isFinished', False)),
                 'teamId': d.get('teamId'),
@@ -725,15 +1269,7 @@ class RoomLeaderboardView(APIView):
         teams = []
         for t in room_ref.collection('teams').stream():
             d = t.to_dict() or {}
-            teams.append({
-                'id': t.id,
-                'name': d.get('name', f'Team {t.id}'),
-                'color': d.get('color'),
-                'score': d.get('score', 0),
-                'correctCount': d.get('correctCount', 0),
-                'answeredCount': d.get('answeredCount', 0),
-                'memberCount': d.get('memberCount', 0),
-            })
+            teams.append({**serialize_team(t.id, d), **_team_stats(d)})
         teams.sort(key=lambda x: x['score'], reverse=True)
 
         return Response({
@@ -743,11 +1279,316 @@ class RoomLeaderboardView(APIView):
             'questionCount': room_data.get('questionCount', 0),
             'timePerQuestion': room_data.get('timePerQuestion', 15),
             'teamMode': bool(room_data.get('teamMode', False)),
+            'teamCount': room_data.get('teamCount', 0),
+            'maxTeamSize': room_data.get('maxTeamSize'),
             'hostId': str(room_data.get('hostId', '')),
             'hostName': room_data.get('hostName', ''),
             'players': players,
             'teams': teams,
         })
+
+
+class AssignTeamView(APIView):
+    """Move the calling player into a team, leaving their previous one.
+
+    This replaces a client-side Firestore batch that had no validation at all:
+    it could be fired twice concurrently, drifted memberCount into the
+    negatives, and let any client set an arbitrary teamId. Doing it here means
+    the roster, the team arrays and the player's teamId always move together.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        team_id = str(request.data.get('teamId') or '').strip()
+        if not room_code or not team_id:
+            return Response({'error': 'roomCode and teamId are required'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+
+        room_data = room.to_dict() or {}
+        if not room_data.get('teamMode', False):
+            return Response({'error': 'This room is not in team mode'}, status=400)
+        if room_data.get('status') != 'waiting':
+            return Response({'error': 'Teams are locked once the game starts'}, status=400)
+
+        player_ref = room_ref.collection('players').document(str(request.user.id))
+        if not player_ref.get().exists:
+            return Response({'error': 'You are not in this room'}, status=400)
+
+        team_ref = room_ref.collection('teams').document(team_id)
+        team_doc = team_ref.get()
+        if not team_doc.exists:
+            return Response({'error': 'Team not found'}, status=404)
+        team_data = team_doc.to_dict() or {}
+
+        uid = str(request.user.id)
+        current_team_id = (player_ref.get().to_dict() or {}).get('teamId')
+        current_team_id = str(current_team_id) if current_team_id else None
+
+        if current_team_id == team_id:
+            return Response({'message': 'Already on that team', 'teamId': team_id,
+                             'teams': [serialize_team(t.id, d) for t in room_ref.collection('teams').stream()
+                                       for d in [t.to_dict() or {}]]})
+
+        roster_size = sum(1 for _ in room_ref.collection('players').stream())
+        capacity = team_capacity(room_data, roster_size)
+        if len(team_data.get('memberIds', []) or []) >= capacity:
+            return Response({'error': 'That team is full', 'maxTeamSize': capacity}, status=400)
+
+        # One transaction so a double-tap or a retry can never leave the
+        # player in two teams' memberIds at once.
+        @fs.transactional
+        def move(transaction):
+            transaction.update(team_ref, {
+                'memberIds': fs.ArrayUnion([uid]),
+                'memberCount': fs.Increment(1),
+            })
+            if current_team_id:
+                old_ref = room_ref.collection('teams').document(current_team_id)
+                transaction.get(old_ref)
+                transaction.update(old_ref, {
+                    'memberIds': fs.ArrayRemove([uid]),
+                    'memberCount': fs.Increment(-1),
+                })
+            transaction.update(player_ref, {'teamId': team_id})
+
+        move(db.transaction())
+        return Response({
+            'message': f'Joined {team_data.get("name", f"Team {team_id}")}',
+            'teamId': team_id,
+            'maxTeamSize': capacity,
+            'teams': [serialize_team(t.id, d) for t in room_ref.collection('teams').stream()
+                      for d in [t.to_dict() or {}]],
+        })
+
+
+class RenameTeamView(APIView):
+    """Let the host — or any member — give the team a real name.
+
+    Whichever member gets there first names the team and it locks, so a class
+    ends up with one committed name rather than a running edit war.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        team_id = str(request.data.get('teamId') or '').strip()
+        name = str(request.data.get('name') or '').strip()
+        if not room_code or not team_id:
+            return Response({'error': 'roomCode and teamId are required'}, status=400)
+        if not (TEAM_NAME_MIN_LEN <= len(name) <= TEAM_NAME_MAX_LEN):
+            return Response(
+                {'error': f'Team name must be {TEAM_NAME_MIN_LEN}-{TEAM_NAME_MAX_LEN} characters'},
+                status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+
+        room_data = room.to_dict() or {}
+        if not room_data.get('teamMode', False):
+            return Response({'error': 'This room is not in team mode'}, status=400)
+
+        team_ref = room_ref.collection('teams').document(team_id)
+        team_doc = team_ref.get()
+        if not team_doc.exists:
+            return Response({'error': 'Team not found'}, status=404)
+        team_data = team_doc.to_dict() or {}
+
+        uid = str(request.user.id)
+        is_host = str(room_data.get('hostId')) == uid
+        # Locked names survive a room restart: once a class has committed to
+        # "The Brainy Bunch", a later joiner must not be able to rename it.
+        already_named = team_data.get('nameLocked', False)
+        if not is_host and already_named:
+            return Response({'error': 'Your team has already picked a name'}, status=403)
+        if not is_host and uid not in [str(m) for m in (team_data.get('memberIds') or [])]:
+            return Response({'error': 'Join the team before naming it'}, status=403)
+        if room_data.get('status') != 'waiting':
+            return Response({'error': 'Teams are locked once the game starts'}, status=400)
+
+        team_ref.update({'name': name, 'namedBy': uid, 'nameLocked': True})
+        return Response({'message': 'Team renamed', 'teamId': team_id, 'name': name})
+
+
+class BoostTeammateView(APIView):
+    """Spend a shared 2x on a specific teammate's next answer.
+
+    The team already shares a pool, but 'somebody should use this' is not a
+    decision players can make without a target. Naming a teammate turns the
+    pool from a passive resource into something the team has to negotiate
+    about mid-quiz, which is most of what makes the mode feel shared.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        target_id = str(request.data.get('playerId') or '').strip()
+        if not room_code or not target_id:
+            return Response({'error': 'roomCode and playerId are required'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+        room_data = room.to_dict() or {}
+        if not room_data.get('teamMode', False):
+            return Response({'error': 'This room is not in team mode'}, status=400)
+        if room_data.get('status') != 'active':
+            return Response({'error': 'Boosts only work while the game is running'}, status=400)
+
+        uid = str(request.user.id)
+        players = room_ref.collection('players')
+        caller = (players.document(uid).get().to_dict() or {})
+        target = (players.document(target_id).get().to_dict() or {})
+
+        caller_team = caller.get('teamId')
+        if not caller_team:
+            return Response({'error': 'Join a team before boosting'}, status=400)
+        if str(target.get('teamId') or '') != str(caller_team):
+            return Response({'error': 'You can only boost a teammate'}, status=403)
+        if target_id == uid:
+            return Response({'error': 'Use a powerup on yourself instead'}, status=400)
+        if target.get('isFinished'):
+            return Response({'error': 'That player has already finished'}, status=400)
+
+        team_ref = room_ref.collection('teams').document(str(caller_team))
+        pool = dict((team_ref.get().to_dict() or {}).get('powerups') or {})
+        if (pool.get('doublePoints', 0) or 0) <= 0:
+            return Response({'error': 'No 2x left in the team pool'}, status=400)
+
+        # The boosted answer is the target's first unanswered question in
+        # their own shuffled order. That is derivable from the player doc the
+        # request already has to read, so the client never has to publish a
+        # "current question" marker that could drift out of sync.
+        order = list(target.get('questionOrder') or [])
+        answered = set(target.get('answeredQuestions') or [])
+        next_question = next((q for q in order if q not in answered), None)
+        if next_question is None:
+            return Response({'error': 'That player has no questions left'}, status=400)
+
+        team_ref.update({
+            'powerups.doublePoints': fs.Increment(-1),
+            'boostTarget': target_id,
+            'boostQuestion': next_question,
+            'boostedBy': uid,
+        })
+        return Response({
+            'message': 'Boost sent',
+            'teamId': str(caller_team),
+            'boostTarget': target_id,
+            'boostQuestion': next_question,
+        })
+
+
+class FreezeTimerView(APIView):
+    """Spend a freeze to stop the caller's own clock on the current question.
+
+    Every other powerup is settled by the answer endpoint, but a freeze has
+    to take effect *before* the answer exists, so it needs its own call. It
+    used to be a raw client-side `increment(-1)` on the player's own document:
+    that never touched the shared team pool (so a team could freeze forever),
+    could drive the count negative, and let a player stack several freezes on
+    one question. The charge is now decided here, transactionally.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        raw_index = request.data.get('questionIndex')
+        if not room_code or raw_index is None:
+            return Response({'error': 'roomCode and questionIndex are required'}, status=400)
+        try:
+            question_index = int(raw_index)
+        except (TypeError, ValueError):
+            return Response({'error': 'questionIndex must be a number'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+        room_data = room.to_dict() or {}
+        if room_data.get('status') != 'active':
+            return Response({'error': 'Freezes only work while the game is running'}, status=400)
+
+        uid = str(request.user.id)
+        player_ref = room_ref.collection('players').document(uid)
+        player = (player_ref.get().to_dict() or {})
+        if not player:
+            return Response({'error': 'You are not in this room'}, status=403)
+        if player.get('isFinished'):
+            return Response({'error': 'You have already finished'}, status=400)
+
+        team_mode = bool(room_data.get('teamMode', False))
+        caller_team = player.get('teamId')
+        if team_mode and not caller_team:
+            return Response({'error': 'Join a team before using a freeze'}, status=400)
+        # Team mode charges the shared pool; solo play charges the player.
+        pool_ref = room_ref.collection('teams').document(str(caller_team)) if team_mode else player_ref
+
+        @fs.transactional
+        def charge(transaction):
+            before = transaction.get(pool_ref).to_dict() or {}
+            powerups = before.get('powerups') or {}
+            remaining = powerups.get('freeze', 0) or 0
+            if remaining <= 0:
+                return None
+            # Written as an absolute value rather than an increment so a
+            # simultaneous second freeze cannot take the count below zero.
+            transaction.update(pool_ref, {'powerups.freeze': remaining - 1})
+            if team_mode:
+                # The marker keeps the charge personal: a teammate's freeze
+                # does not carry over to the next player who taps Freeze.
+                transaction.update(player_ref, {'frozenQuestion': question_index})
+            return True
+
+        if charge(db.transaction()) is not True:
+            return Response({'error': 'No freeze left'}, status=400)
+        return Response({'message': 'Timer frozen', 'questionIndex': question_index})
+
+
+class ReactToGameView(APIView):
+    """Emoji reactions, written server-side so the client cannot inject
+    arbitrary documents into the room's reactions subcollection."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        emoji = str(request.data.get('emoji') or '')
+        if not room_code:
+            return Response({'error': 'roomCode is required'}, status=400)
+        if emoji not in REACTION_EMOJIS:
+            return Response({'error': 'Unsupported reaction'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        if not room_ref.get().exists:
+            return Response({'error': 'Room not found'}, status=404)
+
+        player = room_ref.collection('players').document(str(request.user.id)).get().to_dict() or {}
+        reaction = {
+            'emoji': emoji,
+            'userId': str(request.user.id),
+            'displayName': player.get('displayName', 'Player'),
+            'teamId': player.get('teamId'),
+            'createdAt': fs.SERVER_TIMESTAMP,
+        }
+        ref = room_ref.collection('reactions').document()
+        ref.set(reaction)
+        # createdAt is a server sentinel, not JSON, so the echoed copy omits it.
+        return Response({'message': 'Sent', 'reactionId': ref.id, 'reaction': {
+            'id': ref.id, 'emoji': emoji, 'userId': reaction['userId'],
+            'displayName': reaction['displayName'], 'teamId': reaction['teamId'],
+        }})
 
 
 class OfflineResultsView(APIView):

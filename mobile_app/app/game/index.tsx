@@ -34,6 +34,8 @@ import { startScanning, stopScanning, startAdvertising, stopAdvertising, Discove
 import { buildQuestions } from '@/services/offlineEngine';
 import { pfpSource } from '@/constants/pfps';
 import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/JoinCodeInput';
+import TeamColumns from '@/components/game/TeamColumns';
+import { sameTeamId, type PlayerEntry, type TeamEntry } from '@/types/game';
 
 // 🎨 SAGE Design System Colors
 const COLORS = {
@@ -110,6 +112,11 @@ export default function GameCenterScreen() {
   const [roomMode, setRoomMode] = useState<'classic' | 'group' | null>(null);
   const [roomHostId, setRoomHostId] = useState<number | string | null>(null);
   const [teams, setTeams] = useState<any[]>([]);
+  // Team columns (GROUP MODE): the room publishes a per-team cap, and
+  // `busyTeamId` both shows a spinner and blocks further taps while the
+  // server decides the assignment.
+  const [roomMaxTeamSize, setRoomMaxTeamSize] = useState(20);
+  const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
   const [lanName, setLanName] = useState('Player');
   const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
   const lanHostRef = useRef<LanHostServer | null>(null);
@@ -257,6 +264,7 @@ export default function GameCenterScreen() {
         setRoomStatus(d.status ?? 'waiting');
         setRoomMode(d.mode === 'group' || d.teamMode ? 'group' : 'classic');
         setRoomHostId(d.hostId ?? null);
+        setRoomMaxTeamSize(d.maxTeamSize ?? 20);
         if (d.status === 'active') {
           startJoinedCountdown(roomCode);
         }
@@ -351,15 +359,23 @@ export default function GameCenterScreen() {
       }
     } else if (modeId === 'group') {
       setSelectedMode(modeId);
-      setActiveTab('custom');
-      // Sync mode to room doc if host has an active room
-      if (roomCode && !joinedRoom) {
-        firestore()
-          .collection('gameRooms')
-          .doc(roomCode)
-          .update({ mode: 'group' })
-          .catch(() => {});
+      // Team mode owns its lobby on /game/lobby, which is where the host picks a
+      // quiz and shares the invite. Creating the room here as well left two
+      // competing lobbies: this screen had its own invite modal and inline team
+      // columns, so host and joiners could be looking at different room state.
+      if (isOffline || usingCachedQuizzes) {
+        // A LAN game has no server room and never reaches the custom lobby.
+        setActiveTab('custom');
+        if (roomCode && !joinedRoom) {
+          firestore()
+            .collection('gameRooms')
+            .doc(roomCode)
+            .update({ mode: 'group' })
+            .catch(() => {});
+        }
+        return;
       }
+      startGroupLobby();
     } else if (modeId === 'flashcards') {
       router.push('/flashcards');
     } else {
@@ -386,6 +402,62 @@ export default function GameCenterScreen() {
       `Please choose ${missing.join(' and ')} before starting a game.`,
     );
     return null;
+  };
+
+  /**
+   * Team mode hands off to /game/lobby. The room is created without a quiz
+   * (`deferQuiz`), because the host picks one inside the lobby once the team
+   * columns and the invite code are already on screen. That ordering is the
+   * whole point of the custom lobby: invite people first, choose second.
+   */
+  const startGroupLobby = async () => {
+    setIsCreatingRoom(true);
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/game/create/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          deferQuiz: 'true',
+          timePerQuestion: parseInt(timePerQuestion) || 15,
+          teamMode: 'true',
+          autoAssignTeams: 'false',
+          teamCount,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to create room');
+
+      // The lobby reads the room document directly, so the mode has to be on it
+      // rather than only in this component's state.
+      firestore()
+        .collection('gameRooms')
+        .doc(data.roomCode)
+        .update({ mode: 'group' })
+        .catch(() => {});
+
+      setRoomCode(data.roomCode);
+      // `isHost` is what switches the lobby between host controls (quiz picker,
+      // start button) and the waiting state. Omitting it renders the host as a
+      // joiner with no way to pick a quiz or begin.
+      router.push({
+        pathname: '/game/lobby',
+        params: {
+          roomCode: data.roomCode,
+          isHost: 'true',
+          teamMode: 'true',
+          teamCount: String(teamCount),
+        },
+      } as any);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Could not open the team lobby');
+    } finally {
+      setIsCreatingRoom(false);
+    }
   };
 
   // 2. Handle Invite Press -> Create Room (if needed) & Show Code Modal
@@ -436,7 +508,9 @@ export default function GameCenterScreen() {
           quizId: quiz.id,
           timePerQuestion: parseInt(timePerQuestion) || 15,
           teamMode: selectedMode === 'group' ? 'true' : 'false',
-          autoAssignTeams: selectedMode === 'group' ? 'true' : 'false',
+          // Players choose their own team in the lobby. Auto-assign stays
+          // available as a "let the host decide" option, not the default.
+          autoAssignTeams: 'false',
           ...(selectedMode === 'group' ? { teamCount } : {}),
         }),
       });
@@ -548,7 +622,7 @@ export default function GameCenterScreen() {
             quizId: selectedQuiz.id,
             timePerQuestion: parseInt(timePerQuestion) || 15,
             teamMode: selectedMode === 'group' ? 'true' : 'false',
-            autoAssignTeams: selectedMode === 'group' ? 'true' : 'false',
+            autoAssignTeams: 'false',
             ...(selectedMode === 'group' ? { teamCount } : {}),
           }),
         });
@@ -775,12 +849,29 @@ export default function GameCenterScreen() {
       if (!response.ok) throw new Error(data.error || 'Failed to join room');
       setShowJoinModal(false);
       setJoinCode(Array(JOIN_CODE_LENGTH).fill(''));
+
+      // A team-mode room is owned by /game/lobby. Staying here would put the
+      // joiner in this screen's inline panel while the host is in the real
+      // lobby, so both sides would be looking at different room state.
+      if (data.teamMode) {
+        router.push({
+          pathname: '/game/lobby',
+          params: {
+            roomCode: code,
+            isHost: 'false',
+            teamMode: 'true',
+            topic: data.topic || '',
+          },
+        } as any);
+        return;
+      }
+
       // Stay on Play tab — joined room view
       setRoomCode(code);
       setRoomTopic(data.topic || '');
       setJoinedRoom(true);
-      setRoomMode(data.teamMode ? 'group' : 'classic');
-      setSelectedMode(data.teamMode ? 'group' : 'classic');
+      setRoomMode('classic');
+      setSelectedMode('classic');
       setActiveTab('presets');
     } catch (error: any) {
       console.warn('Join fell back to LAN after server error', error);
@@ -836,29 +927,54 @@ export default function GameCenterScreen() {
     );
   };
 
-  const assignToTeam = async (teamId: string) => {
-    if (!roomCode || !currentUserId) return;
-    const uid = String(currentUserId);
-    const roomRef = firestore().collection('gameRooms').doc(roomCode);
-    // Find current team to remove from memberIds
-    const playerRef = roomRef.collection('players').doc(uid);
+  /* ── team columns (GROUP MODE) ── */
+  // Assignment goes through the server, not a client-side Firestore batch:
+  // capacity is a race otherwise, and a full team would happily accept a
+  // write that the roster then over-reports. This matches the lobby.
+  const post = async (path: string, body: Record<string, unknown>) => {
+    const token = await getToken();
+    const res = await fetch(`${API_BASE_URL}/game/${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    return data;
+  };
+
+  const assignTeamServer = async (teamId: string) => {
+    if (!roomCode) return;
+    setBusyTeamId(String(teamId));
     try {
-      const playerSnap = await playerRef.get();
-      const myTeamId = playerSnap.data()?.teamId;
-      const batch = firestore().batch();
-      if (myTeamId && myTeamId !== teamId) {
-        batch.update(roomRef.collection('teams').doc(myTeamId), {
-          memberIds: firestore.FieldValue.arrayRemove(uid),
-        });
-      }
-      batch.update(roomRef.collection('teams').doc(teamId), {
-        memberIds: firestore.FieldValue.arrayUnion(uid),
-      });
-      batch.update(playerRef, { teamId });
-      await batch.commit();
-    } catch (e) {
-      console.warn('Team assignment failed', e);
+      await post('teams/assign/', { roomCode, teamId: String(teamId) });
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to join team');
+    } finally {
+      setBusyTeamId(null);
     }
+  };
+
+  const doRename = async (teamId: string, name: string) => {
+    if (!roomCode) return;
+    await post('teams/rename/', { roomCode, teamId, name });
+  };
+
+  const handlePickTeam = (teamId: string) => {
+    const target = teams.find(t => String(t.id) === String(teamId));
+    const current = teams.find(t => sameTeamId(t.id, myTeamId));
+    if (!target || String(target.id) === String(myTeamId)) return;
+    // First pick needs no ceremony; switching teams does, since it silently
+    // changes who you are answering for.
+    if (!current) { assignTeamServer(teamId); return; }
+    Alert.alert(
+      'Switch team',
+      `Move from ${current.name || `Team ${current.id}`} to ${target.name || `Team ${target.id}`}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Switch', onPress: () => assignTeamServer(teamId) },
+      ],
+    );
   };
 
   // --- Render Helpers ---
@@ -870,6 +986,14 @@ export default function GameCenterScreen() {
     ? lanRoster.map(p => ({ id: p.id, displayName: p.name, avatar: p.avatar }))
     : roomPlayers.filter(p => String(p.id) !== String(currentUserId));
   const joinedCount = joinedPlayers.length;
+
+  // Which team am I in, and am I the host? Needed by the team columns for the
+  // "YOU" pill, rename permission and the switch confirmation.
+  const myTeamId = roomPlayers.find(
+    p => String(p.id) === String(currentUserId)
+  )?.teamId as string | undefined;
+  const isHostUser = roomHostId != null && currentUserId != null
+    && String(roomHostId) === String(currentUserId);
 
   // While waiting in a LAN game, the host is only a roster player once they tap
   // START — until then, show a dedicated HOST slot so joiners can see them.
@@ -1097,41 +1221,26 @@ export default function GameCenterScreen() {
                     );
                 })}
 
-                {/* Team picker for joined players in GROUP MODE */}
+                {/* Team columns for joined players in GROUP MODE. Tapping a
+                    column joins that team. The lobby screen uses this same
+                    component, so GROUP MODE looks and behaves identically
+                    whichever way a room was created. */}
                 {joinedRoom && roomMode === 'group' && teams.length > 0 && (
-                  <View style={styles.teamPickerSection}>
-                    <Text style={styles.teamPickerLabel}>PICK YOUR TEAM</Text>
-                    <View style={styles.teamPickerChips}>
-                      {teams.map((team) => {
-                        const myTeamId = roomPlayers.find(
-                          p => String(p.id) === String(currentUserId)
-                        )?.teamId as string | undefined;
-                        const isMyTeam = team.id === myTeamId;
-                        const memberCount = team.memberIds?.length || 0;
-                        return (
-                          <TouchableOpacity
-                            key={team.id}
-                            style={[
-                              styles.teamPickerChip,
-                              isMyTeam && styles.teamPickerChipActive,
-                            ]}
-                            onPress={() => assignToTeam(team.id)}
-                            activeOpacity={0.7}
-                            disabled={roomStatus === 'active'}
-                          >
-                            <Text style={[
-                              styles.teamPickerChipText,
-                              isMyTeam && styles.teamPickerChipTextActive,
-                            ]}>
-                              {team.name || `Team ${team.id}`}
-                              {'\n'}
-                              <Text style={{ fontSize: 10, opacity: 0.7 }}>{memberCount} players</Text>
-                            </Text>
-                          </TouchableOpacity>
-                        );
-                      })}
+                    <View style={styles.teamPickerSection}>
+                        <Text style={styles.teamPickerLabel}>PICK YOUR TEAM</Text>
+                        <TeamColumns
+                            teams={teams as TeamEntry[]}
+                            players={roomPlayers as PlayerEntry[]}
+                            myId={currentUserId != null ? String(currentUserId) : null}
+                            myTeamId={myTeamId ?? null}
+                            maxTeamSize={roomMaxTeamSize}
+                            locked={roomStatus !== 'waiting'}
+                            canRename={isHostUser || myTeamId != null}
+                            busyTeamId={busyTeamId}
+                            onJoin={handlePickTeam}
+                            onRename={doRename}
+                        />
                     </View>
-                  </View>
                 )}
             </ScrollView>
             ) : (
@@ -1828,33 +1937,6 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     letterSpacing: 1,
     marginBottom: 10,
-  },
-  teamPickerChips: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-  },
-  teamPickerChip: {
-    backgroundColor: COLORS.surface,
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: COLORS.border,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  teamPickerChipActive: {
-    backgroundColor: '#F3E8FF',
-    borderColor: COLORS.purplePrimary,
-  },
-  teamPickerChipText: {
-    fontSize: 13,
-    fontFamily: FONTS.semiBold,
-    color: COLORS.textPrimary,
-    textAlign: 'center',
-  },
-  teamPickerChipTextActive: {
-    color: COLORS.purpleDeep,
   },
 
   // Modals

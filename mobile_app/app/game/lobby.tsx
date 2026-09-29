@@ -1,9 +1,10 @@
 import { useEffect, useState, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert,
-  ActivityIndicator, Platform, StatusBar, Animated, Image,
+  ActivityIndicator, Platform, StatusBar, Animated, Image, Pressable, Share,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import * as Clipboard from 'expo-clipboard';
 import firestore from '@react-native-firebase/firestore';
 import { getToken, getCurrentUser } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
@@ -12,6 +13,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { pfpSource } from '@/constants/pfps';
 import { getLanClient, lanGame, getLastLanRoster, setLastLanRoster, setLanPlayerId } from '@/services/lanSession';
 import type { LanMessage } from '@/services/lanProtocol';
+import TeamColumns from '@/components/game/TeamColumns';
+import type { PlayerEntry, RoomStatus, TeamEntry } from '@/types/game';
 
 const COLORS = {
   bg: '#0f0c29',
@@ -47,11 +50,22 @@ export default function LobbyScreen() {
   // LAN (offline hotspot) lobbies share this screen with online rooms.
   const isLAN = lanParam === 'true';
   const [myLanId, setMyLanId] = useState<string | null>(myIdParam || null);
-  const [players, setPlayers] = useState<any[]>([]);
-  const [teams, setTeams] = useState<any[]>([]);
-  const [roomStatus, setRoomStatus] = useState('waiting');
+  const [players, setPlayers] = useState<PlayerEntry[]>([]);
+  const [teams, setTeams] = useState<TeamEntry[]>([]);
+  const [roomStatus, setRoomStatus] = useState<RoomStatus>('waiting');
   const [teamMode, setTeamMode] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
+  const [maxTeamSize, setMaxTeamSize] = useState(20);
+  // A custom lobby creates the room before a quiz exists, so the host picks one
+  // here. These track what the room document currently has.
+  const [quizPending, setQuizPending] = useState(false);
+  const [roomTopic, setRoomTopic] = useState(topic || '');
+  const [roomQuestionCount, setRoomQuestionCount] = useState(0);
+  const [quizzes, setQuizzes] = useState<{ id: number; title: string; question_count?: number }[]>([]);
+  const [showQuizPicker, setShowQuizPicker] = useState(false);
+  const [savingQuiz, setSavingQuiz] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [hostId, setHostId] = useState<number | string | null>(null);
 
@@ -72,7 +86,7 @@ export default function LobbyScreen() {
       .doc(roomCode)
       .collection('players')
       .onSnapshot(snap => {
-        setPlayers(snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []);
+        setPlayers((snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []) as PlayerEntry[]);
       });
 
     // Listen for game start
@@ -83,6 +97,10 @@ export default function LobbyScreen() {
         const d = snap?.data();
         setRoomStatus(d?.status ?? 'waiting');
         setTeamMode(!!d?.teamMode);
+        setMaxTeamSize(d?.maxTeamSize ?? 20);
+        if (d?.topic) setRoomTopic(d.topic);
+        setRoomQuestionCount(d?.questionCount ?? 0);
+        setQuizPending(!!d?.quizPending);
         if (d?.status === 'active') {
           startJoinerCountdown();
         }
@@ -130,7 +148,7 @@ export default function LobbyScreen() {
       .doc(roomCode)
       .collection('teams')
       .onSnapshot(snap => {
-        setTeams(snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []);
+        setTeams((snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []) as TeamEntry[]);
       });
     return () => unsub();
   }, [teamMode, roomCode]);
@@ -147,6 +165,14 @@ export default function LobbyScreen() {
 
   /* ── LAN mode: roster + game start come from the LAN client, not Firestore ── */
   const lanStartedRef = useRef(false);
+  // LAN rooms have no teams and no scoring, so the roster is stored in a
+  // slimmer shape and widened to PlayerEntry here rather than making every
+  // online field optional across the game screens.
+  const asLobbyPlayer = (p: { id: string; name: string; avatar?: string; connected: boolean }): PlayerEntry => ({
+    id: p.id, displayName: p.name, avatar: p.avatar,
+    score: 0, answeredCount: 0, streak: 0, isFinished: false, teamId: null,
+  });
+
   useEffect(() => {
     if (!isLAN) return;
     const client = getLanClient();
@@ -155,7 +181,7 @@ export default function LobbyScreen() {
     // mounted (e.g. between welcome and navigation) are visible immediately.
     const seed = getLastLanRoster();
     if (seed.length > 0) {
-      setPlayers(seed.map(p => ({ id: p.id, displayName: p.name, avatar: p.avatar, connected: p.connected })));
+      setPlayers(seed.map(asLobbyPlayer));
     }
     client.onEvent = (msg: LanMessage) => {
       if (msg.t === 'welcome') {
@@ -164,7 +190,7 @@ export default function LobbyScreen() {
       } else if (msg.t === 'roster') {
         const connected = msg.players.filter(p => p.connected);
         setLastLanRoster(connected);
-        setPlayers(connected.map(p => ({ id: p.id, displayName: p.name, avatar: p.avatar, connected: p.connected })));
+        setPlayers(connected.map(asLobbyPlayer));
       } else if (msg.t === 'quiz') {
         lanGame.quiz = msg.quiz;
         lanGame.order = msg.order ?? lanGame.order;
@@ -215,15 +241,16 @@ export default function LobbyScreen() {
     return () => loop.stop();
   }, []);
 
-  /* ── original handler (UNCHANGED) ── */
-  const handleStart = async () => {
+  const startGame = async (force: boolean) => {
     setLoading(true);
     try {
       const token = await getToken();
       const res = await fetch(`${API_BASE_URL}/game/start/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ roomCode }),
+        // `force` lets the server drop anyone still unassigned into the
+        // smallest team, so one indecisive student cannot stall the room.
+        body: JSON.stringify(force ? { roomCode, force: 'true' } : { roomCode }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -234,52 +261,135 @@ export default function LobbyScreen() {
     }
   };
 
+  const handleStart = () => {
+    if (unassigned.length === 0) { startGame(false); return; }
+    Alert.alert(
+      'Start anyway?',
+      `${unassigned.length} ${unassigned.length === 1 ? 'player has' : 'players have'} not picked a team. SAGE will put them on the smallest team.`,
+      [
+        { text: 'Wait', style: 'cancel' },
+        { text: 'Auto-assign & start', onPress: () => startGame(true) },
+      ],
+    );
+  };
+
   const isHostUser = isHost === 'true';
+  const unassigned = teamMode ? players.filter(p => !p.teamId) : [];
   const playerCount = players.length;
   const ghostSeats = Math.max(0, 4 - playerCount);
   const codeChars = (roomCode || '').split('');
+
+  /* ── host quiz selection (custom lobby) ── */
+  const openQuizPicker = async () => {
+    setShowQuizPicker(true);
+    if (quizzes.length > 0) return;
+    try {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/ai/quizzes/`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const list = Array.isArray(data) ? data : (data.results ?? []);
+        setQuizzes(list);
+      }
+    } catch {
+      // The picker renders an empty-state message if this fails; not worth an
+      // interrupting alert on top of whatever else the host is doing.
+    }
+  };
+
+  const chooseQuiz = async (quizId: number) => {
+    setSavingQuiz(true);
+    try {
+      await post('set-quiz/', { roomCode, quizId });
+      // The room document is the source of truth, so let the snapshot above
+      // clear quizPending rather than guessing at it locally.
+      setShowQuizPicker(false);
+    } catch (e: any) {
+      Alert.alert('Could Not Set Quiz', e.message);
+    } finally {
+      setSavingQuiz(false);
+    }
+  };
+
+  const copyInvite = async () => {
+    try {
+      await Clipboard.setStringAsync((roomCode || '').toUpperCase());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      Alert.alert('Copy Failed', 'Could not copy the room code.');
+    }
+  };
+
+  const shareInvite = async () => {
+    try {
+      const code = (roomCode || '').toUpperCase();
+      await Share.share({
+        message: `Join my SAGE game! Room code: ${code}`,
+      });
+    } catch {
+      // The user dismissing the share sheet is not an error.
+    }
+  };
 
   /* ── team assignment ── */
   const myPlayer = players.find(p => String(p.id) === String(currentUserId));
   const myTeamId = myPlayer?.teamId ?? null;
   const sortedTeams = [...teams].sort((a, b) => (parseInt(a.id, 10) || 0) - (parseInt(b.id, 10) || 0));
   const allAssigned = !teamMode || (players.length > 0 && players.every(p => p.teamId));
+  const myTeam = sortedTeams.find(t => String(t.id) === String(myTeamId));
+
+  const post = async (path: string, body: Record<string, unknown>) => {
+    const token = await getToken();
+    const res = await fetch(`${API_BASE_URL}/game/${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    return data;
+  };
 
   const handlePickTeam = (teamId: string) => {
     if (roomStatus === 'active' || !currentUserId) return;
-    const target = sortedTeams.find(t => t.id === teamId);
-    const current = sortedTeams.find(t => t.id === myTeamId);
-    if (!target || target.id === myTeamId) return;
+    const target = sortedTeams.find(t => String(t.id) === String(teamId));
+    const current = myTeam;
+    if (!target || String(target.id) === String(myTeamId)) return;
+    // First pick needs no ceremony; switching teams does, since it silently
+    // changes who you are answering for.
+    if (!current) { doAssign(teamId); return; }
     Alert.alert(
-      'Join Team',
-      current ? `Switch from ${current.name} to ${target.name}?` : `Join ${target.name}?`,
+      'Switch team',
+      `Move from ${current.name} to ${target.name}?`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Confirm', onPress: () => doAssign(teamId) },
+        { text: 'Switch', onPress: () => doAssign(teamId) },
       ],
     );
   };
 
+  // Team assignment goes through the server, not a client-side Firestore
+  // batch: capacity is a race otherwise, and a full team would happily
+  // accept a write that the roster then over-reports.
   const doAssign = async (teamId: string) => {
+    setBusyTeamId(String(teamId));
     try {
-      const db = firestore();
-      const uid = String(currentUserId);
-      const roomRef = db.collection('gameRooms').doc(roomCode);
-      const batch = db.batch();
-      batch.update(roomRef.collection('teams').doc(teamId), {
-        memberIds: firestore.FieldValue.arrayUnion(uid),
-        memberCount: firestore.FieldValue.increment(1),
-      });
-      if (myTeamId) {
-        batch.update(roomRef.collection('teams').doc(myTeamId), {
-          memberIds: firestore.FieldValue.arrayRemove(uid),
-          memberCount: firestore.FieldValue.increment(-1),
-        });
-      }
-      batch.update(roomRef.collection('players').doc(uid), { teamId });
-      await batch.commit();
+      await post('teams/assign/', { roomCode, teamId: String(teamId) });
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to join team');
+    } finally {
+      setBusyTeamId(null);
+    }
+  };
+
+  const doRename = async (teamId: string, name: string) => {
+    try {
+      await post('teams/rename/', { roomCode, teamId, name });
+    } catch (e: any) {
+      Alert.alert('Rename failed', e?.message || 'Could not rename team');
     }
   };
 
@@ -340,7 +450,62 @@ export default function LobbyScreen() {
           </View>
 
           <Text style={styles.codeHint}>Send this code to friends so they can join the battle</Text>
+
+          {/* Copy/share were missing: the code was on screen but the host had to
+              read it out loud, which is the whole friction point of a lobby. */}
+          {!isLAN && (
+            <View style={styles.codeActions}>
+              <TouchableOpacity style={styles.codeAction} onPress={copyInvite}>
+                <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={15} color={COLORS.accent} />
+                <Text style={styles.codeActionText}>{copied ? 'Copied' : 'Copy code'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.codeAction} onPress={shareInvite}>
+                <Ionicons name="share-social-outline" size={15} color={COLORS.purpleLight} />
+                <Text style={styles.codeActionText}>Share invite</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </Animated.View>
+
+        {/* ── quiz selection (custom lobby) ── */}
+        {!isLAN && (isHostUser || quizPending) && (
+          <Animated.View
+            style={[styles.quizCard, {
+              opacity: rosterAnim,
+              transform: [{ translateY: rosterAnim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] }) }],
+            }]}
+          >
+            <View style={styles.quizCardTop}>
+              <View style={styles.quizIconWrap}>
+                <Ionicons name="document-text-outline" size={16} color={COLORS.purpleLight} />
+              </View>
+              <View style={styles.quizInfo}>
+                <Text style={styles.quizKicker}>QUIZ</Text>
+                <Text style={styles.quizTitle} numberOfLines={1}>
+                  {quizPending ? 'No quiz chosen yet' : (roomTopic || 'Quiz Battle')}
+                </Text>
+                {!quizPending && roomQuestionCount > 0 && (
+                  <Text style={styles.quizSub}>{roomQuestionCount} questions</Text>
+                )}
+              </View>
+            </View>
+
+            {isHostUser && (
+              <TouchableOpacity
+                style={[styles.quizAction, (savingQuiz || loading) && styles.quizActionDisabled]}
+                onPress={openQuizPicker}
+                disabled={savingQuiz || loading}
+              >
+                {savingQuiz ? (
+                  <ActivityIndicator size="small" color={COLORS.textPrimary} />
+                ) : (
+                  <Ionicons name={quizPending ? 'add' : 'swap-horizontal'} size={15} color={COLORS.textPrimary} />
+                )}
+                <Text style={styles.quizActionText}>{quizPending ? 'Choose a quiz' : 'Change quiz'}</Text>
+              </TouchableOpacity>
+            )}
+          </Animated.View>
+        )}
 
         {/* ── teams (team mode) ── */}
         {teamMode && (
@@ -365,48 +530,18 @@ export default function LobbyScreen() {
               )}
             </View>
 
-            {sortedTeams.map(team => {
-              const members = players.filter(p => String(p.teamId) === team.id);
-              const isMyTeam = team.id === myTeamId;
-              const maxSize = team.maxTeamSize ?? 20;
-              const full = members.length >= maxSize;
-              return (
-                <TouchableOpacity
-                  key={team.id}
-                  style={[
-                    styles.teamCard,
-                    { borderColor: isMyTeam ? team.color : team.color + '55' },
-                    isMyTeam && { backgroundColor: team.color + '14' },
-                    roomStatus === 'active' && { opacity: 0.55 },
-                  ]}
-                  onPress={() => handlePickTeam(team.id)}
-                  activeOpacity={0.75}
-                  disabled={roomStatus === 'active' || full || isMyTeam}
-                >
-                  <View style={[styles.teamDot, { backgroundColor: team.color }]} />
-                  <View style={styles.teamInfo}>
-                    <View style={styles.playerNameRow}>
-                      <Text style={styles.teamName} numberOfLines={1}>{team.name}</Text>
-                      {isMyTeam && <View style={styles.youPill}><Text style={styles.youPillText}>YOU</Text></View>}
-                    </View>
-                    <Text style={styles.playerSub} numberOfLines={1}>
-                      {members.length > 0 ? members.map(m => m.displayName).join(', ') : 'No players yet'}
-                    </Text>
-                  </View>
-                  <View style={styles.teamScoreCol}>
-                    <Text style={styles.teamScore}>{members.length}/{maxSize}</Text>
-                    <Text style={styles.teamScoreLabel}>JOINED</Text>
-                  </View>
-                  {roomStatus !== 'active' && (
-                    <View style={[styles.joinChip, isMyTeam && styles.joinChipYou, full && !isMyTeam && styles.joinChipFull]}>
-                      <Text style={[styles.joinChipText, isMyTeam && styles.joinChipTextYou]}>
-                        {isMyTeam ? 'Joined' : full ? 'Full' : 'Join'}
-                      </Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-              );
-            })}
+            <TeamColumns
+              teams={sortedTeams}
+              players={players}
+              myId={currentUserId != null ? String(currentUserId) : null}
+              myTeamId={myTeamId != null ? String(myTeamId) : null}
+              maxTeamSize={maxTeamSize}
+              locked={roomStatus === 'active' || roomStatus === 'finished'}
+              canRename={isHostUser || myTeamId != null}
+              busyTeamId={busyTeamId}
+              onJoin={handlePickTeam}
+              onRename={doRename}
+            />
           </Animated.View>
         )}
 
@@ -500,17 +635,26 @@ export default function LobbyScreen() {
           <TouchableOpacity
             style={styles.startWrap}
             onPress={handleStart}
-            disabled={loading || (teamMode && !allAssigned)}
+            disabled={loading}
             activeOpacity={0.85}
           >
             {loading ? (
               <View style={styles.startInnerDisabled}>
                 <ActivityIndicator color="#fff" />
               </View>
-            ) : (teamMode && !allAssigned) ? (
+            ) : quizPending ? (
+              // The server refuses to start a room with no questions, so say so
+              // on the button rather than letting it 400.
               <View style={styles.startInnerDisabled}>
-                <Ionicons name="people" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
-                <Text style={styles.startTextDisabled}>Waiting for all players to pick a team</Text>
+                <Ionicons name="document-text-outline" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
+                <Text style={styles.startTextDisabled}>Choose a quiz to start</Text>
+              </View>
+            ) : (unassigned.length > 0) ? (
+              <View style={styles.startInnerDisabled}>
+                <Ionicons name="shuffle" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
+                <Text style={styles.startTextDisabled}>
+                  Auto-assign {unassigned.length} & start
+                </Text>
               </View>
             ) : (
               <LinearGradient
@@ -539,6 +683,45 @@ export default function LobbyScreen() {
           </View>
         )}
       </Animated.View>
+
+      {/* Host quiz picker. Plain RN Modal: the existing <Modal> screens in this
+          app put flex:1 content inside a non-transparent sheet, which clips to
+          nothing useful. */}
+      {showQuizPicker && (
+        <View style={styles.pickerBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowQuizPicker(false)} />
+          <View style={styles.pickerSheet}>
+            <View style={styles.pickerHandle} />
+            <Text style={styles.pickerTitle}>Choose a quiz</Text>
+            <ScrollView style={styles.pickerList} showsVerticalScrollIndicator={false}>
+              {quizzes.length === 0 && (
+                <Text style={styles.pickerEmpty}>
+                  No quizzes yet. Create one and it will show up here.
+                </Text>
+              )}
+              {quizzes.map(q => (
+                <TouchableOpacity
+                  key={q.id}
+                  style={styles.pickerRow}
+                  onPress={() => chooseQuiz(q.id)}
+                  disabled={savingQuiz}
+                >
+                  <View style={styles.pickerRowInfo}>
+                    <Text style={styles.pickerRowTitle} numberOfLines={1}>{q.title}</Text>
+                    {!!q.question_count && (
+                      <Text style={styles.pickerRowSub}>{q.question_count} questions</Text>
+                    )}
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TouchableOpacity style={styles.pickerClose} onPress={() => setShowQuizPicker(false)}>
+              <Text style={styles.pickerCloseText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
 
       {/* Joiner countdown overlay */}
       {showCountdown && (
@@ -606,6 +789,89 @@ const styles = StyleSheet.create({
   },
   codeChipText: { fontSize: 26, fontFamily: FONTS.black, color: COLORS.textPrimary },
   codeHint: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, textAlign: 'center', lineHeight: 17 },
+
+  /* -- invite actions -- */
+  codeActions: {
+    flexDirection: 'row', gap: 10, marginTop: 14, justifyContent: 'center',
+  },
+  codeAction: {
+    flexDirection: 'row', alignItems: 'center', gap: 7,
+    paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12,
+    backgroundColor: 'rgba(34, 211, 238, 0.10)',
+    borderWidth: 1, borderColor: 'rgba(34, 211, 238, 0.28)',
+  },
+  codeActionText: {
+    fontSize: 13, fontFamily: FONTS.semiBold, color: COLORS.textPrimary,
+  },
+
+  /* -- quiz selection card -- */
+  quizCard: {
+    backgroundColor: COLORS.cardBg, borderRadius: 18, padding: 14, marginBottom: 10,
+    borderWidth: 1.5, borderColor: COLORS.cardBorder, gap: 12,
+  },
+  quizCardTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  quizIconWrap: {
+    width: 36, height: 36, borderRadius: 11, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(139, 92, 246, 0.16)',
+  },
+  quizInfo: { flex: 1 },
+  quizKicker: {
+    fontSize: 10, fontFamily: FONTS.bold, color: COLORS.textMuted, letterSpacing: 1,
+  },
+  quizTitle: {
+    fontSize: 15, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginTop: 2,
+  },
+  quizSub: {
+    fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 2,
+  },
+  quizAction: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 12, borderRadius: 14,
+    backgroundColor: COLORS.purplePrimary,
+  },
+  quizActionDisabled: { opacity: 0.6 },
+  quizActionText: {
+    fontSize: 14, fontFamily: FONTS.bold, color: COLORS.textPrimary,
+  },
+
+  /* -- quiz picker sheet -- */
+  pickerBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(3, 2, 15, 0.72)',
+    justifyContent: 'flex-end',
+    zIndex: 200,
+    elevation: 200,
+  },
+  pickerSheet: {
+    backgroundColor: COLORS.surface,
+    borderTopLeftRadius: 26, borderTopRightRadius: 26,
+    paddingHorizontal: 20, paddingTop: 10, paddingBottom: 34,
+    borderTopWidth: 1, borderColor: COLORS.cardBorder,
+    maxHeight: '78%',
+  },
+  pickerHandle: {
+    width: 40, height: 4, borderRadius: 2, alignSelf: 'center',
+    backgroundColor: COLORS.surfaceLight, marginBottom: 14,
+  },
+  pickerTitle: {
+    fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textPrimary, marginBottom: 12,
+  },
+  pickerList: { flexGrow: 0 },
+  pickerRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 14, paddingHorizontal: 14, borderRadius: 14,
+    backgroundColor: COLORS.cardBg, marginBottom: 8,
+    borderWidth: 1, borderColor: COLORS.cardBorder,
+  },
+  pickerRowInfo: { flex: 1 },
+  pickerRowTitle: { fontSize: 15, fontFamily: FONTS.semiBold, color: COLORS.textPrimary },
+  pickerRowSub: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 2 },
+  pickerEmpty: {
+    fontSize: 14, fontFamily: FONTS.regular, color: COLORS.textMuted,
+    textAlign: 'center', paddingVertical: 28, lineHeight: 20,
+  },
+  pickerClose: { marginTop: 10, alignItems: 'center', paddingVertical: 12 },
+  pickerCloseText: { fontSize: 15, fontFamily: FONTS.semiBold, color: COLORS.textMuted },
 
   /* ── team cards ── */
   teamCard: {

@@ -179,6 +179,8 @@ export default function ClassicGameSetupScreen() {
             timePerQuestion: parseInt(timePerQuestion) || 15,
             teamMode,
             teamCount: teamMode ? teamCount : undefined,
+            // Default to players picking their own team in the lobby.
+            autoAssignTeams: false,
           }),
         });
         const data = await response.json();
@@ -190,6 +192,7 @@ export default function ClassicGameSetupScreen() {
         formData.append('timePerQuestion', timePerQuestion);
         formData.append('teamMode', String(teamMode));
         formData.append('teamCount', String(teamCount));
+        formData.append('autoAssignTeams', 'false');
         const response = await fetch(`${API_BASE_URL}/game/create/`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}` },

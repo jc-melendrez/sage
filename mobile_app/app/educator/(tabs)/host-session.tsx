@@ -11,6 +11,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Clipboard from 'expo-clipboard';
 import * as ScreenOrientation from 'expo-screen-orientation';
+import { POWERUP_META } from '@/components/game/TeamMomentumHUD';
+import { formatMultiplier, POWERUP_KEYS } from '@/types/game';
 
 const COLORS = {
   bg: '#0f0c29',
@@ -135,13 +137,48 @@ function TeamRow({ team, index, memberCount }: { team: any; index: number; membe
         <View style={styles.leaderNameRow}>
           <View style={[styles.teamDot, { backgroundColor: team.color }]} />
           <Text style={styles.leaderName} numberOfLines={1}>{team.name}</Text>
+          <View style={[styles.teamMult, { borderColor: team.color + '77' }]}>
+            <Text style={[styles.teamMultText, { color: team.color }]}>
+              {formatMultiplier(team.multiplier ?? 1)}
+            </Text>
+          </View>
         </View>
         <Text style={styles.leaderMeta}>
           {memberCount} {memberCount === 1 ? 'member' : 'members'} · {team.answeredCount ?? 0} answers
+          {team.bestStreak ? ` · best streak ${team.bestStreak}` : ''}
         </Text>
+        <TeamPoolStrip team={team} />
       </View>
       <Text style={styles.leaderScore}>{displayScore.toLocaleString()}</Text>
     </Animated.View>
+  );
+}
+
+/**
+ * The shared pool, on the teacher's console.
+ *
+ * A teacher is the one person who can see that a team is sitting on three
+ * unspent powerups, and nudge them in the right direction before the game
+ * quietly wastes the reward.
+ */
+function TeamPoolStrip({ team }: { team: any }) {
+  const pool = team.powerups;
+  if (!pool) return null;
+  const entries = POWERUP_KEYS.filter(k => (pool[k] ?? 0) > 0);
+  if (entries.length === 0) return null;
+  return (
+    <View style={styles.poolStrip}>
+      <Ionicons name="people" size={9} color="#94A3B8" />
+      {entries.map(key => {
+        const meta = POWERUP_META[key];
+        return (
+          <View key={key} style={[styles.poolChip, { borderColor: meta.tint + '66' }]}>
+            <Ionicons name={meta.icon} size={9} color={meta.tint} />
+            <Text style={[styles.poolChipText, { color: meta.tint }]}>×{pool[key]}</Text>
+          </View>
+        );
+      })}
+    </View>
   );
 }
 
@@ -229,9 +266,15 @@ function PresentTeamRow({ team, index, memberCount }: { team: any; index: number
       <View style={styles.presentRowBody}>
         <View style={styles.presentRowNameRow}>
           <Text style={styles.presentRowName} numberOfLines={1}>{team.name}</Text>
+          <View style={[styles.presentMult, { borderColor: team.color + '99', backgroundColor: team.color + '22' }]}>
+            <Text style={[styles.presentMultText, { color: team.color }]}>
+              {formatMultiplier(team.multiplier ?? 1)}
+            </Text>
+          </View>
         </View>
         <Text style={styles.presentRowMeta}>
           {memberCount} {memberCount === 1 ? 'member' : 'members'} · {team.answeredCount ?? 0} answers
+          {team.bestStreak ? ` · best streak ${team.bestStreak}` : ''}
         </Text>
       </View>
       <Text style={styles.presentRowScore}>{displayScore.toLocaleString()}</Text>
@@ -243,7 +286,7 @@ function PresentTeamRow({ team, index, memberCount }: { team: any; index: number
 function PresentationView({
   status, codeChars, topic, students, ranked, questionCount, finishedCount, playerCount,
   livePulse, phaseAnim, codeAnim, listAnim, loading,
-  teamMode, teams, rankedTeams, allAssigned, teamColorOf,
+  teamMode, teams, rankedTeams, allAssigned, unassignedCount, teamColorOf,
   onStart, onEnd, onBack, onExit,
 }: {
   status: RoomStatus;
@@ -263,6 +306,7 @@ function PresentationView({
   teams: any[];
   rankedTeams: any[];
   allAssigned: boolean;
+  unassignedCount: number;
   teamColorOf: (teamId?: string) => string | undefined;
   onStart: () => void;
   onEnd: () => void;
@@ -481,9 +525,9 @@ function PresentationView({
               <TouchableOpacity
                 style={styles.presentStartWrap}
                 onPress={onStart}
-                onPressIn={() => { if (!loading && playerCount > 0 && (!teamMode || allAssigned)) animatePressIn(); }}
+                onPressIn={() => { if (!loading && playerCount > 0) animatePressIn(); }}
                 onPressOut={animatePressOut}
-                disabled={loading || playerCount === 0 || (teamMode && !allAssigned)}
+                disabled={loading || playerCount === 0}
                 activeOpacity={0.85}
               >
                 {loading ? (
@@ -495,8 +539,10 @@ function PresentationView({
                   </View>
                 ) : (teamMode && !allAssigned) ? (
                   <View style={styles.presentStartInnerDisabled}>
-                    <Ionicons name="people" size={20} color={COLORS.textMuted} style={{ marginRight: 8 }} />
-                    <Text style={[styles.presentStartText, { color: COLORS.textMuted }]}>Waiting for teams...</Text>
+                    <Ionicons name="shuffle" size={20} color={COLORS.textMuted} style={{ marginRight: 8 }} />
+                    <Text style={[styles.presentStartText, { color: COLORS.textMuted }]}>
+                      Auto-assign {unassignedCount} & start
+                    </Text>
                   </View>
                 ) : (
                   <LinearGradient
@@ -663,14 +709,18 @@ export default function HostSessionScreen() {
     return () => { unsubTeams(); };
   }, [teamMode, code]);
 
-  const handleStart = async () => {
+  const unassigned = teamMode ? players.filter(p => !p.teamId) : [];
+
+  const startGame = async (force: boolean) => {
     setLoading(true);
     try {
       const token = await getToken();
       const res = await fetch(`${API_BASE_URL}/game/start/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ roomCode: code }),
+        // `force` lets the server drop anyone still unassigned into the
+        // smallest team, so one indecisive student cannot stall the lesson.
+        body: JSON.stringify(force ? { roomCode: code, force: 'true' } : { roomCode: code }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -679,6 +729,18 @@ export default function HostSessionScreen() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleStart = () => {
+    if (unassigned.length === 0) { startGame(false); return; }
+    Alert.alert(
+      'Start anyway?',
+      `${unassigned.length} ${unassigned.length === 1 ? 'student has' : 'students have'} not picked a team. SAGE will put them on the smallest team.`,
+      [
+        { text: 'Wait', style: 'cancel' },
+        { text: 'Auto-assign & start', onPress: () => startGame(true) },
+      ],
+    );
   };
 
   const handleEndSession = async () => {
@@ -958,9 +1020,9 @@ export default function HostSessionScreen() {
             <TouchableOpacity
               style={styles.startWrap}
               onPress={handleStart}
-              onPressIn={() => { if (!loading && playerCount > 0 && (!teamMode || allAssigned)) animatePressIn(); }}
+              onPressIn={() => { if (!loading && playerCount > 0) animatePressIn(); }}
               onPressOut={animatePressOut}
-              disabled={loading || playerCount === 0 || (teamMode && !allAssigned)}
+              disabled={loading || playerCount === 0}
               activeOpacity={0.85}
             >
               {loading ? (
@@ -974,8 +1036,10 @@ export default function HostSessionScreen() {
                 </View>
               ) : (teamMode && !allAssigned) ? (
                 <View style={styles.startInnerDisabled}>
-                  <Ionicons name="people" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
-                  <Text style={[styles.startText, { color: COLORS.textMuted }]}>Waiting for teams...</Text>
+                  <Ionicons name="shuffle" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
+                  <Text style={[styles.startText, { color: COLORS.textMuted }]}>
+                    Auto-assign {unassigned.length} & start
+                  </Text>
                 </View>
               ) : (
                 <LinearGradient
@@ -1232,6 +1296,22 @@ const styles = StyleSheet.create({
   progressTrack: { height: 6, backgroundColor: 'rgba(139,92,246,0.18)', borderRadius: 3, overflow: 'hidden' },
   progressFill: { height: '100%', backgroundColor: COLORS.purpleVibrant, borderRadius: 3 },
   leaderScore: { fontSize: 17, fontFamily: FONTS.black, color: COLORS.textPrimary },
+  teamMult: {
+    paddingHorizontal: 7, paddingVertical: 1, borderRadius: 6,
+    borderWidth: 1, marginLeft: 6,
+  },
+  teamMultText: { fontSize: 11, fontFamily: FONTS.black },
+  poolStrip: { flexDirection: 'row', alignItems: 'center', gap: 4, flexWrap: 'wrap' },
+  poolChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 2,
+    borderWidth: 1, borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1,
+  },
+  poolChipText: { fontSize: 9, fontFamily: FONTS.bold },
+  presentMult: {
+    paddingHorizontal: 9, paddingVertical: 2, borderRadius: 8,
+    borderWidth: 1.5, marginLeft: 10,
+  },
+  presentMultText: { fontSize: 15, fontFamily: FONTS.black },
   teamDot: { width: 10, height: 10, borderRadius: 5 },
   teamsBlock: { marginBottom: 4 },
   blockKicker: {

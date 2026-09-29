@@ -12,6 +12,7 @@ import {
   ActivityIndicator,
   Platform,
   Image,
+  Alert,
 } from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 // ✨ NEW: Reanimated imports for timer shake/pulse
@@ -34,6 +35,10 @@ import { getLanClient, lanGame, getLanPlayerId, setLanPlayerId, setLanFinalStand
 import type { LanMessage, LanPlayer } from '@/services/lanProtocol';
 import { API_BASE_URL } from '@/config/api';
 import TeamRevealOverlay from '@/components/TeamRevealOverlay';
+import { Ionicons } from '@expo/vector-icons';
+import TeamMomentumHUD from '@/components/game/TeamMomentumHUD';
+import ReactionBar from '@/components/game/ReactionBar';
+import { formatMultiplier, sameTeamId, type PowerupKey, type TeamEntry } from '@/types/game';
 import { pfpSource } from '@/constants/pfps';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -182,11 +187,16 @@ export default function QuestionScreen() {
   const [spinIndex, setSpinIndex] = useState(0);
   const [roulettePhase, setRoulettePhase] = useState<'idle' | 'spinning' | 'revealed'>('idle');
   const [isFrozen, setIsFrozen] = useState(false);
+/** Blocks a second tap while the freeze charge is being confirmed. */
+const [freezeBusy, setFreezeBusy] = useState(false);
   const [showStandings, setShowStandings] = useState(false);
   const [roomStatus, setRoomStatus] = useState('waiting');
   const [teamMode, setTeamMode] = useState(false);
-  const [teams, setTeams] = useState<any[]>([]);
+  const [teams, setTeams] = useState<TeamEntry[]>([]);
   const [myTeamId, setMyTeamId] = useState<string | null>(null);
+  const [teammates, setTeammates] = useState<{ id: string; displayName: string; avatar?: string }[]>([]);
+  const [boostingId, setBoostingId] = useState<string | null>(null);
+  const [boostedName, setBoostedName] = useState<string | null>(null);
   const [teamAssignments, setTeamAssignments] = useState<any[] | null>(null);
   const [showTeamReveal, setShowTeamReveal] = useState(false);
   const [waitTimer, setWaitTimer] = useState(0);
@@ -573,10 +583,30 @@ export default function QuestionScreen() {
       .collection('gameRooms').doc(roomCode)
       .collection('teams')
       .onSnapshot(snap => {
-        setTeams(snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []);
+        setTeams((snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []) as TeamEntry[]);
       });
     return () => { unsub(); };
   }, [teamMode, roomCode]);
+
+  /* ── teammates subscription: the boost strip needs names to aim at ── */
+  useEffect(() => {
+    if (!teamMode || !myTeamId || isLan || isOffline) {
+      setTeammates([]);
+      return;
+    }
+    const unsub = firestore()
+      .collection('gameRooms').doc(roomCode)
+      .collection('players')
+      .onSnapshot(snap => {
+        setTeammates(
+          (snap?.docs ?? [])
+            .map(d => ({ id: d.id, ...d.data() }))
+            .filter((p: any) => sameTeamId(p.teamId, myTeamId) && !p.isFinished)
+            .map((p: any) => ({ id: p.id, displayName: p.displayName, avatar: p.avatar }))
+        );
+      });
+    return () => unsub();
+  }, [teamMode, myTeamId, roomCode, isLan, isOffline]);
 
   useEffect(() => {
     if (!showRoulette || !rouletteTarget) return;
@@ -730,7 +760,11 @@ export default function QuestionScreen() {
   };
 
   const handleFreeze = async () => {
-    if (powerups.freeze <= 0 || selected || isFrozen) return;
+    if (selected || isFrozen || freezeBusy) return;
+    if (!isOffline && !isLan) {
+      const poolFreeze = teamMode ? pool.freeze : powerups.freeze;
+      if (poolFreeze <= 0) return;
+    }
     if (Platform.OS !== 'web') Haptics.selectionAsync();
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
@@ -740,17 +774,58 @@ export default function QuestionScreen() {
       setPowerups({ ...game.powerups });
       return;
     }
-    clearInterval(timerRef.current);
-    setIsFrozen(true);
-    setPowerups(p => ({ ...p, freeze: p.freeze - 1 }));
+    // The charge is decided by the server, not here: in team mode a freeze
+    // comes out of the shared pool, and the count must never be able to go
+    // negative. Only stop the clock once the backend confirms the spend.
+    setFreezeBusy(true);
+    try {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/game/powerups/freeze/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ roomCode, questionIndex: currentIndex }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not freeze the timer');
+      clearInterval(timerRef.current);
+      setIsFrozen(true);
+      // In team mode the shared pool is a live Firestore team doc, so the
+      // server's decrement arrives on its own. Only the personal pool is
+      // local state that needs to be updated here.
+      if (!teamMode) {
+        setPowerups(p => ({ ...p, freeze: Math.max(0, p.freeze - 1) }));
+      }
+    } catch (e: any) {
+      Alert.alert('Freeze failed', e?.message || 'Could not freeze the timer');
+    } finally {
+      setFreezeBusy(false);
+    }
+  };
+
+  const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : null;
+  const sortedTeams = [...teams].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const myTeamRank = sortedTeams.findIndex(t => sameTeamId(t.id, myTeamId)) + 1;
+  // Team mode spends from the team's shared pool; classic/offline/LAN from the
+  // personal one. One source of truth for both the buttons and their guards,
+  // so a teammate's award cannot leave this player tapping a dead button.
+  const pool = (teamMode && myTeam ? myTeam.powerups : powerups) ?? powerups;
+  const hasPoolPowerups = pool.freeze > 0 || pool.hint > 0 || pool.doublePoints > 0 || pool.shield > 0;
+
+  // In team mode the pool belongs to the team and the server spends from it
+  // inside the answer transaction (via the useHint/useDoublePoints/useShield
+  // flags). The old client-side `increment(-1)` on the player doc is skipped
+  // there, otherwise the same powerup would be charged twice.
+  const spendLocally = async (key: PowerupKey) => {
+    setPowerups(p => ({ ...p, [key]: Math.max(0, p[key] - 1) }));
+    if (teamMode) return;
     const user = await getCurrentUser();
-    const playerRef = firestore().collection('gameRooms').doc(roomCode)
-      .collection('players').doc(String(user?.id));
-    playerRef.update({ 'powerups.freeze': firestore.FieldValue.increment(-1) });
+    firestore().collection('gameRooms').doc(roomCode)
+      .collection('players').doc(String(user?.id))
+      .update({ [`powerups.${key}`]: firestore.FieldValue.increment(-1) });
   };
 
   const handleHint = async () => {
-    if (powerups.hint <= 0 || selected || activePowerups.hint) return;
+    if (pool.hint <= 0 || selected || activePowerups.hint) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
@@ -765,7 +840,6 @@ export default function QuestionScreen() {
       }
       return;
     }
-    setPowerups(p => ({ ...p, hint: p.hint - 1 }));
     setActivePowerups(p => ({ ...p, hint: true }));
     const q = questions[questionOrder[currentIndex]];
     if (q?.type === 'mcq' && q.choices) {
@@ -773,14 +847,11 @@ export default function QuestionScreen() {
       const shuffled = wrong.sort(() => Math.random() - 0.5);
       setHintedChoices(shuffled.slice(0, 2));
     }
-    const user = await getCurrentUser();
-    const playerRef = firestore().collection('gameRooms').doc(roomCode)
-      .collection('players').doc(String(user?.id));
-    playerRef.update({ 'powerups.hint': firestore.FieldValue.increment(-1) });
+    await spendLocally('hint');
   };
 
   const handleDoublePoints = async () => {
-    if (powerups.doublePoints <= 0 || selected || activePowerups.doublePoints) return;
+    if (pool.doublePoints <= 0 || selected || activePowerups.doublePoints) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
@@ -789,16 +860,12 @@ export default function QuestionScreen() {
       setActivePowerups(p => ({ ...p, doublePoints: true }));
       return;
     }
-    setPowerups(p => ({ ...p, doublePoints: p.doublePoints - 1 }));
     setActivePowerups(p => ({ ...p, doublePoints: true }));
-    const user = await getCurrentUser();
-    const playerRef = firestore().collection('gameRooms').doc(roomCode)
-      .collection('players').doc(String(user?.id));
-    playerRef.update({ 'powerups.doublePoints': firestore.FieldValue.increment(-1) });
+    await spendLocally('doublePoints');
   };
 
   const handleShield = async () => {
-    if (powerups.shield <= 0 || selected || activePowerups.shield) return;
+    if (pool.shield <= 0 || selected || activePowerups.shield) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
@@ -807,12 +874,31 @@ export default function QuestionScreen() {
       setActivePowerups(p => ({ ...p, shield: true }));
       return;
     }
-    setPowerups(p => ({ ...p, shield: p.shield - 1 }));
     setActivePowerups(p => ({ ...p, shield: true }));
-    const user = await getCurrentUser();
-    const playerRef = firestore().collection('gameRooms').doc(roomCode)
-      .collection('players').doc(String(user?.id));
-    playerRef.update({ 'powerups.shield': firestore.FieldValue.increment(-1) });
+    await spendLocally('shield');
+  };
+
+  const handleBoost = async (targetId: string) => {
+    if (!teamMode || boostingId) return;
+    setBoostingId(targetId);
+    try {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/game/teams/boost/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ roomCode, playerId: String(targetId) }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not send boost');
+      setBoostedName(data.boostTarget === String(targetId)
+        ? teammates.find(t => t.id === targetId)?.displayName ?? 'Teammate'
+        : null);
+      if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (e: any) {
+      Alert.alert('Boost failed', e?.message || 'Could not send boost');
+    } finally {
+      setBoostingId(null);
+    }
   };
 
   const handleAnswer = async (answer: string | null) => {
@@ -1014,9 +1100,6 @@ export default function QuestionScreen() {
   const question = questions[actualIndex];
   const playerRank = standings.findIndex(p => String(p.id) === String(userId)) + 1;
   const isDanger = !isFrozen && timeLeft <= 5;
-  const hasPowerups = powerups.freeze > 0 || powerups.hint > 0 || powerups.doublePoints > 0 || powerups.shield > 0;
-  const myTeam = teamMode ? teams.find(t => t.id === myTeamId) ?? null : null;
-  const sortedTeams = [...teams].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   const visibleChoices = question.type === 'mcq'
     ? question.choices.filter((c: string) => !hintedChoices.includes(c))
     : [];
@@ -1089,6 +1172,16 @@ export default function QuestionScreen() {
           { width: timerBarAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) },
         ]} />
       </View>
+
+      {/* ── TEAM MOMENTUM + SHARED POOL ── */}
+      {myTeam && !result && (
+        <TeamMomentumHUD
+          team={myTeam}
+          pool={pool}
+          active={activePowerups}
+          shared={teamMode}
+        />
+      )}
 
       {/* ── ACTIVE POWERUP BANNERS ── */}
       {!selected && !result && (activePowerups.doublePoints || activePowerups.shield) && (
@@ -1315,53 +1408,104 @@ export default function QuestionScreen() {
         )}
       </ScrollView>
 
+      {/* ── BOOST A TEAMMATE ── */}
+      {teamMode && !result && !isOffline && !isLan && (pool.doublePoints > 0 || boostedName) && (
+        <View style={styles.boostWrap}>
+          <View style={styles.boostLabelRow}>
+            <Ionicons name="flash" size={11} color={COLORS.textMuted} />
+            <Text style={styles.boostLabel}>BOOST A TEAMMATE · 2x THEIR NEXT ANSWER</Text>
+          </View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.boostRow}>
+            {teammates
+              .filter(t => userId == null || String(t.id) !== String(userId))
+              .map(t => (
+                <TouchableOpacity
+                  key={t.id}
+                  style={styles.boostChip}
+                  onPress={() => handleBoost(t.id)}
+                  disabled={!!boostingId}
+                  activeOpacity={0.7}
+                >
+                  {pfpSource(t.avatar) ? (
+                    <Image source={pfpSource(t.avatar)!} style={styles.boostAvatar} resizeMode="cover" />
+                  ) : (
+                    <View style={styles.boostAvatarFallback}>
+                      <Text style={styles.boostInitial}>{(t.displayName || '?').charAt(0).toUpperCase()}</Text>
+                    </View>
+                  )}
+                  <Text style={styles.boostName} numberOfLines={1}>{t.displayName}</Text>
+                </TouchableOpacity>
+              ))}
+            {teammates.filter(t => userId == null || String(t.id) !== String(userId)).length === 0 && (
+              <Text style={styles.boostEmpty}>No teammates left to boost</Text>
+            )}
+          </ScrollView>
+          {boostedName && (
+            <Text style={styles.boostSent}>🔥 {boostedName} is boosted — save it for a hard one!</Text>
+          )}
+        </View>
+      )}
+
+      {/* ── REACTION BAR ── */}
+      {/* Team mode only. Reactions cheer on a shared team, but in classic
+          every player is competing alone, so cheering on other players is
+          meaningless rather than supportive. */}
+      {!isOffline && !isLan && !result && teamMode && (
+        <ReactionBar
+          roomCode={roomCode}
+          enabled={roomStatus === 'active'}
+          myId={userId != null ? String(userId) : null}
+          teams={teams}
+        />
+      )}
+
       {/* ── POWERUP BAR (pinned bottom) ── */}
-      {!selected && !result && hasPowerups && (
+      {!selected && !result && hasPoolPowerups && (
         <View style={styles.powerupBar}>
-          {powerups.freeze > 0 && (
+          {pool.freeze > 0 && (
             <TouchableOpacity
               style={[styles.puBtn, isFrozen && styles.puBtnFreezeActive]}
               onPress={handleFreeze}
-              disabled={!!selected || isFrozen}
+              disabled={!!selected || isFrozen || freezeBusy}
               activeOpacity={0.7}
             >
-              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{powerups.freeze}</Text></View>
+              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.freeze}</Text></View>
               <Text style={styles.puIcon}>❄️</Text>
               <Text style={[styles.puLabel, isFrozen && styles.puLabelCyan]}>Freeze</Text>
             </TouchableOpacity>
           )}
-          {powerups.hint > 0 && (
+          {pool.hint > 0 && (
             <TouchableOpacity
               style={[styles.puBtn, activePowerups.hint && styles.puBtnUsed]}
               onPress={handleHint}
               disabled={!!selected || activePowerups.hint}
               activeOpacity={0.7}
             >
-              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{powerups.hint}</Text></View>
+              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.hint}</Text></View>
               <Text style={styles.puIcon}>💡</Text>
               <Text style={[styles.puLabel, activePowerups.hint && styles.puLabelYellow]}>Hint</Text>
             </TouchableOpacity>
           )}
-          {powerups.doublePoints > 0 && (
+          {pool.doublePoints > 0 && (
             <TouchableOpacity
               style={[styles.puBtn, activePowerups.doublePoints && styles.puBtnUsed]}
               onPress={handleDoublePoints}
               disabled={!!selected || activePowerups.doublePoints}
               activeOpacity={0.7}
             >
-              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{powerups.doublePoints}</Text></View>
+              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.doublePoints}</Text></View>
               <Text style={styles.puIcon}>⚡</Text>
               <Text style={[styles.puLabel, activePowerups.doublePoints && styles.puLabelYellow]}>2x Pts</Text>
             </TouchableOpacity>
           )}
-          {powerups.shield > 0 && (
+          {pool.shield > 0 && (
             <TouchableOpacity
               style={[styles.puBtn, activePowerups.shield && styles.puBtnShieldActive]}
               onPress={handleShield}
               disabled={!!selected || activePowerups.shield}
               activeOpacity={0.7}
             >
-              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{powerups.shield}</Text></View>
+              <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.shield}</Text></View>
               <Text style={styles.puIcon}>🛡️</Text>
               <Text style={[styles.puLabel, activePowerups.shield && styles.puLabelCyan]}>Shield</Text>
             </TouchableOpacity>
@@ -1418,7 +1562,7 @@ export default function QuestionScreen() {
                 <View style={styles.standingsTeamsBlock}>
                   <Text style={styles.standingsBlockLabel}>TEAMS</Text>
                   {sortedTeams.map((t, i) => {
-                    const isMyTeam = t.id === myTeamId;
+                    const isMyTeam = sameTeamId(t.id, myTeamId);
                     return (
                       <View key={t.id} style={[styles.srRow, i < 3 && styles.srRowTop3, isMyTeam && styles.srRowYou]}>
                         <Text style={styles.srRank}>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}`}</Text>
@@ -1426,6 +1570,9 @@ export default function QuestionScreen() {
                           <Text style={[styles.srName, isMyTeam && styles.srNameYou]} numberOfLines={1}>
                             {t.name}
                             {isMyTeam && <Text style={styles.srYouTag}> (You)</Text>}
+                          </Text>
+                          <Text style={styles.srSub} numberOfLines={1}>
+                            {formatMultiplier(t.multiplier ?? 1)} · {t.teamCorrect ?? 0} correct · {t.memberCount ?? 0} players
                           </Text>
                         </View>
                         <View style={[styles.teamStandDot, { backgroundColor: t.color }]} />
@@ -2081,6 +2228,27 @@ const styles = StyleSheet.create({
   srAvatarText: { fontSize: 14, fontFamily: FONTS.bold, color: '#E2E8F0' },
   srNameWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 4 },
   srName: { fontSize: 14, fontFamily: FONTS.bold, color: '#E2E8F0' },
+  srSub: { fontSize: 10, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 1 },
+
+  boostWrap: { gap: 6 },
+  boostLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  boostLabel: { fontSize: 8, fontFamily: FONTS.extraBold, color: COLORS.textMuted, letterSpacing: 0.5 },
+  boostRow: { gap: 7, alignItems: 'center', paddingRight: 8 },
+  boostChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: COLORS.surface, borderRadius: 999,
+    borderWidth: 1, borderColor: 'rgba(244,114,182,0.35)',
+    paddingLeft: 4, paddingRight: 12, paddingVertical: 4,
+  },
+  boostAvatar: { width: 24, height: 24, borderRadius: 12 },
+  boostAvatarFallback: {
+    width: 24, height: 24, borderRadius: 12,
+    backgroundColor: 'rgba(244,114,182,0.18)', alignItems: 'center', justifyContent: 'center',
+  },
+  boostInitial: { fontSize: 11, fontFamily: FONTS.extraBold, color: '#F472B6' },
+  boostName: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.textPrimary, maxWidth: 96 },
+  boostEmpty: { fontSize: 11, fontFamily: FONTS.medium, color: COLORS.textMuted, paddingVertical: 6 },
+  boostSent: { fontSize: 10, fontFamily: FONTS.semiBold, color: '#F9A8D4' },
   srNameYou: { color: COLORS.accent },
   srYouTag: { color: COLORS.accent, fontFamily: FONTS.extraBold, fontSize: 12 },
   srStreak: { fontSize: 12 },
