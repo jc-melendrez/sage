@@ -112,7 +112,14 @@ def deepseek_chat_completion(payload, api_key, max_retries=3, deadline_seconds=N
         if last_response.status_code == 200:
             return last_response
 
+        # Do not retry non-retryable 4xx. These indicate the request itself is
+        # malformed or unauthorized, and repeating it will only burn the deadline
+        # before returning the same answer. Retrying is confined to rate limits
+        # and server failures.
+        non_retryable = {400, 401, 402, 403, 404, 405, 413, 422}
         print(f"[DeepSeek] attempt {attempt} status {last_response.status_code}: {last_response.text[:300]}")
+        if last_response.status_code in non_retryable:
+            return last_response
         if attempt < max_retries and not budget_exhausted():
             # Honor DeepSeek's suggested wait time (rate limits) when present.
             wait = 2 * attempt

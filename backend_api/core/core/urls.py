@@ -14,13 +14,37 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+import os
+
 from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import path, include
 
+# Read at import time, not per request, so a redeploy with new values actually
+# changes the output. The RENDER_* names are what Render injects automatically;
+# a local run has none of them and reports nulls, which is the useful signal that
+# you are not talking to the deployed service.
+DEPLOY_COMMIT = os.getenv('RENDER_GIT_COMMIT')
+DEPLOY_BRANCH = os.getenv('RENDER_GIT_BRANCH')
+
+
+def healthz(request):
+    """Liveness plus the commit actually running.
+
+    Knowing the deployed SHA is what tells "the fix isn't deployed yet" apart
+    from "the fix is deployed and still broken", which is otherwise only
+    answerable by reading Render's deploy log.
+    """
+    return JsonResponse({
+        'status': 'ok',
+        'commit': DEPLOY_COMMIT,
+        'branch': DEPLOY_BRANCH,
+    })
+
+
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/healthz/', lambda request: JsonResponse({'status': 'ok'})),
+    path('api/healthz/', healthz),
     path('api/users/', include('users.urls')),
     path('api/ai/', include('ai_assistant.urls')),
     path('api/game/', include('game.urls')),

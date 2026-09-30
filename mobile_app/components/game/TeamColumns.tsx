@@ -110,6 +110,11 @@ export default function TeamColumns({
   const columnCount = teams.length + 1 + (showAddColumn ? 1 : 0);
   const scroll = columnCount > 2;
 
+  // A room can reach team mode before any team document exists. Showing just
+  // the Spectators column in that state reads as "team mode is broken" rather
+  // than "nobody has created a team yet", so say which it is.
+  const noTeamsYet = teams.length === 0;
+
   // With many columns they get too narrow to read, so cap how many member chips
   // each one shows and summarise the rest rather than stretching to fit.
   const perColumn = columnCount <= 3 ? 8 : columnCount <= 4 ? 5 : 4;
@@ -334,11 +339,23 @@ export default function TeamColumns({
               <>
                 <Ionicons name="add-circle-outline" size={26} color={COLORS.textSecondary} />
                 <Text style={styles.addLabel}>Add team</Text>
+                {/* With no teams yet, the two columns on screen are the Spectators
+                    and this control, which is not obviously an invitation to
+                    create the first one. */}
+                {noTeamsYet && (
+                  <Text style={styles.addHint}>No teams yet</Text>
+                )}
               </>
             )}
           </TouchableOpacity>
         )}
       </ScrollView>
+
+      {noTeamsYet && !showAddColumn && (
+        <Text style={styles.noTeamsNote}>
+          No teams have been created yet.
+        </Text>
+      )}
 
       {/* ── rename modal ── */}
       <Modal visible={!!renaming} transparent animationType="fade" onRequestClose={() => setRenaming(null)}>
@@ -415,6 +432,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: FONTS.bold,
     color: COLORS.textSecondary,
+    textAlign: 'center',
+  },
+  addHint: {
+    fontSize: 10,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+  },
+  noTeamsNote: {
+    marginTop: 10,
+    fontSize: 12,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
     textAlign: 'center',
   },
 

@@ -156,6 +156,9 @@ export default function CourseQuizScreen() {
             );
             return { xp: result.xp, badges: result.badges };
           }}
+          onFinishError={(message) => {
+            Alert.alert("Couldn't save your result", message);
+          }}
           onClose={() => router.back()}
         />
       )}

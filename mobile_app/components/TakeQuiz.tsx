@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, Modal, ActivityIndicator } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
@@ -33,6 +33,17 @@ export interface TakeQuizResult {
   correctAnswer: string;
   correct: boolean;
   explanation: string;
+  /**
+   * The question's options as presented, so the detail view can show every
+   * choice with the student's pick and the right one both marked. Only present
+   * for choice questions.
+   */
+  options?: string[];
+  /** 1-based position, for the numbered grid. */
+  number: number;
+  /** `A`/`B`/... for choice questions, null for typed answers. */
+  yourLabel: string | null;
+  correctLabel: string | null;
 }
 
 interface TakeQuizProps {
@@ -45,11 +56,17 @@ interface TakeQuizProps {
    */
   onFinish: (score: number, results?: TakeQuizResult[]) => QuizRewardInfo | void | Promise<QuizRewardInfo | void>;
   onClose: () => void; // Callback to close the quiz
+  /**
+   * Called when recording the result fails, so the screen can tell the student
+   * instead of closing and implying the attempt was saved. The quiz stays open
+   * when this fires.
+   */
+  onFinishError?: (message: string) => void;
 }
 
 const OPTION_LABELS = ['A', 'B', 'C', 'D', 'E', 'F'];
 
-const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onClose }) => {
+const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onClose, onFinishError }) => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   // Keyed by array index, not by question id. Ids come from the database, but
   // the response from a generation call echoes the ids the model invented, and
@@ -58,9 +75,13 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
   const [score, setScore] = useState<number | null>(null);
   const [review, setReview] = useState<TakeQuizResult[]>([]);
   const [showResults, setShowResults] = useState(false);
-  const [missedOnly, setMissedOnly] = useState(false);
+  // Index into `review` of the question whose detail is open, or null.
+  const [openQuestion, setOpenQuestion] = useState<number | null>(null);
   const [reward, setReward] = useState<QuizRewardInfo | null>(null);
   const [isFinishing, setIsFinishing] = useState(false);
+  // Set once the result has been recorded, so a second tap while the student
+  // is reading the review cannot record the same attempt twice.
+  const [isRecorded, setIsRecorded] = useState(false);
 
   // A short fade/scale on entry. The quiz used to snap in flat, which read as
   // a jump cut the moment the sheet closed.
@@ -192,6 +213,13 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
     return String(value);
   };
 
+  /** The option letter for a value, or null when it is not one of the options. */
+  const labelFor = (value: string, options?: string[]): string | null => {
+    if (!options?.length) return null;
+    const index = options.findIndex(o => o === value);
+    return index === -1 ? null : getOptionLabel(index);
+  };
+
   const handleSubmitQuiz = () => {
     let correctCount = 0;
     // Graded per question and kept, so the review can say what was right and
@@ -212,44 +240,51 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
         correctAnswer,
         correct,
         explanation: (q.explanation ?? '').trim(),
+        options: q.options?.length ? q.options : undefined,
+        number: index + 1,
+        yourLabel: labelFor(yourAnswer, q.options),
+        correctLabel: labelFor(correctAnswer, q.options),
       };
     });
 
     setScore(correctCount);
     setReview(results);
-    setMissedOnly(correctCount < results.length);
     setShowResults(true);
   };
 
+  /**
+   * Records the attempt and leaves, in one tap.
+   *
+   * This used to be two taps: the first saved the result and turned the button
+   * into "Done", and only a second tap closed the quiz. A single tap that
+   * appeared to do nothing read as the app hanging. A recorded attempt is
+   * remembered, so a later tap closes immediately instead of saving twice.
+   */
   const handleFinish = async () => {
     if (score === null || isFinishing) return;
-    if (reward !== null) {
-      // Rewards already recorded — second tap dismisses the quiz entirely.
+    if (isRecorded) {
       onClose();
       return;
     }
     setIsFinishing(true);
     try {
       const result = await onFinish(score, review);
+      setIsRecorded(true);
       if (result && typeof result === 'object') {
         setReward(result as QuizRewardInfo);
-      } else {
-        // No reward info (e.g. legacy callers) — close immediately.
-        onClose();
       }
-    } catch (err) {
+    } catch (err: any) {
+      // Keep the quiz open. Closing here would tell the student the attempt was
+      // saved when it was not, and the attempt would be lost.
       console.error('Failed to record quiz result:', err);
-      onClose();
+      onFinishError?.(err?.message || 'Could not save your result.');
     } finally {
       setIsFinishing(false);
     }
   };
 
   const missedCount = useMemo(() => review.filter((r) => !r.correct).length, [review]);
-  const visibleReview = useMemo(
-    () => (missedOnly ? review.filter((r) => !r.correct) : review),
-    [missedOnly, review],
-  );
+  const openResult = openQuestion != null ? review[openQuestion] ?? null : null;
 
   const isLastQuestion = currentQuestionIndex >= answers.length - 1;
 
@@ -315,14 +350,14 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
             </TouchableOpacity>
           </>
         ) : (
-          <TouchableOpacity
-            style={[styles.navButton, styles.submitButton, !canAdvance && styles.navButtonDisabled]}
-            onPress={handleSubmitQuiz}
-            disabled={!canAdvance}
-            activeOpacity={canAdvance ? 0.8 : 1}
-          >
-            <Text style={[styles.navButtonText, styles.submitButtonText]}>Submit Quiz</Text>
-          </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.navButton, styles.submitButton, !canAdvance && styles.navButtonDisabled]}
+          onPress={handleSubmitQuiz}
+          disabled={!canAdvance}
+          activeOpacity={canAdvance ? 0.8 : 1}
+        >
+          <Text style={[styles.navButtonText, styles.submitButtonText]}>Finish</Text>
+        </TouchableOpacity>
         )}
       </View>
 
@@ -338,133 +373,226 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
         </View>
       )}
 
-      {/* Results + review. Full screen rather than a centred card: a 50-question
-          quiz does not fit in a dialog, and the review is the point of the
-          screen. */}
-      <Modal visible={showResults} animationType="slide">
-        <View style={styles.resultsScreen}>
-          <LinearGradient colors={['#6D28D9', '#4F46E5']} style={styles.resultsHero}>
-            <View style={styles.resultsHeroTop}>
-              <TouchableOpacity
-                style={styles.closeButton}
-                onPress={handleFinish}
-                disabled={isFinishing}
-                accessibilityLabel="Close results"
-              >
-                {isFinishing
-                  ? <ActivityIndicator color="white" />
-                  : <Ionicons name="close" size={24} color="white" />}
-              </TouchableOpacity>
-              <Text style={styles.resultsHeroTitle} numberOfLines={1}>{quizTitle}</Text>
-              <View style={styles.closeButton} />
-            </View>
-
-            <View style={styles.resultsScoreRow}>
-              <View style={styles.scoreCircle}>
-                <Text style={styles.scoreText}>{score}</Text>
-                <Text style={styles.scoreTotal}>/ {answers.length}</Text>
+      {/* Results. An in-tree overlay, NOT a <Modal>. This component is already
+          rendered inside the parent <Modal> that hosts the quiz, and Android
+          silently drops a second Modal stacked on another -- which is what
+          made the review unreachable from here. */}
+      {showResults && (
+        <View style={styles.resultsOverlay}>
+          <View style={styles.resultsScreen}>
+            <LinearGradient colors={['#6D28D9', '#4F46E5']} style={styles.resultsHero}>
+              <View style={styles.resultsHeroTop}>
+                <TouchableOpacity
+                  style={styles.closeButton}
+                  onPress={handleFinish}
+                  disabled={isFinishing}
+                  accessibilityLabel="Close results"
+                >
+                  {isFinishing
+                    ? <ActivityIndicator color="white" />
+                    : <Ionicons name="close" size={24} color="white" />}
+                </TouchableOpacity>
+                <Text style={styles.resultsHeroTitle} numberOfLines={1}>{quizTitle}</Text>
+                <View style={styles.closeButton} />
               </View>
-              <View style={styles.resultsScoreText}>
-                <Text style={styles.resultsTitle}>
-                  {score !== null && score / answers.length >= 0.7 ? 'Great Job!' : 'Keep Practicing!'}
-                </Text>
-                <Text style={styles.resultsPercent}>
-                  {Math.round(((score ?? 0) / answers.length) * 100)}% score
-                </Text>
-                <Text style={styles.resultsSubtitle}>
-                  {answers.length - missedCount} right, {missedCount} to review
-                </Text>
-              </View>
-            </View>
-          </LinearGradient>
 
-          <View style={styles.reviewHeader}>
-            <Text style={styles.reviewHeading}>
-              {missedOnly ? 'What you missed' : 'Answer review'}
-            </Text>
-            <TouchableOpacity
-              style={[styles.filterChip, missedOnly && styles.filterChipActive]}
-              onPress={() => setMissedOnly(prev => !prev)}
-            >
-              <Ionicons
-                name={missedOnly ? 'eye-outline' : 'eye-off-outline'}
-                size={13}
-                color={missedOnly ? '#FFFFFF' : '#6D28D9'}
-              />
-              <Text style={[styles.filterChipText, missedOnly && styles.filterChipTextActive]}>
-                {missedOnly ? 'Showing missed' : 'Showing all'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          <ScrollView
-            style={styles.reviewScroll}
-            contentContainerStyle={styles.reviewContent}
-            showsVerticalScrollIndicator={false}
-          >
-            {visibleReview.map((r, i) => (
-              <View
-                key={i}
-                style={[styles.reviewRow, r.correct ? styles.reviewRowCorrect : styles.reviewRowWrong]}
-              >
-                <View style={styles.reviewRowTop}>
-                  <View style={[styles.reviewBadge, r.correct ? styles.reviewBadgeCorrect : styles.reviewBadgeWrong]}>
-                    <Ionicons
-                      name={r.correct ? 'checkmark-circle' : 'close-circle'}
-                      size={14}
-                      color="#FFFFFF"
-                    />
-                  </View>
-                  <Text style={styles.reviewVerdict}>{r.correct ? 'Correct' : 'Incorrect'}</Text>
-                  <Text style={styles.reviewIndex}>#{i + 1}</Text>
+              <View style={styles.resultsScoreRow}>
+                <View style={styles.scoreCircle}>
+                  <Text style={styles.scoreText}>{score}</Text>
+                  <Text style={styles.scoreTotal}>/ {answers.length}</Text>
                 </View>
-
-                <Text style={styles.reviewQuestion}>{r.question}</Text>
-
-                <View style={styles.answerBlock}>
-                  <Text style={styles.answerLabel}>Your answer</Text>
-                  <Text style={[styles.answerValue, r.correct ? styles.answerRight : styles.answerWrong]}>
-                    {r.yourAnswer ?? 'Not answered'}
+                <View style={styles.resultsScoreText}>
+                  <Text style={styles.resultsTitle}>
+                    {score !== null && score / answers.length >= 0.7 ? 'Great Job!' : 'Keep Practicing!'}
+                  </Text>
+                  <Text style={styles.resultsPercent}>
+                    {Math.round(((score ?? 0) / answers.length) * 100)}% score
+                  </Text>
+                  <Text style={styles.resultsSubtitle}>
+                    {answers.length - missedCount} right, {missedCount} to review
                   </Text>
                 </View>
-
-                {!r.correct && (
-                  <View style={styles.answerBlock}>
-                    <Text style={styles.answerLabel}>Correct answer</Text>
-                    <Text style={[styles.answerValue, styles.answerRight]}>{r.correctAnswer}</Text>
-                  </View>
-                )}
-
-                {r.explanation ? (
-                  <View style={styles.explanationBlock}>
-                    <View style={styles.explanationHead}>
-                      <Ionicons name="bulb-outline" size={13} color="#B45309" />
-                      <Text style={styles.explanationLabel}>Why</Text>
-                    </View>
-                    <Text style={styles.explanationText}>{r.explanation}</Text>
-                  </View>
-                ) : (
-                  <Text style={styles.noExplanation}>No explanation was provided for this question.</Text>
-                )}
               </View>
-            ))}
-          </ScrollView>
+            </LinearGradient>
 
-          <View style={styles.resultsFooter}>
-            <TouchableOpacity
-              style={[styles.finishButton, isFinishing && { opacity: 0.7 }]}
-              onPress={handleFinish}
-              disabled={isFinishing}
+            {/* Numbered grid. Tapping a number opens that question in full, so a
+                50-question quiz stays scannable instead of becoming 50 cards. */}
+            <View style={styles.gridHeader}>
+              <Text style={styles.reviewHeading}>Your answers</Text>
+              <Text style={styles.gridHint}>Tap a number to see the question</Text>
+            </View>
+
+            <ScrollView
+              style={styles.reviewScroll}
+              contentContainerStyle={styles.reviewContent}
+              showsVerticalScrollIndicator={false}
             >
-              {isFinishing ? (
-                <ActivityIndicator color="white" />
-              ) : (
-                <Text style={styles.finishButtonText}>{reward ? 'Done' : 'Finish'}</Text>
+              <View style={styles.grid}>
+                {review.map((r, i) => (
+                  <TouchableOpacity
+                    key={i}
+                    style={[styles.gridCell, r.correct ? styles.gridCellRight : styles.gridCellWrong]}
+                    onPress={() => setOpenQuestion(i)}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      r.correct
+                        ? `Question ${r.number}, correct`
+                        : `Question ${r.number}, you answered ${r.yourLabel ?? r.yourAnswer ?? 'nothing'}, correct was ${r.correctLabel ?? r.correctAnswer}`
+                    }
+                  >
+                    <Text style={styles.gridNumber}>{r.number}</Text>
+                    {!r.correct && (
+                      <View style={styles.gridLetterRow}>
+                        <Text style={styles.gridLetter}>
+                          {r.yourLabel ?? '—'}
+                        </Text>
+                        <Ionicons name="arrow-forward" size={9} color="#FECACA" />
+                        <Text style={[styles.gridLetter, styles.gridLetterRight]}>
+                          {r.correctLabel ?? '?'}
+                        </Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+
+            <View style={styles.resultsFooter}>
+              {reward && reward.xp > 0 && (
+                <Text style={styles.rewardLine}>
+                  +{reward.xp} XP earned
+                  {reward.badges?.length ? ` · ${reward.badges.length} new badge${reward.badges.length === 1 ? '' : 's'}` : ''}
+                </Text>
               )}
-            </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.finishButton, isFinishing && { opacity: 0.7 }]}
+                onPress={handleFinish}
+                disabled={isFinishing}
+              >
+                {isFinishing ? (
+                  <ActivityIndicator color="white" />
+                ) : (
+                  <Text style={styles.finishButtonText}>
+                    {isRecorded ? 'Close' : 'Finish'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
+
+          {/* Per-question detail. Also in-tree: a third stacked Modal is even
+              less reliable on Android than the second one was. */}
+          {openResult && (
+            <View style={styles.detailBackdrop}>
+              <TouchableOpacity
+                style={StyleSheet.absoluteFill}
+                activeOpacity={1}
+                onPress={() => setOpenQuestion(null)}
+                accessibilityLabel="Close question"
+              />
+              <View style={styles.detailCard}>
+                <View style={styles.detailHead}>
+                  <View style={[
+                    styles.detailBadge,
+                    openResult.correct ? styles.gridCellRight : styles.gridCellWrong,
+                  ]}>
+                    <Text style={styles.detailBadgeText}>
+                      {openResult.correct ? 'Correct' : 'Incorrect'}
+                    </Text>
+                  </View>
+                  <Text style={styles.detailNumber}>Question {openResult.number}</Text>
+                  <TouchableOpacity
+                    onPress={() => setOpenQuestion(null)}
+                    hitSlop={12}
+                    accessibilityLabel="Close"
+                  >
+                    <Ionicons name="close-circle" size={28} color="#9CA3AF" />
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView style={styles.detailScroll} showsVerticalScrollIndicator={false}>
+                  <Text style={styles.detailQuestion}>{openResult.question}</Text>
+
+                  {openResult.options?.length ? (
+                    <View style={styles.detailOptions}>
+                      {openResult.options.map((option, index) => {
+                        const letter = getOptionLabel(index);
+                        const isYours = option === openResult.yourAnswer;
+                        const isRight = option === openResult.correctAnswer;
+                        return (
+                          <View
+                            key={index}
+                            style={[
+                              styles.detailOption,
+                              isRight && styles.detailOptionRight,
+                              isYours && !isRight && styles.detailOptionWrong,
+                              isYours && isRight && styles.detailOptionRight,
+                            ]}
+                          >
+                            <View style={[
+                              styles.detailOptionPrefix,
+                              isRight && styles.detailOptionPrefixRight,
+                              isYours && !isRight && styles.detailOptionPrefixWrong,
+                            ]}>
+                              <Text style={[
+                                styles.detailOptionPrefixText,
+                                (isRight || isYours) && { color: '#FFFFFF' },
+                              ]}>
+                                {letter}
+                              </Text>
+                            </View>
+                            <Text style={styles.detailOptionText}>{option}</Text>
+                            {isRight && (
+                              <Text style={styles.detailOptionTag}>correct</Text>
+                            )}
+                            {isYours && !isRight && (
+                              <Text style={styles.detailOptionTagWrong}>yours</Text>
+                            )}
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ) : (
+                    <View style={styles.detailAnswers}>
+                      <View style={styles.detailAnswerBlock}>
+                        <Text style={styles.answerLabel}>Your answer</Text>
+                        <Text style={[
+                          styles.answerValue,
+                          openResult.correct ? styles.answerRight : styles.answerWrong,
+                        ]}>
+                          {openResult.yourAnswer ?? 'Not answered'}
+                        </Text>
+                      </View>
+                      {!openResult.correct && (
+                        <View style={styles.detailAnswerBlock}>
+                          <Text style={styles.answerLabel}>Correct answer</Text>
+                          <Text style={[styles.answerValue, styles.answerRight]}>
+                            {openResult.correctAnswer}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  )}
+
+                  {openResult.explanation ? (
+                    <View style={styles.explanationBlock}>
+                      <View style={styles.explanationHead}>
+                        <Ionicons name="bulb-outline" size={13} color="#B45309" />
+                        <Text style={styles.explanationLabel}>Why</Text>
+                      </View>
+                      <Text style={styles.explanationText}>{openResult.explanation}</Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.noExplanation}>
+                      No explanation was provided for this question.
+                    </Text>
+                  )}
+                </ScrollView>
+              </View>
+            </View>
+          )}
         </View>
-      </Modal>
+      )}
     </Animated.View>
     </KeyboardSafeView>
   );
@@ -606,6 +734,9 @@ const styles = StyleSheet.create({
   hintText: { fontSize: 12, fontWeight: '600', color: '#6D28D9' },
 
   // ── Results ──
+  // Absolutely positioned over the quiz rather than a <Modal>, so it is not a
+  // second Modal stacked on the one already hosting this component.
+  resultsOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: '#F1F5F9', zIndex: 20 },
   resultsScreen: { flex: 1, backgroundColor: '#F1F5F9' },
   resultsHero: { paddingTop: 20, paddingBottom: 28, paddingHorizontal: 20, borderBottomLeftRadius: 28, borderBottomRightRadius: 28 },
   resultsHeroTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
@@ -628,50 +759,73 @@ const styles = StyleSheet.create({
   resultsSubtitle: { fontSize: 13, color: 'rgba(255,255,255,0.85)', marginTop: 6 },
   resultsPercent: { fontSize: 15, fontWeight: '700', color: '#FFFFFF' },
 
-  reviewHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  gridHeader: {
     paddingHorizontal: 20,
     paddingTop: 18,
-    paddingBottom: 10,
+    paddingBottom: 4,
   },
   reviewHeading: { fontSize: 16, fontWeight: '800', color: '#1F2937' },
-  filterChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#EDE9FE',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-  },
-  filterChipActive: { backgroundColor: '#6D28D9' },
-  filterChipText: { fontSize: 11, fontWeight: '700', color: '#6D28D9' },
-  filterChipTextActive: { color: '#FFFFFF' },
+  gridHint: { fontSize: 12, color: '#6B7280', marginTop: 2 },
 
   reviewScroll: { flex: 1 },
-  reviewContent: { paddingHorizontal: 20, paddingBottom: 24, gap: 12 },
-  reviewRow: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    padding: 16,
-    borderLeftWidth: 4,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
+  reviewContent: { paddingHorizontal: 20, paddingBottom: 24, paddingTop: 12 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  gridCell: {
+    width: 62,
+    paddingVertical: 8,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
   },
-  reviewRowCorrect: { borderLeftColor: '#10B981' },
-  reviewRowWrong: { borderLeftColor: '#EF4444' },
-  reviewRowTop: { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 8 },
-  reviewBadge: { width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
-  reviewBadgeCorrect: { backgroundColor: '#10B981' },
-  reviewBadgeWrong: { backgroundColor: '#EF4444' },
-  reviewVerdict: { fontSize: 12, fontWeight: '800', color: '#4B5563' },
-  reviewIndex: { marginLeft: 'auto', fontSize: 11, fontWeight: '700', color: '#9CA3AF' },
-  reviewQuestion: { fontSize: 15, fontWeight: '600', color: '#1F2937', lineHeight: 21, marginBottom: 12 },
+  gridCellRight: { backgroundColor: '#DCFCE7', borderColor: '#10B981' },
+  gridCellWrong: { backgroundColor: '#FEE2E2', borderColor: '#EF4444' },
+  gridNumber: { fontSize: 15, fontWeight: '800', color: '#1F2937' },
+  gridLetterRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2 },
+  gridLetter: { fontSize: 10, fontWeight: '800', color: '#B91C1C' },
+  gridLetterRight: { color: '#15803D' },
+
+  // ── per-question detail ──
+  detailBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(15,23,42,0.72)', justifyContent: 'center', padding: 20, zIndex: 30 },
+  detailCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: 18,
+    maxHeight: '80%',
+  },
+  detailHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
+  detailBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, borderWidth: 1.5 },
+  detailBadgeText: { fontSize: 11, fontWeight: '800', color: '#1F2937' },
+  detailNumber: { flex: 1, fontSize: 13, fontWeight: '700', color: '#6B7280' },
+  detailScroll: { flexGrow: 0 },
+  detailQuestion: { fontSize: 16, fontWeight: '700', color: '#1F2937', lineHeight: 23, marginBottom: 14 },
+  detailOptions: { gap: 8 },
+  detailOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    padding: 11,
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+  },
+  detailOptionRight: { backgroundColor: '#DCFCE7', borderColor: '#10B981' },
+  detailOptionWrong: { backgroundColor: '#FEE2E2', borderColor: '#EF4444' },
+  detailOptionPrefix: {
+    width: 26, height: 26, borderRadius: 13,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#CBD5E1',
+  },
+  detailOptionPrefixRight: { backgroundColor: '#10B981', borderColor: '#10B981' },
+  detailOptionPrefixWrong: { backgroundColor: '#EF4444', borderColor: '#EF4444' },
+  detailOptionPrefixText: { fontSize: 12, fontWeight: '800', color: '#4B5563' },
+  detailOptionText: { flex: 1, fontSize: 14, color: '#1F2937', lineHeight: 19 },
+  detailOptionTag: { fontSize: 10, fontWeight: '800', color: '#15803D' },
+  detailOptionTagWrong: { fontSize: 10, fontWeight: '800', color: '#B91C1C' },
+  detailAnswers: { gap: 4 },
+  detailAnswerBlock: { marginBottom: 8 },
+  rewardLine: { fontSize: 13, fontWeight: '700', color: '#059669', textAlign: 'center', marginBottom: 10 },
   answerBlock: { marginBottom: 8 },
   answerLabel: { fontSize: 10, fontWeight: '800', color: '#9CA3AF', letterSpacing: 0.6, marginBottom: 3 },
   answerValue: { fontSize: 14, fontWeight: '600', lineHeight: 20 },

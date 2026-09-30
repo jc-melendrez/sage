@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 import traceback
 import logging
@@ -42,6 +43,88 @@ MAX_QUIZ_QUESTIONS = 100
 # Quiz.quiz_type is CharField(max_length=50). Mirrored here because the model
 # is the source of truth and this is the field the request writes to.
 MAX_QUIZ_TYPE_CHARS = 50
+# Ceiling on max_tokens for a quiz generation.
+#
+# The provider refuses a request whose max_tokens is above the model's output
+# limit, and that is a 400 it will never accept on retry. Quizzes worked up to
+# 30 questions and failed from 40, which is exactly where the old formula
+# (capped at 12000, far above the real limit) crossed 8192:
+#
+#   10 -> 3400, 30 -> 7800  (under the cap, both worked)
+#   40 -> 10000, 50 -> 12000 (over the cap, both failed)
+#
+# So 8192 is the limit, not a guess at a token budget. Override only if the
+# configured model is swapped for one with a larger output allowance.
+AI_MAX_OUTPUT_TOKENS = int(os.getenv('AI_MAX_OUTPUT_TOKENS', '8192'))
+# Fixed overhead in the formula below: the title, the schema restated in the
+# prompt, and the JSON punctuation around every question.
+QUIZ_TOKEN_OVERHEAD = 1200
+# Per-question allowance, measured against what a 30-question batch actually
+# needed. Deliberately unchanged for the counts that already work -- only the
+# 40 and 50 requests move, and they move down to the cap.
+QUIZ_TOKENS_PER_QUESTION = 220
+
+# Provider 4xx that will never succeed on a retry: the request itself is
+# unacceptable (bad model name, max_tokens over the output limit, malformed
+# body). Retrying these only burns the generation deadline before failing the
+# same way, and reporting them as a timeout hides the reason.
+AI_NON_RETRYABLE_STATUS = frozenset({400, 401, 402, 403, 404, 405, 413, 422})
+
+
+def _provider_message(detail):
+    """Pull the human-readable reason out of a provider error body.
+
+    DeepSeek answers `{"error": {"message": "..."}}`, but a proxy in front of it
+    may answer with a bare string or an HTML error page, so every shape is
+    tolerated and the raw text is the last resort.
+    """
+    text = (detail or '').strip()
+    if not text:
+        return ''
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return text[:200]
+    if isinstance(payload, dict):
+        err = payload.get('error')
+        if isinstance(err, dict) and err.get('message'):
+            return str(err['message'])[:200]
+        if isinstance(err, str) and err:
+            return err[:200]
+        if payload.get('message'):
+            return str(payload['message'])[:200]
+    return text[:200]
+
+
+def _ai_failure_response(status, detail):
+    """Turn a provider failure into an HTTP error the app can act on.
+
+    This used to be a single branch that returned 504 "AI generation timed out"
+    for every non-200. That is actively misleading: a rejected request (a
+    max_tokens value over the model's output limit, say) is not a timeout, and
+    labelling it as one sent every investigation down the wrong path. The
+    provider's own wording is passed through so the cause is visible without
+    server logs.
+    """
+    message = _provider_message(detail)
+    if status == 429:
+        return Response(
+            {'error': 'The AI service is rate limited. Wait a moment and try again.'},
+            status=429)
+    if status in AI_NON_RETRYABLE_STATUS:
+        # A rejected request usually means our parameters are wrong, so say what
+        # the provider objected to. It is provider-side detail, not internals.
+        return Response(
+            {'error': f'The AI service rejected this request: {message or "unknown reason"}'},
+            status=502)
+    if status is None:
+        return Response(
+            {'error': 'AI generation timed out. Please try again.'},
+            status=504)
+    return Response(
+        {'error': 'The AI service is unavailable right now. Please try again.'},
+        status=502)
+
 from users.utils.file_parser import (
     extract_text_from_bytes,
     extract_text_from_file,
@@ -644,9 +727,29 @@ class GenerateQuizView(APIView):
             "}"
         )
 
+        # Output budget, restated in the prompt.
+        #
+        # Without these limits the model writes as much prose as it likes, and
+        # the explanation field is where it goes. At 30 questions that fit
+        # inside the token ceiling; at 50 the same per-question length does not,
+        # and the request is rejected before a token is generated. A hard
+        # per-field budget is what makes the larger batches reachable in one
+        # call, which is the whole point of not chunking.
+        option_count = 2 if q_type.lower() in ('true/false', 'true false', 'boolean') else 4
+        brevity_rules = (
+            "Strict length limits, so the whole quiz fits one response:\n"
+            "- title: at most 60 characters\n"
+            "- question: at most 20 words\n"
+            f"- exactly {option_count} options, each at most 10 words\n"
+            "- correct_answer: copy the chosen option text exactly\n"
+            "- explanation: ONE sentence, at most 20 words. Never more than one.\n"
+            "- no markdown, no numbering, no commentary outside the JSON\n"
+        )
+
         user_prompt = (
             f"Generate a {difficulty} level quiz with exactly {count} {q_type} questions. "
             f"Additional Instructions: {instructions}\n\n"
+            f"{brevity_rules}\n"
             f"Content to base the quiz on:\n{content}"
         )
 
@@ -665,12 +768,17 @@ class GenerateQuizView(APIView):
         # and an over-long response was silently truncated into a JSON parse
         # failure.
         #
-        # 12000 is enough for the 50 the UI offers: at 50 that is ~240 tokens
-        # per question, and a batch that large has been observed to parse and
-        # reach the save intact, so the ceiling is not the thing that was
-        # failing. A `finish_reason == 'length'` check below still catches a
-        # genuine truncation and says so.
-        max_tokens = min(12000, 1200 + count * 220)
+        # The clamp is the important half. Asking for more output tokens than
+        # the model can emit is rejected outright as a 400, so an unbounded
+        # formula does not produce a longer quiz, it produces a failed request.
+        # That is what capped this at 30 questions in practice: 30 needs 7800
+        # and fits, 40 asks for 10000 and does not. The prompt above spends the
+        # budget that is actually available on terser output, which is how 40
+        # and 50 fit without splitting the generation.
+        max_tokens = min(
+            AI_MAX_OUTPUT_TOKENS,
+            QUIZ_TOKEN_OVERHEAD + count * QUIZ_TOKENS_PER_QUESTION,
+        )
 
         payload = {
             "model": model_name,
@@ -692,11 +800,10 @@ class GenerateQuizView(APIView):
                 payload, DEEPSEEK_API_KEY, deadline_seconds=AI_GEN_BUDGET_SECONDS)
 
             if response is None or response.status_code != 200:
+                status = getattr(response, 'status_code', None)
                 detail = getattr(response, 'text', '') or 'no response'
-                print(f"[GenerateQuizView] DeepSeek error: {str(detail)[:300]}")
-                return Response(
-                    {'error': 'AI generation timed out. Please try again.'},
-                    status=504)
+                print(f"[GenerateQuizView] DeepSeek error {status}: {str(detail)[:300]}")
+                return _ai_failure_response(status, detail)
 
             # A body that isn't JSON at all used to raise inside .json() and was
             # reported as a 500. Treat any malformed payload as a bad gateway.

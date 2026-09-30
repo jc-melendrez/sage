@@ -463,14 +463,14 @@ export default function CourseDetailScreen() {
             questions={activeQuiz.questions}
             onFinish={async (score) => {
               const total = activeQuiz.questions.length;
-              try {
-                // Passing courseId keeps the class leaderboard credit.
-                const result = await completeQuiz(score, total, Number(courseId), activeQuiz.id);
-                return { xp: result.xp, badges: result.badges };
-              } catch (error) {
-                console.error('Failed to record quiz completion:', error);
-                return { xp: 0, badges: [] };
-              }
+              // Passing courseId keeps the class leaderboard credit.
+              // A failure propagates so the quiz stays open instead of
+              // reporting a save that never happened.
+              const result = await completeQuiz(score, total, Number(courseId), activeQuiz.id);
+              return { xp: result.xp, badges: result.badges };
+            }}
+            onFinishError={(message) => {
+              Alert.alert("Couldn't save your result", message);
             }}
             onClose={() => {
               setActiveQuiz(null);

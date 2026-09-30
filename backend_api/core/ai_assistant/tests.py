@@ -1245,7 +1245,8 @@ class GenerateQuizReliabilityTests(APITestCase):
         self.assertEqual(payload['thinking'], {'type': 'disabled'})
         # No max_tokens meant the provider default, which is below what 30
         # questions need; the response was truncated into a parse failure.
-        self.assertEqual(payload['max_tokens'], min(12000, 1200 + 30 * 220))
+        # 30 fits under the output ceiling, so the clamp leaves it untouched.
+        self.assertEqual(payload['max_tokens'], 1200 + 30 * 220)
         # The deadline is the whole point of using the shared helper.
         self.assertEqual(
             mock_call.call_args[1]['deadline_seconds'],
@@ -1346,12 +1347,87 @@ class GenerateQuizReliabilityTests(APITestCase):
 
     @override_settings(DEEPSEEK_API_KEY='test-key')
     @patch('ai_assistant.views.deepseek_chat_completion')
-    def test_an_upstream_error_body_is_surfaced(self, mock_call):
+    def test_a_rate_limited_call_reports_429_not_a_timeout(self, mock_call):
         mock_call.return_value = _deepseek_response(
             '', status_code=429, text='rate limit reached')
         resp = self.post_quiz()
-        self.assertEqual(resp.status_code, 504)
+        self.assertEqual(resp.status_code, 429)
+        self.assertIn('rate limited', resp.data['error'])
         self.assertEqual(Quiz.objects.count(), 0)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_rejected_request_reports_the_providers_reason(self, mock_call):
+        """A 400 is not a timeout.
+
+        The provider refuses a request whose max_tokens exceeds the model's
+        output limit. Reporting that as "AI generation timed out" is what made
+        the 40-50 question failure look like a network problem, so the provider's
+        own wording has to reach the client.
+        """
+        mock_call.return_value = _deepseek_response(
+            '', status_code=400,
+            text=json.dumps({'error': {
+                'message': "max_tokens: 10000 > model's maximum 8192",
+            }}))
+        resp = self.post_quiz(count=50)
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn('rejected this request', resp.data['error'])
+        self.assertIn('8192', resp.data['error'])
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_non_retryable_status_is_not_retried(self, mock_call):
+        """A 400 is the same answer every time.
+
+        The helper used to retry every non-200, so a rejected request burned
+        three attempts and the backoff between them out of a 70s budget that
+        also has to cover a real generation.
+        """
+        from core.llm import deepseek_chat_completion
+
+        with patch('core.llm.requests.post') as mock_post:
+            mock_post.return_value = _deepseek_response(
+                '', status_code=400, text='bad request')
+            result = deepseek_chat_completion(
+                {'model': 'x'}, 'key', max_retries=3, deadline_seconds=70)
+        self.assertEqual(result.status_code, 400)
+        self.assertEqual(mock_post.call_count, 1)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_server_error_is_still_retried(self, mock_call):
+        """The flip side: a 5xx genuinely can succeed on a second attempt."""
+        from core.llm import deepseek_chat_completion
+
+        with patch('core.llm.requests.post') as mock_post:
+            mock_post.side_effect = [
+                _deepseek_response('', status_code=503, text='unavailable'),
+                _deepseek_response('{"title": "t", "questions": []}', status_code=200),
+            ]
+            result = deepseek_chat_completion(
+                {'model': 'x'}, 'key', max_retries=3, deadline_seconds=70)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(mock_post.call_count, 2)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_provider_message_is_extracted_from_any_error_shape(self, mock_call):
+        """A proxy in front of the provider may not use the provider's JSON
+        shape, so a bare string and an unparseable body both still reach the
+        client rather than degrading to a generic message."""
+        from ai_assistant.views import _provider_message
+
+        self.assertEqual(
+            _provider_message('{"error": {"message": "boom"}}'), 'boom')
+        self.assertEqual(
+            _provider_message('{"error": "flat reason"}'), 'flat reason')
+        self.assertEqual(
+            _provider_message('{"message": "top level"}'), 'top level')
+        # Unparseable bodies fall back to the raw text rather than nothing.
+        self.assertEqual(_provider_message('Bad Gateway'), 'Bad Gateway')
+        self.assertEqual(_provider_message(''), '')
 
     @override_settings(DEEPSEEK_API_KEY=None)
     @patch('ai_assistant.views.deepseek_chat_completion')
@@ -1399,6 +1475,61 @@ class GenerateQuizReliabilityTests(APITestCase):
         for q in resp.data['questions']:
             self.assertGreaterEqual(len(q['options']), 2)
             self.assertTrue(q['correct_answer'])
+
+    # -- the token ceiling (why 30 worked and 40 did not) --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_the_requested_token_budget_never_exceeds_the_output_ceiling(self, mock_call):
+        """Asking for more output tokens than the model can emit is rejected
+        outright as a 400, so a larger budget does not produce a longer quiz --
+        it produces a failed request. The old formula asked for 10000 at 40
+        questions and 12000 at 50, both over the 8192 ceiling, which is exactly
+        where generation started failing.
+        """
+        from ai_assistant.views import AI_MAX_OUTPUT_TOKENS
+
+        for count in (1, 10, 30, 40, 50, 100):
+            mock_call.return_value = _deepseek_response(_quiz_payload(count))
+            self.post_quiz(count=count)
+            max_tokens = mock_call.call_args[0][0]['max_tokens']
+            self.assertLessEqual(
+                max_tokens, AI_MAX_OUTPUT_TOKENS,
+                f'{count} questions asked for {max_tokens} tokens')
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_counts_that_already_work_keep_their_token_budget(self, mock_call):
+        """Clamping must not regress the sizes that were already succeeding.
+
+        10 and 30 questions fit under the ceiling, so they must keep the exact
+        budget they had before the clamp was added. Lowering it would truncate
+        a working batch into a JSON parse failure.
+        """
+        mock_call.return_value = _deepseek_response(_quiz_payload(30))
+        self.post_quiz(count=30)
+        self.assertEqual(mock_call.call_args[0][0]['max_tokens'], 1200 + 30 * 220)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_the_prompt_carries_a_per_field_length_budget(self, mock_call):
+        """The ceiling only helps if the model's output is terse enough to fit
+        inside it. The prompt had no length limits at all, and the explanation
+        field is where an unconstrained model spends its tokens."""
+        mock_call.return_value = _deepseek_response(_quiz_payload(3))
+        self.post_quiz(count=50)
+        prompt = mock_call.call_args[0][0]['messages'][1]['content']
+        self.assertIn('ONE sentence', prompt)
+        self.assertIn('at most 20 words', prompt)
+        self.assertIn('at most 60 characters', prompt)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_true_false_asks_for_two_options(self, mock_call):
+        mock_call.return_value = _deepseek_response(_quiz_payload(2))
+        self.post_quiz(count=2, type='True/False')
+        prompt = mock_call.call_args[0][0]['messages'][1]['content']
+        self.assertIn('exactly 2 options', prompt)
 
     # -- over-length columns (the 40-50 question 500) --
 

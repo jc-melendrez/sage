@@ -989,14 +989,16 @@ export default function ActivitiesScreen() {
           questions={quizToTake?.questions || []}
           onFinish={async (score) => {
             const total = quizToTake?.questions.length ?? 0;
-
-            try {
-              const quizResult = await completeQuiz(score, total, undefined, quizToTake?.id);
-              return { xp: quizResult.xp, badges: quizResult.badges };
-            } catch (error) {
-              console.error('Failed to record quiz completion:', error);
-              return { xp: 0, badges: [] };
-            }
+            // No try/catch: completeQuiz already raises a message describing
+            // what went wrong, and swallowing it into `{ xp: 0 }` reported a
+            // failed save as a successful one with no XP.
+            const quizResult = await completeQuiz(score, total, undefined, quizToTake?.id);
+            return { xp: quizResult.xp, badges: quizResult.badges };
+          }}
+          onFinishError={(message) => {
+            // The quiz stays open so the attempt is not lost, and the student
+            // can retry the save.
+            Alert.alert("Couldn't save your result", message);
           }}
           onClose={() => {
             setIsQuizModalOpen(false);
