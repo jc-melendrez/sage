@@ -161,6 +161,9 @@ export default function CourseDetailScreen() {
           type: (quiz.quiz_type || 'Multiple Choice') as any,
           options: q.options,
           correct_answer: q.correct_answer,
+          // Dropped here before, so the end-of-quiz review had no explanation
+          // to show even though the model wrote one and the serializer returns it.
+          explanation: q.explanation ?? '',
         })),
       });
     } catch (err) {

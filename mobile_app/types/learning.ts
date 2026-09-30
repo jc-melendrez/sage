@@ -113,6 +113,11 @@ export interface CoursePathTopic {
 
 export interface NodeCompleteResponse {
   score: number;
+  /**
+   * Highest score ever recorded on this node. `score` is the attempt that was
+   * just submitted, which is what the results screen shows.
+   */
+  best_score: number;
   passed: boolean;
   attempts: number;
   xp: {

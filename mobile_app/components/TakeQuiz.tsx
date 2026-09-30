@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, Modal, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 
 // Define a basic interface for a quiz question
@@ -11,6 +12,12 @@ interface QuizQuestion {
   type: 'Multiple Choice' | 'True/False' | 'Short Answer' | 'Fill-in-the-Blank';
   options?: string[]; // For Multiple Choice
   correct_answer?: string; // For validation (optional for this template)
+  /**
+   * Why the correct answer is correct. The model writes one per question and
+   * the serializer already returns it, so the review below has something to
+   * teach with instead of just marking an answer red.
+   */
+  explanation?: string | null;
 }
 
 export interface QuizRewardInfo {
@@ -18,35 +25,80 @@ export interface QuizRewardInfo {
   badges: { icon: string; name: string }[];
 }
 
+/** One graded question, kept so the end-of-quiz review can explain it. */
+export interface TakeQuizResult {
+  question: string;
+  /** What the student picked. `null` for a question they never answered. */
+  yourAnswer: string | null;
+  correctAnswer: string;
+  correct: boolean;
+  explanation: string;
+}
+
 interface TakeQuizProps {
   quizTitle: string;
   questions: QuizQuestion[];
-  /** May be async and return reward info (XP/badges) to display in the results view. */
-  onFinish: (score: number) => QuizRewardInfo | void | Promise<QuizRewardInfo | void>;
+  /**
+   * May be async and return reward info (XP/badges) to display in the results
+   * view. The second argument is the per-question review; existing callers
+   * ignore it, so it is optional in practice.
+   */
+  onFinish: (score: number, results?: TakeQuizResult[]) => QuizRewardInfo | void | Promise<QuizRewardInfo | void>;
   onClose: () => void; // Callback to close the quiz
 }
 
+const OPTION_LABELS = ['A', 'B', 'C', 'D', 'E', 'F'];
+
 const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onClose }) => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  // Keyed by array index, not by question id. Ids come from the database, but
+  // the response from a generation call echoes the ids the model invented, and
+  // a collision there would silently overwrite one answer with another.
   const [userAnswers, setUserAnswers] = useState<{ [key: number]: string | string[] }>({});
   const [score, setScore] = useState<number | null>(null);
+  const [review, setReview] = useState<TakeQuizResult[]>([]);
   const [showResults, setShowResults] = useState(false);
+  const [missedOnly, setMissedOnly] = useState(false);
   const [reward, setReward] = useState<QuizRewardInfo | null>(null);
   const [isFinishing, setIsFinishing] = useState(false);
 
-  if (!questions || questions.length === 0) return null;
+  // A short fade/scale on entry. The quiz used to snap in flat, which read as
+  // a jump cut the moment the sheet closed.
+  const enter = useSharedValue(0);
+  useEffect(() => {
+    enter.value = withTiming(1, { duration: 320 });
+  }, [enter]);
+  const enterStyle = useAnimatedStyle(() => ({
+    opacity: enter.value,
+    transform: [{ scale: 0.97 + 0.03 * enter.value }],
+  }));
 
   const currentQuestion = questions[currentQuestionIndex] || questions[0];
-  const progress = ((currentQuestionIndex + 1) / questions.length) * 100;
+
+  // answers is undefined until the quiz mounts, so every early return below
+  // has to sit after this.
+  const answers = questions;
+
+  const progress = answers.length > 0 ? ((currentQuestionIndex + 1) / answers.length) * 100 : 0;
 
   const getOptionLabel = (index: number) => {
-    const labels = ['A', 'B', 'C', 'D', 'E', 'F'];
-    return labels[index] || '';
+    return OPTION_LABELS[index] || '';
   };
 
-  const handleAnswer = (questionId: number, answer: string | string[]) => {
-    setUserAnswers(prev => ({ ...prev, [questionId]: answer }));
+  const handleAnswer = (index: number, answer: string | string[]) => {
+    setUserAnswers(prev => ({ ...prev, [index]: answer }));
   };
+
+  const hasAnswered = useCallback((index: number) => {
+    const answer = userAnswers[index];
+    if (answer == null) return false;
+    if (Array.isArray(answer)) return answer.length > 0;
+    // A short-answer box the student typed into and then cleared is not an
+    // answer, so trim before deciding.
+    return answer.trim().length > 0;
+  }, [userAnswers]);
+
+  const canAdvance = hasAnswered(currentQuestionIndex);
 
   const renderQuestionContent = () => {
     switch (currentQuestion.type) {
@@ -58,24 +110,24 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
                 key={index}
                 style={[
                   styles.optionButton,
-                  userAnswers[currentQuestion.id] === option ? styles.optionButtonSelected : styles.optionButtonUnselected,
+                  userAnswers[currentQuestionIndex] === option ? styles.optionButtonSelected : styles.optionButtonUnselected,
                 ]}
-                onPress={() => handleAnswer(currentQuestion.id, option)}
+                onPress={() => handleAnswer(currentQuestionIndex, option)}
               >
                 <View style={[
                   styles.optionPrefix,
-                  userAnswers[currentQuestion.id] === option ? styles.optionPrefixSelected : styles.optionPrefixUnselected
+                  userAnswers[currentQuestionIndex] === option ? styles.optionPrefixSelected : styles.optionPrefixUnselected
                 ]}>
                   <Text style={[
                     styles.optionPrefixText,
-                    userAnswers[currentQuestion.id] === option ? { color: 'white' } : { color: '#6D28D9' }
+                    userAnswers[currentQuestionIndex] === option ? { color: 'white' } : { color: '#6D28D9' }
                   ]}>
                     {getOptionLabel(index)}
                   </Text>
                 </View>
                 <Text style={[
                   styles.optionText,
-                  userAnswers[currentQuestion.id] === option ? styles.optionTextSelected : styles.optionTextUnselected,
+                  userAnswers[currentQuestionIndex] === option ? styles.optionTextSelected : styles.optionTextUnselected,
                 ]}>
                   {option}
                 </Text>
@@ -92,13 +144,13 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
                 style={[
                   styles.optionButton,
                   { flex: 1, marginHorizontal: 6 },
-                  userAnswers[currentQuestion.id] === option && styles.optionButtonSelected,
+                  userAnswers[currentQuestionIndex] === option && styles.optionButtonSelected,
                 ]}
-                onPress={() => handleAnswer(currentQuestion.id, option)}
+                onPress={() => handleAnswer(currentQuestionIndex, option)}
               >
                 <Text style={[
                   styles.optionText,
-                  userAnswers[currentQuestion.id] === option && styles.optionTextSelected,
+                  userAnswers[currentQuestionIndex] === option && styles.optionTextSelected,
                 ]}>
                   {option}
                 </Text>
@@ -113,8 +165,8 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
             placeholder="Type your answer here..."
             placeholderTextColor="#9CA3AF"
             multiline
-            value={userAnswers[currentQuestion.id] as string || ''}
-            onChangeText={(text) => handleAnswer(currentQuestion.id, text)}
+            value={(userAnswers[currentQuestionIndex] as string) || ''}
+            onChangeText={(text) => handleAnswer(currentQuestionIndex, text)}
           />
         );
       case 'Fill-in-the-Blank':
@@ -125,8 +177,8 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
             style={styles.shortAnswerInput}
             placeholder="Fill in the blank..."
             placeholderTextColor="#9CA3AF"
-            value={userAnswers[currentQuestion.id] as string || ''}
-            onChangeText={(text) => handleAnswer(currentQuestion.id, text)}
+            value={(userAnswers[currentQuestionIndex] as string) || ''}
+            onChangeText={(text) => handleAnswer(currentQuestionIndex, text)}
           />
         );
       default:
@@ -134,24 +186,38 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
     }
   };
 
+  const normalise = (value: unknown): string => {
+    if (value == null) return '';
+    if (Array.isArray(value)) return value.join(', ');
+    return String(value);
+  };
+
   const handleSubmitQuiz = () => {
     let correctCount = 0;
-
-    questions.forEach((q) => {
-      const userAnswer = userAnswers[q.id];
-      const correctAnswer = q.correct_answer;
-
-      if (!userAnswer || !correctAnswer) return;
-
-      if (typeof userAnswer === 'string' && typeof correctAnswer === 'string') {
-        // Case-insensitive trim comparison for text/short answer/multiple choice
-        if (userAnswer.trim().toLowerCase() === correctAnswer.trim().toLowerCase()) {
-          correctCount++;
-        }
-      }
+    // Graded per question and kept, so the review can say what was right and
+    // why. The old version counted and threw the detail away, which left the
+    // results screen able to show a number and nothing else.
+    const results: TakeQuizResult[] = answers.map((q, index) => {
+      const rawAnswer = userAnswers[index];
+      const yourAnswer = normalise(rawAnswer);
+      const correctAnswer = normalise(q.correct_answer);
+      // Case-insensitive trim comparison for text/short answer/multiple choice
+      const correct = yourAnswer.length > 0
+        && correctAnswer.length > 0
+        && yourAnswer.trim().toLowerCase() === correctAnswer.trim().toLowerCase();
+      if (correct) correctCount++;
+      return {
+        question: q.question,
+        yourAnswer: yourAnswer.length > 0 ? yourAnswer : null,
+        correctAnswer,
+        correct,
+        explanation: (q.explanation ?? '').trim(),
+      };
     });
 
     setScore(correctCount);
+    setReview(results);
+    setMissedOnly(correctCount < results.length);
     setShowResults(true);
   };
 
@@ -164,7 +230,7 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
     }
     setIsFinishing(true);
     try {
-      const result = await onFinish(score);
+      const result = await onFinish(score, review);
       if (result && typeof result === 'object') {
         setReward(result as QuizRewardInfo);
       } else {
@@ -179,9 +245,21 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
     }
   };
 
+  const missedCount = useMemo(() => review.filter((r) => !r.correct).length, [review]);
+  const visibleReview = useMemo(
+    () => (missedOnly ? review.filter((r) => !r.correct) : review),
+    [missedOnly, review],
+  );
+
+  const isLastQuestion = currentQuestionIndex >= answers.length - 1;
+
+  // After the hooks, because a conditional return above them would break the
+  // hook order across renders.
+  if (!questions || questions.length === 0) return null;
+
   return (
     <KeyboardSafeView style={styles.container}>
-    <View style={styles.container}>
+    <Animated.View style={[styles.container, enterStyle]}>
       {/* Modern Gradient Header */}
       <LinearGradient colors={['#6D28D9', '#4F46E5']} style={styles.header}>
         <TouchableOpacity onPress={onClose} style={styles.closeButton}>
@@ -189,7 +267,7 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
         </TouchableOpacity>
         <View style={styles.headerInfo}>
           <Text style={styles.quizTitle} numberOfLines={1}>{quizTitle}</Text>
-          <Text style={styles.questionCounter}>Question {currentQuestionIndex + 1} of {questions.length}</Text>
+          <Text style={styles.questionCounter}>Question {currentQuestionIndex + 1} of {answers.length}</Text>
         </View>
         <View style={styles.headerIcon}>
           <Ionicons name="timer-outline" size={22} color="rgba(255,255,255,0.8)" />
@@ -218,48 +296,161 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
           <Text style={styles.navButtonText}>Previous</Text>
         </TouchableOpacity>
 
-        {currentQuestionIndex < questions.length - 1 ? (
-          <TouchableOpacity
-            style={[styles.navButton, styles.nextButton]}
-            onPress={() => setCurrentQuestionIndex(prev => prev + 1)}
-          >
-            <Text style={[styles.navButtonText, { color: 'white' }]}>Next</Text>
-            <Ionicons name="arrow-forward" size={18} color="white" style={{ marginLeft: 6 }} />
-          </TouchableOpacity>
+        {!isLastQuestion ? (
+          <>
+            <TouchableOpacity
+              // Advancing used to be unconditional, so a student could walk the
+              // whole quiz without answering anything and be graded on blanks.
+              style={[
+                styles.navButton,
+                styles.nextButton,
+                !canAdvance && styles.navButtonDisabled,
+              ]}
+              onPress={() => setCurrentQuestionIndex(prev => prev + 1)}
+              disabled={!canAdvance}
+              activeOpacity={canAdvance ? 0.8 : 1}
+            >
+              <Text style={[styles.navButtonText, { color: 'white' }]}>Next</Text>
+              <Ionicons name="arrow-forward" size={18} color="white" style={{ marginLeft: 6 }} />
+            </TouchableOpacity>
+          </>
         ) : (
           <TouchableOpacity
-            style={[styles.navButton, styles.submitButton]}
+            style={[styles.navButton, styles.submitButton, !canAdvance && styles.navButtonDisabled]}
             onPress={handleSubmitQuiz}
+            disabled={!canAdvance}
+            activeOpacity={canAdvance ? 0.8 : 1}
           >
             <Text style={[styles.navButtonText, styles.submitButtonText]}>Submit Quiz</Text>
           </TouchableOpacity>
         )}
       </View>
 
-      {/* Results Modal */}
-      <Modal visible={showResults} transparent animationType="fade">
-        <View style={styles.resultsOverlay}>
-          <LinearGradient colors={['#FFFFFF', '#F1F5F9']} style={styles.resultsCard}>
-            <View style={styles.resultsHeader}>
-              <View style={[styles.scoreCircle, { borderColor: score !== null && score / questions.length >= 0.7 ? '#10B981' : '#F59E0B' }]}>
-                <Text style={styles.scoreText}>{score}</Text>
-                <Text style={styles.scoreTotal}>/ {questions.length}</Text>
-              </View>
-              <Text style={styles.resultsTitle}>
-                {score !== null && score / questions.length >= 0.7 ? 'Great Job!' : 'Keep Practicing!'}
-              </Text>
-              <Text style={styles.resultsSubtitle}>
-                You&apos;ve completed the &quot;{quizTitle}&quot; quiz.
-              </Text>
+      {/* Why the button is dead, instead of leaving it to be guessed at. */}
+      {!canAdvance && (
+        <View style={styles.hintBar} pointerEvents="none">
+          <Ionicons name="information-circle-outline" size={14} color="#6D28D9" />
+          <Text style={styles.hintText}>
+            {currentQuestion.type === 'Multiple Choice' || currentQuestion.type === 'True/False'
+              ? 'Pick an answer to continue'
+              : 'Type an answer to continue'}
+          </Text>
+        </View>
+      )}
 
-              {score !== null && (
-                <Text style={styles.resultsPercent}>
-                  {Math.round((score / questions.length) * 100)}% score
-                </Text>
-              )}
-
+      {/* Results + review. Full screen rather than a centred card: a 50-question
+          quiz does not fit in a dialog, and the review is the point of the
+          screen. */}
+      <Modal visible={showResults} animationType="slide">
+        <View style={styles.resultsScreen}>
+          <LinearGradient colors={['#6D28D9', '#4F46E5']} style={styles.resultsHero}>
+            <View style={styles.resultsHeroTop}>
+              <TouchableOpacity
+                style={styles.closeButton}
+                onPress={handleFinish}
+                disabled={isFinishing}
+                accessibilityLabel="Close results"
+              >
+                {isFinishing
+                  ? <ActivityIndicator color="white" />
+                  : <Ionicons name="close" size={24} color="white" />}
+              </TouchableOpacity>
+              <Text style={styles.resultsHeroTitle} numberOfLines={1}>{quizTitle}</Text>
+              <View style={styles.closeButton} />
             </View>
 
+            <View style={styles.resultsScoreRow}>
+              <View style={styles.scoreCircle}>
+                <Text style={styles.scoreText}>{score}</Text>
+                <Text style={styles.scoreTotal}>/ {answers.length}</Text>
+              </View>
+              <View style={styles.resultsScoreText}>
+                <Text style={styles.resultsTitle}>
+                  {score !== null && score / answers.length >= 0.7 ? 'Great Job!' : 'Keep Practicing!'}
+                </Text>
+                <Text style={styles.resultsPercent}>
+                  {Math.round(((score ?? 0) / answers.length) * 100)}% score
+                </Text>
+                <Text style={styles.resultsSubtitle}>
+                  {answers.length - missedCount} right, {missedCount} to review
+                </Text>
+              </View>
+            </View>
+          </LinearGradient>
+
+          <View style={styles.reviewHeader}>
+            <Text style={styles.reviewHeading}>
+              {missedOnly ? 'What you missed' : 'Answer review'}
+            </Text>
+            <TouchableOpacity
+              style={[styles.filterChip, missedOnly && styles.filterChipActive]}
+              onPress={() => setMissedOnly(prev => !prev)}
+            >
+              <Ionicons
+                name={missedOnly ? 'eye-outline' : 'eye-off-outline'}
+                size={13}
+                color={missedOnly ? '#FFFFFF' : '#6D28D9'}
+              />
+              <Text style={[styles.filterChipText, missedOnly && styles.filterChipTextActive]}>
+                {missedOnly ? 'Showing missed' : 'Showing all'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView
+            style={styles.reviewScroll}
+            contentContainerStyle={styles.reviewContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {visibleReview.map((r, i) => (
+              <View
+                key={i}
+                style={[styles.reviewRow, r.correct ? styles.reviewRowCorrect : styles.reviewRowWrong]}
+              >
+                <View style={styles.reviewRowTop}>
+                  <View style={[styles.reviewBadge, r.correct ? styles.reviewBadgeCorrect : styles.reviewBadgeWrong]}>
+                    <Ionicons
+                      name={r.correct ? 'checkmark-circle' : 'close-circle'}
+                      size={14}
+                      color="#FFFFFF"
+                    />
+                  </View>
+                  <Text style={styles.reviewVerdict}>{r.correct ? 'Correct' : 'Incorrect'}</Text>
+                  <Text style={styles.reviewIndex}>#{i + 1}</Text>
+                </View>
+
+                <Text style={styles.reviewQuestion}>{r.question}</Text>
+
+                <View style={styles.answerBlock}>
+                  <Text style={styles.answerLabel}>Your answer</Text>
+                  <Text style={[styles.answerValue, r.correct ? styles.answerRight : styles.answerWrong]}>
+                    {r.yourAnswer ?? 'Not answered'}
+                  </Text>
+                </View>
+
+                {!r.correct && (
+                  <View style={styles.answerBlock}>
+                    <Text style={styles.answerLabel}>Correct answer</Text>
+                    <Text style={[styles.answerValue, styles.answerRight]}>{r.correctAnswer}</Text>
+                  </View>
+                )}
+
+                {r.explanation ? (
+                  <View style={styles.explanationBlock}>
+                    <View style={styles.explanationHead}>
+                      <Ionicons name="bulb-outline" size={13} color="#B45309" />
+                      <Text style={styles.explanationLabel}>Why</Text>
+                    </View>
+                    <Text style={styles.explanationText}>{r.explanation}</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.noExplanation}>No explanation was provided for this question.</Text>
+                )}
+              </View>
+            ))}
+          </ScrollView>
+
+          <View style={styles.resultsFooter}>
             <TouchableOpacity
               style={[styles.finishButton, isFinishing && { opacity: 0.7 }]}
               onPress={handleFinish}
@@ -271,10 +462,10 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
                 <Text style={styles.finishButtonText}>{reward ? 'Done' : 'Finish'}</Text>
               )}
             </TouchableOpacity>
-          </LinearGradient>
+          </View>
         </View>
       </Modal>
-    </View>
+    </Animated.View>
     </KeyboardSafeView>
   );
 };
@@ -385,7 +576,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     padding: 20,
-    paddingBottom: 34,
+    paddingBottom: 12,
     borderTopWidth: 1,
     borderTopColor: '#F1F5F9',
   },
@@ -400,39 +591,104 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   nextButton: { backgroundColor: '#4F46E5' },
+  navButtonDisabled: { backgroundColor: '#9CA3AF' },
   navButtonText: { fontSize: 15, fontWeight: '700', color: '#4B5563' },
   submitButton: { backgroundColor: '#10B981', flex: 1, marginLeft: 12 },
   submitButtonText: { color: 'white' },
-  resultsOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+  hintBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
+    gap: 6,
+    paddingBottom: 18,
+    backgroundColor: '#F8FAFC',
   },
-  resultsCard: {
-    width: '100%',
-    borderRadius: 32,
-    padding: 32,
-    alignItems: 'center',
-    elevation: 10,
-  },
-  resultsHeader: { alignItems: 'center', marginBottom: 32 },
+  hintText: { fontSize: 12, fontWeight: '600', color: '#6D28D9' },
+
+  // ── Results ──
+  resultsScreen: { flex: 1, backgroundColor: '#F1F5F9' },
+  resultsHero: { paddingTop: 20, paddingBottom: 28, paddingHorizontal: 20, borderBottomLeftRadius: 28, borderBottomRightRadius: 28 },
+  resultsHeroTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
+  resultsHeroTitle: { flex: 1, textAlign: 'center', color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
+  resultsScoreRow: { flexDirection: 'row', alignItems: 'center', gap: 20 },
+  resultsScoreText: { flex: 1 },
   scoreCircle: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    borderWidth: 8,
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    borderWidth: 6,
+    borderColor: 'rgba(255,255,255,0.9)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 20,
     flexDirection: 'row',
   },
-  scoreText: { fontSize: 38, fontWeight: 'bold', color: '#1F2937' },
-  scoreTotal: { fontSize: 18, color: '#6B7280', marginLeft: 4, marginTop: 10 },
-  resultsTitle: { fontSize: 24, fontWeight: 'bold', color: '#1F2937', marginBottom: 8 },
-  resultsSubtitle: { fontSize: 14, color: '#6B7280', textAlign: 'center', lineHeight: 20 },
-  resultsPercent: { fontSize: 15, fontWeight: '700', color: '#6D28D9', marginTop: 8 },
+  scoreText: { fontSize: 32, fontWeight: 'bold', color: '#FFFFFF' },
+  scoreTotal: { fontSize: 15, color: 'rgba(255,255,255,0.85)', marginLeft: 3, marginTop: 8 },
+  resultsTitle: { fontSize: 22, fontWeight: 'bold', color: '#FFFFFF', marginBottom: 4 },
+  resultsSubtitle: { fontSize: 13, color: 'rgba(255,255,255,0.85)', marginTop: 6 },
+  resultsPercent: { fontSize: 15, fontWeight: '700', color: '#FFFFFF' },
+
+  reviewHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 18,
+    paddingBottom: 10,
+  },
+  reviewHeading: { fontSize: 16, fontWeight: '800', color: '#1F2937' },
+  filterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#EDE9FE',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  filterChipActive: { backgroundColor: '#6D28D9' },
+  filterChipText: { fontSize: 11, fontWeight: '700', color: '#6D28D9' },
+  filterChipTextActive: { color: '#FFFFFF' },
+
+  reviewScroll: { flex: 1 },
+  reviewContent: { paddingHorizontal: 20, paddingBottom: 24, gap: 12 },
+  reviewRow: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: 16,
+    borderLeftWidth: 4,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+  },
+  reviewRowCorrect: { borderLeftColor: '#10B981' },
+  reviewRowWrong: { borderLeftColor: '#EF4444' },
+  reviewRowTop: { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 8 },
+  reviewBadge: { width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  reviewBadgeCorrect: { backgroundColor: '#10B981' },
+  reviewBadgeWrong: { backgroundColor: '#EF4444' },
+  reviewVerdict: { fontSize: 12, fontWeight: '800', color: '#4B5563' },
+  reviewIndex: { marginLeft: 'auto', fontSize: 11, fontWeight: '700', color: '#9CA3AF' },
+  reviewQuestion: { fontSize: 15, fontWeight: '600', color: '#1F2937', lineHeight: 21, marginBottom: 12 },
+  answerBlock: { marginBottom: 8 },
+  answerLabel: { fontSize: 10, fontWeight: '800', color: '#9CA3AF', letterSpacing: 0.6, marginBottom: 3 },
+  answerValue: { fontSize: 14, fontWeight: '600', lineHeight: 20 },
+  answerRight: { color: '#059669' },
+  answerWrong: { color: '#DC2626' },
+  explanationBlock: {
+    backgroundColor: '#FFFBEB',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 4,
+  },
+  explanationHead: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 },
+  explanationLabel: { fontSize: 10, fontWeight: '800', color: '#B45309', letterSpacing: 0.6 },
+  explanationText: { fontSize: 13, color: '#78350F', lineHeight: 19 },
+  noExplanation: { fontSize: 12, color: '#9CA3AF', fontStyle: 'italic', marginTop: 2 },
+
+  resultsFooter: { padding: 20, paddingBottom: 28, backgroundColor: '#F1F5F9' },
   finishButton: {
     backgroundColor: '#6D28D9',
     paddingVertical: 16,

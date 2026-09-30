@@ -351,6 +351,43 @@ class CourseAPITests(APITestCase):
         self.assertEqual(progress.score, 90)
         self.assertEqual(progress.attempts, 2)
 
+    def test_a_retake_reports_its_own_score_not_the_recorded_best(self):
+        """The results screen prints "Perfect Score!" for anything at 100.
+
+        This response used to carry `progress.score`, the high-water mark, so a
+        retake that got questions wrong was still reported as a perfect score
+        after one clean run. The attempt's own score is what belongs here; the
+        best is reported alongside it.
+        """
+        course = self._make_course_with_students()
+        topic = Topic.objects.create(course=course, title='T', order=0)
+        node = LearningNode.objects.create(
+            topic=topic, node_type='practice', title='P', xp_reward=25, required_score=70
+        )
+        self.client.force_authenticate(user=self.student1)
+
+        first = self.client.post(
+            reverse('node_complete', args=[node.id]), {'score': 100}, format='json'
+        )
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(first.data['score'], 100)
+        self.assertEqual(first.data['best_score'], 100)
+
+        # Missed several the second time round.
+        second = self.client.post(
+            reverse('node_complete', args=[node.id]), {'score': 40}, format='json'
+        )
+        self.assertEqual(second.status_code, 200, second.data)
+        # The attempt, not the record: this is what the results ring shows.
+        self.assertEqual(second.data['score'], 40)
+        self.assertNotEqual(second.data['score'], 100)
+        # The best is still available for the node pill on the path.
+        self.assertEqual(second.data['best_score'], 100)
+        # Still passed: the one-way door is unchanged.
+        self.assertTrue(second.data['passed'])
+        self.assertEqual(NodeProgress.objects.get(
+            user=self.student1, node=node).score, 100)
+
 
 class GamificationServiceTests(TestCase):
     def setUp(self):

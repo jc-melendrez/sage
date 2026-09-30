@@ -30,29 +30,28 @@ export default function FinalScreen() {
   const [teamResults, setTeamResults] = useState<Record<string, TeamMember[]>>({});
   const podiumAnim = useState(new Animated.Value(0))[0];
 
+  // Only the user's own id is resolved here. Their rank and team used to be
+  // read from a one-shot players.get() in the same effect, guarded by a silent
+  // .catch(() => {}), so a failed lookup — or a players collection that had not
+  // been written yet — left both null for the life of the screen. With fewer
+  // than three teams there is no podium to fall back on, so the results came up
+  // blank. Both are now derived from the live subscription below, which is
+  // already fetching the same documents.
+  const [myUserId, setMyUserId] = useState<string | null>(null);
+
   useEffect(() => {
     if (isOffline || isLan) return;
     let mounted = true;
     getCurrentUser()
       .then(user => {
-        if (!user?.id || !mounted) return;
-        firestore()
-          .collection('gameRooms').doc(roomCode)
-          .collection('players')
-          .get()
-          .then(snap => {
-            if (!mounted) return;
-            const sorted: any[] = snap.docs
-              .map(d => ({ id: d.id, ...d.data() }))
-              .sort((a: any, b: any) => b.score - a.score);
-            const rank = sorted.findIndex(p => String(p.id) === String(user.id)) + 1;
-            if (rank > 0) setMyRank(rank);
-            const me = sorted.find((p: any) => String(p.id) === String(user.id));
-            if (me?.teamId) setMyTeamId(String(me.teamId));
-          })
-          .catch(() => {});
+        if (!mounted) return;
+        if (user?.id) setMyUserId(String(user.id));
       })
-      .catch(() => {});
+      .catch(error => {
+        // Loud on purpose: a silent catch here is what made the blank screen
+        // undiagnosable.
+        console.warn('[final] could not resolve the current user id', error);
+      });
     return () => { mounted = false; };
   }, []);
 
@@ -62,10 +61,22 @@ export default function FinalScreen() {
       .collection('gameRooms').doc(roomCode)
       .collection('players')
       .onSnapshot(snap => {
-        const sorted = snap.docs
+        const sorted: any[] = snap.docs
           .map(d => ({ id: d.id, ...d.data() }))
           .sort((a: any, b: any) => b.score - a.score);
         setPlayers(sorted);
+
+        // Derived live, so a late-arriving player document still resolves the
+        // viewer's own rank and team without a manual refresh.
+        if (myUserId) {
+          const me = sorted.find((p: any) => String(p.id) === myUserId);
+          const rank = sorted.findIndex((p: any) => String(p.id) === myUserId) + 1;
+          if (rank > 0) setMyRank(rank);
+          // A null/blank teamId means the player watched from the Spectators
+          // column for the whole game. That is a legitimate result now that
+          // spectating is the default, not a lookup failure.
+          setMyTeamId(me?.teamId != null && me.teamId !== '' ? String(me.teamId) : null);
+        }
       });
     const roomUnsub = firestore()
       .collection('gameRooms').doc(roomCode)
@@ -88,7 +99,10 @@ export default function FinalScreen() {
         setTeamResults(byTeam);
       });
     return () => { unsub(); roomUnsub(); };
-  }, []);
+    // myUserId is a dependency so the subscription re-attaches once, and only
+    // once, after the identity lookup lands. Without it the closure would keep
+    // the initial null and never resolve the viewer's own row.
+  }, [myUserId]);
 
   useEffect(() => {
     if (!teamMode) {
@@ -152,20 +166,17 @@ export default function FinalScreen() {
   const podiumScore = (t: any) => t?.score ?? 0;
   const podiumColor = (t: any) => (teamMode && t?.color) || '#2d2a6e';
 
-  // Team mode ranks teams, not people. Teams below the podium are listed by
-  // rank, and the player's own team gets an expanded card with the member
-  // breakdown — but only when it is not already on the podium, which is what
-  // made a top-three team appear twice.
-  const listData = teamMode
-    ? teams.filter(t => rankOf(t) > 3 && !sameTeamId(t.id, myTeamId))
-    : showPodium ? playersList.slice(3) : playersList;
-  // A team that is already visible on the podium does not need a second card.
-  // Gated on showPodium because a 2-team room draws no podium, and suppressing
-  // the card there would leave the player's own team off the screen entirely.
-  // myTeam can be null when the room has no teamId for this player, so the
-  // rank lookup has to be guarded before it dereferences anything.
+  // Teams that are not already represented elsewhere on the screen. This used
+  // to filter to `rankOf(t) > 3`, which assumes a podium is being drawn: with
+  // two teams (or a player who watched from the Spectators column, who has no
+  // team of their own) that filter matched nothing, so the list was empty and
+  // the screen showed a title and nothing else. Anything already on the podium
+  // or expanded as the viewer's own team is dropped, so no team shows twice.
   const onPodium = !!myTeam && showPodium && rankOf(myTeam) <= 3;
   const detailTeam = teamMode && myTeam && !onPodium ? myTeam : null;
+  const listData = teamMode
+    ? teams.filter(t => !(showPodium && rankOf(t) <= 3) && !(detailTeam && sameTeamId(t.id, detailTeam.id)))
+    : showPodium ? playersList.slice(3) : playersList;
   // Cards below the podium keep their true overall rank, which can be far
   // lower than their position in the filtered list.
   const listRank = (t: TeamEntry) => rankOf(t);
@@ -175,6 +186,16 @@ export default function FinalScreen() {
     <View style={styles.container}>
       <Text style={styles.title}>Game Over!</Text>
       <Text style={styles.subtitle}>{teamMode ? 'Team Battle Results' : isOffline ? 'Offline Practice Complete' : isLan ? 'Friend Game Results' : 'Final Leaderboard'}</Text>
+      {teamMode && !myTeam && (
+        // Spectating is the default now, so watching a whole game without
+        // picking a team is an ordinary outcome. It used to produce no banner
+        // and no team card, which read as a broken screen.
+        <View style={styles.youBanner}>
+          <Text style={styles.youBannerText}>
+            <>You watched this game from the <Text style={styles.youBannerRank}>Spectators</Text> column, so you have no team rank. The final standings are below.</>
+          </Text>
+        </View>
+      )}
       {finalRank !== null && (
         <View style={styles.youBanner}>
           <Text style={styles.youBannerText}>

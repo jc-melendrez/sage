@@ -282,24 +282,53 @@ export default function GameCenterScreen() {
   // Team picker subscription (team mode only) — separate effect
   useEffect(() => {
     if (!joinedRoom || !roomCode) return;
-    let unsub: (() => void) | null = null;
-    firestore()
+    let unsubTeams: (() => void) | null = null;
+
+    const attachTeams = () => {
+      if (unsubTeams) return;
+      unsubTeams = firestore()
+        .collection('gameRooms')
+        .doc(roomCode)
+        .collection('teams')
+        .onSnapshot(snap => {
+          const docs = snap?.docs?.map(doc => ({ id: doc.id, ...doc.data() })) ?? [];
+          setTeams(docs as TeamEntry[]);
+          // Temporary: the add-team column not appearing was reported with no
+          // way to tell a failed POST from a subscription that never attached.
+          // Mirrors the lobby's log.
+          console.log('[index] teams snapshot', JSON.stringify({
+            roomCode,
+            teamCount: docs.length,
+            teams: docs.map((t: any) => ({
+              id: t.id,
+              name: t.name ?? null,
+              members: t.memberIds?.length ?? 0,
+            })),
+          }));
+        }, error => {
+          console.warn('[index] teams subscription failed', error);
+        });
+    };
+
+    // Subscribed to the room rather than read once. The old one-shot .get()
+    // only attached the teams listener if teamMode was already true at the
+    // instant this ran, so a room document that had not landed yet (or any
+    // late write of the flag) left the screen permanently unsubscribed: the
+    // host could add a team successfully and see no new column, because
+    // nothing was listening for it.
+    const unsubRoom = firestore()
       .collection('gameRooms')
       .doc(roomCode)
-      .get()
-      .then(snap => {
-        const d = snap?.data();
-        if (d?.teamMode) {
-          unsub = firestore()
-            .collection('gameRooms')
-            .doc(roomCode)
-            .collection('teams')
-            .onSnapshot(snap => {
-              setTeams(snap?.docs?.map(doc => ({ id: doc.id, ...doc.data() })) ?? []);
-            });
-        }
+      .onSnapshot(snap => {
+        if (snap?.data()?.teamMode) attachTeams();
+      }, error => {
+        console.warn('[index] room subscription failed', error);
       });
-    return () => unsub?.();
+
+    return () => {
+      unsubRoom();
+      unsubTeams?.();
+    };
   }, [joinedRoom, roomCode]);
 
   const fetchQuizzes = useCallback(async () => {
@@ -311,25 +340,34 @@ export default function GameCenterScreen() {
       });
       if (res.ok) {
         const data = await res.json();
-        const list = Array.isArray(data) ? data : [];
-        setQuizzes(list);
-        setUsingCachedQuizzes(false);
-        cacheQuizzes(list);
-        // No implicit "pick the first one for you" — the selector has to say
-        // which quiz is being played, otherwise the host starts a game on a
-        // quiz nobody chose. The guard in startGame reports it instead.
-        setSelectedQuiz(prev => (list.some(q => q.id === prev?.id) ? prev : null));
-        setLoadingQuizzes(false);
-        return;
+        if (Array.isArray(data)) {
+          setQuizzes(data);
+          setUsingCachedQuizzes(false);
+          cacheQuizzes(data);
+          // No implicit "pick the first one for you" — the selector has to say
+          // which quiz is being played, otherwise the host starts a game on a
+          // quiz nobody chose. The guard in startGame reports it instead.
+          //
+          // Reconciled only against a list we actually trust. This used to
+          // null the selection on *any* response missing the quiz, and since
+          // useFocusEffect refetches every time the screen regains focus,
+          // leaving a group lobby and coming back could drop a valid pick on a
+          // transient failure — which is what made Start then report "no quiz
+          // selected" for a quiz the student had in fact chosen.
+          setSelectedQuiz(prev => (!prev || data.some(q => q.id === prev.id) ? prev : null));
+          setLoadingQuizzes(false);
+          return;
+        }
       }
     } catch (error) {
       console.error("Failed to load quizzes", error);
     }
+    // Fall through to the cache. Whatever the student had selected is still
+    // valid, so it is left alone rather than thrown away with the list.
     const cached = getCachedQuizzes();
     if (cached.length > 0) {
       setQuizzes(cached);
       setUsingCachedQuizzes(true);
-      setSelectedQuiz(prev => (cached.some(q => q.id === prev?.id) ? prev : null));
     }
     setLoadingQuizzes(false);
   }, []);
@@ -928,6 +966,16 @@ export default function GameCenterScreen() {
             setRoomHostId(null);
             setRoomPlayers([]);
             setTeams([]);
+            // The mode card the host pressed to get into the lobby is not a
+            // choice for whatever they do next. Leaving reset only `roomMode`,
+            // so `selectedMode` stayed on 'group' and the group configuration
+            // panel was still sitting under the picker on return — pressing
+            // Start then went back to the group lobby instead of the mode the
+            // student had switched to.
+            //
+            // The quiz selection is deliberately kept: they chose it, and
+            // quitting a room is no reason to make them choose it again.
+            setSelectedMode(null);
           },
         },
       ]
@@ -971,8 +1019,13 @@ export default function GameCenterScreen() {
     if (!roomCode || addingTeam) return;
     setAddingTeam(true);
     try {
-      await post('teams/add/', { roomCode });
+      const created = await post('teams/add/', { roomCode });
+      // Temporary: distinguishes "the request failed" from "the request
+      // succeeded but nothing re-rendered". Remove once the add-team report is
+      // closed.
+      console.log('[index] teams/add ok', JSON.stringify({ roomCode, created }));
     } catch (e: any) {
+      console.warn('[index] teams/add failed', e?.message);
       Alert.alert('Could not add team', e?.message || 'Try again');
     } finally {
       setAddingTeam(false);

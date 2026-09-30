@@ -515,54 +515,46 @@ export default function ActivitiesScreen() {
     }
   }, [loadInitialData]);
 
-  const handleTakeQuiz = (quiz: Quiz) => {
+  const handleTakeQuiz = async (quiz: Quiz) => {
     if (quiz.available_until && new Date(quiz.available_until).getTime() <= Date.now()) {
       Alert.alert('Quiz Closed', `This quiz closed on ${new Date(quiz.available_until).toLocaleString()}.`);
       return;
     }
-    // Retakes are unlimited — the server counts attempts and only ever pays
-    // the XP once, so there is nothing to guard against here.
-    const isRetake = (quiz.attempt_count ?? 0) > 0;
-    setInfoModalQuiz(null);
-    Alert.alert(
-      isRetake ? 'Retake this quiz?' : 'Take this quiz?',
-      isRetake
-        ? `This is attempt ${(quiz.attempt_count ?? 0) + 1} of "${quiz.title}". Only your best score counts.`
-        : `"${quiz.title}" — you can retake it as many times as you like.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: isRetake ? 'Retake' : 'Start',
-          onPress: async () => {
-            setIsQuizStarting(true);
-            try {
-              await startQuizAttempt(quiz.id);
-              setQuizToTake({
-                id: quiz.id,
-                title: quiz.title,
-                questions: quiz.questions.map((q: any) => ({
-                  id: q.id,
-                  question: q.question_text,
-                  type: (quiz.quiz_type || 'Multiple Choice') as any,
-                  options: q.options,
-                  correct_answer: q.correct_answer,
-                })),
-                levelId: -1,
-                passingScore: 0,
-              });
-              setIsQuizModalOpen(true);
-            } catch (err) {
-              Alert.alert(
-                'Cannot Take Quiz',
-                err instanceof Error ? err.message : 'This quiz is no longer available.',
-              );
-            } finally {
-              setIsQuizStarting(false);
-            }
-          },
-        },
-      ],
-    );
+    // Started straight from the info sheet. It used to close the sheet and
+    // raise a second "Take this quiz? / Retake this quiz?" Alert on top of it,
+    // which asked the student to confirm something they had just confirmed.
+    // Retakes are unlimited and the server counts attempts, so there is
+    // nothing to guard against here anyway.
+    setIsQuizStarting(true);
+    try {
+      await startQuizAttempt(quiz.id);
+      setQuizToTake({
+        id: quiz.id,
+        title: quiz.title,
+        questions: quiz.questions.map((q: any) => ({
+          id: q.id,
+          question: q.question_text,
+          type: (quiz.quiz_type || 'Multiple Choice') as any,
+          options: q.options,
+          correct_answer: q.correct_answer,
+          // The model already writes an explanation per question and the
+          // serializer already returns it; the mapping threw it away, so the
+          // end-of-quiz review had nothing to explain the answers with.
+          explanation: q.explanation ?? '',
+        })),
+        levelId: -1,
+        passingScore: 0,
+      });
+      setInfoModalQuiz(null);
+      setIsQuizModalOpen(true);
+    } catch (err) {
+      Alert.alert(
+        'Cannot Take Quiz',
+        err instanceof Error ? err.message : 'This quiz is no longer available.',
+      );
+    } finally {
+      setIsQuizStarting(false);
+    }
   };
 
   const handleDeleteQuiz = (quiz: Quiz) => {

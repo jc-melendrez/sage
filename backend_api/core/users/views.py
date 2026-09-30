@@ -2380,7 +2380,15 @@ class CompleteNodeView(APIView):
             xp_result = award_xp(request.user, node.xp_reward, source='learning_node')
 
         return Response({
-            'score': progress.score,
+            # This attempt's score, not the stored best. The client renders
+            # this straight into the results screen, and ResultsSummary calls
+            # anything at 100 a "Perfect Score!", so reporting the high-water
+            # mark here meant a retake that got questions wrong still said
+            # perfect after one clean run. The best is now reported separately
+            # for the places that genuinely want it (the node pill on the path
+            # reads NodeProgress.score directly, which is unchanged).
+            'score': score,
+            'best_score': progress.score,
             # Report the stored verdict, not this attempt's — otherwise a
             # failed retake tells the learner they failed a node the trail
             # still shows as cleared.
