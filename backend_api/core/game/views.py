@@ -831,7 +831,13 @@ class AnswerQuestionView(APIView):
                 # Read up front because the boost check has to happen before
                 # scoring, while the momentum update further down still needs
                 # the pre-answer values.
-                team_now = (transaction.get(team_ref).to_dict() or {}) if team_ref is not None else {}
+                #
+                # Must be team_ref.get(transaction=transaction), NOT
+                # transaction.get(team_ref). The latter returns a *generator* of
+                # snapshots rather than a snapshot, so `.to_dict()` raised
+                # "AttributeError: 'generator' object has no attribute 'to_dict'"
+                # on every team-mode answer in production.
+                team_now = (team_ref.get(transaction=transaction).to_dict() or {}) if team_ref is not None else {}
 
                 # Is a teammate's boost aimed at this player, on this question?
                 # A boost the player is already covering with their own 2x is
@@ -1344,13 +1350,22 @@ class AssignTeamView(APIView):
         # player in two teams' memberIds at once.
         @fs.transactional
         def move(transaction):
+            old_ref = (
+                room_ref.collection('teams').document(current_team_id)
+                if current_team_id
+                else None
+            )
+            # Every read must be issued before any write. Reading old_ref after
+            # writing team_ref makes the transaction illegal on Firestore
+            # ("all reads must precede all writes"), so the read is hoisted
+            # here and the write follows it.
+            if old_ref is not None:
+                transaction.get(old_ref)
             transaction.update(team_ref, {
                 'memberIds': fs.ArrayUnion([uid]),
                 'memberCount': fs.Increment(1),
             })
-            if current_team_id:
-                old_ref = room_ref.collection('teams').document(current_team_id)
-                transaction.get(old_ref)
+            if old_ref is not None:
                 transaction.update(old_ref, {
                     'memberIds': fs.ArrayRemove([uid]),
                     'memberCount': fs.Increment(-1),
@@ -1537,7 +1552,10 @@ class FreezeTimerView(APIView):
 
         @fs.transactional
         def charge(transaction):
-            before = transaction.get(pool_ref).to_dict() or {}
+            # Same generator trap as AnswerQuestionView: transaction.get()
+            # yields snapshots lazily, so it must be read through the document
+            # reference, not off the transaction.
+            before = pool_ref.get(transaction=transaction).to_dict() or {}
             powerups = before.get('powerups') or {}
             remaining = powerups.get('freeze', 0) or 0
             if remaining <= 0:

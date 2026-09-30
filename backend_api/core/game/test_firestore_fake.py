@@ -170,19 +170,31 @@ class FakeCollectionReference:
 
 
 class FakeTransaction:
-    """Minimal duck-typed transaction satisfying fs.transactional."""
+    """Minimal duck-typed transaction satisfying fs.transactional.
+
+    Deliberately faithful to the real SDK on two points that bit us in
+    production:
+
+    1. ``get()`` returns a *generator* of snapshots, not a snapshot. Code that
+       does ``transaction.get(ref).to_dict()`` must fail here exactly as it
+       does on Firestore, instead of quietly passing.
+    2. Reads must all be issued before any write. ``update``/``set`` after a
+       read have already happened raises, matching Firestore's ordering rule.
+    """
 
     def __init__(self, store):
         self._store = store
         self._read_only = False
         self._max_attempts = 1
         self._id = None
+        self._saw_write = False
 
     def _clean_up(self):
         pass
 
     def _begin(self, retry_id=None):
         self._id = retry_id or 'fake-txn-id'
+        self._saw_write = False
 
     def _commit(self):
         pass
@@ -190,13 +202,26 @@ class FakeTransaction:
     def _rollback(self):
         pass
 
+    def _require_no_write(self):
+        if self._saw_write:
+            raise FakeStoreError(
+                'Firestore transactions require all reads to precede all writes'
+            )
+
     def get(self, ref):
-        return ref._store.get(ref._path)
+        self._require_no_write()
+
+        def snapshots():
+            yield self._store.get(ref._path)
+
+        return snapshots()
 
     def update(self, ref, updates):
+        self._saw_write = True
         ref._store.update(ref._path, updates)
 
     def set(self, ref, data, merge=False):
+        self._saw_write = True
         ref._store.set(ref._path, data, merge)
 
 

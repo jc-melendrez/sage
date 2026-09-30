@@ -6,7 +6,7 @@ from rest_framework.test import APIClient
 
 from users.models import Activity, User
 from ai_assistant.models import Quiz, QuizQuestion
-from game.test_firestore_fake import FakeFirestoreClient
+from game.test_firestore_fake import FakeFirestoreClient, FakeStoreError, FakeTransaction
 
 
 class TeamModeGameTests(TestCase):
@@ -1135,3 +1135,114 @@ class CustomLobbyQuizTests(TestCase):
         self.client.force_authenticate(user=self.p1)
         resp = self.client.post(reverse('join-game'), {'roomCode': code}, format='json')
         self.assertNotIn('quizPending', resp.data)
+
+
+class TransactionFidelityRegressionTests(TestCase):
+    """Guards the two Firestore transaction mistakes that only ever showed up
+    in production, because the test fake used to be more forgiving than the
+    real SDK:
+
+    * ``transaction.get()`` yields snapshots lazily, so calling ``.to_dict()``
+      straight on the return value raises. Team answers and freeze charges both
+      did exactly that.
+    * A transaction may not read after it has written. Moving between teams
+      used to read the old team document after updating the new one.
+    """
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='fhost', password='pass')
+        self.a = User.objects.create_user(username='fa', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('TXN1')
+        self.room_ref.set({
+            'status': 'active',
+            'hostId': self.host.id,
+            'teamMode': True,
+            'teamCount': 2,
+            'timePerQuestion': 15,
+            'questions': [
+                {'type': 'mcq', 'question': f'Q{i}', 'choices': ['A. yes', 'B. no'],
+                 'correctAnswer': 'A. yes'} for i in range(10)
+            ],
+        })
+        teams = self.room_ref.collection('teams')
+        teams.document('1').set({
+            'name': 'Alphas', 'color': '#22D3EE', 'score': 0, 'correctCount': 0,
+            'answeredCount': 0, 'memberIds': [str(self.a.id)], 'memberCount': 1,
+            'teamCorrect': 0, 'multiplier': 1.0, 'boostTarget': '', 'boostQuestion': -1,
+            'powerups': {'freeze': 1, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+        teams.document('2').set({
+            'name': 'Betas', 'color': '#10B981', 'score': 0, 'correctCount': 0,
+            'answeredCount': 0, 'memberIds': [], 'memberCount': 0,
+            'teamCorrect': 0, 'multiplier': 1.0,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+        self.room_ref.collection('players').document(str(self.a.id)).set({
+            'displayName': 'PA', 'score': 0, 'answeredCount': 0, 'correctCount': 0,
+            'streak': 0, 'questionOrder': list(range(10)), 'teamId': '1',
+            'isFinished': False,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+
+    def test_transaction_get_yields_a_generator_not_a_snapshot(self):
+        """The exact trap: the return value has no .to_dict()."""
+        txn = FakeTransaction(self.store._store)
+        txn._begin()
+        ref = self.room_ref.collection('teams').document('1')
+        result = txn.get(ref)
+        self.assertFalse(hasattr(result, 'to_dict'))
+        self.assertEqual(next(result).to_dict()['name'], 'Alphas')
+
+    def test_answering_in_team_mode_scores_the_team(self):
+        """Regression: this returned 500 in production on every team answer."""
+        self.client.force_authenticate(user=self.a)
+        resp = self.client.post(
+            reverse('answer-question'),
+            {'roomCode': 'TXN1', 'questionIndex': 0, 'answer': 'A. yes', 'timeTaken': '1'},
+            format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        team = self.room_ref.collection('teams').document('1').get().to_dict()
+        self.assertGreater(team['score'], 0)
+        self.assertEqual(team['answeredCount'], 1)
+        self.assertEqual(team['correctCount'], 1)
+
+    def test_freeze_charges_the_shared_pool(self):
+        """Same generator trap as the team answer, in the powerup path."""
+        self.client.force_authenticate(user=self.a)
+        resp = self.client.post(
+            reverse('freeze-timer'),
+            {'roomCode': 'TXN1', 'questionIndex': 0}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        team = self.room_ref.collection('teams').document('1').get().to_dict()
+        self.assertEqual(team['powerups']['freeze'], 0)
+        player = self.room_ref.collection('players').document(str(self.a.id)).get().to_dict()
+        self.assertEqual(player['frozenQuestion'], 0)
+
+    def test_moving_teams_issues_every_read_before_any_write(self):
+        """A read after a write is illegal on Firestore."""
+        # Team moves are only legal in the lobby, so this room is still waiting.
+        self.room_ref.update({'status': 'waiting'})
+        self.client.force_authenticate(user=self.a)
+        resp = self.client.post(
+            reverse('assign-team'),
+            {'roomCode': 'TXN1', 'teamId': '2'}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        teams = self.room_ref.collection('teams')
+        self.assertNotIn(str(self.a.id), teams.document('1').get().to_dict()['memberIds'])
+        self.assertIn(str(self.a.id), teams.document('2').get().to_dict()['memberIds'])
+
+    def test_reading_after_writing_raises_in_the_fake(self):
+        """So the ordering rule is enforced by the suite, not by production."""
+        txn = FakeTransaction(self.store._store)
+        txn._begin()
+        ref = self.room_ref.collection('teams').document('1')
+        txn.update(ref, {'score': 5})
+        with self.assertRaises(FakeStoreError):
+            next(txn.get(ref))
