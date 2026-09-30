@@ -7,6 +7,7 @@ from rest_framework.test import APIClient
 from users.models import Activity, User
 from ai_assistant.models import Quiz, QuizQuestion
 from game.test_firestore_fake import FakeFirestoreClient, FakeStoreError, FakeTransaction
+from game.views import TEAM_COLORS
 
 
 class TeamModeGameTests(TestCase):
@@ -1246,3 +1247,244 @@ class TransactionFidelityRegressionTests(TestCase):
         txn.update(ref, {'score': 5})
         with self.assertRaises(FakeStoreError):
             next(txn.get(ref))
+
+    def test_listing_a_collection_inside_a_transaction_raises_in_the_fake(self):
+        """Real CollectionReference.stream() takes no transaction argument.
+
+        AddTeamView once read the teams collection with
+        ``stream(transaction=...)`` to work out the next team id. The fake
+        accepted and ignored the kwarg, so the suite was green and production
+        raised TypeError. The fake now refuses it, which is the point: a
+        transactional read has to go through transaction.get().
+        """
+        teams = self.room_ref.collection('teams')
+        with self.assertRaises(TypeError):
+            teams.stream(transaction=object())
+
+    def test_add_team_derives_the_next_id_without_listing_the_collection(self):
+        """The in-transaction path must read only the room document."""
+        self.room_ref.update({'status': 'waiting'})
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(
+            reverse('add-team'), {'roomCode': 'TXN1'}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['teamId'], '3')
+        self.assertEqual(self.room_ref.get().to_dict()['teamCount'], 3)
+        # Ids are numeric strings, so '3' sorts after '1' and '2' in the UI
+        # instead of appearing as a separate "1" column.
+        teams = self.room_ref.collection('teams')
+        self.assertEqual(teams.document('3').get().to_dict()['name'], 'Team 3')
+        self.assertEqual(
+            sorted(t.id for t in teams.stream()),
+            ['1', '2', '3'],
+        )
+
+
+class SpectatorColumnAndAddTeamTests(TestCase):
+    """The spectator column and host-added teams.
+
+    Spectating is modelled as "no teamId" rather than as a real team, so
+    unassigning is the same transaction as joining with the decrement flipped.
+    Adding a team has to move the new document and the room's teamCount
+    together, and must never leave a room that SetQuizView will then refuse.
+    """
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='shost', password='pass')
+        self.p1 = User.objects.create_user(username='sp1', password='pass')
+        self.p2 = User.objects.create_user(username='sp2', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('SPC1')
+        self.room_ref.set({
+            'status': 'waiting', 'hostId': self.host.id, 'teamMode': True,
+            'teamCount': 2, 'questionCount': 10, 'topic': 't', 'timePerQuestion': 15,
+            'questions': [
+                {'type': 'mcq', 'question': f'q{i}', 'choices': ['A. y'], 'correctAnswer': 'A. y'}
+                for i in range(10)
+            ],
+        })
+        for i in (1, 2):
+            self.room_ref.collection('teams').document(str(i)).set({
+                'name': f'Team {i}', 'color': TEAM_COLORS[i - 1], 'score': 0,
+                'correctCount': 0, 'answeredCount': 0, 'memberIds': [], 'memberCount': 0,
+                'teamCorrect': 0, 'multiplier': 1.0, 'nameLocked': False,
+                'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            })
+        for user in (self.host, self.p1, self.p2):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': 0, 'teamId': None, 'isFinished': False,
+            })
+
+    def team(self, team_id):
+        return self.room_ref.collection('teams').document(team_id).get().to_dict()
+
+    def player(self, user):
+        return self.room_ref.collection('players').document(str(user.id)).get().to_dict()
+
+    def room(self):
+        return self.room_ref.get().to_dict()
+
+    def assign(self, user, team_id):
+        self.client.force_authenticate(user=user)
+        return self.client.post(reverse('assign-team'),
+                                {'roomCode': 'SPC1', 'teamId': team_id}, format='json')
+
+    def add_team(self, user=None):
+        self.client.force_authenticate(user=user or self.host)
+        return self.client.post(reverse('add-team'), {'roomCode': 'SPC1'}, format='json')
+
+    # -- the spectator column --
+
+    def test_players_start_unassigned_so_the_client_shows_them_in_spectators(self):
+        for user in (self.host, self.p1, self.p2):
+            self.assertIsNone(self.player(user).get('teamId'))
+
+    def test_a_null_team_id_sends_the_player_back_to_the_spectators(self):
+        self.assertEqual(self.assign(self.p1, '1').status_code, 200)
+        self.assertEqual(self.team('1')['memberCount'], 1)
+
+        resp = self.assign(self.p1, None)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()['teamId'])
+        self.assertEqual(self.team('1')['memberIds'], [])
+        self.assertEqual(self.team('1')['memberCount'], 0)
+
+    def test_unassigning_deletes_the_field_rather_than_nulling_it(self):
+        self.assign(self.p1, '1')
+        self.assign(self.p1, None)
+        # A leftover null would read differently from a missing field, and the
+        # roster is the single source of truth for who is spectating.
+        self.assertNotIn('teamId', self.player(self.p1))
+
+    def test_unassigning_when_already_spectating_is_a_no_op(self):
+        resp = self.assign(self.p1, None)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.team('1')['memberCount'], 0)
+        self.assertEqual(self.team('2')['memberCount'], 0)
+
+    def test_omitting_team_id_entirely_is_rejected_rather_than_unassigning(self):
+        """A client bug must not silently pull a player out of their team."""
+        self.assertEqual(self.assign(self.p1, '1').status_code, 200)
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('assign-team'),
+                                {'roomCode': 'SPC1'}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.player(self.p1)['teamId'], '1')
+        self.assertEqual(self.team('1')['memberCount'], 1)
+
+    def test_a_blank_team_id_counts_as_spectating(self):
+        self.assertEqual(self.assign(self.p1, '1').status_code, 200)
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('assign-team'),
+                                {'roomCode': 'SPC1', 'teamId': '   '}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.player(self.p1).get('teamId'), None)
+        self.assertEqual(self.team('1')['memberCount'], 0)
+
+
+    def test_join_then_leave_returns_both_rosters_to_their_starting_state(self):
+        self.assign(self.p1, '1')
+        self.assign(self.p1, '2')
+        self.assertEqual(self.team('2')['memberIds'], [str(self.p1.id)])
+
+        self.assign(self.p1, None)
+        for tid in ('1', '2'):
+            self.assertEqual(self.team(tid)['memberIds'], [], tid)
+            self.assertEqual(self.team(tid)['memberCount'], 0, tid)
+        self.assertNotIn('teamId', self.player(self.p1))
+
+    def test_one_player_spectating_does_not_free_a_slot_someone_else_took(self):
+        self.assign(self.p1, '1')
+        self.assign(self.p2, '1')
+        self.assign(self.p1, None)
+        self.assertEqual(self.team('1')['memberIds'], [str(self.p2.id)])
+        self.assertEqual(self.team('1')['memberCount'], 1)
+
+    # -- adding a team --
+
+    def test_host_can_add_a_team_which_is_named_by_its_slot(self):
+        resp = self.add_team()
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()['teamCount'], 3)
+
+        team = self.team('3')
+        self.assertEqual(team['name'], 'Team 3')
+        self.assertEqual(team['color'], TEAM_COLORS[2])
+        self.assertEqual(team['memberIds'], [])
+        self.assertEqual(team['memberCount'], 0)
+        self.assertEqual(team['score'], 0)
+        self.assertEqual(team['multiplier'], 1.0)
+        self.assertEqual(team['powerups'], {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0})
+
+    def test_adding_a_team_keeps_the_room_count_in_step_with_the_documents(self):
+        self.add_team()
+        self.add_team()
+        # If these drift, the room claims four teams while only three exist and
+        # the auto-assign at start writes memberIds into a team nobody created.
+        self.assertEqual(self.room()['teamCount'], 4)
+        team_ids = sorted(int(snap.id) for snap in self.room_ref.collection('teams').stream())
+        self.assertEqual(team_ids, [1, 2, 3, 4])
+
+    def test_an_added_team_can_be_joined(self):
+        self.add_team()
+        resp = self.assign(self.p1, '3')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.player(self.p1)['teamId'], '3')
+        self.assertEqual(self.team('3')['memberIds'], [str(self.p1.id)])
+
+    def test_only_the_host_can_add_a_team(self):
+        self.assertEqual(self.add_team(self.p1).status_code, 403)
+        self.assertEqual(self.add_team(self.p2).status_code, 403)
+        self.assertEqual(self.room()['teamCount'], 2)
+
+    def test_cannot_add_a_team_beyond_the_question_count(self):
+        # A quiz shorter than the team count is refused by SetQuizView, so the
+        # host has to learn about it here rather than get a dead room.
+        self.room_ref.update({'questionCount': 2})
+        resp = self.add_team()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Not enough questions', resp.json()['error'])
+        self.assertEqual(self.room()['teamCount'], 2)
+        self.assertIsNone(self.team('3'))
+
+    def test_teams_can_be_added_while_the_quiz_is_still_pending(self):
+        # questionCount is 0 until a quiz is chosen, so there is nothing to
+        # measure against yet and SetQuizView keeps enforcing it later.
+        self.room_ref.update({'questionCount': 0, 'quizPending': True})
+        resp = self.add_team()
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(self.room()['teamCount'], 3)
+
+    def test_cannot_add_more_than_the_team_ceiling(self):
+        self.room_ref.update({'teamCount': 20})
+        resp = self.add_team()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('at most', resp.json()['error'])
+
+    def test_cannot_add_a_team_once_the_game_has_started(self):
+        self.room_ref.update({'status': 'active'})
+        self.assertEqual(self.add_team().status_code, 400)
+
+    def test_cannot_add_a_team_to_a_room_that_is_not_in_team_mode(self):
+        self.room_ref.update({'teamMode': False})
+        self.assertEqual(self.add_team().status_code, 400)
+
+    def test_spectators_are_dealt_into_teams_when_the_host_forces_the_start(self):
+        # Starting with people in the spectator column is the normal state now,
+        # so the host has to be able to wave them through.
+        self.add_team()
+        self.client.force_authenticate(user=self.host)
+        blocked = self.client.post(reverse('start-game'), {'roomCode': 'SPC1'}, format='json')
+        self.assertEqual(blocked.status_code, 400)
+
+        forced = self.client.post(reverse('start-game'),
+                                  {'roomCode': 'SPC1', 'force': 'true'}, format='json')
+        self.assertEqual(forced.status_code, 200)
+        for user in (self.host, self.p1, self.p2):
+            self.assertIsNotNone(self.player(user)['teamId'])

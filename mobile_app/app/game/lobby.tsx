@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert,
-  ActivityIndicator, Platform, StatusBar, Animated, Image, Pressable, Share,
+  ActivityIndicator, Platform, StatusBar, Animated, Image, Pressable, Share, Dimensions,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
@@ -15,6 +15,12 @@ import { getLanClient, lanGame, getLastLanRoster, setLastLanRoster, setLanPlayer
 import type { LanMessage } from '@/services/lanProtocol';
 import TeamColumns from '@/components/game/TeamColumns';
 import type { PlayerEntry, RoomStatus, TeamEntry } from '@/types/game';
+
+/**
+ * busyTeamId sentinel for the spectator column. Team ids are numeric strings,
+ * so a non-numeric key can never collide with a real one.
+ */
+const SPECTATOR_KEY = '__spectator__';
 
 const COLORS = {
   bg: '#0f0c29',
@@ -56,12 +62,16 @@ export default function LobbyScreen() {
   const [teamMode, setTeamMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
+  const [addingTeam, setAddingTeam] = useState(false);
   const [maxTeamSize, setMaxTeamSize] = useState(20);
   // A custom lobby creates the room before a quiz exists, so the host picks one
   // here. These track what the room document currently has.
   const [quizPending, setQuizPending] = useState(false);
   const [roomTopic, setRoomTopic] = useState(topic || '');
   const [roomQuestionCount, setRoomQuestionCount] = useState(0);
+// Null means "the room document has no teamCount yet". Logged to diagnose the
+// one-column report; the column list itself is driven by the teams collection.
+const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
   const [quizzes, setQuizzes] = useState<{ id: number; title: string; question_count?: number }[]>([]);
   const [showQuizPicker, setShowQuizPicker] = useState(false);
   const [savingQuiz, setSavingQuiz] = useState(false);
@@ -100,6 +110,7 @@ export default function LobbyScreen() {
         setMaxTeamSize(d?.maxTeamSize ?? 20);
         if (d?.topic) setRoomTopic(d.topic);
         setRoomQuestionCount(d?.questionCount ?? 0);
+        setRoomTeamCount(d?.teamCount ?? null);
         setQuizPending(!!d?.quizPending);
         if (d?.status === 'active') {
           startJoinerCountdown();
@@ -148,10 +159,24 @@ export default function LobbyScreen() {
       .doc(roomCode)
       .collection('teams')
       .onSnapshot(snap => {
-        setTeams((snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []) as TeamEntry[]);
+        const docs = snap?.docs ?? [];
+        // Temporary: the "teams collapse into one column on a phone" report
+        // needs the actual payload to confirm, since the horizontal scroller
+        // should keep columns side by side at any width.
+        console.log('[lobby] teams snapshot', JSON.stringify({
+          roomCode,
+          screenWidth: Dimensions.get('window').width,
+          snapshotSize: docs.length,
+          teamCount: roomTeamCount,
+          teams: docs.map(d => {
+            const t = d.data() as any;
+            return { id: d.id, name: t?.name, color: t?.color, members: t?.memberIds?.length ?? null };
+          }),
+        }));
+        setTeams(docs.map(d => ({ id: d.id, ...d.data() })) as TeamEntry[]);
       });
     return () => unsub();
-  }, [teamMode, roomCode]);
+  }, [teamMode, roomCode, roomTeamCount]);
 
   /* ── additive UI-only: read hostId once (existing listeners stay untouched) ── */
   useEffect(() => {
@@ -353,13 +378,29 @@ export default function LobbyScreen() {
     return data;
   };
 
-  const handlePickTeam = (teamId: string) => {
+  // teamId null means "go back to the spectators". First pick needs no
+  // ceremony; leaving or switching teams does, since it silently changes who
+  // you are answering for.
+  const handlePickTeam = (teamId: string | null) => {
     if (roomStatus === 'active' || !currentUserId) return;
+
+    if (teamId == null) {
+      const current = myTeam;
+      if (!current) return;
+      Alert.alert(
+        'Leave team',
+        `Go back to the spectators instead of playing for ${current.name}?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Leave', onPress: () => doAssign(null) },
+        ],
+      );
+      return;
+    }
+
     const target = sortedTeams.find(t => String(t.id) === String(teamId));
     const current = myTeam;
     if (!target || String(target.id) === String(myTeamId)) return;
-    // First pick needs no ceremony; switching teams does, since it silently
-    // changes who you are answering for.
     if (!current) { doAssign(teamId); return; }
     Alert.alert(
       'Switch team',
@@ -374,14 +415,33 @@ export default function LobbyScreen() {
   // Team assignment goes through the server, not a client-side Firestore
   // batch: capacity is a race otherwise, and a full team would happily
   // accept a write that the roster then over-reports.
-  const doAssign = async (teamId: string) => {
-    setBusyTeamId(String(teamId));
+  const doAssign = async (teamId: string | null) => {
+    // Team ids are numeric strings, so this sentinel can never collide with a
+    // real one; it just marks the spectator column as the busy one.
+    setBusyTeamId(teamId == null ? SPECTATOR_KEY : String(teamId));
     try {
-      await post('teams/assign/', { roomCode, teamId: String(teamId) });
+      // Sent as a real null, not String(null). The server reads teamId: null as
+      // "go back to the spectators"; the string "null" would look for a team
+      // with that id and 404.
+      await post('teams/assign/', { roomCode, teamId });
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to join team');
     } finally {
       setBusyTeamId(null);
+    }
+  };
+
+  // Lets the host decide how many teams the class needs while students are
+  // still arriving, instead of guessing before the room is created.
+  const doAddTeam = async () => {
+    if (addingTeam) return;
+    setAddingTeam(true);
+    try {
+      await post('teams/add/', { roomCode });
+    } catch (e: any) {
+      Alert.alert('Could not add team', e?.message || 'Try again');
+    } finally {
+      setAddingTeam(false);
     }
   };
 
@@ -525,7 +585,7 @@ export default function LobbyScreen() {
               ) : (
                 <View style={styles.waitingTag}>
                   <View style={styles.waitingDot} />
-                  <Text style={styles.waitingTagText}>Tap a team to join</Text>
+                  <Text style={styles.waitingTagText}>Tap a team, or stay in the spectators</Text>
                 </View>
               )}
             </View>
@@ -541,6 +601,9 @@ export default function LobbyScreen() {
               busyTeamId={busyTeamId}
               onJoin={handlePickTeam}
               onRename={doRename}
+              canAddTeam={isHostUser}
+              onAddTeam={doAddTeam}
+              addingTeam={addingTeam}
             />
           </Animated.View>
         )}
@@ -678,7 +741,7 @@ export default function LobbyScreen() {
               }]}
             />
             <Text style={styles.waitBarText}>
-              {teamMode && !allAssigned ? 'Pick a team so the host can start...' : 'Waiting for host to start...'}
+                {teamMode && !allAssigned ? 'Pick a team if you want one, or wait in the spectators' : 'Waiting for host to start...'}
             </Text>
           </View>
         )}

@@ -1301,14 +1301,31 @@ class AssignTeamView(APIView):
     it could be fired twice concurrently, drifted memberCount into the
     negatives, and let any client set an arbitrary teamId. Doing it here means
     the roster, the team arrays and the player's teamId always move together.
+
+    ``teamId: null`` is not a bad request, it is the request to go back to the
+    spectator column. Spectating is therefore not a special case in the data
+    model -- it is simply "no teamId" -- which means unassigning is the same
+    transaction as joining, with the memberCount decrement instead of the
+    increment.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         room_code = (request.data.get('roomCode') or '').upper()
-        team_id = str(request.data.get('teamId') or '').strip()
-        if not room_code or not team_id:
-            return Response({'error': 'roomCode and teamId are required'}, status=400)
+        if not room_code:
+            return Response({'error': 'roomCode is required'}, status=400)
+
+        # A null/blank teamId means "go back to the spectators", so it has to be
+        # told apart from a genuinely malformed id before it is rejected. The
+        # key must be present, though: treating a client that forgot to send
+        # teamId as an unassign would quietly pull a player out of their team.
+        if 'teamId' not in request.data:
+            return Response(
+                {'error': 'roomCode and teamId are required (teamId null = spectating)'},
+                status=400)
+        raw_team_id = request.data.get('teamId')
+        unassign = raw_team_id is None or str(raw_team_id).strip() == ''
+        team_id = '' if unassign else str(raw_team_id).strip()
 
         db = get_firestore()
         room_ref = db.collection('gameRooms').document(room_code)
@@ -1323,28 +1340,40 @@ class AssignTeamView(APIView):
             return Response({'error': 'Teams are locked once the game starts'}, status=400)
 
         player_ref = room_ref.collection('players').document(str(request.user.id))
-        if not player_ref.get().exists:
+        player_doc = player_ref.get()
+        if not player_doc.exists:
             return Response({'error': 'You are not in this room'}, status=400)
 
-        team_ref = room_ref.collection('teams').document(team_id)
-        team_doc = team_ref.get()
-        if not team_doc.exists:
-            return Response({'error': 'Team not found'}, status=404)
-        team_data = team_doc.to_dict() or {}
-
         uid = str(request.user.id)
-        current_team_id = (player_ref.get().to_dict() or {}).get('teamId')
+        current_team_id = (player_doc.to_dict() or {}).get('teamId')
         current_team_id = str(current_team_id) if current_team_id else None
 
-        if current_team_id == team_id:
-            return Response({'message': 'Already on that team', 'teamId': team_id,
-                             'teams': [serialize_team(t.id, d) for t in room_ref.collection('teams').stream()
-                                       for d in [t.to_dict() or {}]]})
+        team_ref = None
+        team_data = {}
+        capacity = None
+        if not unassign:
+            team_ref = room_ref.collection('teams').document(team_id)
+            team_doc = team_ref.get()
+            if not team_doc.exists:
+                return Response({'error': 'Team not found'}, status=404)
+            team_data = team_doc.to_dict() or {}
 
-        roster_size = sum(1 for _ in room_ref.collection('players').stream())
-        capacity = team_capacity(room_data, roster_size)
-        if len(team_data.get('memberIds', []) or []) >= capacity:
-            return Response({'error': 'That team is full', 'maxTeamSize': capacity}, status=400)
+        def team_snapshot():
+            return [serialize_team(t.id, d) for t in room_ref.collection('teams').stream()
+                    for d in [t.to_dict() or {}]]
+
+        if unassign:
+            if current_team_id is None:
+                return Response({'message': 'Not on a team', 'teamId': None,
+                                 'teams': team_snapshot()})
+        else:
+            if current_team_id == team_id:
+                return Response({'message': 'Already on that team', 'teamId': team_id,
+                                 'teams': team_snapshot()})
+            roster_size = sum(1 for _ in room_ref.collection('players').stream())
+            capacity = team_capacity(room_data, roster_size)
+            if len(team_data.get('memberIds', []) or []) >= capacity:
+                return Response({'error': 'That team is full', 'maxTeamSize': capacity}, status=400)
 
         # One transaction so a double-tap or a retry can never leave the
         # player in two teams' memberIds at once.
@@ -1357,29 +1386,182 @@ class AssignTeamView(APIView):
             )
             # Every read must be issued before any write. Reading old_ref after
             # writing team_ref makes the transaction illegal on Firestore
-            # ("all reads must precede all writes"), so the read is hoisted
-            # here and the write follows it.
+            # ("all reads must precede all writes"), so the reads are hoisted
+            # here and the writes follow them.
             if old_ref is not None:
                 transaction.get(old_ref)
-            transaction.update(team_ref, {
-                'memberIds': fs.ArrayUnion([uid]),
-                'memberCount': fs.Increment(1),
-            })
+            if team_ref is not None:
+                transaction.get(team_ref)
+                transaction.update(team_ref, {
+                    'memberIds': fs.ArrayUnion([uid]),
+                    'memberCount': fs.Increment(1),
+                })
             if old_ref is not None:
                 transaction.update(old_ref, {
                     'memberIds': fs.ArrayRemove([uid]),
                     'memberCount': fs.Increment(-1),
                 })
-            transaction.update(player_ref, {'teamId': team_id})
+            if unassign:
+                # DELETE_FIELD rather than None. Every read treats a missing
+                # field and a null one as "spectating", but writing null would
+                # leave the two representations free to drift apart in old
+                # rooms; deleting keeps the roster the single source of truth.
+                transaction.update(player_ref, {'teamId': fs.DELETE_FIELD})
+            else:
+                transaction.update(player_ref, {'teamId': team_id})
 
         move(db.transaction())
+
+        if unassign:
+            return Response({
+                'message': 'Back to the spectators',
+                'teamId': None,
+                'teams': team_snapshot(),
+            })
         return Response({
             'message': f'Joined {team_data.get("name", f"Team {team_id}")}',
             'teamId': team_id,
             'maxTeamSize': capacity,
-            'teams': [serialize_team(t.id, d) for t in room_ref.collection('teams').stream()
-                      for d in [t.to_dict() or {}]],
+            'teams': team_snapshot(),
         })
+
+
+class AddTeamView(APIView):
+    """Let the host add a team to a waiting room.
+
+    The team count is otherwise fixed when the room is created, which forces the
+    host to guess how many teams a class needs before anybody has arrived. This
+    lets them add a column while students are still joining.
+
+    Two things this has to get right:
+
+    * The new team document and the room's teamCount have to move together. If
+      they drift, the room claims more teams than exist and the auto-assign at
+      start writes memberIds into a team that was never created.
+    * Adding a team must not make the room unstartable. SetQuizView rejects a
+      quiz shorter than the team count, so once a quiz is chosen the new team
+      has to fit inside its question count. While the lobby is still quizPending
+      there is no quiz to measure against and SetQuizView keeps enforcing it.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        if not room_code:
+            return Response({'error': 'roomCode is required'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+
+        room_data = room.to_dict() or {}
+        if not room_data.get('teamMode', False):
+            return Response({'error': 'This room is not in team mode'}, status=400)
+        if str(room_data.get('hostId')) != str(request.user.id):
+            return Response({'error': 'Only the host can add a team'}, status=403)
+        if room_data.get('status') != 'waiting':
+            return Response({'error': 'Teams are locked once the game starts'}, status=400)
+
+        team_count = int(room_data.get('teamCount') or 0)
+        if team_count >= MAX_TEAMS:
+            return Response({'error': f'A room can have at most {MAX_TEAMS} teams'}, status=400)
+
+        question_count = int(room_data.get('questionCount') or 0)
+        if question_count and team_count + 1 > question_count:
+            return Response({
+                'error': 'Not enough questions for that many teams',
+                'teamCount': team_count,
+                'questionCount': question_count,
+                'maxTeams': question_count,
+            }, status=400)
+
+        class _Rejected(Exception):
+            """A guard tripped inside the transaction, after the pre-read.
+
+            The checks above are only a fast path that keeps the common failure
+            a cheap 400/403. Whether the write is actually *legal* has to be
+            decided against the document the transaction reads, otherwise a host
+            who starts the game or picks a quiz in the gap still gets a team
+            added to a room that can no longer start.
+            """
+
+            def __init__(self, payload, status):
+                super().__init__(payload.get('error', 'Rejected'))
+                self.payload = payload
+                self.status = status
+
+        # One transaction: the new document and the bumped count are two writes
+        # that must not be able to happen separately, and next_id comes from the
+        # teamCount the transaction reads, so two rapid taps cannot both mint
+        # "Team 3".
+        #
+        # next_id is derived from teamCount rather than by listing the teams
+        # collection. Nothing here ever deletes a team, so teamCount always
+        # equals the highest team id; and a collection cannot be listed inside a
+        # transaction anyway -- the real CollectionReference.stream() takes no
+        # transaction argument, so a transactional read has to go through
+        # transaction.get() on a document reference.
+        @fs.transactional
+        def add(transaction):
+            fresh = next(transaction.get(room_ref)).to_dict() or {}
+            if not fresh.get('teamMode', False):
+                raise _Rejected({'error': 'This room is not in team mode'}, 400)
+            if str(fresh.get('hostId')) != str(request.user.id):
+                raise _Rejected({'error': 'Only the host can add a team'}, 403)
+            if fresh.get('status') != 'waiting':
+                raise _Rejected({'error': 'Teams are locked once the game starts'}, 400)
+
+            next_id = int(fresh.get('teamCount') or 0) + 1
+            if next_id > MAX_TEAMS:
+                raise _Rejected(
+                    {'error': f'A room can have at most {MAX_TEAMS} teams', 'maxTeams': MAX_TEAMS},
+                    400,
+                )
+
+            # SetQuizView refuses a quiz shorter than the team count, so a team
+            # added past the question count would leave the room unstartable.
+            fresh_question_count = int(fresh.get('questionCount') or 0)
+            if fresh_question_count and next_id > fresh_question_count:
+                raise _Rejected({
+                    'error': 'Not enough questions for that many teams',
+                    'teamCount': next_id - 1,
+                    'questionCount': fresh_question_count,
+                    'maxTeams': fresh_question_count,
+                }, 400)
+
+            new_team_ref = room_ref.collection('teams').document(str(next_id))
+            transaction.set(new_team_ref, {
+                'name': f'Team {next_id}',
+                'color': TEAM_COLORS[(next_id - 1) % len(TEAM_COLORS)],
+                'score': 0,
+                'correctCount': 0,
+                'answeredCount': 0,
+                'memberIds': [],
+                'memberCount': 0,
+                'teamCorrect': 0,
+                'teamStreak': 0,
+                'bestStreak': 0,
+                'multiplier': 1.0,
+                'maxMultiplier': 1.0,
+                'powerups': empty_powerups(),
+                'namedBy': None,
+                'nameLocked': False,
+            }, merge=True)
+            transaction.update(room_ref, {'teamCount': next_id})
+            return next_id
+
+        try:
+            next_id = add(db.transaction())
+        except _Rejected as rejected:
+            return Response(rejected.payload, status=rejected.status)
+
+        return Response({
+            'message': f'Team {next_id} added',
+            'teamId': str(next_id),
+            'teamCount': next_id,
+        }, status=201)
 
 
 class RenameTeamView(APIView):

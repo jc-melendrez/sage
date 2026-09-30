@@ -36,23 +36,45 @@ interface Props {
   /** The host (or any member) may name a team once; after that it is locked. */
   canRename: boolean;
   busyTeamId: string | null;
-  onJoin: (teamId: string) => void;
+  /** null means "go back to the spectators". */
+  onJoin: (teamId: string | null) => void;
   onRename: (teamId: string, name: string) => Promise<void>;
+  /** Host-only, and only while the room is still waiting. */
+  canAddTeam?: boolean;
+  onAddTeam?: () => void;
+  addingTeam?: boolean;
 }
 
 const MIN_NAME = 2;
 const MAX_NAME = 20;
 
 /**
+ * busyTeamId key for the spectator column. Team ids are numeric strings, so a
+ * non-numeric key can never collide with a real one. Keep in sync with the
+ * screens, which set it when they send teamId: null.
+ */
+const SPECTATOR_KEY = '__spectator__';
+
+/** Mirrors the backend TEAM_COLORS, used only when a team doc has no color. */
+const FALLBACK_TEAM_COLORS = [
+  '#22D3EE', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899',
+];
+
+/**
  * Team columns for the waiting room.
  *
- * Tapping a column joins that team. The whole column is the tap target rather
- * than a small "Join" button, so a student joining on a phone does not have to
- * hit a 60px-wide control — with four or five teams side by side that is the
- * difference between picking a team and giving up and standing around.
+ * The leftmost column is always Spectators. Students land there by default, so
+ * it is the resting state rather than an edge case: tapping a team column joins
+ * that team, and tapping Spectators goes back. Spectating is simply "no
+ * teamId" on the server, which is why leaving a team is the same request as
+ * joining one.
+ *
+ * The whole column is the tap target rather than a small "Join" button, so a
+ * student joining on a phone does not have to hit a 60px-wide control.
  */
 export default function TeamColumns({
-  teams, players, myId, myTeamId, maxTeamSize, locked, canRename, busyTeamId, onJoin, onRename,
+  teams, players, myId, myTeamId, maxTeamSize, locked, canRename, busyTeamId,
+  onJoin, onRename, canAddTeam = false, onAddTeam, addingTeam = false,
 }: Props) {
   const [renaming, setRenaming] = useState<TeamEntry | null>(null);
   const [draft, setDraft] = useState('');
@@ -73,14 +95,28 @@ export default function TeamColumns({
     return map;
   }, [teams, players]);
 
-  // With many teams the columns get too narrow to read, so cap how many member
-  // chips each one shows and summarise the rest rather than letting the
-  // columns stretch to fit the whole class.
-  const perColumn = teams.length <= 3 ? 8 : teams.length <= 4 ? 5 : 4;
+  const spectators = useMemo(
+    () => players
+      .filter(player => !player.teamId)
+      .sort((a, b) => (a.displayName || '').localeCompare(b.displayName || '')),
+    [players]
+  );
+
+  // Spectators counts as a column, so it has to be included in every layout
+  // decision or the row overflows one column earlier than it used to. The host's
+  // "add team" control takes width too, which is enough to tip a narrow phone
+  // into scrolling, so it counts here even though it holds no players.
+  const showAddColumn = canAddTeam && !locked && !!onAddTeam;
+  const columnCount = teams.length + 1 + (showAddColumn ? 1 : 0);
+  const scroll = columnCount > 2;
+
+  // With many columns they get too narrow to read, so cap how many member chips
+  // each one shows and summarise the rest rather than stretching to fit.
+  const perColumn = columnCount <= 3 ? 8 : columnCount <= 4 ? 5 : 4;
 
   const openRename = (team: TeamEntry) => {
     setRenaming(team);
-    setDraft(team.name);
+    setDraft(team.name || `Team ${team.id}`);
   };
 
   const submitRename = async () => {
@@ -96,17 +132,96 @@ export default function TeamColumns({
     }
   };
 
+  const renderMember = (member: PlayerEntry, accent: string) => {
+    const isMe = myId != null && String(member.id) === String(myId);
+    const initial = (member.displayName || '?').charAt(0).toUpperCase();
+    return (
+      <View key={member.id} style={[styles.member, isMe && styles.memberYou]}>
+        {pfpSource(member.avatar) ? (
+          <Image source={pfpSource(member.avatar)!} style={styles.avatar} resizeMode="cover" />
+        ) : (
+          <View style={[styles.avatarFallback, { borderColor: accent + '88' }]}>
+            <Text style={[styles.avatarText, { color: accent }]}>{initial}</Text>
+          </View>
+        )}
+        <Text style={styles.memberName} numberOfLines={1}>{member.displayName}</Text>
+      </View>
+    );
+  };
+
+  const isSpectating = myTeamId == null;
+  const canTapSpectators = !locked && !isSpectating && busyTeamId === null;
+  const shownSpectators = spectators.slice(0, perColumn);
+  const spectatorOverflow = spectators.length - shownSpectators.length;
+
   return (
     <>
       <ScrollView
-        horizontal={teams.length > 3}
+        horizontal={scroll}
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={[
           styles.row,
-          teams.length > 3 && styles.rowScroll,
+          scroll && styles.rowScroll,
         ]}
       >
-        {teams.map(team => {
+        {/* ── spectators: always first, this is where students start ── */}
+        <TouchableOpacity
+          onPress={() => canTapSpectators && onJoin(null)}
+          activeOpacity={0.8}
+          disabled={!canTapSpectators}
+          accessibilityLabel="Spectators"
+          style={[
+            styles.column,
+            !scroll && styles.columnFlex,
+            styles.spectator,
+            isSpectating && styles.spectatorActive,
+            locked && styles.columnMuted,
+          ]}
+        >
+          <View style={[styles.header, styles.spectatorHeader]}>
+            <View style={[styles.colorBar, { backgroundColor: COLORS.textMuted }]} />
+            <Text style={[styles.name, { color: COLORS.textSecondary }]} numberOfLines={1}>
+              Spectators
+            </Text>
+            <View style={styles.countRow}>
+              <Text style={[styles.count, { color: COLORS.textMuted }]}>
+                {spectators.length}
+              </Text>
+              {isSpectating && <View style={styles.youPill}><Text style={styles.youPillText}>YOU</Text></View>}
+            </View>
+          </View>
+
+          <View style={styles.body}>
+            {shownSpectators.map(member => renderMember(member, COLORS.textSecondary))}
+
+            {spectatorOverflow > 0 && (
+              <View style={styles.overflow}>
+                <Text style={styles.overflowText}>+{spectatorOverflow} more</Text>
+              </View>
+            )}
+
+            {spectators.length === 0 && (
+              <View style={styles.emptySlot}>
+                <Ionicons name="eye-outline" size={18} color={COLORS.textMuted} />
+                <Text style={[styles.emptyText, { color: COLORS.textMuted }]}>
+                  {isSpectating ? 'You are here' : 'Nobody here'}
+                </Text>
+              </View>
+            )}
+          </View>
+
+          <View style={styles.footer}>
+            {busyTeamId === SPECTATOR_KEY ? (
+              <ActivityIndicator size="small" color={COLORS.textSecondary} />
+            ) : (
+              <Text style={[styles.footerText, { color: isSpectating ? COLORS.textSecondary : COLORS.textMuted }]} numberOfLines={1}>
+                {isSpectating ? '✓ You are here' : 'Tap to leave team'}
+              </Text>
+            )}
+          </View>
+        </TouchableOpacity>
+
+        {teams.map((team, teamIndex) => {
           const key = String(team.id);
           const members = membersByTeam.get(key) ?? [];
           const isMyTeam = sameTeamId(team.id, myTeamId);
@@ -115,6 +230,11 @@ export default function TeamColumns({
           const shown = members.slice(0, perColumn);
           const overflow = members.length - shown.length;
           const slots = Math.max(0, Math.min(maxTeamSize, 4) - members.length);
+          // Rooms created before teams carried a color still have to render:
+          // every use below concatenates an alpha suffix, so a missing color
+          // would put "undefined3A" into a style and silently drop the column.
+          const accent = team.color || FALLBACK_TEAM_COLORS[teamIndex % FALLBACK_TEAM_COLORS.length];
+          const label = team.name || `Team ${key}`;
 
           return (
             <TouchableOpacity
@@ -122,32 +242,33 @@ export default function TeamColumns({
               onPress={() => canTap && onJoin(key)}
               activeOpacity={0.8}
               disabled={!canTap}
+              accessibilityLabel={label}
               style={[
                 styles.column,
-                teams.length <= 3 && styles.columnFlex,
-                { borderColor: isMyTeam ? team.color : team.color + '3A' },
-                isMyTeam && { backgroundColor: team.color + '1A' },
+                !scroll && styles.columnFlex,
+                { borderColor: isMyTeam ? accent : accent + '3A' },
+                isMyTeam && { backgroundColor: accent + '1A' },
                 (locked || (full && !isMyTeam)) && styles.columnMuted,
               ]}
             >
               {/* ── header: name, count, rename ── */}
-              <View style={[styles.header, { backgroundColor: team.color + '26' }]}>
-                <View style={[styles.colorBar, { backgroundColor: team.color }]} />
-                <Text style={[styles.name, { color: team.color }]} numberOfLines={1}>
-                  {team.name}
+              <View style={[styles.header, { backgroundColor: accent + '26' }]}>
+                <View style={[styles.colorBar, { backgroundColor: accent }]} />
+                <Text style={[styles.name, { color: accent }]} numberOfLines={1}>
+                  {label}
                 </Text>
                 {canRename && !team.nameLocked && !locked && (
                   <TouchableOpacity
                     onPress={() => openRename(team)}
                     hitSlop={10}
                     style={styles.pencil}
-                    accessibilityLabel={`Rename ${team.name}`}
+                    accessibilityLabel={`Rename ${label}`}
                   >
-                    <Ionicons name="pencil" size={11} color={team.color} />
+                    <Ionicons name="pencil" size={11} color={accent} />
                   </TouchableOpacity>
                 )}
                 <View style={styles.countRow}>
-                  <Text style={[styles.count, { color: team.color }]}>
+                  <Text style={[styles.count, { color: accent }]}>
                     {members.length}/{maxTeamSize}
                   </Text>
                   {isMyTeam && <View style={styles.youPill}><Text style={styles.youPillText}>YOU</Text></View>}
@@ -156,22 +277,7 @@ export default function TeamColumns({
 
               {/* ── members ── */}
               <View style={styles.body}>
-                {shown.map(member => {
-                  const isMe = myId != null && String(member.id) === String(myId);
-                  const initial = (member.displayName || '?').charAt(0).toUpperCase();
-                  return (
-                    <View key={member.id} style={[styles.member, isMe && styles.memberYou]}>
-                      {pfpSource(member.avatar) ? (
-                        <Image source={pfpSource(member.avatar)!} style={styles.avatar} resizeMode="cover" />
-                      ) : (
-                        <View style={[styles.avatarFallback, { borderColor: team.color + '88' }]}>
-                          <Text style={[styles.avatarText, { color: team.color }]}>{initial}</Text>
-                        </View>
-                      )}
-                      <Text style={styles.memberName} numberOfLines={1}>{member.displayName}</Text>
-                    </View>
-                  );
-                })}
+                {shown.map(member => renderMember(member, accent))}
 
                 {overflow > 0 && (
                   <View style={styles.overflow}>
@@ -181,8 +287,8 @@ export default function TeamColumns({
 
                 {members.length === 0 && (
                   <View style={styles.emptySlot}>
-                    <Ionicons name="add-circle-outline" size={18} color={team.color + '88'} />
-                    <Text style={[styles.emptyText, { color: team.color + 'AA' }]}>Tap to join</Text>
+                    <Ionicons name="add-circle-outline" size={18} color={accent + '88'} />
+                    <Text style={[styles.emptyText, { color: accent + 'AA' }]}>Tap to join</Text>
                   </View>
                 )}
 
@@ -196,12 +302,12 @@ export default function TeamColumns({
               {/* ── footer: join state ── */}
               <View style={styles.footer}>
                 {busyTeamId === key ? (
-                  <ActivityIndicator size="small" color={team.color} />
+                  <ActivityIndicator size="small" color={accent} />
                 ) : (
                   <Text
                     style={[
                       styles.footerText,
-                      { color: isMyTeam ? team.color : full ? COLORS.textMuted : COLORS.textSecondary },
+                      { color: isMyTeam ? accent : full ? COLORS.textMuted : COLORS.textSecondary },
                     ]}
                     numberOfLines={1}
                   >
@@ -212,6 +318,26 @@ export default function TeamColumns({
             </TouchableOpacity>
           );
         })}
+
+        {/* ── host adds a team while students are still arriving ── */}
+        {showAddColumn && (
+          <TouchableOpacity
+            onPress={onAddTeam}
+            disabled={addingTeam}
+            activeOpacity={0.7}
+            accessibilityLabel="Add a team"
+            style={[styles.column, styles.addColumn, !scroll && styles.addColumnFlex]}
+          >
+            {addingTeam ? (
+              <ActivityIndicator size="small" color={COLORS.textSecondary} />
+            ) : (
+              <>
+                <Ionicons name="add-circle-outline" size={26} color={COLORS.textSecondary} />
+                <Text style={styles.addLabel}>Add team</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        )}
       </ScrollView>
 
       {/* ── rename modal ── */}
@@ -267,6 +393,30 @@ const styles = StyleSheet.create({
   },
   columnFlex: { flex: 1, maxWidth: undefined },
   columnMuted: { opacity: 0.55 },
+
+  // Spectators are the resting state, not a team, so the column reads as
+  // "unassigned" -- dashed, uncoloured, and quieter than the teams beside it.
+  spectator: { borderStyle: 'dashed', borderColor: 'rgba(148,163,184,0.45)' },
+  spectatorActive: { borderColor: COLORS.textSecondary, backgroundColor: 'rgba(148,163,184,0.10)' },
+  spectatorHeader: { backgroundColor: 'rgba(148,163,184,0.10)' },
+
+  addColumn: {
+    minWidth: 96,
+    maxWidth: 140,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderStyle: 'dashed',
+    borderColor: 'rgba(148,163,184,0.45)',
+    backgroundColor: 'rgba(148,163,184,0.06)',
+  },
+  addColumnFlex: { minWidth: 0, maxWidth: undefined },
+  addLabel: {
+    fontSize: 12,
+    fontFamily: FONTS.bold,
+    color: COLORS.textSecondary,
+    textAlign: 'center',
+  },
 
   header: { paddingHorizontal: 10, paddingTop: 9, paddingBottom: 8 },
   colorBar: { height: 3, borderRadius: 2, marginBottom: 7, marginHorizontal: 2 },

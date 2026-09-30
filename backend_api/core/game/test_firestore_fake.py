@@ -18,7 +18,8 @@ google.cloud.firestore, which requires the transaction object to expose
 
 Transforms are resolved eagerly on write: ``Increment`` adds to the existing
 value, ``ArrayUnion`` appends non-duplicate members, ``ArrayRemove`` drops
-them, and ``SERVER_TIMESTAMP`` becomes a sentinel object.
+them, ``SERVER_TIMESTAMP`` becomes a sentinel object, and ``DELETE_FIELD``
+removes the key outright.
 """
 
 from google.cloud.firestore_v1 import transforms as fs_transforms
@@ -97,11 +98,17 @@ class FakeStore:
                 target = doc
                 for part in parts[:-1]:
                     target = target.setdefault(part, {})
-                target[parts[-1]] = FakeStore._resolve(
-                    target.get(parts[-1]), value
-                )
+                leaf = parts[-1]
             else:
-                doc[key] = FakeStore._resolve(doc.get(key), value)
+                target = doc
+                leaf = key
+            if value is fs_transforms.DELETE_FIELD:
+                # Real Firestore removes the key entirely. Storing the sentinel
+                # as the value instead would leave readers seeing a non-null
+                # teamId, which is exactly the bug DELETE_FIELD exists to avoid.
+                target.pop(leaf, None)
+            else:
+                target[leaf] = FakeStore._resolve(target.get(leaf), value)
 
     @staticmethod
     def _resolve(existing, value):
@@ -156,7 +163,12 @@ class FakeCollectionReference:
             doc_id = f'auto-{len(self._store._docs) + 1}'
         return FakeDocumentReference(self._store, self._path + (doc_id,))
 
-    def stream(self, transaction=None):
+    def stream(self):
+        # Deliberately no `transaction` parameter. The real
+        # CollectionReference.stream() does not accept one, so accepting and
+        # ignoring it here would let code that only works against the fake
+        # through the test suite and then raise TypeError in production. A
+        # transactional read of a document must use transaction.get().
         return self._store.stream(self._path)
 
     def list_documents(self):

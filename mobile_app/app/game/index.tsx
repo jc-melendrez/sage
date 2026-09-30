@@ -37,6 +37,12 @@ import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/
 import TeamColumns from '@/components/game/TeamColumns';
 import { sameTeamId, type PlayerEntry, type TeamEntry } from '@/types/game';
 
+/**
+ * busyTeamId sentinel for the spectator column. Team ids are numeric strings,
+ * so a non-numeric key can never collide with a real one.
+ */
+const SPECTATOR_KEY = '__spectator__';
+
 // 🎨 SAGE Design System Colors
 const COLORS = {
   bg: '#baaeda',
@@ -117,6 +123,7 @@ export default function GameCenterScreen() {
   // server decides the assignment.
   const [roomMaxTeamSize, setRoomMaxTeamSize] = useState(20);
   const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
+  const [addingTeam, setAddingTeam] = useState(false);
   const [lanName, setLanName] = useState('Player');
   const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
   const lanHostRef = useRef<LanHostServer | null>(null);
@@ -943,15 +950,32 @@ export default function GameCenterScreen() {
     return data;
   };
 
-  const assignTeamServer = async (teamId: string) => {
+  const assignTeamServer = async (teamId: string | null) => {
     if (!roomCode) return;
-    setBusyTeamId(String(teamId));
+    // Sent as a real null, not String(null). The server reads teamId: null as
+    // "go back to the spectators"; the string "null" would look for a team with
+    // that id and 404.
+    setBusyTeamId(teamId == null ? SPECTATOR_KEY : String(teamId));
     try {
-      await post('teams/assign/', { roomCode, teamId: String(teamId) });
+      await post('teams/assign/', { roomCode, teamId });
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to join team');
     } finally {
       setBusyTeamId(null);
+    }
+  };
+
+  // Lets the host decide how many teams the class needs while students are
+  // still arriving, instead of guessing before the room is created.
+  const addTeamServer = async () => {
+    if (!roomCode || addingTeam) return;
+    setAddingTeam(true);
+    try {
+      await post('teams/add/', { roomCode });
+    } catch (e: any) {
+      Alert.alert('Could not add team', e?.message || 'Try again');
+    } finally {
+      setAddingTeam(false);
     }
   };
 
@@ -960,12 +984,27 @@ export default function GameCenterScreen() {
     await post('teams/rename/', { roomCode, teamId, name });
   };
 
-  const handlePickTeam = (teamId: string) => {
+  // teamId null means "go back to the spectators". First pick needs no
+  // ceremony; leaving or switching teams does, since it silently changes who
+  // you are answering for.
+  const handlePickTeam = (teamId: string | null) => {
+    if (teamId == null) {
+      const current = teams.find(t => sameTeamId(t.id, myTeamId));
+      if (!current) return;
+      Alert.alert(
+        'Leave team',
+        `Go back to the spectators instead of playing for ${current.name || `Team ${current.id}`}?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Leave', onPress: () => assignTeamServer(null) },
+        ],
+      );
+      return;
+    }
+
     const target = teams.find(t => String(t.id) === String(teamId));
     const current = teams.find(t => sameTeamId(t.id, myTeamId));
     if (!target || String(target.id) === String(myTeamId)) return;
-    // First pick needs no ceremony; switching teams does, since it silently
-    // changes who you are answering for.
     if (!current) { assignTeamServer(teamId); return; }
     Alert.alert(
       'Switch team',
@@ -1221,13 +1260,15 @@ export default function GameCenterScreen() {
                     );
                 })}
 
-                {/* Team columns for joined players in GROUP MODE. Tapping a
-                    column joins that team. The lobby screen uses this same
+                {/* Team columns for joined players in GROUP MODE. The leftmost
+                    column is always Spectators, where players start, and tapping
+                    it puts a player back on it -- so it has to render even when
+                    the room has no teams yet. The lobby screen uses this same
                     component, so GROUP MODE looks and behaves identically
                     whichever way a room was created. */}
-                {joinedRoom && roomMode === 'group' && teams.length > 0 && (
+                {joinedRoom && roomMode === 'group' && (
                     <View style={styles.teamPickerSection}>
-                        <Text style={styles.teamPickerLabel}>PICK YOUR TEAM</Text>
+                        <Text style={styles.teamPickerLabel}>PICK A TEAM OR STAY IN THE SPECTATORS</Text>
                         <TeamColumns
                             teams={teams as TeamEntry[]}
                             players={roomPlayers as PlayerEntry[]}
@@ -1239,6 +1280,9 @@ export default function GameCenterScreen() {
                             busyTeamId={busyTeamId}
                             onJoin={handlePickTeam}
                             onRename={doRename}
+                            canAddTeam={isHostUser}
+                            onAddTeam={addTeamServer}
+                            addingTeam={addingTeam}
                         />
                     </View>
                 )}
