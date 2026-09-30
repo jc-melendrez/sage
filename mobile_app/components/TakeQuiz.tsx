@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, ActivityIndicator } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
@@ -77,11 +77,6 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
   const [showResults, setShowResults] = useState(false);
   // Index into `review` of the question whose detail is open, or null.
   const [openQuestion, setOpenQuestion] = useState<number | null>(null);
-  const [reward, setReward] = useState<QuizRewardInfo | null>(null);
-  const [isFinishing, setIsFinishing] = useState(false);
-  // Set once the result has been recorded, so a second tap while the student
-  // is reading the review cannot record the same attempt twice.
-  const [isRecorded, setIsRecorded] = useState(false);
 
   // A short fade/scale on entry. The quiz used to snap in flat, which read as
   // a jump cut the moment the sheet closed.
@@ -253,33 +248,34 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
   };
 
   /**
-   * Records the attempt and leaves, in one tap.
+   * Close first, save second.
    *
-   * This used to be two taps: the first saved the result and turned the button
-   * into "Done", and only a second tap closed the quiz. A single tap that
-   * appeared to do nothing read as the app hanging. A recorded attempt is
-   * remembered, so a later tap closes immediately instead of saving twice.
+   * The screen used to await onFinish before doing anything visible, so pressing
+   * Finish looked like a hang for the length of a network round trip -- and the
+   * results overlay then sat there with the button relabelled "Close", needing a
+   * second tap to leave. Dismissing immediately and letting the save finish in
+   * the background is what "it should be instant" actually requires; the XP
+   * lands on the refreshed Quizzes tab instead of on a screen we have already
+   * left.
+   *
+   * The ref is what makes the background save safe: the component unmounts on
+   * close, so state updates after the await would be wasted, and a second press
+   * during that window would fire a duplicate POST.
    */
+  const submittingRef = useRef(false);
+
   const handleFinish = async () => {
-    if (score === null || isFinishing) return;
-    if (isRecorded) {
-      onClose();
-      return;
-    }
-    setIsFinishing(true);
+    if (score === null || submittingRef.current) return;
+    submittingRef.current = true;
+    onClose();
     try {
-      const result = await onFinish(score, review);
-      setIsRecorded(true);
-      if (result && typeof result === 'object') {
-        setReward(result as QuizRewardInfo);
-      }
+      await onFinish(score, review);
     } catch (err: any) {
-      // Keep the quiz open. Closing here would tell the student the attempt was
-      // saved when it was not, and the attempt would be lost.
+      // The quiz is already closed, so this cannot be "kept open" for a retry.
+      // Reporting it is the honest thing to do: swallowing it would leave the
+      // student believing an attempt was saved when it was not.
       console.error('Failed to record quiz result:', err);
       onFinishError?.(err?.message || 'Could not save your result.');
-    } finally {
-      setIsFinishing(false);
     }
   };
 
@@ -385,12 +381,9 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
                 <TouchableOpacity
                   style={styles.closeButton}
                   onPress={handleFinish}
-                  disabled={isFinishing}
                   accessibilityLabel="Close results"
                 >
-                  {isFinishing
-                    ? <ActivityIndicator color="white" />
-                    : <Ionicons name="close" size={24} color="white" />}
+                  <Ionicons name="close" size={24} color="white" />
                 </TouchableOpacity>
                 <Text style={styles.resultsHeroTitle} numberOfLines={1}>{quizTitle}</Text>
                 <View style={styles.closeButton} />
@@ -458,24 +451,14 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
             </ScrollView>
 
             <View style={styles.resultsFooter}>
-              {reward && reward.xp > 0 && (
-                <Text style={styles.rewardLine}>
-                  +{reward.xp} XP earned
-                  {reward.badges?.length ? ` · ${reward.badges.length} new badge${reward.badges.length === 1 ? '' : 's'}` : ''}
-                </Text>
-              )}
               <TouchableOpacity
-                style={[styles.finishButton, isFinishing && { opacity: 0.7 }]}
+                style={styles.finishButton}
                 onPress={handleFinish}
-                disabled={isFinishing}
+                accessibilityLabel="Finish and save"
               >
-                {isFinishing ? (
-                  <ActivityIndicator color="white" />
-                ) : (
-                  <Text style={styles.finishButtonText}>
-                    {isRecorded ? 'Close' : 'Finish'}
-                  </Text>
-                )}
+                <Text style={styles.finishButtonText}>
+                  Finish
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -825,7 +808,6 @@ const styles = StyleSheet.create({
   detailOptionTagWrong: { fontSize: 10, fontWeight: '800', color: '#B91C1C' },
   detailAnswers: { gap: 4 },
   detailAnswerBlock: { marginBottom: 8 },
-  rewardLine: { fontSize: 13, fontWeight: '700', color: '#059669', textAlign: 'center', marginBottom: 10 },
   answerBlock: { marginBottom: 8 },
   answerLabel: { fontSize: 10, fontWeight: '800', color: '#9CA3AF', letterSpacing: 0.6, marginBottom: 3 },
   answerValue: { fontSize: 14, fontWeight: '600', lineHeight: 20 },

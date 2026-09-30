@@ -759,13 +759,14 @@ class TeamLobbyTests(TestCase):
         self.assertEqual(self.team('1')['memberCount'], 1)
 
     def test_full_team_rejects_a_move(self):
-        # Capacity is 2 for a 2-player / 2-team room, so the third joiner is
-        # refused rather than silently piling on.
+        # Seat count is per team now, so a team is full at its own maxSize
+        # rather than at a room-wide ceil(players/teams) guess.
         extra = User.objects.create_user(username='extra', password='pass')
         self.room_ref.collection('players').document(str(extra.id)).set(
             {'displayName': 'extra', 'teamId': None, 'score': 0})
         self.room_ref.collection('teams').document('1').set(
-            {'memberIds': [str(self.host.id), str(extra.id)], 'memberCount': 2}, merge=True)
+            {'memberIds': [str(self.host.id), str(extra.id)], 'memberCount': 2,
+             'maxSize': 2}, merge=True)
 
         self.client.force_authenticate(user=self.p1)
         resp = self.client.post(reverse('assign-team'),
@@ -773,6 +774,28 @@ class TeamLobbyTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn('full', resp.json()['error'])
         self.assertIsNone(self.player(self.p1)['teamId'])
+
+    def test_team_without_a_maxSize_defaults_to_five_seats(self):
+        # setUp creates teams with no maxSize, which is exactly a room that
+        # predates per-team seats. Reading that as 0 would make every legacy
+        # team instantly full; reading it as MAX_PLAYERS would make the "+"
+        # a no-op forever. It has to be 5.
+        joiners = [User.objects.create_user(username=f'j{i}', password='pass') for i in range(6)]
+        for user in joiners:
+            self.room_ref.collection('players').document(str(user.id)).set(
+                {'displayName': user.username, 'teamId': None, 'score': 0})
+
+        for user in joiners[:5]:
+            self.client.force_authenticate(user=user)
+            resp = self.client.post(reverse('assign-team'),
+                                    {'roomCode': 'LOB1', 'teamId': '1'}, format='json')
+            self.assertEqual(resp.status_code, 200, f'{user.username} should fit in 5 seats')
+
+        self.client.force_authenticate(user=joiners[5])
+        resp = self.client.post(reverse('assign-team'),
+                                {'roomCode': 'LOB1', 'teamId': '1'}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['maxTeamSize'], 5)
 
     def test_teams_lock_once_the_game_starts(self):
         self.room_ref.update({'status': 'active'})
@@ -841,6 +864,228 @@ class TeamLobbyTests(TestCase):
         self.assertEqual(
             self.client.post(reverse('start-game'), {'roomCode': 'LOB1'}, format='json').status_code,
             400)  # already started
+
+
+class TeamSeatTests(TestCase):
+    """Seat counts live on the team, and auto-assign is its own action.
+
+    Both used to be folded into /game/start/, which meant the only way to grow
+    a team or even out a roster was to begin the game.
+    """
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='host', password='pass')
+        self.p1 = User.objects.create_user(username='p1', password='pass')
+        self.p2 = User.objects.create_user(username='p2', password='pass')
+        self.educator = User.objects.create_user(
+            username='teacher', password='pass', role='educator')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('SEAT')
+        self.room_ref.set({
+            'status': 'waiting', 'hostId': self.host.id, 'teamMode': True,
+            'teamCount': 3, 'topic': 't', 'questionCount': 1, 'timePerQuestion': 15,
+            'questions': [{'type': 'mcq', 'question': 'q',
+                           'choices': ['A. y'], 'correctAnswer': 'A. y'}],
+        })
+        for i in (1, 2, 3):
+            self.room_ref.collection('teams').document(str(i)).set({
+                'name': f'Team {i}', 'color': '#22D3EE', 'score': 0, 'correctCount': 0,
+                'answeredCount': 0, 'memberIds': [], 'memberCount': 0, 'maxSize': 5,
+                'teamCorrect': 0, 'multiplier': 1.0, 'nameLocked': False,
+                'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            })
+        for user in (self.host, self.p1, self.p2, self.educator):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': 0, 'teamId': None,
+                'isFinished': False,
+            })
+
+    def team(self, team_id):
+        return self.room_ref.collection('teams').document(team_id).get().to_dict()
+
+    def player(self, user):
+        return self.room_ref.collection('players').document(str(user.id)).get().to_dict()
+
+    # ── resize ──
+
+    def test_resize_grows_a_team_by_one(self):
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('resize-team'),
+                                {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['maxSize'], 6)
+        self.assertEqual(self.team('1')['maxSize'], 6)
+
+    def test_resize_stops_at_ten(self):
+        self.client.force_authenticate(user=self.host)
+        for _ in range(12):
+            resp = self.client.post(reverse('resize-team'),
+                                    {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
+        self.assertEqual(resp.json()['maxSize'], 10)
+        self.assertTrue(resp.json()['atMax'])
+        self.assertEqual(self.team('1')['maxSize'], 10)
+
+    def test_only_the_host_can_resize(self):
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('resize-team'),
+                                {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.team('1')['maxSize'], 5)
+
+    def test_resize_is_refused_once_the_game_starts(self):
+        self.room_ref.update({'status': 'active'})
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('resize-team'),
+                                {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_resize_cannot_shrink_below_the_current_members(self):
+        self.room_ref.collection('teams').document('1').set(
+            {'memberIds': [str(self.p1.id), str(self.p2.id)], 'memberCount': 2}, merge=True)
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('resize-team'),
+                                {'roomCode': 'SEAT', 'teamId': '1', 'delta': -9}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.team('1')['maxSize'], 5)
+
+    def test_a_grown_team_actually_admits_another_player(self):
+        # The whole point of the "+": if the full check still used the old
+        # room-wide estimate, growing a team would never let anybody in.
+        self.room_ref.collection('teams').document('1').set(
+            {'memberIds': [str(self.p1.id)] * 5, 'memberCount': 5}, merge=True)
+        self.client.force_authenticate(user=self.p2)
+        blocked = self.client.post(reverse('assign-team'),
+                                   {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
+        self.assertEqual(blocked.status_code, 400)
+
+        self.client.force_authenticate(user=self.host)
+        self.client.post(reverse('resize-team'),
+                         {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
+        self.client.force_authenticate(user=self.p2)
+        admitted = self.client.post(reverse('assign-team'),
+                                    {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
+        self.assertEqual(admitted.status_code, 200)
+
+    # ── auto-assign ──
+
+    def test_auto_assign_deals_everyone_evenly(self):
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('auto-assign-teams'),
+                                {'roomCode': 'SEAT'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        sizes = resp.json()['sizes']
+        self.assertEqual(sum(sizes.values()), 4)
+        # Round-robin over 3 teams with 4 people: two teams of 1, one of 2.
+        self.assertLessEqual(max(sizes.values()) - min(sizes.values()), 1)
+        for team_id, team in ((t, self.team(t)) for t in ('1', '2', '3')):
+            self.assertEqual(len(team['memberIds']), sizes[team_id])
+            for member in team['memberIds']:
+                self.assertEqual(self.player_doc(member)['teamId'], team_id)
+
+    def player_doc(self, player_id):
+        return self.room_ref.collection('players').document(str(player_id)).get().to_dict()
+
+    def test_auto_assign_never_starts_the_game(self):
+        self.client.force_authenticate(user=self.host)
+        self.client.post(reverse('auto-assign-teams'), {'roomCode': 'SEAT'}, format='json')
+        self.assertEqual(self.room_ref.get().to_dict()['status'], 'waiting')
+
+    def test_auto_assign_ignores_previous_picks(self):
+        # The host asked for a full reshuffle, so a hand-picked team loses them.
+        self.room_ref.collection('players').document(str(self.p1.id)).update({'teamId': '2'})
+        self.room_ref.collection('teams').document('2').set(
+            {'memberIds': [str(self.p1.id)], 'memberCount': 1}, merge=True)
+
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('auto-assign-teams'),
+                                {'roomCode': 'SEAT'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        # 4 players / 3 teams, so team 2 keeps one person but not necessarily p1.
+        self.assertEqual(sum(len(self.team(t)['memberIds']) for t in ('1', '2', '3')), 4)
+
+    def test_auto_assign_is_host_only(self):
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('auto-assign-teams'),
+                                {'roomCode': 'SEAT'}, format='json')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_auto_assign_refuses_an_empty_room(self):
+        self.room_ref.collection('players').document(str(self.p1.id)).delete()
+        self.room_ref.collection('players').document(str(self.p2.id)).delete()
+        self.room_ref.collection('players').document(str(self.educator.id)).delete()
+        self.client.force_authenticate(user=self.host)
+        self.room_ref.collection('players').document(str(self.host.id)).delete()
+        resp = self.client.post(reverse('auto-assign-teams'),
+                                {'roomCode': 'SEAT'}, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    # ── start without auto-assigning ──
+
+    def test_start_leaves_unassigned_players_spectating_when_asked(self):
+        self.client.force_authenticate(user=self.p1)
+        self.client.post(reverse('assign-team'),
+                         {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
+        self.assertEqual(self.player(self.p1)['teamId'], '1')
+
+        self.client.force_authenticate(user=self.host)
+        blocked = self.client.post(reverse('start-game'),
+                                   {'roomCode': 'SEAT'}, format='json')
+        self.assertEqual(blocked.status_code, 400)
+
+        allowed = self.client.post(reverse('start-game'),
+                                   {'roomCode': 'SEAT', 'allowUnassigned': 'true'}, format='json')
+        self.assertEqual(allowed.status_code, 200)
+        # p2 never picked a team, and START must not have quietly dealt them in.
+        self.assertIsNone(self.player(self.p2)['teamId'])
+        self.assertEqual(self.player(self.p1)['teamId'], '1')
+
+    # ── host handover ──
+
+    def test_host_claim_promotes_when_the_host_is_gone(self):
+        # No educator left, so the promotion is decided purely by join order.
+        self.room_ref.collection('players').document(str(self.host.id)).delete()
+        self.room_ref.collection('players').document(str(self.educator.id)).delete()
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('host-claim'),
+                                {'roomCode': 'SEAT'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()['promoted'])
+        self.assertEqual(self.room_ref.get().to_dict()['hostId'], self.p1.id)
+
+    def test_host_claim_prefers_a_remaining_educator(self):
+        self.room_ref.collection('players').document(str(self.host.id)).delete()
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('host-claim'),
+                                {'roomCode': 'SEAT'}, format='json')
+        self.assertEqual(self.room_ref.get().to_dict()['hostId'], self.educator.id)
+
+    def test_host_claim_is_a_noop_while_the_host_remains(self):
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('host-claim'),
+                                {'roomCode': 'SEAT'}, format='json')
+        self.assertFalse(resp.json()['promoted'])
+        self.assertEqual(self.room_ref.get().to_dict()['hostId'], self.host.id)
+
+    def test_a_promoted_host_gains_the_host_rights(self):
+        # Every host check reads hostId off the room document, so the promotion
+        # is all the handover needs: the new host can rename without any extra
+        # bookkeeping on the client.
+        self.room_ref.collection('players').document(str(self.host.id)).delete()
+        self.room_ref.collection('players').document(str(self.educator.id)).delete()
+        self.client.force_authenticate(user=self.p1)
+        self.client.post(reverse('host-claim'), {'roomCode': 'SEAT'}, format='json')
+
+        resp = self.client.post(reverse('rename-team'),
+                                {'roomCode': 'SEAT', 'teamId': '1', 'name': 'New Captain'},
+                                format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.team('1')['name'], 'New Captain')
 
 
 class TeamPlacementXpTests(TestCase):

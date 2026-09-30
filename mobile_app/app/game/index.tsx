@@ -16,7 +16,7 @@ import {
   Image,
 } from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
-import { useRouter, useFocusEffect } from 'expo-router';
+import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -83,6 +83,7 @@ interface Quiz {
 
 export default function GameCenterScreen() {
   const router = useRouter();
+  const { leftLobby: leftLobbyParam } = useLocalSearchParams<{ leftLobby?: string }>();
   const insets = useSafeAreaInsets();
   
   // --- State ---
@@ -136,6 +137,10 @@ export default function GameCenterScreen() {
   });
   const myLanIdRef = useRef<string | null>(null);
   const lanNavPushedRef = useRef(false);
+const [resizingTeamId, setResizingTeamId] = useState<string | null>(null);
+// Bumped every time a group lobby create starts, so a create that resolves
+// after the host has already changed their mind cannot navigate or write state.
+const lobbyTokenRef = useRef(0);
   const lanClientMsgRef = useRef<(msg: LanMessage) => void>(() => {});
   const lanHostMsgRef = useRef<(msg: LanMessage) => void>(() => {});
 
@@ -280,6 +285,15 @@ export default function GameCenterScreen() {
   }, [joinedRoom, roomCode, startJoinedCountdown]);
 
   // Team picker subscription (team mode only) — separate effect
+  // Latest host identity, readable from the teams subscription below without
+  // re-subscribing whenever hostId lands.
+  const isHostUserRef = useRef(false);
+  useEffect(() => {
+    isHostUserRef.current =
+      roomHostId != null && currentUserId != null
+      && String(roomHostId) === String(currentUserId);
+  }, [roomHostId, currentUserId]);
+
   useEffect(() => {
     if (!joinedRoom || !roomCode) return;
     let unsubTeams: (() => void) | null = null;
@@ -293,18 +307,17 @@ export default function GameCenterScreen() {
         .onSnapshot(snap => {
           const docs = snap?.docs?.map(doc => ({ id: doc.id, ...doc.data() })) ?? [];
           setTeams(docs as TeamEntry[]);
-          // Temporary: the add-team column not appearing was reported with no
-          // way to tell a failed POST from a subscription that never attached.
-          // Mirrors the lobby's log.
-          console.log('[index] teams snapshot', JSON.stringify({
-            roomCode,
-            teamCount: docs.length,
-            teams: docs.map((t: any) => ({
-              id: t.id,
-              name: t.name ?? null,
-              members: t.memberIds?.length ?? 0,
-            })),
-          }));
+          // A team-mode room with an empty teams subcollection is a dead end:
+          // there is no box to tap, no name to edit, and the host's own add-team
+          // control was the only way out. Creating the first team here makes the
+          // room recoverable without having to delete and re-share it.
+          //
+          // Read through a ref: this subscription is created before the room
+          // document has delivered hostId, so a captured isHostUser would still
+          // be false forever and the repair would never run.
+          if (docs.length === 0 && isHostUserRef.current) {
+            post('teams/add/', { roomCode }).catch(() => {});
+          }
         }, error => {
           console.warn('[index] teams subscription failed', error);
         });
@@ -378,6 +391,30 @@ export default function GameCenterScreen() {
     }, [fetchQuizzes])
   );
 
+  /**
+   * Coming back from a lobby the host abandoned.
+   *
+   * startGroupLobby stores the group's room code here before pushing the lobby,
+   * and START below treats any non-null code as "reuse this room". The lobby
+   * returns with leftLobby=1 (from its back button and its hardware-back
+   * handler) precisely so that code is dropped instead of quietly hijacking
+   * whatever the student starts next.
+   */
+  useEffect(() => {
+    if (leftLobbyParam !== '1') return;
+    lobbyTokenRef.current += 1;
+    setRoomCode(null);
+    setRoomTopic('');
+    setRoomStatus('waiting');
+    setRoomMode(null);
+    setRoomHostId(null);
+    setRoomPlayers([]);
+    setTeams([]);
+    setSelectedMode(null);
+    setIsCreatingRoom(false);
+    router.setParams({ leftLobby: undefined });
+  }, [leftLobbyParam, router]);
+
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -394,6 +431,18 @@ export default function GameCenterScreen() {
     if (modeId === 'classic') {
       setSelectedMode(modeId);
       setActiveTab('custom');
+      // Switching away from Teams must also drop the team room's leftovers, or
+      // the number-of-teams panel keeps rendering and START keeps aiming at a
+      // deferQuiz room. The lobby normally clears these on the way out; this
+      // covers a student who changes their mind without ever opening it.
+      if (roomMode === 'group') {
+        lobbyTokenRef.current += 1;
+        setRoomCode(null);
+        setRoomMode(null);
+        setRoomHostId(null);
+        setRoomPlayers([]);
+        setTeams([]);
+      }
       // Sync mode to room doc if host has an active room
       if (roomCode && !joinedRoom) {
         firestore()
@@ -452,18 +501,25 @@ export default function GameCenterScreen() {
   /**
    * Team mode hands off to /game/lobby. The room is created without a quiz
    * (`deferQuiz`), because the host picks one inside the lobby once the team
-   * columns and the invite code are already on screen. That ordering is the
+   * boxes and the invite code are already on screen. That ordering is the
    * whole point of the custom lobby: invite people first, choose second.
    */
   const startGroupLobby = async () => {
+    // A lobby the host walks away from must not keep its room code here.
+    // START below reuses any non-null roomCode instead of creating a fresh one,
+    // so a leftover deferQuiz group room silently hijacked a later Classic game
+    // and failed with "choose a quiz" for a quiz the student had picked. The
+    // lobby's back button and its hardware-back handler both come back here
+    // with leftLobby=1 to clear it.
+    const token = ++lobbyTokenRef.current;
     setIsCreatingRoom(true);
     try {
-      const token = await getToken();
+      const token2 = await getToken();
       const response = await fetch(`${API_BASE_URL}/game/create/`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `Bearer ${token2}`,
         },
         body: JSON.stringify({
           deferQuiz: 'true',
@@ -476,6 +532,10 @@ export default function GameCenterScreen() {
 
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Failed to create room');
+      // Superseded while the create was in flight: a second mode press, or the
+      // student gave up and picked something else. Navigating now would strand
+      // them in a lobby they already walked out of.
+      if (token !== lobbyTokenRef.current) return;
 
       // The lobby reads the room document directly, so the mode has to be on it
       // rather than only in this component's state.
@@ -499,9 +559,10 @@ export default function GameCenterScreen() {
         },
       } as any);
     } catch (error: any) {
+      if (token !== lobbyTokenRef.current) return;
       Alert.alert('Error', error.message || 'Could not open the team lobby');
     } finally {
-      setIsCreatingRoom(false);
+      if (token === lobbyTokenRef.current) setIsCreatingRoom(false);
     }
   };
 
@@ -646,6 +707,42 @@ export default function GameCenterScreen() {
       return;
     }
 
+    /**
+     * Create a room for `quiz` and start it.
+     *
+     * Shared by "no room yet" and "stale group room" so both end up with a room
+     * that actually carries the quiz the student picked.
+     */
+    const createAndStartFor = async (quiz: Quiz) => {
+      setIsCreatingRoom(true);
+      try {
+        const token = await getToken();
+        const response = await fetch(`${API_BASE_URL}/game/create/`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            quizId: quiz.id,
+            timePerQuestion: parseInt(timePerQuestion) || 15,
+            teamMode: 'false',
+            autoAssignTeams: 'false',
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Failed to create room');
+        setRoomCode(data.roomCode);
+        setRoomTopic(data.topic || quiz.title);
+
+        // Proceed to start after creation
+        startGameSequence(data.roomCode);
+      } catch (error: any) {
+        Alert.alert("Error", error.message);
+        setIsCreatingRoom(false);
+      }
+    };
+
     if (!roomCode) {
        // If no room exists, create one first silently
        if (!selectedQuiz) {
@@ -653,35 +750,29 @@ export default function GameCenterScreen() {
     if (!quiz) return;
         return;
       }
-      
-      setIsCreatingRoom(true);
-      try {
-        const token = await getToken();
-        const response = await fetch(`${API_BASE_URL}/game/create/`, {
-          method: 'POST',
-          headers: { 
-            'Content-Type': 'application/json', 
-            'Authorization': `Bearer ${token}` 
-          },
-          body: JSON.stringify({
-            quizId: selectedQuiz.id,
-            timePerQuestion: parseInt(timePerQuestion) || 15,
-            teamMode: selectedMode === 'group' ? 'true' : 'false',
-            autoAssignTeams: 'false',
-            ...(selectedMode === 'group' ? { teamCount } : {}),
-          }),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Failed to create room');
-        setRoomCode(data.roomCode);
-        setRoomTopic(data.topic || selectedQuiz.title);
-        
-        // Proceed to start after creation
-        startGameSequence(data.roomCode);
-      } catch (error: any) {
-        Alert.alert("Error", error.message);
-        setIsCreatingRoom(false);
+
+      await createAndStartFor(selectedQuiz);
+    } else if (roomMode === 'group') {
+      // A group room cannot be started from here: it has no quiz (it was
+      // created with deferQuiz) and its start button lives in the lobby. This
+      // used to fall through to startGameSequence and fail server-side with
+      // "choose a quiz" for a quiz the student had actually just picked.
+      //
+      // Discarding the group room lands the user on Classic, so the mode is set
+      // to 'classic' rather than nulled -- nulling it and then calling
+      // requirePlaySelections() re-raised the very "choose a game mode" alert
+      // this branch exists to avoid.
+      setRoomCode(null);
+      setRoomMode(null);
+      setRoomHostId(null);
+      setRoomPlayers([]);
+      setTeams([]);
+      setSelectedMode('classic');
+      if (!selectedQuiz) {
+        Alert.alert('Almost There', 'Please choose a quiz before starting a game.');
+        return;
       }
+      createAndStartFor(selectedQuiz);
     } else {
       // Room exists, just start
       startGameSequence(roomCode);
@@ -956,6 +1047,12 @@ export default function GameCenterScreen() {
               } catch {}
               // Delete own player doc
               await playerRef.delete().catch(() => {});
+              // Hand the room over if we were hosting it. The endpoint is a
+              // no-op while the host is still present, so it is safe to call
+              // unconditionally: a student leaving must not disturb the host.
+              // Without this the room would sit permanently unhosted whenever
+              // the host used LEAVE rather than closing the app.
+              await post('host/claim/', { roomCode }).catch(() => {});
             }
             // Reset joined room state
             setJoinedRoom(false);
@@ -1019,16 +1116,25 @@ export default function GameCenterScreen() {
     if (!roomCode || addingTeam) return;
     setAddingTeam(true);
     try {
-      const created = await post('teams/add/', { roomCode });
-      // Temporary: distinguishes "the request failed" from "the request
-      // succeeded but nothing re-rendered". Remove once the add-team report is
-      // closed.
-      console.log('[index] teams/add ok', JSON.stringify({ roomCode, created }));
+      await post('teams/add/', { roomCode });
     } catch (e: any) {
-      console.warn('[index] teams/add failed', e?.message);
       Alert.alert('Could not add team', e?.message || 'Try again');
     } finally {
       setAddingTeam(false);
+    }
+  };
+
+  // The "+" beside a team's last slot. Separate from add-team: this grows an
+  // existing team by one seat, it does not create another team.
+  const resizeTeamServer = async (teamId: string) => {
+    if (!roomCode || resizingTeamId) return;
+    setResizingTeamId(teamId);
+    try {
+      await post('teams/resize/', { roomCode, teamId, delta: 1 });
+    } catch (e: any) {
+      Alert.alert('Could not add a seat', e?.message || 'Try again');
+    } finally {
+      setResizingTeamId(null);
     }
   };
 
@@ -1336,6 +1442,9 @@ export default function GameCenterScreen() {
                             canAddTeam={isHostUser}
                             onAddTeam={addTeamServer}
                             addingTeam={addingTeam}
+                            canResizeTeam={isHostUser}
+                            onResizeTeam={resizeTeamServer}
+                            resizingTeamId={resizingTeamId}
                         />
                     </View>
                 )}

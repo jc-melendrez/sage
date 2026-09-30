@@ -1,7 +1,8 @@
-import { useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert,
-  ActivityIndicator, Platform, StatusBar, Animated, Image, Pressable, Share, Dimensions,
+  ActivityIndicator, Platform, StatusBar, Animated, Image, Pressable, Share,
+  BackHandler,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
@@ -78,6 +79,11 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [hostId, setHostId] = useState<number | string | null>(null);
+  // Auto-assign and the per-team "+" are separate actions from START, each with
+  // their own in-flight flag so a double-tap cannot deal the roster twice.
+  const [autoAssigning, setAutoAssigning] = useState(false);
+  const [autoAssignDone, setAutoAssignDone] = useState(false);
+  const [resizingTeamId, setResizingTeamId] = useState<string | null>(null);
 
   // Joiner countdown shown when the host starts the game
   const [showCountdown, setShowCountdown] = useState(false);
@@ -88,6 +94,33 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
   useEffect(() => {
     getCurrentUser().then(u => setCurrentUserId(u?.id));
   }, []);
+
+  /**
+   * Leave the lobby, telling the server so the room does not keep a dead host.
+   *
+   * The Play tab stashes this room's code before pushing here, and START there
+   * reuses any non-null room code. Walking out of the lobby used to be a bare
+   * route pop, so the code survived and a later Classic game got sent to this
+   * deferQuiz room instead of creating its own.
+   */
+  const exitToPlay = useCallback(() => {
+    if (isLAN) { router.back(); return; }
+    // replace, not push: the lobby was pushed on top of this same screen, so
+    // pushing /game/index again would stack index on top of lobby and the next
+    // back press would return the student to the lobby they just left.
+    router.replace({ pathname: '/game/index', params: { leftLobby: '1' } } as any);
+  }, [isLAN, router]);
+
+  // The phone's back gesture has to run the same cleanup as the on-screen
+  // button, or it is a route pop that leaves the stale room code behind.
+  useEffect(() => {
+    if (isLAN) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      exitToPlay();
+      return true;
+    });
+    return () => sub.remove();
+  }, [exitToPlay, isLAN]);
 
   useEffect(() => {
     if (isLAN) return;
@@ -160,33 +193,54 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
       .collection('teams')
       .onSnapshot(snap => {
         const docs = snap?.docs ?? [];
-        // Temporary: the "teams collapse into one column on a phone" report
-        // needs the actual payload to confirm, since the horizontal scroller
-        // should keep columns side by side at any width.
-        console.log('[lobby] teams snapshot', JSON.stringify({
-          roomCode,
-          screenWidth: Dimensions.get('window').width,
-          snapshotSize: docs.length,
-          teamCount: roomTeamCount,
-          teams: docs.map(d => {
-            const t = d.data() as any;
-            return { id: d.id, name: t?.name, color: t?.color, members: t?.memberIds?.length ?? null };
-          }),
-        }));
         setTeams(docs.map(d => ({ id: d.id, ...d.data() })) as TeamEntry[]);
+
+        // A team-mode room whose teams subcollection is empty has nothing to
+        // tap and nothing to name, and the host is the only one who can fix it.
+        // Creating the first team here saves the room from needing a re-share.
+        if (docs.length === 0 && isHostUserRef.current) {
+          post('teams/add/', { roomCode }).catch(() => {});
+        }
       });
     return () => unsub();
   }, [teamMode, roomCode, roomTeamCount]);
 
-  /* ── additive UI-only: read hostId once (existing listeners stay untouched) ── */
+  /* ── live hostId, so a promoted host actually gains the host controls ── */
   useEffect(() => {
     if (isLAN) return;
-    let live = true;
-    firestore().collection('gameRooms').doc(roomCode).get().then(s => {
-      if (live) setHostId(s.data()?.hostId ?? null);
-    });
-    return () => { live = false; };
+    // This used to be a one-shot get(). That froze the host identity at mount,
+    // so when the original host left and someone else took over, this screen
+    // carried on showing the departed host's controls to everyone.
+    const unsub = firestore().collection('gameRooms').doc(roomCode)
+      .onSnapshot(s => setHostId(s.data()?.hostId ?? null));
+    return () => unsub();
   }, [roomCode, isLAN]);
+
+  // Read by the teams subscription above, which is created before the room
+  // document has delivered hostId -- a captured isHostUser there would still be
+  // false forever and the empty-room repair would never run.
+  const isHostUserRef = useRef(false);
+  useEffect(() => {
+    isHostUserRef.current =
+      hostId != null && currentUserId != null
+      && String(hostId) === String(currentUserId);
+  }, [hostId, currentUserId]);
+
+  /**
+   * Ask the server to hand the room over when its host is no longer in it.
+   *
+   * The host's own leave is a bare Firestore delete with no server call, so
+   * this listener is the only thing that notices when they close the app
+   * without leaving. It is safe to call from every client: the server elects
+   * the same person deterministically and no-ops while a host is still there.
+   */
+  useEffect(() => {
+    if (isLAN) return;
+    if (hostId == null || players.length === 0) return;
+    const hostStillHere = players.some(p => String(p.id) === String(hostId));
+    if (hostStillHere) return;
+    post('host/claim/', { roomCode }).catch(() => {});
+  }, [hostId, players, roomCode, isLAN]);
 
   /* ── LAN mode: roster + game start come from the LAN client, not Firestore ── */
   const lanStartedRef = useRef(false);
@@ -266,16 +320,18 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
     return () => loop.stop();
   }, []);
 
-  const startGame = async (force: boolean) => {
+  const startGame = async (allowUnassigned: boolean) => {
     setLoading(true);
     try {
       const token = await getToken();
       const res = await fetch(`${API_BASE_URL}/game/start/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        // `force` lets the server drop anyone still unassigned into the
-        // smallest team, so one indecisive student cannot stall the room.
-        body: JSON.stringify(force ? { roomCode, force: 'true' } : { roomCode }),
+        // `force` used to be how leftovers got dealt, which welded "assign the
+        // roster" onto "begin the game". allowUnassigned instead starts the game
+        // and leaves anyone without a team in the spectators, which is the state
+        // the host confirmed in the dialog.
+        body: JSON.stringify(allowUnassigned ? { roomCode, allowUnassigned: 'true' } : { roomCode }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -288,21 +344,64 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
 
   const handleStart = () => {
     if (unassigned.length === 0) { startGame(false); return; }
+    // No "auto-assign & start" option any more. Assignment is the button below
+    // this one; if the host wants it they press it first, and get to see the
+    // split before committing to it.
     Alert.alert(
       'Start anyway?',
-      `${unassigned.length} ${unassigned.length === 1 ? 'player has' : 'players have'} not picked a team. SAGE will put them on the smallest team.`,
+      `${unassigned.length} ${unassigned.length === 1 ? 'player has' : 'players have'} not picked a team. They will stay in the spectators.`,
       [
         { text: 'Wait', style: 'cancel' },
-        { text: 'Auto-assign & start', onPress: () => startGame(true) },
+        { text: 'Start', onPress: () => startGame(true) },
       ],
     );
   };
 
-  const isHostUser = isHost === 'true';
+  const isHostUser =
+    hostId != null && currentUserId != null && String(hostId) === String(currentUserId)
+      // The route param is only a fallback for the moment before the room
+      // listener delivers. Deriving this from it alone meant a host who left
+      // mid-game left everyone else stuck with stale host controls, and a
+      // promoted host saw no controls at all.
+      || (hostId == null && isHost === 'true');
   const unassigned = teamMode ? players.filter(p => !p.teamId) : [];
   const playerCount = players.length;
   const ghostSeats = Math.max(0, 4 - playerCount);
   const codeChars = (roomCode || '').split('');
+
+  /**
+   * Deal everyone into evenly-sized teams.
+   *
+   * Deliberately its own request, not the `force` flag on /game/start/: auto
+   * assign used to live only inside start, which meant tidying the roster and
+   * beginning the game were the same irreversible action.
+   */
+  const doAutoAssign = async () => {
+    if (autoAssigning) return;
+    setAutoAssigning(true);
+    setAutoAssignDone(false);
+    try {
+      await post('teams/auto-assign/', { roomCode });
+      setAutoAssignDone(true);
+    } catch (e: any) {
+      Alert.alert('Could not auto-assign', e?.message || 'Try again');
+    } finally {
+      setAutoAssigning(false);
+    }
+  };
+
+  /** The "+" beside a team's last slot. */
+  const doResizeTeam = async (teamId: string) => {
+    if (resizingTeamId) return;
+    setResizingTeamId(teamId);
+    try {
+      await post('teams/resize/', { roomCode, teamId, delta: 1 });
+    } catch (e: any) {
+      Alert.alert('Could not add a seat', e?.message || 'Try again');
+    } finally {
+      setResizingTeamId(null);
+    }
+  };
 
   /* ── host quiz selection (custom lobby) ── */
   const openQuizPicker = async () => {
@@ -471,6 +570,14 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
           }]}
         >
           <View style={styles.headerLeft}>
+            <TouchableOpacity
+              onPress={exitToPlay}
+              hitSlop={10}
+              style={styles.backBtn}
+              accessibilityLabel="Back to Play"
+            >
+              <Ionicons name="arrow-back" size={18} color={COLORS.textSecondary} />
+            </TouchableOpacity>
             <Text style={styles.kicker}>LOBBY</Text>
             <Text style={styles.title} numberOfLines={1}>{topic || 'Quiz Battle'}</Text>
           </View>
@@ -604,6 +711,9 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
               canAddTeam={isHostUser}
               onAddTeam={doAddTeam}
               addingTeam={addingTeam}
+              canResizeTeam={isHostUser}
+              onResizeTeam={doResizeTeam}
+              resizingTeamId={resizingTeamId}
             />
           </Animated.View>
         )}
@@ -695,43 +805,70 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
         }]}
       >
         {isHostUser ? (
-          <TouchableOpacity
-            style={styles.startWrap}
-            onPress={handleStart}
-            disabled={loading}
-            activeOpacity={0.85}
-          >
-            {loading ? (
-              <View style={styles.startInnerDisabled}>
-                <ActivityIndicator color="#fff" />
-              </View>
-            ) : quizPending ? (
-              // The server refuses to start a room with no questions, so say so
-              // on the button rather than letting it 400.
-              <View style={styles.startInnerDisabled}>
-                <Ionicons name="document-text-outline" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
-                <Text style={styles.startTextDisabled}>Choose a quiz to start</Text>
-              </View>
-            ) : (unassigned.length > 0) ? (
-              <View style={styles.startInnerDisabled}>
-                <Ionicons name="shuffle" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
-                <Text style={styles.startTextDisabled}>
-                  Auto-assign {unassigned.length} & start
-                </Text>
-              </View>
-            ) : (
-              <LinearGradient
-                colors={[COLORS.accent, '#06B6D4']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={styles.startInner}
-              >
-                <Ionicons name="play" size={18} color={COLORS.bg} style={{ marginRight: 8 }} />
-                <Text style={styles.startText}>Start Game</Text>
-                <Text style={styles.startCount}> · {playerCount} {playerCount === 1 ? 'player' : 'players'}</Text>
-              </LinearGradient>
+          <View style={styles.hostActions}>
+            <TouchableOpacity
+              style={styles.startWrap}
+              onPress={handleStart}
+              disabled={loading}
+              activeOpacity={0.85}
+            >
+              {loading ? (
+                <View style={styles.startInnerDisabled}>
+                  <ActivityIndicator color="#fff" />
+                </View>
+              ) : (
+                <LinearGradient
+                  colors={[COLORS.accent, '#06B6D4']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.startInner}
+                >
+                  <Ionicons name="play" size={18} color={COLORS.bg} style={{ marginRight: 8 }} />
+                  <Text style={styles.startText}>Start Game</Text>
+                  <Text style={styles.startCount}> · {playerCount} {playerCount === 1 ? 'player' : 'players'}</Text>
+                </LinearGradient>
+              )}
+            </TouchableOpacity>
+
+            {/* The server refuses to start a room with no questions, so say so
+                here rather than letting the press 400. */}
+            {quizPending && (
+              <Text style={styles.hostHint}>Pick a quiz before you start</Text>
             )}
-          </TouchableOpacity>
+
+            {/* Auto-assign is its own action, below START, and never starts the
+                game. It only appears once there is a quiz to start, because
+                before that there is no game to be ready for.
+
+                Shuffling is deliberately NOT gated on unassigned.length: it
+                redistributes every player evenly, so hiding it once the roster
+                happens to be full would remove the only way to fix a lopsided
+                split the host has already done by hand. */}
+            {!quizPending && (
+              <TouchableOpacity
+                onPress={doAutoAssign}
+                disabled={autoAssigning || players.length === 0}
+                activeOpacity={0.8}
+                style={[styles.autoAssign, players.length === 0 && { opacity: 0.5 }]}
+                accessibilityLabel={`Auto-assign ${players.length} players`}
+              >
+                {autoAssigning ? (
+                  <ActivityIndicator size="small" color={COLORS.textSecondary} />
+                ) : (
+                  <>
+                    <Ionicons name="shuffle" size={16} color={COLORS.textSecondary} style={{ marginRight: 8 }} />
+                    <Text style={styles.autoAssignText}>
+                      Auto-assign {players.length} {players.length === 1 ? 'player' : 'players'}
+                    </Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            )}
+
+            {autoAssignDone && unassigned.length === 0 && !quizPending && (
+              <Text style={styles.autoAssignDone}>Teams assigned · press Start when ready</Text>
+            )}
+          </View>
         ) : (
           <View style={styles.waitBar}>
             <Animated.View
@@ -805,6 +942,9 @@ const styles = StyleSheet.create({
   /* ── header ── */
   header: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 22 },
   headerLeft: { flex: 1, paddingRight: 12 },
+  // The lobby used to have no way out but the phone's back gesture, which is
+  // exactly the gesture that left the Play tab pointing at a dead room.
+  backBtn: { marginBottom: 6, alignSelf: 'flex-start' },
   kicker: {
     fontSize: 11, fontFamily: FONTS.extraBold, letterSpacing: 2.5,
     color: COLORS.accent, marginBottom: 4,
@@ -1033,6 +1173,24 @@ const styles = StyleSheet.create({
   startText: { color: COLORS.bg, fontSize: 16, fontFamily: FONTS.extraBold, letterSpacing: 0.3 },
   startTextDisabled: { color: COLORS.textMuted, fontSize: 14, fontFamily: FONTS.extraBold, letterSpacing: 0.2, textAlign: 'center' },
   startCount: { color: 'rgba(15,12,41,0.7)', fontSize: 14, fontFamily: FONTS.bold },
+  // START and AUTO-ASSIGN stack in one column: starting and assigning are two
+  // decisions, and the host has to be able to make them in either order.
+  hostActions: { gap: 8 },
+  hostHint: {
+    fontSize: 12, fontFamily: FONTS.semiBold, color: COLORS.textMuted,
+    textAlign: 'center', marginTop: 2,
+  },
+  autoAssign: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 13, borderRadius: 12,
+    borderWidth: 1, borderColor: 'rgba(148,163,184,0.32)',
+    backgroundColor: 'rgba(148,163,184,0.10)',
+  },
+  autoAssignText: { fontSize: 14, fontFamily: FONTS.bold, color: COLORS.textSecondary },
+  autoAssignDone: {
+    fontSize: 12, fontFamily: FONTS.semiBold, color: COLORS.success,
+    textAlign: 'center', marginTop: 2,
+  },
 
   waitBar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,

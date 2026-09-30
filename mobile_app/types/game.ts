@@ -45,6 +45,13 @@ export interface TeamEntry {
   id: string;
   name: string;
   color: string;
+  /**
+   * Seats on this team. The host grows it from the "+" beside the last slot,
+   * capped at 10 by the server. Optional because rooms created before per-team
+   * seats existed have no such field; the UI falls back to 5 to match the
+   * server's own default rather than rendering a team that is already full.
+   */
+  maxSize?: number;
   score: number;
   correctCount: number;
   answeredCount: number;

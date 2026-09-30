@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Modal, TextInput,
-  ScrollView, ActivityIndicator, Image,
+  ActivityIndicator, Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { pfpSource } from '@/constants/pfps';
@@ -31,6 +31,7 @@ interface Props {
   players: PlayerEntry[];
   myId: string | null;
   myTeamId: string | null;
+  /** Room-wide fallback only; a team's own maxSize wins when the server sent one. */
   maxTeamSize: number;
   locked: boolean;
   /** The host (or any member) may name a team once; after that it is locked. */
@@ -43,13 +44,22 @@ interface Props {
   canAddTeam?: boolean;
   onAddTeam?: () => void;
   addingTeam?: boolean;
+  /** Host-only "+" beside a team's last slot. */
+  canResizeTeam?: boolean;
+  onResizeTeam?: (teamId: string) => void;
+  resizingTeamId?: string | null;
 }
 
 const MIN_NAME = 2;
 const MAX_NAME = 20;
 
+/** Mirrors the backend DEFAULT_TEAM_MAX_SIZE, for teams that predate maxSize. */
+const DEFAULT_SEATS = 5;
+/** Mirrors the backend MAX_TEAM_MAX_SIZE; the "+" disables itself at this. */
+const MAX_SEATS = 10;
+
 /**
- * busyTeamId key for the spectator column. Team ids are numeric strings, so a
+ * busyTeamId key for the spectator box. Team ids are numeric strings, so a
  * non-numeric key can never collide with a real one. Keep in sync with the
  * screens, which set it when they send teamId: null.
  */
@@ -61,20 +71,39 @@ const FALLBACK_TEAM_COLORS = [
 ];
 
 /**
- * Team columns for the waiting room.
+ * Seats a team actually has, clamped to the same range the server enforces.
  *
- * The leftmost column is always Spectators. Students land there by default, so
- * it is the resting state rather than an edge case: tapping a team column joins
- * that team, and tapping Spectators goes back. Spectating is simply "no
- * teamId" on the server, which is why leaving a team is the same request as
- * joining one.
+ * A team with no maxSize of its own is a team that predates per-team seats, and
+ * the server resolves that to DEFAULT_TEAM_MAX_SIZE -- not to the room's
+ * maxTeamSize. Seeding the UI from the room instead made every legacy team
+ * advertise the room cap (20, clamped to 10) while the server would still
+ * refuse a 6th member, so the extra slots were tappable failures.
+ */
+function seatsFor(team: TeamEntry): number {
+  const raw = Number(team.maxSize);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_SEATS;
+  return Math.max(1, Math.min(MAX_SEATS, Math.round(raw)));
+}
+
+/**
+ * Team boxes for the waiting room.
  *
- * The whole column is the tap target rather than a small "Join" button, so a
- * student joining on a phone does not have to hit a 60px-wide control.
+ * Laid out as a vertical list: Spectators pinned at the top, then one box per
+ * team, separated by a "VS" label. Students start in the spectators, so that
+ * box is the resting state and the way back out -- tapping a box joins that
+ * team, tapping Spectators leaves. Spectating is simply "no teamId" on the
+ * server, which is why leaving a team is the same request as joining one.
+ *
+ * Each box shows a fixed set of slots sized to the team's own seat count, so
+ * the host can see at a glance how much room is left and a student can tap an
+ * empty slot instead of hunting for a small "Join" control. A full team stays
+ * visible but inert: the student is expected to move to another box, not to be
+ * stuck.
  */
 export default function TeamColumns({
   teams, players, myId, myTeamId, maxTeamSize, locked, canRename, busyTeamId,
   onJoin, onRename, canAddTeam = false, onAddTeam, addingTeam = false,
+  canResizeTeam = false, onResizeTeam, resizingTeamId = null,
 }: Props) {
   const [renaming, setRenaming] = useState<TeamEntry | null>(null);
   const [draft, setDraft] = useState('');
@@ -102,22 +131,7 @@ export default function TeamColumns({
     [players]
   );
 
-  // Spectators counts as a column, so it has to be included in every layout
-  // decision or the row overflows one column earlier than it used to. The host's
-  // "add team" control takes width too, which is enough to tip a narrow phone
-  // into scrolling, so it counts here even though it holds no players.
-  const showAddColumn = canAddTeam && !locked && !!onAddTeam;
-  const columnCount = teams.length + 1 + (showAddColumn ? 1 : 0);
-  const scroll = columnCount > 2;
-
-  // A room can reach team mode before any team document exists. Showing just
-  // the Spectators column in that state reads as "team mode is broken" rather
-  // than "nobody has created a team yet", so say which it is.
-  const noTeamsYet = teams.length === 0;
-
-  // With many columns they get too narrow to read, so cap how many member chips
-  // each one shows and summarise the rest rather than stretching to fit.
-  const perColumn = columnCount <= 3 ? 8 : columnCount <= 4 ? 5 : 4;
+  const showAddTeam = canAddTeam && !locked && !!onAddTeam;
 
   const openRename = (team: TeamEntry) => {
     setRenaming(team);
@@ -156,38 +170,31 @@ export default function TeamColumns({
 
   const isSpectating = myTeamId == null;
   const canTapSpectators = !locked && !isSpectating && busyTeamId === null;
-  const shownSpectators = spectators.slice(0, perColumn);
-  const spectatorOverflow = spectators.length - shownSpectators.length;
 
   return (
     <>
-      <ScrollView
-        horizontal={scroll}
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={[
-          styles.row,
-          scroll && styles.rowScroll,
-        ]}
-      >
-        {/* ── spectators: always first, this is where students start ── */}
+      <View style={styles.stack}>
+        {/* ── spectators: pinned at the top, this is where students start ── */}
         <TouchableOpacity
           onPress={() => canTapSpectators && onJoin(null)}
           activeOpacity={0.8}
           disabled={!canTapSpectators}
           accessibilityLabel="Spectators"
           style={[
-            styles.column,
-            !scroll && styles.columnFlex,
+            styles.box,
             styles.spectator,
             isSpectating && styles.spectatorActive,
-            locked && styles.columnMuted,
+            locked && styles.boxMuted,
           ]}
         >
           <View style={[styles.header, styles.spectatorHeader]}>
             <View style={[styles.colorBar, { backgroundColor: COLORS.textMuted }]} />
-            <Text style={[styles.name, { color: COLORS.textSecondary }]} numberOfLines={1}>
-              Spectators
-            </Text>
+            <View style={styles.titleRow}>
+              <Ionicons name="eye-outline" size={14} color={COLORS.textSecondary} />
+              <Text style={[styles.name, { color: COLORS.textSecondary }]} numberOfLines={1}>
+                Spectators
+              </Text>
+            </View>
             <View style={styles.countRow}>
               <Text style={[styles.count, { color: COLORS.textMuted }]}>
                 {spectators.length}
@@ -197,21 +204,12 @@ export default function TeamColumns({
           </View>
 
           <View style={styles.body}>
-            {shownSpectators.map(member => renderMember(member, COLORS.textSecondary))}
-
-            {spectatorOverflow > 0 && (
-              <View style={styles.overflow}>
-                <Text style={styles.overflowText}>+{spectatorOverflow} more</Text>
-              </View>
-            )}
-
-            {spectators.length === 0 && (
-              <View style={styles.emptySlot}>
-                <Ionicons name="eye-outline" size={18} color={COLORS.textMuted} />
-                <Text style={[styles.emptyText, { color: COLORS.textMuted }]}>
-                  {isSpectating ? 'You are here' : 'Nobody here'}
-                </Text>
-              </View>
+            {spectators.length === 0 ? (
+              <Text style={[styles.emptyText, { color: COLORS.textMuted }]}>
+                {isSpectating ? 'You are here' : 'Nobody here'}
+              </Text>
+            ) : (
+              spectators.map(member => renderMember(member, COLORS.textSecondary))
             )}
           </View>
 
@@ -226,136 +224,178 @@ export default function TeamColumns({
           </View>
         </TouchableOpacity>
 
+        {/* ── one box per team, with a VS label between neighbours ── */}
         {teams.map((team, teamIndex) => {
           const key = String(team.id);
           const members = membersByTeam.get(key) ?? [];
           const isMyTeam = sameTeamId(team.id, myTeamId);
-          const full = members.length >= maxTeamSize;
+          const seats = seatsFor(team);
+          const full = members.length >= seats;
+          // A full team is dimmed but still rendered: the student needs to see it
+          // to know to move somewhere else rather than concluding they are stuck.
           const canTap = !locked && !full && !isMyTeam && busyTeamId === null;
-          const shown = members.slice(0, perColumn);
-          const overflow = members.length - shown.length;
-          const slots = Math.max(0, Math.min(maxTeamSize, 4) - members.length);
+          // Never fewer slots than players, or a member could sit outside the
+          // box entirely and read as missing.
+          const slots = Math.max(members.length, seats);
           // Rooms created before teams carried a color still have to render:
           // every use below concatenates an alpha suffix, so a missing color
-          // would put "undefined3A" into a style and silently drop the column.
+          // would put "undefined3A" into a style and silently drop the box.
           const accent = team.color || FALLBACK_TEAM_COLORS[teamIndex % FALLBACK_TEAM_COLORS.length];
           const label = team.name || `Team ${key}`;
+          const atMaxSeats = seats >= MAX_SEATS;
+          const canGrow = canResizeTeam && !locked && !atMaxSeats && !!onResizeTeam;
 
           return (
-            <TouchableOpacity
-              key={key}
-              onPress={() => canTap && onJoin(key)}
-              activeOpacity={0.8}
-              disabled={!canTap}
-              accessibilityLabel={label}
-              style={[
-                styles.column,
-                !scroll && styles.columnFlex,
-                { borderColor: isMyTeam ? accent : accent + '3A' },
-                isMyTeam && { backgroundColor: accent + '1A' },
-                (locked || (full && !isMyTeam)) && styles.columnMuted,
-              ]}
-            >
-              {/* ── header: name, count, rename ── */}
-              <View style={[styles.header, { backgroundColor: accent + '26' }]}>
-                <View style={[styles.colorBar, { backgroundColor: accent }]} />
-                <Text style={[styles.name, { color: accent }]} numberOfLines={1}>
-                  {label}
-                </Text>
-                {canRename && !team.nameLocked && !locked && (
-                  <TouchableOpacity
-                    onPress={() => openRename(team)}
-                    hitSlop={10}
-                    style={styles.pencil}
-                    accessibilityLabel={`Rename ${label}`}
-                  >
-                    <Ionicons name="pencil" size={11} color={accent} />
-                  </TouchableOpacity>
-                )}
-                <View style={styles.countRow}>
-                  <Text style={[styles.count, { color: accent }]}>
-                    {members.length}/{maxTeamSize}
-                  </Text>
-                  {isMyTeam && <View style={styles.youPill}><Text style={styles.youPillText}>YOU</Text></View>}
+            <View key={key} style={styles.teamGroup}>
+              {teamIndex > 0 && (
+                <View style={styles.vsRow}>
+                  <View style={styles.vsLine} />
+                  <Text style={styles.vsText}>VS</Text>
+                  <View style={styles.vsLine} />
                 </View>
-              </View>
+              )}
 
-              {/* ── members ── */}
-              <View style={styles.body}>
-                {shown.map(member => renderMember(member, accent))}
-
-                {overflow > 0 && (
-                  <View style={styles.overflow}>
-                    <Text style={styles.overflowText}>+{overflow} more</Text>
+              <TouchableOpacity
+                onPress={() => canTap && onJoin(key)}
+                activeOpacity={0.8}
+                disabled={!canTap}
+                accessibilityLabel={label}
+                style={[
+                  styles.box,
+                  { borderColor: isMyTeam ? accent : accent + '3A' },
+                  isMyTeam && { backgroundColor: accent + '1A' },
+                  (locked || (full && !isMyTeam)) && styles.boxMuted,
+                ]}
+              >
+                {/* ── header: name, count, rename ── */}
+                <View style={[styles.header, { backgroundColor: accent + '26' }]}>
+                  <View style={[styles.colorBar, { backgroundColor: accent }]} />
+                  <View style={styles.titleRow}>
+                    <Text style={[styles.name, { color: accent }]} numberOfLines={1}>
+                      {label}
+                    </Text>
+                    {canRename && !team.nameLocked && !locked && (
+                      <TouchableOpacity
+                        onPress={() => openRename(team)}
+                        hitSlop={10}
+                        style={styles.pencil}
+                        accessibilityLabel={`Rename ${label}`}
+                      >
+                        <Ionicons name="pencil" size={12} color={accent} />
+                      </TouchableOpacity>
+                    )}
                   </View>
-                )}
-
-                {members.length === 0 && (
-                  <View style={styles.emptySlot}>
-                    <Ionicons name="add-circle-outline" size={18} color={accent + '88'} />
-                    <Text style={[styles.emptyText, { color: accent + 'AA' }]}>Tap to join</Text>
+                  <View style={styles.countRow}>
+                    <Text style={[styles.count, { color: accent }]}>
+                      {members.length}/{seats}
+                    </Text>
+                    {isMyTeam && <View style={styles.youPill}><Text style={styles.youPillText}>YOU</Text></View>}
+                    {full && !isMyTeam && (
+                      <Text style={[styles.fullTag, { color: accent }]}>FULL</Text>
+                    )}
                   </View>
-                )}
+                </View>
 
-                {members.length > 0 && slots > 0 && Array.from({ length: slots }).map((_, i) => (
-                  <View key={`slot-${i}`} style={styles.slot}>
-                    <Text style={styles.slotText}>empty</Text>
-                  </View>
-                ))}
-              </View>
+                {/* ── one row per seat ── */}
+                <View style={styles.body}>
+                  {Array.from({ length: slots }).map((_, i) => {
+                    const member = members[i];
+                    if (member) return renderMember(member, accent);
 
-              {/* ── footer: join state ── */}
-              <View style={styles.footer}>
-                {busyTeamId === key ? (
-                  <ActivityIndicator size="small" color={accent} />
-                ) : (
-                  <Text
-                    style={[
-                      styles.footerText,
-                      { color: isMyTeam ? accent : full ? COLORS.textMuted : COLORS.textSecondary },
-                    ]}
-                    numberOfLines={1}
-                  >
-                    {isMyTeam ? '✓ You are here' : full ? 'FULL' : locked ? 'Locked' : 'Tap to join'}
-                  </Text>
-                )}
-              </View>
-            </TouchableOpacity>
+                    const lastSlot = i === slots - 1;
+                    // The "+" only ever appears beside the final slot, so the
+                    // control to grow a team is attached to the thing it grows.
+                    return (
+                      <View key={`slot-${i}`} style={styles.slotRow}>
+                        <TouchableOpacity
+                          onPress={() => canTap && onJoin(key)}
+                          activeOpacity={0.7}
+                          disabled={!canTap}
+                          style={[
+                            styles.slot,
+                            canTap && styles.slotJoinable,
+                            full && styles.slotFull,
+                          ]}
+                          accessibilityLabel={`Join ${label}`}
+                        >
+                          <Text style={styles.slotText}>
+                            {full ? 'full' : canTap ? 'Tap to join' : 'empty'}
+                          </Text>
+                        </TouchableOpacity>
+                        {lastSlot && (
+                          <TouchableOpacity
+                            onPress={() => canGrow && onResizeTeam?.(key)}
+                            disabled={!canGrow || resizingTeamId === key}
+                            activeOpacity={0.7}
+                            hitSlop={6}
+                            style={[
+                              styles.growBtn,
+                              !canGrow && styles.growBtnDisabled,
+                            ]}
+                            accessibilityLabel={`Add a seat to ${label}`}
+                          >
+                            {resizingTeamId === key ? (
+                              <ActivityIndicator size="small" color={COLORS.textSecondary} />
+                            ) : (
+                              <Ionicons
+                                name="add"
+                                size={16}
+                                color={canGrow ? accent : COLORS.textMuted}
+                              />
+                            )}
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    );
+                  })}
+
+                  {members.length === 0 && (
+                    <Text style={[styles.emptyText, { color: accent + 'AA' }]}>
+                      {canTap ? 'Tap a slot to join' : locked ? 'Locked' : 'Tap another team'}
+                    </Text>
+                  )}
+                </View>
+
+                <View style={styles.footer}>
+                  {busyTeamId === key ? (
+                    <ActivityIndicator size="small" color={accent} />
+                  ) : (
+                    <Text
+                      style={[
+                        styles.footerText,
+                        { color: isMyTeam ? accent : full ? COLORS.textMuted : COLORS.textSecondary },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {isMyTeam ? '✓ You are here' : full ? 'Team is full' : locked ? 'Locked' : 'Tap to join'}
+                    </Text>
+                  )}
+                </View>
+              </TouchableOpacity>
+
+              {/* ── host adds another team ── */}
+              {showAddTeam && teamIndex === teams.length - 1 && (
+                <TouchableOpacity
+                  onPress={onAddTeam}
+                  disabled={addingTeam}
+                  activeOpacity={0.7}
+                  style={styles.addTeam}
+                  accessibilityLabel="Add a team"
+                >
+                  {addingTeam ? (
+                    <ActivityIndicator size="small" color={COLORS.textSecondary} />
+                  ) : (
+                    <>
+                      <Ionicons name="add-circle-outline" size={18} color={COLORS.textSecondary} />
+                      <Text style={styles.addLabel}>Add team</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              )}
+            </View>
           );
         })}
-
-        {/* ── host adds a team while students are still arriving ── */}
-        {showAddColumn && (
-          <TouchableOpacity
-            onPress={onAddTeam}
-            disabled={addingTeam}
-            activeOpacity={0.7}
-            accessibilityLabel="Add a team"
-            style={[styles.column, styles.addColumn, !scroll && styles.addColumnFlex]}
-          >
-            {addingTeam ? (
-              <ActivityIndicator size="small" color={COLORS.textSecondary} />
-            ) : (
-              <>
-                <Ionicons name="add-circle-outline" size={26} color={COLORS.textSecondary} />
-                <Text style={styles.addLabel}>Add team</Text>
-                {/* With no teams yet, the two columns on screen are the Spectators
-                    and this control, which is not obviously an invitation to
-                    create the first one. */}
-                {noTeamsYet && (
-                  <Text style={styles.addHint}>No teams yet</Text>
-                )}
-              </>
-            )}
-          </TouchableOpacity>
-        )}
-      </ScrollView>
-
-      {noTeamsYet && !showAddColumn && (
-        <Text style={styles.noTeamsNote}>
-          No teams have been created yet.
-        </Text>
-      )}
+      </View>
 
       {/* ── rename modal ── */}
       <Modal visible={!!renaming} transparent animationType="fade" onRequestClose={() => setRenaming(null)}>
@@ -396,64 +436,57 @@ export default function TeamColumns({
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: 'row', gap: 10, alignItems: 'stretch' },
-  rowScroll: { paddingRight: 16 },
+  // Vertical list: spectators on top, then each team box with a VS between.
+  stack: { gap: 0 },
 
-  column: {
-    flex: 1,
-    minWidth: 112,
-    maxWidth: 220,
+  box: {
     borderWidth: 1.5,
     borderRadius: 16,
     overflow: 'hidden',
     backgroundColor: COLORS.surface,
   },
-  columnFlex: { flex: 1, maxWidth: undefined },
-  columnMuted: { opacity: 0.55 },
+  boxMuted: { opacity: 0.55 },
 
-  // Spectators are the resting state, not a team, so the column reads as
-  // "unassigned" -- dashed, uncoloured, and quieter than the teams beside it.
+  teamGroup: { gap: 0 },
+
+  // Spectators are the resting state, not a team, so the box reads as
+  // "unassigned" -- dashed, uncoloured, and quieter than the teams below it.
   spectator: { borderStyle: 'dashed', borderColor: 'rgba(148,163,184,0.45)' },
   spectatorActive: { borderColor: COLORS.textSecondary, backgroundColor: 'rgba(148,163,184,0.10)' },
   spectatorHeader: { backgroundColor: 'rgba(148,163,184,0.10)' },
 
-  addColumn: {
-    minWidth: 96,
-    maxWidth: 140,
+  addTeam: {
+    marginTop: 10,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
+    paddingVertical: 11,
+    borderWidth: 1,
     borderStyle: 'dashed',
     borderColor: 'rgba(148,163,184,0.45)',
+    borderRadius: 12,
     backgroundColor: 'rgba(148,163,184,0.06)',
   },
-  addColumnFlex: { minWidth: 0, maxWidth: undefined },
-  addLabel: {
-    fontSize: 12,
-    fontFamily: FONTS.bold,
-    color: COLORS.textSecondary,
-    textAlign: 'center',
-  },
-  addHint: {
-    fontSize: 10,
-    fontFamily: FONTS.medium,
+  addLabel: { fontSize: 12, fontFamily: FONTS.bold, color: COLORS.textSecondary },
+
+  vsRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
+  vsLine: { flex: 1, height: 1, backgroundColor: 'rgba(255,255,255,0.10)' },
+  vsText: {
+    fontSize: 11,
+    fontFamily: FONTS.extraBold,
+    letterSpacing: 2,
     color: COLORS.textMuted,
-    textAlign: 'center',
-  },
-  noTeamsNote: {
-    marginTop: 10,
-    fontSize: 12,
-    fontFamily: FONTS.medium,
-    color: COLORS.textMuted,
-    textAlign: 'center',
   },
 
-  header: { paddingHorizontal: 10, paddingTop: 9, paddingBottom: 8 },
-  colorBar: { height: 3, borderRadius: 2, marginBottom: 7, marginHorizontal: 2 },
-  name: { fontSize: 14, fontFamily: FONTS.extraBold, letterSpacing: 0.2 },
-  pencil: { position: 'absolute', top: 16, right: 8, padding: 3 },
-  countRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 },
+  header: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 8 },
+  colorBar: { height: 3, borderRadius: 2, marginBottom: 8, marginHorizontal: 2 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  name: { flex: 1, fontSize: 15, fontFamily: FONTS.extraBold, letterSpacing: 0.2 },
+  pencil: { padding: 3 },
+  countRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
   count: { fontSize: 11, fontFamily: FONTS.bold },
+  fullTag: { fontSize: 9, fontFamily: FONTS.extraBold, letterSpacing: 0.6 },
   youPill: {
     backgroundColor: COLORS.success,
     borderRadius: 4,
@@ -462,15 +495,15 @@ const styles = StyleSheet.create({
   },
   youPillText: { fontSize: 8, fontFamily: FONTS.extraBold, color: '#062A20' },
 
-  body: { paddingHorizontal: 8, paddingVertical: 8, gap: 5, minHeight: 96 },
+  body: { paddingHorizontal: 10, paddingVertical: 9, gap: 6 },
   member: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 7,
     backgroundColor: COLORS.surfaceLight,
     borderRadius: 9,
-    paddingHorizontal: 6,
-    paddingVertical: 5,
+    paddingHorizontal: 7,
+    paddingVertical: 6,
   },
   memberYou: { backgroundColor: 'rgba(255,255,255,0.10)' },
   avatar: { width: 20, height: 20, borderRadius: 10 },
@@ -480,35 +513,44 @@ const styles = StyleSheet.create({
   },
   avatarText: { fontSize: 9, fontFamily: FONTS.extraBold },
   memberName: {
-    flex: 1, fontSize: 11, fontFamily: FONTS.semiBold,
+    flex: 1, fontSize: 12, fontFamily: FONTS.semiBold,
     color: COLORS.textPrimary,
   },
-  overflow: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: 9,
-    paddingVertical: 5,
-    alignItems: 'center',
-  },
-  overflowText: { fontSize: 10, fontFamily: FONTS.semiBold, color: COLORS.textMuted },
-  emptySlot: { alignItems: 'center', justifyContent: 'center', paddingVertical: 18, gap: 4 },
-  emptyText: { fontSize: 10, fontFamily: FONTS.semiBold },
+  emptyText: { fontSize: 11, fontFamily: FONTS.semiBold, textAlign: 'center', paddingVertical: 6 },
+
+  // A slot is one seat. Occupied seats render a member row instead.
+  slotRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   slot: {
+    flex: 1,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.09)',
     borderStyle: 'dashed',
     borderRadius: 9,
-    paddingVertical: 5,
+    paddingVertical: 8,
     alignItems: 'center',
   },
-  slotText: { fontSize: 9, fontFamily: FONTS.medium, color: COLORS.textMuted },
+  slotJoinable: { borderColor: 'rgba(255,255,255,0.22)' },
+  slotFull: { opacity: 0.45 },
+  slotText: { fontSize: 10, fontFamily: FONTS.medium, color: COLORS.textMuted },
+
+  growBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.surfaceLight,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  growBtnDisabled: { opacity: 0.35 },
 
   footer: {
-    paddingVertical: 8,
+    paddingVertical: 9,
     alignItems: 'center',
     justifyContent: 'center',
     borderTopWidth: 1,
     borderTopColor: 'rgba(255,255,255,0.06)',
-    minHeight: 34,
   },
   footerText: { fontSize: 11, fontFamily: FONTS.bold },
 

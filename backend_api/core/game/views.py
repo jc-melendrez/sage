@@ -67,6 +67,27 @@ REACTION_EMOJIS = ('\U0001F525', '\U0001F44F', '\U0001F92F', '\U0001F622', '\U00
 TEAM_NAME_MAX_LEN = 20
 TEAM_NAME_MIN_LEN = 2
 
+# Seat count lives on the team document rather than the room, because the host
+# grows an individual team from the "+" beside its last slot. A single room-wide
+# capacity (team_capacity) cannot express "team 1 has 8 seats, team 2 has 3".
+DEFAULT_TEAM_MAX_SIZE = 5
+MAX_TEAM_MAX_SIZE = 10
+
+
+class _Rejected(Exception):
+    """A team guard tripped after the pre-read, so the write must be abandoned.
+
+    The cheap 400/403 checks up front are only a fast path. Whether a write is
+    actually legal has to be decided against the document a transaction reads,
+    otherwise a host who starts the game or picks a quiz in the gap still gets
+    a team added to a room that can no longer start.
+    """
+
+    def __init__(self, payload, status):
+        super().__init__(payload.get('error', 'Rejected'))
+        self.payload = payload
+        self.status = status
+
 
 def team_color(team_id):
     """Stable colour for a 1-based team id. Never wraps into a duplicate."""
@@ -115,12 +136,27 @@ def team_capacity(room_data, player_count):
     return max(2, min(MAX_PLAYERS, even))
 
 
+def team_max_size(team_data):
+    """Seats on one team, defaulting to 5 for rooms predating per-team sizes.
+
+    The fallback matters: `maxSize` was added after rooms were already live, so
+    a missing field must not read as 0 (every team instantly "full") or as
+    MAX_PLAYERS (the "+" would be a no-op the whole time).
+    """
+    try:
+        value = int((team_data or {}).get('maxSize') or DEFAULT_TEAM_MAX_SIZE)
+    except (TypeError, ValueError):
+        return DEFAULT_TEAM_MAX_SIZE
+    return max(1, min(MAX_TEAM_MAX_SIZE, value))
+
+
 def serialize_team(team_id, data):
     """Wire shape for a team document, shared by join/start/leaderboard."""
     return {
         'id': team_id,
         'name': data.get('name', f'Team {team_id}'),
         'color': data.get('color') or team_color(team_id),
+        'maxSize': team_max_size(data),
         'score': data.get('score', 0),
         'correctCount': data.get('correctCount', 0),
         'answeredCount': data.get('answeredCount', 0),
@@ -325,6 +361,7 @@ class CreateGameView(APIView):
                     'answeredCount': 0,
                     'memberIds': [],
                     'memberCount': 0,
+                    'maxSize': DEFAULT_TEAM_MAX_SIZE,
                     # Team-mode momentum state. Correct counts are team-wide so
                     # a member's answer lifts the whole team up the ladder.
                     'teamCorrect': 0,
@@ -615,8 +652,13 @@ class StartGameView(APIView):
         # The host may explicitly wave through students who never picked a
         # team, rather than letting one absent-minded joiner deadlock the room.
         force = str(request.data.get('force', 'false')).lower() == 'true'
+        # Auto-assign is its own endpoint now, so START has two honest ways past
+        # an unassigned roster: send force to deal the leftovers into the
+        # emptiest team, or allowUnassigned to start and leave them spectating.
+        # Neither happens by accident.
+        allow_unassigned = str(request.data.get('allowUnassigned', 'false')).lower() == 'true'
         unassigned = [p for p in players if team_mode and not (p.to_dict() or {}).get('teamId')]
-        if team_mode and unassigned and not (auto_assign or force):
+        if team_mode and unassigned and not (auto_assign or force or allow_unassigned):
             return Response({
                 'error': 'All players must join a team before starting',
                 'unassigned': [len(unassigned)],
@@ -644,7 +686,7 @@ class StartGameView(APIView):
                 rng.shuffle(shuffled)
                 for i, player_snap in enumerate(shuffled):
                     place(player_snap, str((i % team_count) + 1))
-            else:
+            elif not allow_unassigned:
                 # Honour the teams students picked in the lobby columns, then
                 # deal anyone left over into the emptiest team. Sorting by
                 # (size, id) and walking the list keeps team sizes within one
@@ -661,6 +703,10 @@ class StartGameView(APIView):
                     target = min(load, key=lambda tid: (load[tid], tid))
                     load[target] += 1
                     place(player_snap, target)
+            # else: allow_unassigned -- these players keep spectating, which is
+            # the state the host confirmed when they pressed START. Placing them
+            # here would make START silently reassign people, which is exactly
+            # what the separate auto-assign button is for.
 
             # Rebuild the reveal payload from final state, so it is correct
             # whether teams were dealt, picked, or a mix of the two.
@@ -1370,8 +1416,9 @@ class AssignTeamView(APIView):
             if current_team_id == team_id:
                 return Response({'message': 'Already on that team', 'teamId': team_id,
                                  'teams': team_snapshot()})
-            roster_size = sum(1 for _ in room_ref.collection('players').stream())
-            capacity = team_capacity(room_data, roster_size)
+            # The team's own seat count wins over the room-wide estimate, or the
+            # "+" the host taps to grow a team would never actually admit anyone.
+            capacity = team_max_size(team_data)
             if len(team_data.get('memberIds', []) or []) >= capacity:
                 return Response({'error': 'That team is full', 'maxTeamSize': capacity}, status=400)
 
@@ -1477,20 +1524,8 @@ class AddTeamView(APIView):
                 'maxTeams': question_count,
             }, status=400)
 
-        class _Rejected(Exception):
-            """A guard tripped inside the transaction, after the pre-read.
-
-            The checks above are only a fast path that keeps the common failure
-            a cheap 400/403. Whether the write is actually *legal* has to be
-            decided against the document the transaction reads, otherwise a host
-            who starts the game or picks a quiz in the gap still gets a team
-            added to a room that can no longer start.
-            """
-
-            def __init__(self, payload, status):
-                super().__init__(payload.get('error', 'Rejected'))
-                self.payload = payload
-                self.status = status
+        def _reject(payload, status):
+            raise _Rejected(payload, status)
 
         # One transaction: the new document and the bumped count are two writes
         # that must not be able to happen separately, and next_id comes from the
@@ -1540,6 +1575,7 @@ class AddTeamView(APIView):
                 'answeredCount': 0,
                 'memberIds': [],
                 'memberCount': 0,
+                'maxSize': DEFAULT_TEAM_MAX_SIZE,
                 'teamCorrect': 0,
                 'teamStreak': 0,
                 'bestStreak': 0,
@@ -1613,6 +1649,246 @@ class RenameTeamView(APIView):
 
         team_ref.update({'name': name, 'namedBy': uid, 'nameLocked': True})
         return Response({'message': 'Team renamed', 'teamId': team_id, 'name': name})
+
+
+def _room_and_teams(room_code):
+    """Shared room/team-mode guard for the team views.
+
+    Returns (room_ref, room_data) or raises _Rejected, so each view does not
+    repeat the same four 404/400 checks.
+    """
+    db = get_firestore()
+    room_ref = db.collection('gameRooms').document(room_code)
+    room = room_ref.get()
+    if not room.exists:
+        raise _Rejected({'error': 'Room not found'}, 404)
+    room_data = room.to_dict() or {}
+    if not room_data.get('teamMode', False):
+        raise _Rejected({'error': 'This room is not in team mode'}, 400)
+    return room_ref, room_data
+
+
+def _require_waiting_host(room_ref, room_data, request):
+    """Reject a team mutation that is not the current host, or a started room."""
+    if str(room_data.get('hostId')) != str(request.user.id):
+        raise _Rejected({'error': 'Only the host can do that'}, 403)
+    if room_data.get('status') != 'waiting':
+        raise _Rejected({'error': 'Teams are locked once the game starts'}, 400)
+
+
+class ResizeTeamView(APIView):
+    """Grow one team by a seat, for the "+" beside its last slot.
+
+    Seat count is per team, so this is the only thing that can raise a team's
+    ceiling: the room-wide estimate in team_capacity() is deliberately not used
+    here, or a small room could never seat more than ceil(players/teams).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        team_id = str(request.data.get('teamId') or '').strip()
+        try:
+            delta = int(request.data.get('delta', 1))
+        except (TypeError, ValueError):
+            return Response({'error': 'delta must be an integer'}, status=400)
+        if not room_code or not team_id:
+            return Response({'error': 'roomCode and teamId are required'}, status=400)
+
+        try:
+            room_ref, room_data = _room_and_teams(room_code)
+            _require_waiting_host(room_ref, room_data, request)
+        except _Rejected as rejected:
+            return Response(rejected.payload, status=rejected.status)
+
+        team_ref = room_ref.collection('teams').document(team_id)
+        team_doc = team_ref.get()
+        if not team_doc.exists:
+            return Response({'error': 'Team not found'}, status=404)
+        team_data = team_doc.to_dict() or {}
+
+        current = team_max_size(team_data)
+        members = len(team_data.get('memberIds', []) or [])
+        target = max(1, min(MAX_TEAM_MAX_SIZE, current + delta))
+        # Shrinking below the people already sitting there would make the roster
+        # unreadable (members with no slot) and could strand a team.
+        if target < members:
+            return Response({
+                'error': f'Cannot shrink below the {members} players already on this team',
+                'memberCount': members,
+                'maxSize': current,
+            }, status=400)
+        if target == current:
+            return Response({
+                'message': 'No change',
+                'teamId': team_id,
+                'maxSize': current,
+                'atMax': current >= MAX_TEAM_MAX_SIZE,
+            })
+
+        team_ref.update({'maxSize': target})
+        return Response({
+            'message': f'{team_data.get("name") or f"Team {team_id}"} now has {target} seats',
+            'teamId': team_id,
+            'maxSize': target,
+            'atMax': target >= MAX_TEAM_MAX_SIZE,
+        })
+
+
+class AutoAssignTeamsView(APIView):
+    """Deal every player into evenly-sized teams, without starting the game.
+
+    Separate from /game/start/ on purpose. The two used to be one action, so
+    the only way to tidy the roster was to start the game, which made it
+    impossible to review the split first.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        if not room_code:
+            return Response({'error': 'roomCode is required'}, status=400)
+
+        try:
+            room_ref, room_data = _room_and_teams(room_code)
+            _require_waiting_host(room_ref, room_data, request)
+        except _Rejected as rejected:
+            return Response(rejected.payload, status=rejected.status)
+
+        team_docs = {
+            t.id: (t.to_dict() or {})
+            for t in room_ref.collection('teams').stream()
+        }
+        if not team_docs:
+            return Response({'error': 'This room has no teams yet'}, status=400)
+
+        players = list(room_ref.collection('players').stream())
+        if not players:
+            return Response({'error': 'Nobody is in the room yet'}, status=400)
+
+        # Full reshuffle: everyone is redealt, so a roster that was already
+        # balanced stays balanced and a hand-picked one is equalised. Starting
+        # from a clean slate first is what stops a reshuffle from double-counting
+        # members who were on a team before.
+        for tid in team_docs:
+            room_ref.collection('teams').document(tid).update({
+                'memberIds': [], 'memberCount': 0,
+            })
+
+        # Round-robin over a shuffle lands sizes within one of each other without
+        # having to sort by load each step, and stays correct when there are more
+        # teams than players (the extra teams come up empty).
+        shuffled = list(players)
+        rng.shuffle(shuffled)
+        team_ids = sorted(team_docs, key=lambda t: (len(str(t)), str(t)))
+        placement = {tid: [] for tid in team_ids}
+        for i, player_snap in enumerate(shuffled):
+            placement[team_ids[i % len(team_ids)]].append(player_snap.id)
+
+        for tid, member_ids in placement.items():
+            room_ref.collection('teams').document(tid).update({
+                'memberIds': member_ids,
+                'memberCount': len(member_ids),
+            })
+            for pid in member_ids:
+                room_ref.collection('players').document(str(pid)).update({'teamId': str(tid)})
+
+        # A team that ran out of players still keeps its seats, so a later
+        # "+" or a hand-picked join has somewhere to sit.
+        for tid, team in team_docs.items():
+            if team_max_size(team) < len(placement[tid]):
+                room_ref.collection('teams').document(tid).update({
+                    'maxSize': min(MAX_TEAM_MAX_SIZE, len(placement[tid])),
+                })
+
+        # Serialised from the placement, not from team_docs: those snapshots
+        # were read before the members were cleared, so handing them back would
+        # report the old rosters alongside a successful reshuffle.
+        final_teams = [
+            serialize_team(tid, {
+                **team_docs[tid],
+                'memberIds': placement[tid],
+                'maxSize': max(team_max_size(team_docs[tid]), len(placement[tid])),
+            })
+            for tid in team_ids
+        ]
+
+        return Response({
+            'message': f'Dealt {len(shuffled)} players into {len(team_ids)} teams',
+            'teams': final_teams,
+            'sizes': {t: len(placement[t]) for t in team_ids},
+        })
+
+
+class HostClaimView(APIView):
+    """Hand the room to someone else when the host has gone.
+
+    Every host check in this file reads hostId off the room document at request
+    time, so rewriting that one field is all it takes to hand over the quiz
+    picker, start, add-team and rename rights -- there is no second copy of
+    "who is the host" to keep in step.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        if not room_code:
+            return Response({'error': 'roomCode is required'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+        room_data = room.to_dict() or {}
+
+        current_host = str(room_data.get('hostId') or '')
+        players = [
+            (p.id, p.to_dict() or {})
+            for p in room_ref.collection('players').stream()
+        ]
+        if not players:
+            return Response({'error': 'The room is empty', 'hostId': current_host or None})
+
+        # Sorted by the player id the client uses as a stable join order, so
+        # every remaining client that calls this independently elects the same
+        # person instead of racing to overwrite each other.
+        players.sort(key=lambda pair: (str(pair[0]).zfill(12), str(pair[0])))
+
+        if any(str(pid) == current_host for pid, _ in players):
+            return Response({
+                'message': 'The host is still here',
+                'hostId': room_data.get('hostId'),
+                'promoted': False,
+            })
+
+        # Prefer another educator: a promoted student host is fine, but if a
+        # teacher is still in the room they are the more sensible custodian.
+        candidates = [pair for pair in players if str(pair[0]) != current_host]
+
+        def rank(pair):
+            user = User.objects.filter(id=pair[0]).values_list('role', flat=True).first()
+            return (0 if user == 'educator' else 1,)
+
+        new_host_id, _ = min(candidates, key=rank)
+
+        # The player document id is a string, but CreateGameView stores
+        # hostId as request.user.id (an int). Writing the raw id would make
+        # every later `hostId != request.user.id` check compare a str to an int
+        # and reject the very host we just promoted.
+        try:
+            new_host_id = int(new_host_id)
+        except (TypeError, ValueError):
+            return Response({'error': 'Could not resolve a new host', 'hostId': current_host or None},
+                            status=500)
+
+        # Written as an int to match CreateGameView, which stores request.user.id.
+        room_ref.update({'hostId': new_host_id})
+        return Response({
+            'message': 'Host handed over',
+            'hostId': new_host_id,
+            'promoted': True,
+        })
 
 
 class BoostTeammateView(APIView):
