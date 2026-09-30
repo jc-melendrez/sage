@@ -1,5 +1,8 @@
 import os
 import requests
+import traceback
+import logging
+
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
@@ -7,6 +10,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+
+logger = logging.getLogger(__name__)
 from .models import ChatSession, ChatMessage, Quiz, QuizAttempt, QuizQuestion, QuizGroupShare
 from .quiz_package import (
     QUIZ_PACKAGE_FORMAT,
@@ -31,9 +36,12 @@ from core.llm import (
 )
 
 # Upper bound on questions in one generated quiz. The educator UI tops out at
-# 30; anything past this cannot fit the token budget inside the generation
+# 50; anything past this cannot fit the token budget inside the generation
 # deadline anyway.
 MAX_QUIZ_QUESTIONS = 100
+# Quiz.quiz_type is CharField(max_length=50). Mirrored here because the model
+# is the source of truth and this is the field the request writes to.
+MAX_QUIZ_TYPE_CHARS = 50
 from users.utils.file_parser import (
     extract_text_from_bytes,
     extract_text_from_file,
@@ -581,7 +589,12 @@ class GenerateQuizView(APIView):
         # unbounded value would ask for a response the 70s budget can never
         # finish. 30 is the largest quiz the UI offers.
         count = max(1, min(MAX_QUIZ_QUESTIONS, count))
-        q_type = request.data.get('type', 'Multiple Choice')
+        # Quiz.quiz_type is a CharField(max_length=50) and this value comes
+        # straight off the request, so it has to be bounded before it reaches
+        # the insert. Postgres raises DataError on an over-length value (the
+        # catch-all at the end of this handler then reports a 500); SQLite
+        # ignores the limit, so only production ever saw the failure.
+        q_type = str(request.data.get('type') or 'Multiple Choice').strip()[:MAX_QUIZ_TYPE_CHARS]
         instructions = request.data.get('instructions', '')
 
         # Optional deadline set by the educator. ISO datetime string or null/empty = no deadline.
@@ -651,6 +664,12 @@ class GenerateQuizView(APIView):
         # default. The provider default is lower than a 30-question quiz needs,
         # and an over-long response was silently truncated into a JSON parse
         # failure.
+        #
+        # 12000 is enough for the 50 the UI offers: at 50 that is ~240 tokens
+        # per question, and a batch that large has been observed to parse and
+        # reach the save intact, so the ceiling is not the thing that was
+        # failing. A `finish_reason == 'length'` check below still catches a
+        # genuine truncation and says so.
         max_tokens = min(12000, 1200 + count * 220)
 
         payload = {
@@ -679,8 +698,33 @@ class GenerateQuizView(APIView):
                     {'error': 'AI generation timed out. Please try again.'},
                     status=504)
 
-            data = response.json()
-            choice = data['choices'][0]
+            # A body that isn't JSON at all used to raise inside .json() and was
+            # reported as a 500. Treat any malformed payload as a bad gateway.
+            try:
+                data = response.json()
+            except ValueError:
+                print(f"[GenerateQuizView] non-JSON body: {str(response.text)[:300]}")
+                return Response(
+                    {"error": "AI returned invalid JSON formatting."},
+                    status=502)
+
+            if not isinstance(data, dict):
+                return Response(
+                    {"error": "AI returned an unexpected response shape."},
+                    status=502)
+
+            # A 200 with an empty `choices` list used to escape as an
+            # IndexError and was reported as a 500. The provider really does
+            # answer this way when a large request is refused after the fact,
+            # so check the shape and report it as the bad gateway it is.
+            choices = data.get('choices') or []
+            if not choices or not isinstance(choices[0], dict):
+                print(f"[GenerateQuizView] 200 with no usable choice: {str(data)[:300]}")
+                return Response(
+                    {"error": "AI returned no content. Please try again."},
+                    status=502)
+
+            choice = choices[0]
 
             # A truncated response would fail safe_json_parse and be reported as
             # the misleading "AI returned invalid JSON formatting". Say what
@@ -692,13 +736,38 @@ class GenerateQuizView(APIView):
                               'Please try again with fewer questions.'},
                     status=400)
 
-            raw_content = choice['message']['content']
+            # A choice carrying no message/content reaches safe_json_parse as
+            # None and is reported as bad formatting; name it for what it is.
+            raw_content = (choice.get('message') or {}).get('content')
+            if not raw_content:
+                print(f"[GenerateQuizView] choice had no message content: {str(choice)[:300]}")
+                return Response(
+                    {"error": "AI returned an empty response. Please try again."},
+                    status=502)
+
             quiz_json = safe_json_parse(raw_content)
 
             if not isinstance(quiz_json, dict) or 'questions' not in quiz_json:
                 return Response({"error": "AI returned invalid JSON formatting."}, status=502)
 
             questions = [q for q in (quiz_json.get('questions') or []) if isinstance(q, dict)]
+
+            # Quiz.title is CharField(max_length=255) and this title is written
+            # verbatim off the model's JSON, so it has to be bounded here. A
+            # long batch (40-50 questions) makes the model write a long,
+            # topic-spanning title, which is what pushed those requests into
+            # DataError on Postgres and out as a 500. Every other quiz-creation
+            # path already bounded it: the upload path truncates at
+            # views.py `name[:255]` and quiz_package.py does
+            # `.strip()[:MAX_IMPORT_TITLE_CHARS]`. The identical bound is
+            # applied here so an AI title can no longer exceed the column.
+            raw_title = str(quiz_json.get('title') or '').strip()
+            quiz_title = (raw_title[:MAX_IMPORT_TITLE_CHARS] or 'Generated Quiz')
+            if raw_title and raw_title != quiz_title:
+                print(
+                    f"[GenerateQuizView] title was {len(raw_title)} chars, "
+                    f"truncated to {len(quiz_title)} for the {MAX_IMPORT_TITLE_CHARS}-char column"
+                )
 
             # A short response is a failure, not a smaller quiz. Silently saving
             # 8 of 30 questions is worse than telling the educator to retry.
@@ -737,7 +806,7 @@ class GenerateQuizView(APIView):
                 quiz = Quiz.objects.create(
                     user=request.user,
                     course=course,
-                    title=quiz_json.get('title') or 'Generated Quiz',
+                    title=quiz_title,
                     quiz_type=q_type,
                     available_until=available_until,
                 )
@@ -753,11 +822,23 @@ class GenerateQuizView(APIView):
                 ])
 
             quiz_json['questions'] = questions
+            # Report the title that was actually stored, so the client never
+            # renders a longer string than the column holds.
+            quiz_json['title'] = quiz.title
             return Response(quiz_json)
 
-        except Exception as e:
-            print(f"[GenerateQuizView] Error: {e}")
-            return Response({"error": f"Quiz generation failed: {e}"}, status=500)
+        except Exception:
+            # A bare 500 with no traceback is undiagnosable from the Render
+            # logs, which is how the over-length title stayed hidden: the app
+            # only ever showed "Quiz generation failed". Log the stack and
+            # return a generic message instead of str(exception), which can
+            # leak SQL and connection details to the client.
+            traceback.print_exc()
+            logger.exception("GenerateQuizView failed")
+            return Response(
+                {"error": "Quiz generation failed. Please try again with fewer questions."},
+                status=500,
+            )
 
 class QuizListView(APIView):
     permission_classes = [IsAuthenticated]

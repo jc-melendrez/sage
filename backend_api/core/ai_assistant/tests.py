@@ -1400,4 +1400,111 @@ class GenerateQuizReliabilityTests(APITestCase):
             self.assertGreaterEqual(len(q['options']), 2)
             self.assertTrue(q['correct_answer'])
 
+    # -- over-length columns (the 40-50 question 500) --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_an_over_length_ai_title_is_truncated_rather_than_500ing(self, mock_call):
+        """A 50-question batch makes the model write a long, topic-spanning
+        title. Quiz.title is CharField(max_length=255) and the old code wrote it
+        verbatim, so on Postgres the insert raised DataError and the handler's
+        catch-all turned it into a 500 -- the exact symptom of "40 or 50
+        questions fails".
+
+        SQLite does not enforce varchar limits, so this test asserts the
+        truncation rather than expecting the database to raise: that keeps it
+        meaningful on both engines instead of passing locally and 500ing in
+        production.
+        """
+        long_title = 'Water Cycle ' + ('and its many interrelated stages ' * 12)
+        self.assertGreater(len(long_title), 255)
+
+        mock_call.return_value = _deepseek_response(_quiz_payload(50, title=long_title))
+        resp = self.post_quiz(count=50)
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        quiz = Quiz.objects.get()
+        self.assertLessEqual(len(quiz.title), 255)
+        self.assertTrue(quiz.title.startswith('Water Cycle'))
+        self.assertEqual(quiz.questions.count(), 50)
+        # The response must not advertise a title the column cannot hold.
+        self.assertEqual(resp.data['title'], quiz.title)
+        self.assertLessEqual(len(resp.data['title']), 255)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_fifty_question_quiz_saves_completely(self, mock_call):
+        mock_call.return_value = _deepseek_response(_quiz_payload(50))
+        resp = self.post_quiz(count=50)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(Quiz.objects.get().questions.count(), 50)
+        self.assertEqual(len(resp.data['questions']), 50)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_an_over_length_quiz_type_is_bounded(self, mock_call):
+        """Quiz.quiz_type is max_length=50 and is written straight off the
+        request, so a long value from a client has to be clamped the same way
+        the title is."""
+        mock_call.return_value = _deepseek_response(_quiz_payload(3))
+        resp = self.post_quiz(count=3, type='Multiple Choice ' + 'x' * 200)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertLessEqual(len(Quiz.objects.get().quiz_type), 50)
+
+    # -- malformed provider payloads must not escape as 500 --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_200_with_no_choices_is_a_502_not_a_500(self, mock_call):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.text = '{"error":"context overflow"}'
+        resp.json.return_value = {'choices': []}
+        mock_call.return_value = resp
+
+        got = self.post_quiz(count=50)
+        self.assertEqual(got.status_code, 502, got.data)
+        self.assertFalse(Quiz.objects.exists())
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_choice_with_no_content_is_a_502_not_a_500(self, mock_call):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.text = '{"choices":[{"message":{}}]}'
+        resp.json.return_value = {'choices': [{'message': {}, 'finish_reason': 'stop'}]}
+        mock_call.return_value = resp
+
+        got = self.post_quiz(count=50)
+        self.assertEqual(got.status_code, 502, got.data)
+        self.assertFalse(Quiz.objects.exists())
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_non_json_body_is_a_502_not_a_500(self, mock_call):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.text = '<html>gateway timeout</html>'
+        resp.json.side_effect = ValueError('no json')
+        mock_call.return_value = resp
+
+        got = self.post_quiz(count=50)
+        self.assertEqual(got.status_code, 502, got.data)
+        self.assertFalse(Quiz.objects.exists())
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_failure_does_not_leak_internals_to_the_client(self, mock_call):
+        """The catch-all used to return str(exception), which can carry SQL and
+        connection details. It now returns a fixed message and logs the stack."""
+        mock_call.return_value = _deepseek_response(_quiz_payload(3))
+        with patch.object(
+            Quiz.objects, 'create',
+            side_effect=RuntimeError('connection to server at 10.0.0.4 refused'),
+        ):
+            got = self.post_quiz(count=3)
+        self.assertEqual(got.status_code, 500)
+        self.assertNotIn('10.0.0.4', json.dumps(got.data))
+        self.assertIn('Quiz generation failed', got.data['error'])
+
 
