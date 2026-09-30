@@ -1,4 +1,4 @@
-import json
+import os
 import requests
 from django.conf import settings
 from django.db import transaction
@@ -20,6 +20,20 @@ from .quiz_package import (
 from .serializers import QuizSerializer, _display_name, _percent # Import the new serializer
 from users.models import Course
 from core.firestore_service import get_study_group
+# Shared with the lesson/topic generators, so quiz generation inherits the same
+# model switch, retry/deadline policy and JSON salvage. It used to carry a
+# private copy that had drifted (hardcoded model, no thinking toggle, no token
+# budget, bare 30s timeout).
+from core.llm import (
+    AI_GEN_BUDGET_SECONDS,
+    deepseek_chat_completion,
+    safe_json_parse,
+)
+
+# Upper bound on questions in one generated quiz. The educator UI tops out at
+# 30; anything past this cannot fit the token budget inside the generation
+# deadline anyway.
+MAX_QUIZ_QUESTIONS = 100
 from users.utils.file_parser import (
     extract_text_from_bytes,
     extract_text_from_file,
@@ -559,7 +573,14 @@ class GenerateQuizView(APIView):
             )
 
         difficulty = request.data.get('difficulty', 'Medium')
-        count = int(request.data.get('count', 10))
+        try:
+            count = int(request.data.get('count', 10))
+        except (TypeError, ValueError):
+            return Response({"error": "count must be a whole number."}, status=400)
+        # Capped because count feeds straight into max_tokens and the prompt: an
+        # unbounded value would ask for a response the 70s budget can never
+        # finish. 30 is the largest quiz the UI offers.
+        count = max(1, min(MAX_QUIZ_QUESTIONS, count))
         q_type = request.data.get('type', 'Multiple Choice')
         instructions = request.data.get('instructions', '')
 
@@ -611,66 +632,132 @@ class GenerateQuizView(APIView):
         )
 
         user_prompt = (
-            f"Generate a {difficulty} level quiz with {count} {q_type} questions. "
+            f"Generate a {difficulty} level quiz with exactly {count} {q_type} questions. "
             f"Additional Instructions: {instructions}\n\n"
             f"Content to base the quiz on:\n{content}"
         )
 
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        # The model used to be hardcoded here, so DEEPSEEK_GEN_MODEL -- the
+        # switch used by every other generator -- did nothing for quizzes.
+        model_name = os.getenv('DEEPSEEK_GEN_MODEL', 'deepseek-v4-pro')
+
+        # DeepSeek V4 thinks by default. That hidden reasoning pass eats the
+        # token budget and adds tens of seconds, which is what pushed long
+        # quizzes past the gunicorn timeout and got them killed mid-response.
+        # Disable it here, matching the lesson/topic generators.
+        #
+        # With thinking off, max_tokens only has to cover the visible JSON, so
+        # scale it from the requested count instead of relying on the provider
+        # default. The provider default is lower than a 30-question quiz needs,
+        # and an over-long response was silently truncated into a JSON parse
+        # failure.
+        max_tokens = min(12000, 1200 + count * 220)
 
         payload = {
-            "model": "deepseek-v4-pro",
+            "model": model_name,
+            "thinking": {"type": "disabled"},
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "response_format": {"type": "json_object"}, # 🌟 Force JSON output
-            "temperature": 0.7
+            "response_format": {"type": "json_object"},
+            "temperature": 0.7,
+            "max_tokens": max_tokens,
         }
 
         try:
-            api_response = requests.post(
-                "https://api.deepseek.com/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-            api_response.raise_for_status()
-            data = api_response.json()
-            
-            # Parse the string content from the AI into a real JSON object
-            quiz_json = json.loads(data['choices'][0]['message']['content'])
+            # One call, with the shared retry/deadline helper. The old code used
+            # a bare requests.post with timeout=30, so a single slow attempt
+            # failed the whole request with a generic error.
+            response = deepseek_chat_completion(
+                payload, DEEPSEEK_API_KEY, deadline_seconds=AI_GEN_BUDGET_SECONDS)
 
-            # 🌟 SAVE TO DATABASE
-            quiz = Quiz.objects.create(
-                user=request.user,
-                course=course,
-                title=quiz_json.get('title', 'Generated Quiz'),
-                quiz_type=q_type,
-                available_until=available_until,
-            )
-            for q in quiz_json.get('questions', []):
-                QuizQuestion.objects.create(
-                    quiz=quiz,
-                    question_text=q.get('question'),
-                    options=q.get('options'),
-                    correct_answer=q.get('correct_answer'),
-                    explanation=q.get('explanation')
+            if response is None or response.status_code != 200:
+                detail = getattr(response, 'text', '') or 'no response'
+                print(f"[GenerateQuizView] DeepSeek error: {str(detail)[:300]}")
+                return Response(
+                    {'error': 'AI generation timed out. Please try again.'},
+                    status=504)
+
+            data = response.json()
+            choice = data['choices'][0]
+
+            # A truncated response would fail safe_json_parse and be reported as
+            # the misleading "AI returned invalid JSON formatting". Say what
+            # actually happened instead.
+            if choice.get('finish_reason') == 'length':
+                print(f"[GenerateQuizView] response truncated at max_tokens={max_tokens}")
+                return Response(
+                    {'error': f'AI response was cut off at {max_tokens} tokens. '
+                              'Please try again with fewer questions.'},
+                    status=400)
+
+            raw_content = choice['message']['content']
+            quiz_json = safe_json_parse(raw_content)
+
+            if not isinstance(quiz_json, dict) or 'questions' not in quiz_json:
+                return Response({"error": "AI returned invalid JSON formatting."}, status=502)
+
+            questions = [q for q in (quiz_json.get('questions') or []) if isinstance(q, dict)]
+
+            # A short response is a failure, not a smaller quiz. Silently saving
+            # 8 of 30 questions is worse than telling the educator to retry.
+            if len(questions) < count:
+                print(f"[GenerateQuizView] requested={count}; model returned {len(questions)}")
+                return Response(
+                    {'error': f'AI only generated {len(questions)} of {count} questions. '
+                              'Please try again.'},
+                    status=502)
+
+            # Validate before writing anything. A question missing its options
+            # or correct answer is ungradable, and saving it left educators with
+            # a quiz they could not hand out.
+            for i, q in enumerate(questions):
+                if not str(q.get('question') or '').strip():
+                    return Response(
+                        {"error": f"AI returned a blank question at position {i + 1}."},
+                        status=502)
+                options = [str(o) for o in (q.get('options') or []) if str(o).strip()]
+                if len(options) < 2:
+                    return Response(
+                        {"error": f"AI returned question {i + 1} with fewer than 2 options."},
+                        status=502)
+                correct = str(q.get('correct_answer') or '').strip()
+                if not correct:
+                    return Response(
+                        {"error": f"AI returned question {i + 1} with no correct answer."},
+                        status=502)
+                q['options'] = options
+                q['correct_answer'] = correct
+
+            # One transaction: a Quiz row plus N question rows. Creating them
+            # individually left an empty quiz behind whenever a later question
+            # failed to save.
+            with transaction.atomic():
+                quiz = Quiz.objects.create(
+                    user=request.user,
+                    course=course,
+                    title=quiz_json.get('title') or 'Generated Quiz',
+                    quiz_type=q_type,
+                    available_until=available_until,
                 )
+                QuizQuestion.objects.bulk_create([
+                    QuizQuestion(
+                        quiz=quiz,
+                        question_text=str(q.get('question')).strip(),
+                        options=q['options'],
+                        correct_answer=q['correct_answer'],
+                        explanation=str(q.get('explanation') or '').strip(),
+                    )
+                    for q in questions
+                ])
 
+            quiz_json['questions'] = questions
             return Response(quiz_json)
 
-        except json.JSONDecodeError:
-            return Response({"error": "AI returned invalid JSON formatting."}, status=500)
         except Exception as e:
-            err_detail = str(e)
-            if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
-                err_detail = f"{err_detail} | {e.response.text[:300]}"
-            print(f"Quiz Gen Error: {e}")
-            return Response({"error": err_detail}, status=500)
+            print(f"[GenerateQuizView] Error: {e}")
+            return Response({"error": f"Quiz generation failed: {e}"}, status=500)
 
 class QuizListView(APIView):
     permission_classes = [IsAuthenticated]

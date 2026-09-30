@@ -453,7 +453,16 @@ export default function ActivitiesScreen() {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || "Failed to generate quiz");
+        // A gunicorn/Cloudflare timeout answers with HTML, not JSON, so
+        // errorData is empty and the educator only saw "Failed to generate
+        // quiz" with no way to tell a timeout from a rejected request.
+        throw new Error(
+          errorData.error || errorData.detail || (
+            response.status === 504
+              ? "Quiz generation timed out. Please try again with fewer questions."
+              : `Failed to generate quiz (HTTP ${response.status})`
+          )
+        );
       }
 
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);

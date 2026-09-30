@@ -19,6 +19,16 @@ from ai_assistant.quiz_package import build_quiz_package
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
 from core.firebase import get_firestore
+# Re-exported rather than redefined: several generators need these, and the
+# private copies that used to live here let the quiz generator drift onto a
+# different model / timeout / budget policy. `patch('users.views.<name>')` in
+# the test suite still works, because callers resolve the module global.
+from core.llm import (  # noqa: F401
+    AI_GEN_BUDGET_SECONDS,
+    _coerce_parsed,
+    deepseek_chat_completion,
+    safe_json_parse,
+)
 from .gamification import (
     record_quiz_completion,
     record_lesson_completion,
@@ -274,32 +284,6 @@ def _as_bool(value, default=False):
         return value.strip().lower() in ('1', 'true', 'yes', 'on')
     return bool(value)
 
-def _coerce_parsed(value):
-    """The reasoning model sometimes wraps the object in a top-level array;
-    unwrap to the first dict so schema checks still pass."""
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, list):
-        for item in value:
-            if isinstance(item, dict):
-                return item
-    return None
-
-def safe_json_parse(text):
-    """Try to parse JSON from text, with fallback to regex extraction."""
-    try:
-        return _coerce_parsed(json.loads(text))
-    except json.JSONDecodeError:
-        # Try to extract a JSON object using regex
-        match = re.search(r"\{[\s\S]*\}", text)
-        if match:
-            try:
-                return _coerce_parsed(json.loads(match.group()))
-            except json.JSONDecodeError:
-                pass
-    return None
-
-
 def normalize_question_answers(content):
     """Rewrite practice/mastery questions so 'correct_answer' holds the actual
     option text. The model sometimes emits the answer as a letter ('A'/'B') or
@@ -523,87 +507,6 @@ def _validate_provenance(nodes):
                 q['based_on'] = f"Learn {idx} — {canonical}"
     return True, 'ok'
 
-
-# Total wall-clock budget for one AI generation request. Stays under the
-# Procfile's `gunicorn --timeout 90` (and Cloudflare's 100s origin cap) so a
-# slow model or a retry storm fails as a clean HTTP error instead of an HTML
-# error page the client can't parse.
-AI_GEN_BUDGET_SECONDS = float(os.getenv('AI_GEN_BUDGET_SECONDS', '70'))
-
-
-def deepseek_chat_completion(payload, api_key, max_retries=3, deadline_seconds=None):
-    """POST to DeepSeek and retry transient failures.
-
-    When deadline_seconds is given, the whole call (every attempt plus backoff)
-    is bounded by that wall-clock budget. Without it a retry storm can run
-    120s x 3 attempts plus Retry-After sleeps, which outlives any front-end
-    timeout and gets the request killed mid-flight.
-    """
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    started = time.monotonic()
-
-    def remaining():
-        if deadline_seconds is None:
-            return None
-        return deadline_seconds - (time.monotonic() - started)
-
-    def budget_exhausted(reserve=5):
-        left = remaining()
-        return left is not None and left <= reserve
-
-    def clamp_wait(wait):
-        """Never sleep past the deadline."""
-        left = remaining()
-        if left is None:
-            return wait
-        return max(0.0, min(wait, left - 1))
-
-    last_response = None
-    for attempt in range(1, max_retries + 1):
-        if budget_exhausted():
-            print(f"[DeepSeek] deadline of {deadline_seconds}s exhausted before attempt {attempt}")
-            return last_response
-
-        left = remaining()
-        read_timeout = 120 if left is None else max(5.0, min(120.0, left))
-        try:
-            last_response = requests.post(
-                "https://api.deepseek.com/chat/completions",
-                headers=headers,
-                json=payload,
-                # (connect, read): never hang on connect, cap the read so a
-                # stalled generation still returns inside the budget.
-                timeout=(10, read_timeout),
-            )
-        except requests.exceptions.RequestException as e:
-            print(f"[DeepSeek] attempt {attempt} request error: {e}")
-            last_response = None
-            if attempt < max_retries and not budget_exhausted():
-                time.sleep(clamp_wait(2 * attempt))
-            continue
-
-        if last_response.status_code == 200:
-            return last_response
-
-        print(f"[DeepSeek] attempt {attempt} status {last_response.status_code}: {last_response.text[:300]}")
-        if attempt < max_retries and not budget_exhausted():
-            # Honor DeepSeek's suggested wait time (rate limits) when present.
-            wait = 2 * attempt
-            retry_after = last_response.headers.get('Retry-After')
-            if retry_after:
-                try:
-                    wait = max(wait, float(retry_after))
-                except (TypeError, ValueError):
-                    pass
-            else:
-                match = re.search(r"Please try again in\s+([\d.]+)\s*s", last_response.text)
-                if match:
-                    wait = max(wait, float(match.group(1)))
-            time.sleep(clamp_wait(wait))
-    return last_response
 
 PALETTE = ['#7F77DD', '#1D9E75', '#D85A30', '#D4537E', '#378ADD', '#639922']
 

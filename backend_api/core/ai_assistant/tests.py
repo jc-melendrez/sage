@@ -1,16 +1,16 @@
 import base64
 import io
 import json
+import os
 import zipfile
 from datetime import timedelta
 from unittest.mock import patch, MagicMock
-
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
-
+from . import views as ai_views
 from .models import ChatMessage, ChatSession, Quiz, QuizAttempt, QuizGroupShare, QuizQuestion
 from .quiz_package import build_quiz_package
 from users.models import Course
@@ -78,6 +78,29 @@ def _build_docx_base64(text):
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def _deepseek_response(content, finish_reason='stop', status_code=200, text=None):
+    """A stand-in for the object deepseek_chat_completion returns."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.text = text if text is not None else json.dumps(
+        {"choices": [{"message": {"content": content}}]})
+    resp.json.return_value = {"choices": [{"message": {"content": content},
+                                           "finish_reason": finish_reason}]}
+    return resp
+
+
+def _fake_deepseek_completion(*args, **kwargs):
+    """Stands in for ai_assistant.views.deepseek_chat_completion.
+
+    Patched in place of the helper (not requests.post) because the helper is
+    now what the view calls, and because it is the thing that owns the retry
+    and deadline policy the quiz view is supposed to inherit.
+    """
+    return _deepseek_response(json.dumps(FAKE_QUIZ_JSON))
+
+
+# Kept for the tests that still patch requests.post directly (the chat views,
+# which do not use the shared helper).
 def _fake_deepseek_post(*args, **kwargs):
     resp = MagicMock()
     resp.raise_for_status.return_value = None
@@ -102,19 +125,22 @@ class QuizCourseAPITests(APITestCase):
         self.client.force_authenticate(user=self.educator)
 
     @override_settings(DEEPSEEK_API_KEY='test-key')
-    @patch('ai_assistant.views.requests.post', side_effect=_fake_deepseek_post)
+    @patch('ai_assistant.views.deepseek_chat_completion', side_effect=_fake_deepseek_completion)
     def test_generate_quiz_attaches_course(self, mock_post):
         resp = self.client.post(reverse('generate_quiz'), {
             'content': 'Study the basics of algebra.',
             'course': self.course.id,
+            # Matches FAKE_QUIZ_JSON. A response shorter than the request is now
+            # rejected rather than silently saved as a smaller quiz.
+            'count': len(FAKE_QUIZ_JSON['questions']),
         }, format='json')
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 200, resp.data)
         quiz = Quiz.objects.get()
         self.assertEqual(quiz.course, self.course)
         self.assertEqual(quiz.title, 'Math Basics')
 
     @override_settings(DEEPSEEK_API_KEY='test-key')
-    @patch('ai_assistant.views.requests.post', side_effect=_fake_deepseek_post)
+    @patch('ai_assistant.views.deepseek_chat_completion', side_effect=_fake_deepseek_completion)
     def test_generate_quiz_other_educators_course_rejected(self, mock_post):
         resp = self.client.post(reverse('generate_quiz'), {
             'content': 'Study the basics of algebra.',
@@ -124,7 +150,7 @@ class QuizCourseAPITests(APITestCase):
         self.assertEqual(Quiz.objects.count(), 0)
 
     @override_settings(DEEPSEEK_API_KEY='test-key')
-    @patch('ai_assistant.views.requests.post', side_effect=_fake_deepseek_post)
+    @patch('ai_assistant.views.deepseek_chat_completion', side_effect=_fake_deepseek_completion)
     def test_generate_quiz_invalid_course(self, mock_post):
         resp = self.client.post(reverse('generate_quiz'), {
             'content': 'Study the basics of algebra.',
@@ -1160,4 +1186,218 @@ class QuizImportTests(APITestCase):
         imported = Quiz.objects.get(id=resp.data['id'])
         self.assertEqual(imported.title, 'Round Trip')
         self.assertEqual(imported.questions.count(), source.questions.count())
+
+
+def _quiz_payload(count, title='Generated', **overrides):
+    """A well-formed model response with `count` questions."""
+    questions = []
+    for i in range(count):
+        q = {
+            "id": i + 1,
+            "question": f"Question {i + 1}?",
+            "options": ["A", "B", "C", "D"],
+            "correct_answer": "A",
+            "explanation": "Because.",
+        }
+        q.update(overrides)
+        questions.append(q)
+    return json.dumps({"title": title, "questions": questions})
+
+
+class GenerateQuizReliabilityTests(APITestCase):
+    """Quiz generation used to fail on long quizzes with "AI returned invalid
+    JSON formatting" and no usable diagnostic.
+
+    Three separate causes, none of which the old tests could see because they
+    patched requests.post and returned a perfect 200 every time:
+
+    * the reasoning model was left on, so its hidden thinking pass ate the
+      token budget and added tens of seconds,
+    * max_tokens was never set, so the provider default truncated a 30-question
+      response mid-JSON, and
+    * finish_reason was never read, so truncation was reported as bad JSON.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='gen-teacher', password='pass123', role='educator',
+        )
+        self.client.force_authenticate(user=self.educator)
+
+    def post_quiz(self, **extra):
+        body = {'content': 'Study the water cycle.', 'count': 3}
+        body.update(extra)
+        return self.client.post(reverse('generate_quiz'), body, format='json')
+
+    # -- request shape --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_thinking_is_disabled_and_tokens_scale_with_the_count(self, mock_call):
+        mock_call.return_value = _deepseek_response(_quiz_payload(30))
+        resp = self.post_quiz(count=30)
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        payload = mock_call.call_args[0][0]
+        # The hidden reasoning pass is what pushed long quizzes past the
+        # gunicorn timeout and got them killed mid-response.
+        self.assertEqual(payload['thinking'], {'type': 'disabled'})
+        # No max_tokens meant the provider default, which is below what 30
+        # questions need; the response was truncated into a parse failure.
+        self.assertEqual(payload['max_tokens'], min(12000, 1200 + 30 * 220))
+        # The deadline is the whole point of using the shared helper.
+        self.assertEqual(
+            mock_call.call_args[1]['deadline_seconds'],
+            ai_views.AI_GEN_BUDGET_SECONDS,
+        )
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_count_scales_the_token_budget(self, mock_call):
+        mock_call.return_value = _deepseek_response(_quiz_payload(3))
+        self.post_quiz(count=3)
+        small = mock_call.call_args[0][0]['max_tokens']
+
+        mock_call.return_value = _deepseek_response(_quiz_payload(30))
+        self.post_quiz(count=30)
+        large = mock_call.call_args[0][0]['max_tokens']
+        self.assertGreater(large, small)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_model_comes_from_the_shared_env_var(self, mock_call):
+        mock_call.return_value = _deepseek_response(_quiz_payload(3))
+        with patch.dict(os.environ, {'DEEPSEEK_GEN_MODEL': 'deepseek-v4-flash'}):
+            self.post_quiz()
+        # The model used to be hardcoded, so DEEPSEEK_GEN_MODEL did nothing for
+        # quizzes while it controlled every other generator.
+        self.assertEqual(mock_call.call_args[0][0]['model'], 'deepseek-v4-flash')
+
+    # -- truncation --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_truncated_response_says_so_instead_of_blaming_the_json(self, mock_call):
+        mock_call.return_value = _deepseek_response('{"title": "x", "quest', finish_reason='length')
+        resp = self.post_quiz()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('cut off', resp.data['error'])
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    # -- a short answer is a failure, not a smaller quiz --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_fewer_questions_than_requested_is_rejected(self, mock_call):
+        mock_call.return_value = _deepseek_response(_quiz_payload(2))
+        resp = self.post_quiz(count=5)
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn('2 of 5', resp.data['error'])
+        # Silently saving 2 of 5 is worse than asking the educator to retry.
+        self.assertEqual(Quiz.objects.count(), 0)
+        self.assertEqual(QuizQuestion.objects.count(), 0)
+
+    # -- ungradable questions never reach the database --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_question_with_no_correct_answer_is_rejected(self, mock_call):
+        questions = json.loads(_quiz_payload(3))
+        questions['questions'][1]['correct_answer'] = ''
+        mock_call.return_value = _deepseek_response(json.dumps(questions))
+        resp = self.post_quiz()
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn('no correct answer', resp.data['error'])
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_question_with_too_few_options_is_rejected(self, mock_call):
+        questions = json.loads(_quiz_payload(3))
+        questions['questions'][2]['options'] = ['only one']
+        mock_call.return_value = _deepseek_response(json.dumps(questions))
+        resp = self.post_quiz()
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn('fewer than 2 options', resp.data['error'])
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_blank_question_is_rejected(self, mock_call):
+        questions = json.loads(_quiz_payload(3))
+        questions['questions'][0]['question'] = '   '
+        mock_call.return_value = _deepseek_response(json.dumps(questions))
+        resp = self.post_quiz()
+        self.assertEqual(resp.status_code, 502)
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    # -- transport failures --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_timed_out_call_returns_504_not_a_generic_500(self, mock_call):
+        # The helper returns None once its deadline is spent.
+        mock_call.return_value = None
+        resp = self.post_quiz()
+        self.assertEqual(resp.status_code, 504)
+        self.assertIn('timed out', resp.data['error'])
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_an_upstream_error_body_is_surfaced(self, mock_call):
+        mock_call.return_value = _deepseek_response(
+            '', status_code=429, text='rate limit reached')
+        resp = self.post_quiz()
+        self.assertEqual(resp.status_code, 504)
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    @override_settings(DEEPSEEK_API_KEY=None)
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_missing_api_key_fails_before_calling_the_model(self, mock_call):
+        resp = self.post_quiz()
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn('API key', resp.data['error'])
+        mock_call.assert_not_called()
+
+    # -- input validation --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_non_numeric_count_is_rejected(self, mock_call):
+        resp = self.post_quiz(count='twelve')
+        self.assertEqual(resp.status_code, 400)
+        mock_call.assert_not_called()
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_an_absurd_count_is_capped(self, mock_call):
+        """count feeds max_tokens and the prompt, so it cannot be unbounded."""
+        mock_call.return_value = _deepseek_response(_quiz_payload(1))
+        self.post_quiz(count=100000)
+        payload = mock_call.call_args[0][0]
+        self.assertLessEqual(payload['max_tokens'], 12000)
+        # Clamped before the prompt is built, so the model is never asked for a
+        # response that cannot fit the generation deadline.
+        self.assertIn(
+            f'exactly {ai_views.MAX_QUIZ_QUESTIONS} ', payload['messages'][1]['content'])
+
+    # -- the happy path the educators actually hit --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_a_full_thirty_question_quiz_saves_completely(self, mock_call):
+        mock_call.return_value = _deepseek_response(_quiz_payload(30, title='Water Cycle'))
+        resp = self.post_quiz(count=30)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        quiz = Quiz.objects.get()
+        self.assertEqual(quiz.title, 'Water Cycle')
+        self.assertEqual(quiz.questions.count(), 30)
+        self.assertEqual(len(resp.data['questions']), 30)
+        # The response the client stores has to be the validated one.
+        for q in resp.data['questions']:
+            self.assertGreaterEqual(len(q['options']), 2)
+            self.assertTrue(q['correct_answer'])
+
 

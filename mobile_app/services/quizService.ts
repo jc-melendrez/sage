@@ -221,7 +221,19 @@ export async function generateQuiz(input: GenerateQuizInput): Promise<Quiz> {
     body: JSON.stringify(input),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || 'Failed to generate quiz');
+  if (!response.ok) {
+    // A gunicorn/Cloudflare timeout answers with an HTML error page, not JSON,
+    // so `data` arrives empty and `data.error` is undefined. Falling back to a
+    // bare "Failed to generate quiz" hid the one thing that distinguishes a
+    // hard timeout from a rejected request.
+    throw new Error(
+      data.error || data.detail || (
+        response.status === 504
+          ? 'Quiz generation timed out. Please try again with fewer questions.'
+          : `Failed to generate quiz (HTTP ${response.status})`
+      )
+    );
+  }
   invalidateCachePrefix('/ai/quizzes');
   return data as Quiz;
 }
