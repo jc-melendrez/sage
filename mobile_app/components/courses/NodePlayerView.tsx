@@ -35,9 +35,15 @@ type NodePlayerViewProps = {
   nodeId: number;
   isPreview: boolean;
   onBack: () => void;
+  /**
+   * Advances to the next node on the path. Supplied only when this screen was
+   * opened *from* a path, so a node reached any other way (a notification, an
+   * educator preview) cannot offer a "Next" that has nowhere to go.
+   */
+  onNext?: () => void;
 };
 
-export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodePlayerViewProps) {
+export default function NodePlayerView({ nodeId: nid, isPreview, onBack, onNext }: NodePlayerViewProps) {
   const insets = useSafeAreaInsets();
   const [node, setNode] = useState<LearningNode | null>(null);
   const [phase, setPhase] = useState<ScreenPhase>('loading');
@@ -206,6 +212,9 @@ export default function NodePlayerView({ nodeId: nid, isPreview, onBack }: NodeP
           xpEarned={result?.xp?.xp ?? 0}
           onRetry={handleRetry}
           onContinue={handleContinue}
+          // An educator preview never advances: there is no path behind it and
+          // the preview deliberately skips persisting progress.
+          onNext={isPreview ? undefined : onNext}
         />
       </View>
     );

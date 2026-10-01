@@ -60,10 +60,25 @@ export default function LobbyScreen() {
   const [players, setPlayers] = useState<PlayerEntry[]>([]);
   const [teams, setTeams] = useState<TeamEntry[]>([]);
   const [roomStatus, setRoomStatus] = useState<RoomStatus>('waiting');
-  const [teamMode, setTeamMode] = useState(false);
+  // null means "the room document has not said yet". This is deliberately not
+  // a plain boolean: the roster and the team columns are mutually exclusive, so
+  // seeding false painted the PLAYERS roster on the first frame and then hid it
+  // when the snapshot landed -- a visible flash for anyone opening a team room.
+  //
+  // LAN lobbies never get a room document (their subscription returns early), so
+  // they are seeded with the answer instead of waiting: a LAN game is always
+  // classic. Seeding from `isLAN` rather than in an effect keeps this correct on
+  // the very first render.
+  const [teamMode, setTeamMode] = useState<boolean | null>(isLAN ? false : null);
   const [loading, setLoading] = useState(false);
   const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
   const [addingTeam, setAddingTeam] = useState(false);
+  // The teams row is a horizontally scrolling strip inside a vertically
+  // scrolling lobby, so a newly added team can land completely off screen with
+  // no other cue -- which is indistinguishable from "nothing happened". The
+  // server echoes the new teamId, so we scroll it into view and pulse it.
+  const [highlightTeamId, setHighlightTeamId] = useState<string | null>(null);
+  const scrollRef = useRef<ScrollView>(null);
   // A custom lobby creates the room before a quiz exists, so the host picks one
   // here. These track what the room document currently has.
   const [quizPending, setQuizPending] = useState(false);
@@ -103,16 +118,20 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
    */
   const exitToPlay = useCallback(() => {
     if (isLAN) { router.back(); return; }
-    // replace, not push: the lobby was pushed on top of this same screen, so
-    // pushing it again would stack the Play screen on top of the lobby and the
-    // next back press would return the student to the lobby they just left.
+    // replace, not push: the lobby was pushed on top of the Play screen, so
+    // pushing it again would stack another Play screen on top of the lobby and
+    // the next back press would return the student to the lobby they just left.
     //
-    // The pathname is '/game', not '/game/index'. expo-router registers
-    // app/game/index.tsx under '/game'; '/game/index' matches no route at all
-    // and dropped the student on the "Unmatched Route" page. The `as any` that
-    // used to sit here suppressed exactly the typed-route error that would have
-    // caught it, so it stays off.
-    router.replace({ pathname: '/game', params: { leftLobby: '1' } });
+    // The pathname is '/games', the Play tab -- NOT '/game'. Both render this
+    // same component, but they are not the same screen: app/_layout.tsx
+    // registers app/game/ as a root Stack *outside* the (tabs) group, so '/game'
+    // has no Tabs ancestor and no bottom navigation bar came back with it.
+    // '/games' is the tab route ((tabs)/games.tsx re-exports app/game/index.tsx),
+    // so leaving through it keeps the student inside the tabs navigator.
+    //
+    // The `as any` that used to sit here suppressed exactly the typed-route
+    // error that would have caught this, so it stays off.
+    router.replace({ pathname: '/games', params: { leftLobby: '1' } });
   }, [isLAN, router]);
 
   // The phone's back gesture has to run the same cleanup as the on-screen
@@ -186,7 +205,10 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
 
   /* ── teams subscription (team mode only) ── */
   useEffect(() => {
-    if (!teamMode) {
+    // `!== true` rather than `!teamMode`, so the listener waits for the room
+    // document to actually confirm team mode instead of attaching on the
+    // unknown first frame and detaching again.
+    if (teamMode !== true) {
       setTeams([]);
       return;
     }
@@ -523,16 +545,41 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
   // Lets the host decide how many teams the class needs while students are
   // still arriving, instead of guessing before the room is created.
   const doAddTeam = async () => {
-    if (addingTeam) return;
+    // Logged rather than silently ignored: a guard that returns without a trace
+    // is how "+ TEAM did nothing" became unreproducible from a bug report.
+    if (addingTeam) {
+      console.warn('[lobby] addTeam ignored: already in flight');
+      return;
+    }
+    if (!roomCode) {
+      console.warn('[lobby] addTeam ignored: no roomCode');
+      Alert.alert('Could not add team', 'No room to add a team to.');
+      return;
+    }
     setAddingTeam(true);
     try {
-      await post('teams/add/', { roomCode });
+      const data = await post('teams/add/', { roomCode });
+      const newId = data?.teamId != null ? String(data.teamId) : null;
+      console.log('[lobby] addTeam ok', { teamId: newId, teamCount: data?.teamCount });
+      setHighlightTeamId(newId);
+      // Bring the new column on screen, then drop the pulse so the room looks
+      // settled again. The teams listener paints the column separately, so a
+      // short scroll-to-end is enough to reveal it.
+      scrollRef.current?.scrollToEnd({ animated: true });
     } catch (e: any) {
+      console.warn('[lobby] addTeam failed', e?.message);
       Alert.alert('Could not add team', e?.message || 'Try again');
     } finally {
       setAddingTeam(false);
     }
   };
+
+  // Clear the pulse once, from a single timer, rather than per-render.
+  useEffect(() => {
+    if (highlightTeamId == null) return;
+    const t = setTimeout(() => setHighlightTeamId(null), 2200);
+    return () => clearTimeout(t);
+  }, [highlightTeamId]);
 
   const doRename = async (teamId: string, name: string) => {
     try {
@@ -551,7 +598,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
     >
       <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
 
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollView ref={scrollRef} contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         {/* ── header ── */}
         <Animated.View
           style={[styles.header, {
@@ -665,7 +712,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
         )}
 
         {/* ── teams (team mode) ── */}
-        {teamMode && (
+        {teamMode === true && (
           <Animated.View
             style={{
               opacity: rosterAnim,
@@ -700,6 +747,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
               canAddTeam={isHostUser}
               onAddTeam={doAddTeam}
               addingTeam={addingTeam}
+              highlightTeamId={highlightTeamId}
             />
           </Animated.View>
         )}
@@ -710,7 +758,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
             a team, once inside their team's column if they have -- so a third
             flat list of the same people just made the screen longer and the
             columns harder to reach. */}
-        {!teamMode && (
+        {teamMode === false && (
         <Animated.View
           style={{
             opacity: rosterAnim,

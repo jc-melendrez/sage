@@ -43,6 +43,12 @@ interface ResultsSummaryProps {
   title?: string;
   onRetry?: () => void;
   onContinue: () => void;
+  /**
+   * Continues to the next node on the path. Supplied by the launching path
+   * screen; absent when the node was opened standalone, or reached the end of
+   * the path, in which case there is nothing to advance to.
+   */
+  onNext?: () => void;
   /** Dismiss without leaving the screen (e.g. an in-place runner). */
   onClose?: () => void;
 }
@@ -57,12 +63,26 @@ export default function ResultsSummary({
   title,
   onRetry,
   onContinue,
+  onNext,
   onClose,
 }: ResultsSummaryProps) {
   const isLesson = mode === 'lesson';
   const correct = results.filter(r => r.correct).length;
   const total = results.length;
   const mistakes = results.filter(r => !r.correct);
+
+  /**
+   * One decision, two renderings. The lesson and quiz layouts differ visually
+   * but must offer the same actions, and they used to drift apart: a lesson
+   * always showed "Practice Again", while a quiz only offered "Try Again" on a
+   * failure and "Continue" on a pass.
+   *
+   * Failed -> retry, because that is the only thing that can change the score
+   * and the next node stays locked until this one passes. Passed -> advance,
+   * when there is somewhere to advance to.
+   */
+  const showRetry = !passed && !!onRetry;
+  const showNext = passed && !!onNext;
 
   // In lesson mode there is no accuracy to report, so skip the ring entirely.
   if (isLesson) {
@@ -86,21 +106,37 @@ export default function ResultsSummary({
           <Text style={styles.lessonXp}>+{xpEarned} XP earned</Text>
         ) : null}
 
+        {/* Retry and Next are mutually exclusive (one needs a failure, the other
+            a pass), so this single slot never stacks two primary buttons. */}
+        {showRetry && (
+          <TouchableOpacity
+            style={styles.practiceBtn}
+            onPress={onRetry}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="refresh" size={18} color="white" />
+            <Text style={styles.practiceText}>Try Again</Text>
+          </TouchableOpacity>
+        )}
+        {showNext && (
+          <TouchableOpacity
+            style={styles.practiceBtn}
+            onPress={onNext}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.practiceText}>Next</Text>
+            <Ionicons name="arrow-forward" size={18} color="white" />
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
-          style={styles.practiceBtn}
-          onPress={onRetry}
-          activeOpacity={0.85}
-        >
-          <Ionicons name="refresh" size={18} color="white" />
-          <Text style={styles.practiceText}>Practice Again</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.lessonContinueBtn}
+          // On the last node of a path this is the only action, so it needs the
+          // primary button's top margin rather than the tight secondary one.
+          style={[styles.lessonContinueBtn, !showRetry && !showNext && styles.lessonContinueBtnSolo]}
           onPress={onContinue}
           activeOpacity={0.85}
         >
+          <Ionicons name="arrow-back" size={18} color={COLORS.purpleVibrant} />
           <Text style={styles.lessonContinueText}>Back to Path</Text>
-          <Ionicons name="arrow-forward" size={18} color={COLORS.purpleVibrant} />
         </TouchableOpacity>
       </View>
     );
@@ -155,21 +191,31 @@ export default function ResultsSummary({
         </View>
       )}
 
-      {/* Actions */}
+      {/* Actions. The primary forward action is filled and the secondary is
+          outlined, so "Next" and "Back to Path" never look equally weighted. */}
       <View style={styles.actions}>
-        {!passed && onRetry && (
-          <TouchableOpacity style={styles.retryBtn} onPress={onRetry} activeOpacity={0.85}>
+        {showRetry && (
+          <TouchableOpacity style={styles.outlineBtn} onPress={onRetry} activeOpacity={0.85}>
             <Ionicons name="refresh" size={18} color={COLORS.purpleVibrant} />
-            <Text style={styles.retryText}>Try Again</Text>
+            <Text style={styles.outlineText}>Try Again</Text>
+          </TouchableOpacity>
+        )}
+        {showNext && (
+          <TouchableOpacity style={styles.nextBtn} onPress={onNext} activeOpacity={0.85}>
+            <Text style={styles.continueText}>Next</Text>
+            <Ionicons name="arrow-forward" size={18} color="white" />
           </TouchableOpacity>
         )}
         <TouchableOpacity
-          style={[styles.continueBtn, passed && styles.continueBtnPass]}
+          style={[
+            showNext ? styles.outlineBtn : styles.continueBtn,
+            passed && !showNext && styles.continueBtnPass,
+          ]}
           onPress={onContinue}
           activeOpacity={0.85}
         >
-          <Text style={styles.continueText}>{passed ? 'Continue' : 'Back to Path'}</Text>
-          <Ionicons name="arrow-forward" size={18} color="white" />
+          <Ionicons name="arrow-back" size={18} color={showNext ? COLORS.purpleVibrant : 'white'} />
+          <Text style={showNext ? styles.outlineText : styles.continueText}>Back to Path</Text>
         </TouchableOpacity>
       </View>
     </ScrollView>
@@ -263,8 +309,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'white',
   },
   lessonContinueText: { fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.purpleVibrant },
+  lessonContinueBtnSolo: { marginTop: 32 },
   actions: { flexDirection: 'row', gap: 12, width: '100%' },
-  retryBtn: {
+  // Secondary action: the outlined "leave this node" look, shared by Try Again
+  // and by Back to Path when Next is the primary.
+  outlineBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
@@ -276,7 +325,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.purpleVibrant + '40',
     backgroundColor: 'white',
   },
-  retryText: { fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.purpleVibrant },
+  outlineText: { fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.purpleVibrant },
   continueBtn: {
     flex: 1,
     flexDirection: 'row',
@@ -288,5 +337,18 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.purpleVibrant,
   },
   continueBtnPass: { backgroundColor: COLORS.success },
+  // Primary forward action on a pass, when there is a next node. Shares the
+  // filled look of continueBtn but stays purple: green is reserved for the
+  // plain "you are done here" Back to Path on the last node.
+  nextBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 16,
+    borderRadius: 16,
+    backgroundColor: COLORS.purpleVibrant,
+  },
   continueText: { fontSize: 14, fontFamily: FONTS.bold, fontWeight: '700', color: 'white' },
 });

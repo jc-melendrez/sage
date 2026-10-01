@@ -123,6 +123,11 @@ export default function GameCenterScreen() {
   // further taps while the server decides the assignment.
   const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
   const [addingTeam, setAddingTeam] = useState(false);
+  // A new team column can land off screen in the horizontal strip with no other
+  // cue, which looks identical to "+ TEAM did nothing". The server echoes the new
+  // teamId, so scroll it into view and pulse it. Mirrors the lobby screen.
+  const [highlightTeamId, setHighlightTeamId] = useState<string | null>(null);
+  const teamScrollRef = useRef<ScrollView>(null);
   const [lanName, setLanName] = useState('Player');
   const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
   const lanHostRef = useRef<LanHostServer | null>(null);
@@ -1109,16 +1114,37 @@ const lobbyTokenRef = useRef(0);
   // Lets the host decide how many teams the class needs while students are
   // still arriving, instead of guessing before the room is created.
   const addTeamServer = async () => {
-    if (!roomCode || addingTeam) return;
+    // Logged rather than silently ignored -- an untraced early return is how
+    // this became an unreproducible "nothing happens" report.
+    if (!roomCode) {
+      console.warn('[play] addTeam ignored: no roomCode');
+      Alert.alert('Could not add team', 'You are not in a room yet.');
+      return;
+    }
+    if (addingTeam) {
+      console.warn('[play] addTeam ignored: already in flight');
+      return;
+    }
     setAddingTeam(true);
     try {
-      await post('teams/add/', { roomCode });
+      const data = await post('teams/add/', { roomCode });
+      const newId = data?.teamId != null ? String(data.teamId) : null;
+      console.log('[play] addTeam ok', { teamId: newId, teamCount: data?.teamCount });
+      setHighlightTeamId(newId);
+      teamScrollRef.current?.scrollToEnd({ animated: true });
     } catch (e: any) {
+      console.warn('[play] addTeam failed', e?.message);
       Alert.alert('Could not add team', e?.message || 'Try again');
     } finally {
       setAddingTeam(false);
     }
   };
+
+  useEffect(() => {
+    if (highlightTeamId == null) return;
+    const t = setTimeout(() => setHighlightTeamId(null), 2200);
+    return () => clearTimeout(t);
+  }, [highlightTeamId]);
 
   const doRename = async (teamId: string, name: string) => {
     if (!roomCode) return;
@@ -1333,6 +1359,7 @@ const lobbyTokenRef = useRef(0);
 
             {activeTab === 'presets' ? (
             <ScrollView 
+                ref={teamScrollRef}
                 style={styles.modesScroll} 
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={{ paddingBottom: 100 }}
@@ -1423,6 +1450,7 @@ const lobbyTokenRef = useRef(0);
                             canAddTeam={isHostUser}
                             onAddTeam={addTeamServer}
                             addingTeam={addingTeam}
+                            highlightTeamId={highlightTeamId}
                         />
                     </View>
                 )}

@@ -291,7 +291,12 @@ function NodeButton({ node, status, selected, active, x, y, onPress }: NodeButto
 }
 
 export default function CoursePathScreen() {
-  const { courseId, topicId } = useLocalSearchParams<{ courseId: string; topicId?: string }>();
+  const { courseId, topicId, openNode } = useLocalSearchParams<{
+    courseId: string;
+    topicId?: string;
+    /** Node whose Start popup should open on arrival, set by the player screen. */
+    openNode?: string;
+  }>();
   const router = useRouter();
   const [topics, setTopics] = useState<CoursePathTopic[]>([]);
   const [flat, setFlat] = useState<FlatNode[]>([]);
@@ -384,7 +389,17 @@ export default function CoursePathScreen() {
     setSelectedNodeIndex(null);
     // Pass the course so the player can offer the next node on the path
     // instead of dumping the student back at the top of the map.
-    router.push(`/course/node/${nodeId}?courseId=${courseId}` as any);
+    //
+    // `next` is the node that follows in this flattened sequence. It has to be
+    // decided here, on the screen that knows the ordering: the player has no
+    // idea a path exists. The last node omits it, and that absence is exactly
+    // what hides the Next button.
+    const idx = flat.findIndex(n => n.node.id === nodeId);
+    const nextId = idx >= 0 ? flat[idx + 1]?.node.id : undefined;
+    const query = nextId != null
+      ? `?courseId=${courseId}&next=${nextId}`
+      : `?courseId=${courseId}`;
+    router.push(`/course/node/${nodeId}${query}` as any);
   };
 
   // One-shot measurement of the scroll container's window offset. The header
@@ -395,6 +410,34 @@ export default function CoursePathScreen() {
       if (y > 0) scrollTop.current = y;
     });
   }, []);
+
+  // Re-open a node's Start popup when the player hands control back with
+  // `openNode`. The node is *not* started: the student still has to confirm, the
+  // same as tapping it on the map.
+  //
+  // Waits for `flat`, because the param carries a node id and the popup is
+  // driven by an index into the flattened list. Clears the param as soon as it
+  // has been consumed so a back gesture, a rotation or a re-render cannot
+  // re-open it over the top of whatever the student does next.
+  //
+  // Declared after handleScrollViewLayout on purpose -- it is in the dependency
+  // array, which is evaluated during render, and referencing the binding before
+  // its `const` would throw.
+  useEffect(() => {
+    if (!openNode) return;
+    if (flat.length === 0) return;
+    const idx = flat.findIndex(n => n.node.id === Number(openNode));
+    if (idx >= 0) {
+      setSelectedNodeIndex(idx);
+      setActiveNodeIndex(idx);
+      handleScrollViewLayout();
+      scrollRef.current?.scrollTo({
+        y: Math.max(0, getNodeY(idx) - SCREEN_H / 2 + 40),
+        animated: true,
+      });
+    }
+    router.setParams({ openNode: undefined });
+  }, [openNode, flat, router, handleScrollViewLayout]);
 
   // Duolingo-style: auto-track the emphasized node as you scroll.
   const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {

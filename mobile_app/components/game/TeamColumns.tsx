@@ -42,6 +42,12 @@ interface Props {
   canAddTeam?: boolean;
   onAddTeam?: () => void;
   addingTeam?: boolean;
+  /**
+   * Id of a team to pulse. The caller sets it right after `teams/add/` returns,
+   * because a fresh column lands off screen in the horizontal strip and the
+   * only other cue (nothing) is indistinguishable from the tap never landing.
+   */
+  highlightTeamId?: string | null;
 }
 
 const MIN_NAME = 2;
@@ -112,6 +118,7 @@ function seatsFor(team: TeamEntry): number {
 export default function TeamColumns({
   teams, players, myId, myTeamId, locked, canRename, busyTeamId,
   onJoin, onRename, canAddTeam = false, onAddTeam, addingTeam = false,
+  highlightTeamId = null,
 }: Props) {
   const [renaming, setRenaming] = useState<TeamEntry | null>(null);
   const [draft, setDraft] = useState('');
@@ -315,6 +322,7 @@ export default function TeamColumns({
           // would put "undefined3A" into a style and silently drop the box.
           const accent = team.color || FALLBACK_TEAM_COLORS[teamIndex % FALLBACK_TEAM_COLORS.length];
           const label = team.name || `Team ${key}`;
+          const isHighlighted = sameTeamId(team.id, highlightTeamId);
 
           return (
             <View key={key} style={styles.teamGroup}>
@@ -335,6 +343,10 @@ export default function TeamColumns({
                   styles.box,
                   { borderColor: isMyTeam ? accent : accent + '3A' },
                   isMyTeam && { backgroundColor: accent + '1A' },
+                  // Full-opacity border + tint instead of a thicker border:
+                  // styles.box is a fixed-size grid cell, so changing borderWidth
+                  // would nudge the inner content by half a pixel for 2s.
+                  isHighlighted && { borderColor: accent, backgroundColor: accent + '24' },
                   (locked || (full && !isMyTeam)) && styles.boxMuted,
                 ]}
               >
