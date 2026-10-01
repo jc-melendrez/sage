@@ -224,7 +224,39 @@ DEFAULT_FROM_EMAIL = os.environ.get('EMAIL_HOST_USER', 'noreply@sage.app')
 if os.environ.get('EMAIL_BACKEND'):
     EMAIL_BACKEND = os.environ['EMAIL_BACKEND']
 
-# --- DRF throttling for OTP endpoints ---
+# --- Cache ---
+# DRF throttles count in Django's default cache, which is LocMemCache: one
+# private dict per process. The Procfile runs `gunicorn --workers 2`, so every
+# worker kept its own counter and the real limit was roughly double the
+# configured rate, reset from scratch on every deploy. A database-backed cache
+# is shared across workers and survives restarts, and it is the same Postgres
+# (or SQLite locally) we already run on -- no new infrastructure.
+#
+# The table is created by `manage.py createcachetable`, which the Procfile
+# release step now runs; see Procfile.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'django_cache',
+        'OPTIONS': {
+            # Throttle keys are one per (scope, user) pair, so the default 300
+            # entries would evict live counters once a few hundred students are
+            # active. MAX_ENTRIES is an LRU ceiling, not an upfront allocation.
+            'MAX_ENTRIES': 10000,
+            # DatabaseCache only purges expired rows when someone touches the
+            # table. Without a cull frequency the table grows forever.
+            'CULL_FREQUENCY': 300,
+        },
+    }
+}
+
+# --- DRF throttling ---
+# ScopedRateThrottle is deliberately absent: it reads its scope off the view
+# instance, which the two @api_view function-based views (generate_lesson,
+# user_recommendations) cannot set without an undocumented .view_class
+# assignment. The AI throttles in core.throttling subclass UserRateThrottle
+# and hardcode `scope` instead, so they attach identically to function and
+# class based views.
 REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = [
     'rest_framework.throttling.AnonRateThrottle',
     'rest_framework.throttling.UserRateThrottle',
@@ -233,4 +265,14 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'anon': '100/day',
     'user': '1000/day',
     'otp': '20/hour',
+    # --- AI burst throttles (core/throttling.py) ---
+    # These are short-window safety rails. The daily budget that actually caps
+    # spend is the weighted point quota in users/ai_usage.py, which is aware
+    # that one lesson generation costs roughly ten chat turns.
+    'ai_chat': os.environ.get('AI_THROTTLE_CHAT', '30/min'),
+    'ai_quiz': os.environ.get('AI_THROTTLE_QUIZ', '10/hour'),
+    'ai_lesson': os.environ.get('AI_THROTTLE_LESSON', '5/hour'),
+    'ai_topic': os.environ.get('AI_THROTTLE_TOPIC', '10/hour'),
+    'ai_recommend': os.environ.get('AI_THROTTLE_RECOMMEND', '5/hour'),
+    'ai_game': os.environ.get('AI_THROTTLE_GAME', '10/hour'),
 }
