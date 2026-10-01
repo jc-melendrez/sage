@@ -1156,7 +1156,7 @@ const lobbyTokenRef = useRef(0);
     }
     if (addingTeam) {
       console.warn('[play] addTeam ignored: already in flight');
-      setAddTeamError('Still adding the previous team — give it a moment.');
+      setAddTeamError('Still adding the previous team, give it a moment.');
       return;
     }
     setAddingTeam(true);

@@ -635,7 +635,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
     // landed, and the button's busy state was left to the caller's `finally`.
     if (addingTeam) {
       console.warn('[lobby] addTeam ignored: already in flight');
-      setAddTeamError('Still adding the previous team — give it a moment.');
+      setAddTeamError('Still adding the previous team, give it a moment.');
       return;
     }
     if (!roomCode) {
