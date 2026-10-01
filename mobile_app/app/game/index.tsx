@@ -43,6 +43,9 @@ import { sameTeamId, type PlayerEntry, type TeamEntry } from '@/types/game';
  */
 const SPECTATOR_KEY = '__spectator__';
 
+/** Deadline for a Play-screen POST; mirrors the one in game/lobby.tsx. */
+const POST_TIMEOUT_MS = 45000;
+
 // 🎨 SAGE Design System Colors
 const COLORS = {
   bg: '#baaeda',
@@ -128,6 +131,13 @@ export default function GameCenterScreen() {
   // teamId, so scroll it into view and pulse it. Mirrors the lobby screen.
   const [highlightTeamId, setHighlightTeamId] = useState<string | null>(null);
   const teamScrollRef = useRef<ScrollView>(null);
+  // Rendered next to the team columns instead of only in a toast: the previous
+  // Alert-only reporting is why this reached "reproducible nowhere".
+  const [addTeamError, setAddTeamError] = useState<string | null>(null);
+  const [addTeamOk, setAddTeamOk] = useState<string | null>(null);
+  // Compared against each teams snapshot, so a server-written team that never
+  // reaches the screen is visible as a number mismatch in the log.
+  const lastAddedTeamIdRef = useRef<string | null>(null);
   const [lanName, setLanName] = useState('Player');
   const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
   const lanHostRef = useRef<LanHostServer | null>(null);
@@ -308,6 +318,13 @@ const lobbyTokenRef = useRef(0);
         .onSnapshot(snap => {
           const docs = snap?.docs?.map(doc => ({ id: doc.id, ...doc.data() })) ?? [];
           setTeams(docs as TeamEntry[]);
+          // Server's word vs what is actually on screen. A mismatch is the
+          // signature of a write that landed and a read that did not.
+          console.log('[play] teams snapshot', {
+            fromServer: lastAddedTeamIdRef.current,
+            rendered: docs.length,
+            ids: docs.map(d => d.id).join(','),
+          });
           // A team-mode room with an empty teams subcollection is a dead end:
           // there is no box to tap, no name to edit, and the host's own add-team
           // control was the only way out. Creating the first team here makes the
@@ -1086,11 +1103,27 @@ const lobbyTokenRef = useRef(0);
   // write that the roster then over-reports. This matches the lobby.
   const post = async (path: string, body: Record<string, unknown>) => {
     const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/game/${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-    });
+    // Deadline, because a pending fetch leaves every caller's `busy` flag stuck
+    // true and its `finally` unreached -- the button spins forever and later taps
+    // hit an `if (busy) return` guard. See the same helper in game/lobby.tsx.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), POST_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(`${API_BASE_URL}/game/${path}`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+    } catch (e: any) {
+      if (e?.name === 'AbortError') {
+        throw new Error(`The server did not respond within ${Math.round(POST_TIMEOUT_MS / 1000)}s`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     return data;
@@ -1114,31 +1147,49 @@ const lobbyTokenRef = useRef(0);
   // Lets the host decide how many teams the class needs while students are
   // still arriving, instead of guessing before the room is created.
   const addTeamServer = async () => {
-    // Logged rather than silently ignored -- an untraced early return is how
+    // Logged and shown, not silently ignored -- an untraced early return is how
     // this became an unreproducible "nothing happens" report.
     if (!roomCode) {
       console.warn('[play] addTeam ignored: no roomCode');
-      Alert.alert('Could not add team', 'You are not in a room yet.');
+      setAddTeamError('You are not in a room yet.');
       return;
     }
     if (addingTeam) {
       console.warn('[play] addTeam ignored: already in flight');
+      setAddTeamError('Still adding the previous team — give it a moment.');
       return;
     }
     setAddingTeam(true);
+    setAddTeamError(null);
     try {
       const data = await post('teams/add/', { roomCode });
       const newId = data?.teamId != null ? String(data.teamId) : null;
       console.log('[play] addTeam ok', { teamId: newId, teamCount: data?.teamCount });
+      lastAddedTeamIdRef.current = newId;
       setHighlightTeamId(newId);
+      // The server confirmed the write. Saying so on screen is what separates
+      // "the column is off to the right" from "the request never landed".
+      setAddTeamOk(
+        newId != null
+          ? `Team ${newId} was created (${data?.teamCount ?? '?'} teams total).`
+          : 'The team was created.',
+      );
       teamScrollRef.current?.scrollToEnd({ animated: true });
     } catch (e: any) {
       console.warn('[play] addTeam failed', e?.message);
-      Alert.alert('Could not add team', e?.message || 'Try again');
+      setAddTeamError(e?.message || 'Could not add team. Try again.');
     } finally {
       setAddingTeam(false);
     }
   };
+
+  // Success is dismissible; a failure is not, because a failure that quietly
+  // disappears is indistinguishable from the bug it was meant to explain.
+  const addTeamNotice = addTeamError
+    ? { kind: 'error' as const, text: addTeamError }
+    : addTeamOk
+      ? { kind: 'ok' as const, text: addTeamOk }
+      : null;
 
   useEffect(() => {
     if (highlightTeamId == null) return;
@@ -1437,6 +1488,27 @@ const lobbyTokenRef = useRef(0);
                 {joinedRoom && roomMode === 'group' && (
                     <View style={styles.teamPickerSection}>
                         <Text style={styles.teamPickerLabel}>PICK A TEAM OR STAY IN THE SPECTATORS</Text>
+                        {/* Attached to the columns themselves: a rejected add or a
+                            failed read is otherwise invisible, which is what made
+                            "+ TEAM did nothing" unreproducible. */}
+                        {addTeamNotice ? (
+                            <View style={[
+                                styles.teamNotice,
+                                addTeamNotice.kind === 'error' ? styles.teamNoticeError : styles.teamNoticeOk,
+                            ]}>
+                                <Ionicons
+                                    name={addTeamNotice.kind === 'error' ? 'alert-circle' : 'checkmark-circle'}
+                                    size={16}
+                                    color={addTeamNotice.kind === 'error' ? COLORS.danger : COLORS.success}
+                                />
+                                <Text style={styles.teamNoticeText}>{addTeamNotice.text}</Text>
+                                {addTeamNotice.kind === 'ok' ? (
+                                    <TouchableOpacity onPress={() => setAddTeamOk(null)} hitSlop={10}>
+                                        <Ionicons name="close" size={16} color={COLORS.textMuted} />
+                                    </TouchableOpacity>
+                                ) : null}
+                            </View>
+                        ) : null}
                         <TeamColumns
                             teams={teams as TeamEntry[]}
                             players={roomPlayers as PlayerEntry[]}
@@ -2150,6 +2222,17 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginBottom: 10,
   },
+
+  // Team-column diagnostics, sitting between the label and the columns so the
+  // failure is attached to the thing that failed.
+  teamNotice: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12,
+    borderWidth: 1, marginBottom: 12,
+  },
+  teamNoticeError: { backgroundColor: COLORS.danger + '1A', borderColor: COLORS.danger + '55' },
+  teamNoticeOk: { backgroundColor: COLORS.success + '1A', borderColor: COLORS.success + '55' },
+  teamNoticeText: { flex: 1, fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textSecondary, lineHeight: 17 },
 
   // Modals
   modalOverlay: {

@@ -23,6 +23,13 @@ import type { PlayerEntry, RoomStatus, TeamEntry } from '@/types/game';
  */
 const SPECTATOR_KEY = '__spectator__';
 
+/**
+ * Deadline for a lobby POST. Generous enough to survive a cold start on a free
+ * Render instance (which can idle for tens of seconds) but finite, so a dropped
+ * connection surfaces as an error instead of a button stuck spinning forever.
+ */
+const POST_TIMEOUT_MS = 45000;
+
 const COLORS = {
   bg: '#0f0c29',
   bgSecondary: '#1a1640',
@@ -36,6 +43,7 @@ const COLORS = {
   accent: '#22D3EE',
   success: '#10B981',
   warning: '#F59E0B',
+  danger: '#EF4444',
   textPrimary: '#FFFFFF',
   textSecondary: '#CBD5E1',
   textMuted: '#94A3B8',
@@ -79,6 +87,19 @@ export default function LobbyScreen() {
   // server echoes the new teamId, so we scroll it into view and pulse it.
   const [highlightTeamId, setHighlightTeamId] = useState<string | null>(null);
   const scrollRef = useRef<ScrollView>(null);
+  // Both failure modes below used to be invisible. A rejected request only
+  // raised an Alert (dismissable, and missed entirely when the tap "did
+  // nothing"), and a denied Firestore read had no error callback at all, so a
+  // healthy room and an unreadable one looked identical. These are rendered as
+  // a persistent strip instead, so the next failure is self-describing.
+  const [addTeamError, setAddTeamError] = useState<string | null>(null);
+  const [teamsError, setTeamsError] = useState<string | null>(null);
+  // The room doc gates `teamMode`, which gates the teams subscription, so a
+  // failure here is the one that silently disables the whole team roster.
+  const [roomError, setRoomError] = useState<string | null>(null);
+  // What the server last said it created, so a snapshot can be compared against
+  // it: a mismatch means the write landed and the read did not.
+  const lastAddedTeamIdRef = useRef<string | null>(null);
   // A custom lobby creates the room before a quiz exists, so the host picks one
   // here. These track what the room document currently has.
   const [quizPending, setQuizPending] = useState(false);
@@ -151,26 +172,46 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
       .collection('gameRooms')
       .doc(roomCode)
       .collection('players')
-      .onSnapshot(snap => {
-        setPlayers((snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []) as PlayerEntry[]);
-      });
+      .onSnapshot(
+        snap => {
+          setPlayers((snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []) as PlayerEntry[]);
+        },
+        (err: any) => {
+          console.warn('[lobby] players read FAILED', err?.code || '', err?.message || err);
+          setRoomError(String(err?.message || err?.code || 'Could not read players'));
+        },
+      );
 
     // Listen for game start
     const roomUnsub = firestore()
       .collection('gameRooms')
       .doc(roomCode)
-      .onSnapshot(snap => {
-        const d = snap?.data();
-        setRoomStatus(d?.status ?? 'waiting');
-        setTeamMode(!!d?.teamMode);
-        if (d?.topic) setRoomTopic(d.topic);
-        setRoomQuestionCount(d?.questionCount ?? 0);
-        setRoomTeamCount(d?.teamCount ?? null);
-        setQuizPending(!!d?.quizPending);
-        if (d?.status === 'active') {
-          startJoinerCountdown();
-        }
-      });
+      .onSnapshot(
+        snap => {
+          const d = snap?.data();
+          setRoomStatus(d?.status ?? 'waiting');
+          setTeamMode(!!d?.teamMode);
+          if (d?.topic) setRoomTopic(d.topic);
+          setRoomQuestionCount(d?.questionCount ?? 0);
+          setRoomTeamCount(d?.teamCount ?? null);
+          setQuizPending(!!d?.quizPending);
+          if (d?.status === 'active') {
+            startJoinerCountdown();
+          }
+        },
+        // This one matters more than its size suggests. `teamMode` is set only
+        // here, and `teamMode === true` is the sole gate that attaches the teams
+        // subscription below. So a denied or failed read of *this* document left
+        // `teamMode` null forever: no teams listener, no columns -- while
+        // POST /teams/add/ still returned 201, because that is a server-side
+        // write with its own auth check. The result was "+ TEAM" returning
+        // cleanly, spinning, and rendering nothing. Reporting the read failure
+        // is the only way that state is distinguishable from an empty room.
+        (err: any) => {
+          console.warn('[lobby] room read FAILED', err?.code || '', err?.message || err);
+          setRoomError(String(err?.message || err?.code || 'Could not read the room'));
+        },
+      );
 
     return () => { unsub(); roomUnsub(); };
   }, [roomCode, isLAN]);
@@ -219,6 +260,13 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
       .onSnapshot(snap => {
         const docs = snap?.docs ?? [];
         setTeams(docs.map(d => ({ id: d.id, ...d.data() })) as TeamEntry[]);
+        // Server minted it, the client is showing this list -- if these two
+        // numbers ever disagree, the write landed and the read did not.
+        console.log('[lobby] teams snapshot', {
+          fromServer: lastAddedTeamIdRef.current,
+          rendered: docs.length,
+          ids: docs.map(d => d.id).join(','),
+        });
 
         // A team-mode room whose teams subcollection is empty has nothing to
         // tap and nothing to name, and the host is the only one who can fix it.
@@ -226,6 +274,17 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
         if (docs.length === 0 && isHostUserRef.current) {
           post('teams/add/', { roomCode }).catch(() => {});
         }
+      },
+      // This used to have no error callback, which made a *denied or failed*
+      // read indistinguishable from an empty room: teams just stayed [] and
+      // adding one looked like it did nothing. Deployed rules can differ from
+      // the repo copy, so surface it rather than swallowing it.
+      // FirestoreError carries a `code` ('permission-denied', 'unavailable'),
+      // but onSnapshot's error callback is typed as plain Error, so read it
+      // structurally instead of casting the whole thing away.
+      (err: any) => {
+        console.warn('[lobby] teams read FAILED', err?.code || '', err?.message || err);
+        setTeamsError(String(err?.message || err?.code || 'Could not read teams'));
       });
     return () => unsub();
   }, [teamMode, roomCode, roomTeamCount]);
@@ -479,15 +538,38 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
 
   const post = async (path: string, body: Record<string, unknown>) => {
     const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/game/${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-    });
+    // A bare fetch can pend forever on a dropped connection or a server that
+    // never answers. That matters here because every caller flips a `busy`
+    // flag that is only cleared in a `finally`: an unsettled request wedges the
+    // button as a permanent spinner and every later tap is swallowed by the
+    // `if (busy) return` guard. So the request gets a deadline of its own.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), POST_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(`${API_BASE_URL}/game/${path}`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+    } catch (e: any) {
+      if (e?.name === 'AbortError') {
+        throw new Error(`The server did not respond within ${Math.round(POST_TIMEOUT_MS / 1000)}s`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     return data;
   };
+
+  // An explicit confirmation that the write landed server-side, shown until the
+  // student dismisses it. The highlight is transient by design, so this is what
+  // separates "the column is off to the right" from "the request never landed".
+  const [addTeamOk, setAddTeamOk] = useState<string | null>(null);
 
   // teamId null means "go back to the spectators". First pick needs no
   // ceremony; leaving or switching teams does, since it silently changes who
@@ -547,28 +629,47 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
   const doAddTeam = async () => {
     // Logged rather than silently ignored: a guard that returns without a trace
     // is how "+ TEAM did nothing" became unreproducible from a bug report.
+    // Each rejection path both explains itself on screen and stops the spinner.
+    // The guard ones matter most: previously they returned without touching
+    // `addingTeam`, so a tap that hit them looked exactly like a tap that never
+    // landed, and the button's busy state was left to the caller's `finally`.
     if (addingTeam) {
       console.warn('[lobby] addTeam ignored: already in flight');
+      setAddTeamError('Still adding the previous team — give it a moment.');
       return;
     }
     if (!roomCode) {
       console.warn('[lobby] addTeam ignored: no roomCode');
-      Alert.alert('Could not add team', 'No room to add a team to.');
+      setAddTeamError('No room code, so there is no room to add a team to.');
       return;
     }
     setAddingTeam(true);
+    setAddTeamError(null);
     try {
       const data = await post('teams/add/', { roomCode });
       const newId = data?.teamId != null ? String(data.teamId) : null;
       console.log('[lobby] addTeam ok', { teamId: newId, teamCount: data?.teamCount });
+      // Remembered so the teams snapshot can be compared against what the server
+      // says it wrote. A divergence here is the signature of a failed read.
+      lastAddedTeamIdRef.current = newId;
       setHighlightTeamId(newId);
+      // The server confirmed the write. If the column still does not appear,
+      // the strip below says so explicitly rather than leaving the host to
+      // conclude the tap missed.
+      setAddTeamOk(
+        newId != null
+          ? `Team ${newId} was created (${data?.teamCount ?? '?'} teams total).`
+          : 'The team was created.',
+      );
       // Bring the new column on screen, then drop the pulse so the room looks
       // settled again. The teams listener paints the column separately, so a
       // short scroll-to-end is enough to reveal it.
       scrollRef.current?.scrollToEnd({ animated: true });
     } catch (e: any) {
       console.warn('[lobby] addTeam failed', e?.message);
-      Alert.alert('Could not add team', e?.message || 'Try again');
+      // Kept on screen as well as in the log: a one-shot Alert is easy to miss,
+      // and "nothing happened" is the whole bug report.
+      setAddTeamError(e?.message || 'Could not add team. Try again.');
     } finally {
       setAddingTeam(false);
     }
@@ -580,6 +681,14 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
     const t = setTimeout(() => setHighlightTeamId(null), 2200);
     return () => clearTimeout(t);
   }, [highlightTeamId]);
+
+  // Success confirmation is explicitly dismissible; failures are not, because a
+  // failure that quietly disappears is how this reached "reproducible nowhere".
+  const addTeamNotice = addTeamError
+    ? { kind: 'error' as const, text: addTeamError }
+    : addTeamOk
+      ? { kind: 'ok' as const, text: addTeamOk }
+      : null;
 
   const doRename = async (teamId: string, name: string) => {
     try {
@@ -733,6 +842,53 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
                 </View>
               )}
             </View>
+
+            {/* Read/write failures for the team columns, rendered where the
+                columns are rather than in a toast. A denied Firestore read used
+                to be silent, and a rejected POST used to raise only an Alert, so
+                both looked like "the tap did nothing". `roomError` is listed
+                first because it explains the other two: it means `teamMode`
+                never arrived, so the teams listener below never attached at all. */}
+            {(addTeamNotice || teamsError || roomError) ? (
+              <View style={styles.teamNoticeWrap}>
+                {roomError ? (
+                  <View style={[styles.teamNotice, styles.teamNoticeError]}>
+                    <Ionicons name="alert-circle" size={16} color={COLORS.danger} />
+                    <Text style={styles.teamNoticeText}>
+                      Could not read the room ({roomError}). Teams will not load until this is fixed.
+                    </Text>
+                  </View>
+                ) : null}
+                {teamsError ? (
+                  <View style={[styles.teamNotice, styles.teamNoticeError]}>
+                    <Ionicons name="alert-circle" size={16} color={COLORS.danger} />
+                    <Text style={styles.teamNoticeText}>
+                      Could not read the teams ({teamsError}). Adding a team will not appear until this is fixed.
+                    </Text>
+                  </View>
+                ) : null}
+                {addTeamNotice ? (
+                  <View
+                    style={[
+                      styles.teamNotice,
+                      addTeamNotice.kind === 'error' ? styles.teamNoticeError : styles.teamNoticeOk,
+                    ]}
+                  >
+                    <Ionicons
+                      name={addTeamNotice.kind === 'error' ? 'alert-circle' : 'checkmark-circle'}
+                      size={16}
+                      color={addTeamNotice.kind === 'error' ? COLORS.danger : COLORS.success}
+                    />
+                    <Text style={styles.teamNoticeText}>{addTeamNotice.text}</Text>
+                    {addTeamNotice.kind === 'ok' ? (
+                      <TouchableOpacity onPress={() => setAddTeamOk(null)} hitSlop={10}>
+                        <Ionicons name="close" size={16} color={COLORS.textMuted} />
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
 
             <TeamColumns
               teams={sortedTeams}
@@ -1143,6 +1299,18 @@ const styles = StyleSheet.create({
 
   /* ── roster ── */
   rosterHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
+
+  // Team-column diagnostics. Sits directly above the columns so a failure is
+  // attached to the thing that failed, not floating elsewhere on the screen.
+  teamNoticeWrap: { gap: 8, marginBottom: 12 },
+  teamNotice: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12,
+    borderWidth: 1,
+  },
+  teamNoticeError: { backgroundColor: COLORS.danger + '1A', borderColor: COLORS.danger + '55' },
+  teamNoticeOk: { backgroundColor: COLORS.success + '1A', borderColor: COLORS.success + '55' },
+  teamNoticeText: { flex: 1, fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textSecondary, lineHeight: 17 },
   rosterKicker: { fontSize: 12, fontFamily: FONTS.extraBold, letterSpacing: 2, color: COLORS.textSecondary },
   waitingTag: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   waitingDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.warning },
