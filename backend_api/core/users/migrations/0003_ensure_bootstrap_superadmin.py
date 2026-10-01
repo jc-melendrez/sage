@@ -1,39 +1,24 @@
-from django.contrib.auth.hashers import make_password
 from django.db import migrations
 
 
+# This migration used to create an `admin` superadmin and an `educator01`
+# account with passwords hardcoded in the source, on every database that ran
+# `migrate`. That put a known-password superadmin on any fresh checkout and on
+# every deploy.
+#
+# Both functions are now no-ops. The migration is kept (rather than deleted) so
+# the chain stays intact for databases that already applied it, but it no longer
+# provisions accounts. First-admin provisioning lives in the `bootstrap_users`
+# management command, which reads the password from the environment and does
+# nothing when it is unset.
+
+
 def ensure_bootstrap_users(apps, schema_editor):
-    User = apps.get_model('users', 'User')
-
-    if not User.objects.filter(username='admin').exists():
-        User.objects.create(
-            username='admin',
-            email='admin@sage.app',
-            first_name='Sage',
-            last_name='Admin',
-            role='superadmin',
-            is_active=True,
-            is_superuser=True,
-            is_staff=True,
-            password=make_password('AdminPass123!'),
-        )
-
-    if not User.objects.filter(username='educator01').exists():
-        User.objects.create(
-            username='educator01',
-            email='educator01@example.com',
-            first_name='Educator',
-            last_name='One',
-            role='educator',
-            is_active=True,
-            password=make_password('Educator123!'),
-        )
+    return None
 
 
 def remove_bootstrap_users(apps, schema_editor):
-    apps.get_model('users', 'User').objects.filter(
-        username__in=['admin', 'educator01']
-    ).delete()
+    return None
 
 
 class Migration(migrations.Migration):

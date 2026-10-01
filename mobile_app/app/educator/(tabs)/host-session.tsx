@@ -775,9 +775,19 @@ export default function HostSessionScreen() {
   const playerCount = students.length;
 
   const tvBase = getTvPageBaseUrl();
-  const copyTvUrl = () => {
+  const copyTvUrl = async () => {
     if (!tvBase) return;
-    const url = `${tvBase}/${code}`;
+    // The TV page polls an authenticated endpoint, so the link has to carry a
+    // credential. It rides in the URL *fragment* rather than the query string:
+    // fragments are not sent in the request line and not forwarded in the
+    // Referer header, so it stays out of server and proxy logs. TvLeaderboard
+    // reads it once on mount, swaps it for a clean URL, and keeps it in memory.
+    const token = await getToken();
+    if (!token) {
+      Alert.alert('Sign in again', 'Your session expired. Re-open the session to get a new TV link.');
+      return;
+    }
+    const url = `${tvBase}/${code}#t=${encodeURIComponent(token)}`;
     Clipboard.setStringAsync(url)
       .then(() => Alert.alert('TV link copied', url))
       .catch(() => {});

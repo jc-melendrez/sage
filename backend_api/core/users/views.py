@@ -13,8 +13,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
-from ai_assistant.models import Quiz, QuizAttempt, QuizGroupShare
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, GroupTask, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
+from ai_assistant.models import Quiz, QuizAttempt, QuizGroupShare, ChatSession, ChatMessage
 from ai_assistant.quiz_package import build_quiz_package
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer
@@ -40,6 +40,7 @@ from .gamification import (
 from .serializers import (
     UserSerializer, UserRegistrationSerializer,
     BadgeSerializer, RecommendationSerializer,
+    GroupTaskSerializer,
     SessionSerializer, ActivitySerializer,
     CourseSerializer, CourseRosterSerializer,
     SuperadminUserUpdateSerializer, SuperadminCreateUserSerializer,
@@ -1300,6 +1301,110 @@ def _validate_quiz_embed(user, payload):
     }, None
 
 
+class GroupTaskListView(APIView):
+    """Shared group checklist.
+
+    Membership is resolved from Firestore (`studyGroups/<id>.members`, a list
+    of Firebase UIDs) rather than the Django StudyGroup table, because that is
+    what every other group endpoint -- chat, members, settings -- already
+    treats as the source of truth. A task row is worthless without that check,
+    since `group_id` is caller-supplied.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    MAX_TASKS = 200
+
+    def _group(self, request, group_id):
+        group = get_study_group(group_id)
+        if not group:
+            return None, Response({"error": "Group not found"}, status=404)
+        if request.user.firebase_uid not in (group.get('members') or []):
+            return None, Response(
+                {"error": "You must be a member of this group"}, status=403
+            )
+        return group, None
+
+    def get(self, request, group_id):
+        _, error = self._group(request, group_id)
+        if error:
+            return error
+        tasks = GroupTask.objects.filter(group_id=group_id)[:self.MAX_TASKS]
+        return Response({
+            'group_id': group_id,
+            'tasks': GroupTaskSerializer(tasks, many=True).data,
+        })
+
+    def post(self, request, group_id):
+        _, error = self._group(request, group_id)
+        if error:
+            return error
+
+        text = (request.data.get('text') or '').strip()
+        if not text:
+            return Response({"error": "Task text is required"}, status=400)
+        if len(text) > 255:
+            return Response({"error": "Task text must be 255 characters or fewer"}, status=400)
+        if GroupTask.objects.filter(group_id=group_id).count() >= self.MAX_TASKS:
+            return Response(
+                {"error": "This group already has the maximum number of tasks"}, status=400
+            )
+
+        task = GroupTask.objects.create(
+            group_id=group_id, text=text, created_by=request.user,
+        )
+        return Response(GroupTaskSerializer(task).data, status=201)
+
+
+class GroupTaskDetailView(APIView):
+    """Toggle or delete a single task. Kept as its own view so the write verbs
+    can't be smuggled onto the collection endpoint's POST."""
+
+    permission_classes = [IsAuthenticated]
+
+    def _get(self, request, task_id):
+        task = GroupTask.objects.filter(id=task_id).select_related('group').first()
+        if task is None:
+            return None, Response({"error": "Task not found"}, status=404)
+        group = get_study_group(task.group_id)
+        if not group:
+            return None, Response({"error": "Group not found"}, status=404)
+        if request.user.firebase_uid not in (group.get('members') or []):
+            return None, Response(
+                {"error": "You must be a member of this group"}, status=403
+            )
+        return task, None
+
+    def post(self, request, task_id):
+        task, error = self._get(request, task_id)
+        if error:
+            return error
+
+        status_now = task.status
+        if status_now == GroupTask.Status.DONE:
+            task.status = GroupTask.Status.OPEN
+            task.completed_by = None
+            task.completed_at = None
+        else:
+            task.status = GroupTask.Status.DONE
+            task.completed_by = request.user
+            task.completed_at = timezone.now()
+        task.save(update_fields=['status', 'completed_by', 'completed_at'])
+        return Response(GroupTaskSerializer(task).data)
+
+    def delete(self, request, task_id):
+        task, error = self._get(request, task_id)
+        if error:
+            return error
+
+        group = get_study_group(task.group_id)
+        # Anyone can add, so anyone can remove: this is a shared list, not a
+        # moderated one, and leaving completed items behind forever is worse
+        # than a member tidying up their own group's list.
+        task.delete()
+        return Response(status=204)
+
+
 class GroupChatView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1722,6 +1827,179 @@ class RemoveStudentFromCourseView(APIView):
         course.students.remove(user_id)
 
         return Response(CourseRosterSerializer(course).data)
+
+
+# --- Educator analytics (real numbers, computed server-side) ---
+
+# The analytics screen used to render hardcoded series, which is exactly the
+# kind of thing a reviewer or a real educator notices first: the numbers do
+# not move, and they do not belong to anyone's class. Everything below is
+# derived from records that actually exist.
+_ANALYTICS_RANGES = {
+    'today': 1,
+    'week': 7,
+    'month': 30,
+    'semester': 120,
+}
+
+
+def _pct(part, whole):
+    if not whole:
+        return 0
+    return max(0, min(100, int(round(100.0 * part / whole))))
+
+
+class CourseAnalyticsView(APIView):
+    """Engagement and outcome summary for one of the caller's own courses.
+
+    Educator-only. Returns zeros rather than 404/403-free placeholders when a
+    class has no activity yet, so the client can render an honest empty state
+    instead of a plausible-looking fabrication.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, course_id):
+        try:
+            course = Course.objects.get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({"error": "Course not found"}, status=404)
+
+        if request.user != course.educator:
+            return Response({"error": "Only the course educator can view analytics"}, status=403)
+
+        key = (request.query_params.get('range') or 'week').strip().lower()
+        key = key if key in _ANALYTICS_RANGES else 'week'
+        days = _ANALYTICS_RANGES[key]
+        now = timezone.now()
+        since = now - timedelta(days=days)
+
+        students = list(course.students.all())
+        student_ids = [s.id for s in students]
+        roster = len(student_ids)
+
+        window = Activity.objects.filter(
+            user_id__in=student_ids, created_at__gte=since,
+        )
+
+        # --- Headline totals -------------------------------------------------
+        xp_window = sum(a.xp_earned for a in window if a.xp_earned)
+        prior_since = since - timedelta(days=days)
+        xp_prior = sum(
+            a.xp_earned for a in Activity.objects.filter(
+                user_id__in=student_ids,
+                created_at__gte=prior_since,
+                created_at__lt=since,
+            )
+            if a.xp_earned
+        )
+        xp_change = _pct(xp_window - xp_prior, xp_prior) if xp_prior else (100 if xp_window else 0)
+
+        attempts = list(
+            QuizAttempt.objects.filter(
+                user_id__in=student_ids, completed_at__gte=since,
+            ).exclude(score=None, total=None).exclude(total=0)
+        )
+        score_pct = [
+            round(100.0 * a.score / a.total) for a in attempts if a.score is not None
+        ]
+        avg_score = int(round(sum(score_pct) / len(score_pct))) if score_pct else 0
+
+        # --- Daily active students (the series the old screen invented) -------
+        active_today = Activity.objects.filter(
+            user_id__in=student_ids, created_at__gte=now - timedelta(days=1),
+        ).values('user_id').distinct().count()
+        daily_series = []
+        for back in range(6, -1, -1):
+            day = (now - timedelta(days=back)).date()
+            bucket = Activity.objects.filter(
+                user_id__in=student_ids,
+                created_at__date=day,
+            )
+            daily_series.append({
+                'date': day.isoformat(),
+                'active': bucket.values('user_id').distinct().count(),
+                'activities': bucket.count(),
+            })
+
+        # --- AI assistant usage ---------------------------------------------
+        ai_prompts = ChatMessage.objects.filter(
+            user_id__in=student_ids, is_ai=False, created_at__gte=since,
+        ).count()
+        ai_students = ChatMessage.objects.filter(
+            user_id__in=student_ids, is_ai=False, created_at__gte=since,
+        ).values('user_id').distinct().count()
+
+        # --- Quiz completion --------------------------------------------------
+        quiz_students = len({a.user_id for a in attempts})
+        quizzes_graded = TaskSubmission.objects.filter(
+            activity__course=course, graded_at__gte=since,
+        ).count()
+        submissions = TaskSubmission.objects.filter(
+            activity__course=course, submitted_at__gte=since,
+        ).count()
+
+        # --- Concept mastery, weakest first -----------------------------------
+        topic_stats = []
+        for topic in course.topics.all():
+            node_ids = list(topic.nodes.values_list('id', flat=True))
+            if not node_ids:
+                continue
+            rows = list(
+                NodeProgress.objects.filter(node_id__in=node_ids)
+                .values('passed').values_list('passed', flat=True)
+            )
+            if not rows:
+                continue
+            passed = sum(1 for r in rows if r)
+            topic_stats.append({
+                'title': topic.title,
+                'pass_rate': _pct(passed, len(rows)),
+                'attempts': len(rows),
+            })
+        topic_stats.sort(key=lambda t: (t['pass_rate'], -t['attempts']))
+
+        # --- At-risk list ------------------------------------------------------
+        at_risk = []
+        for student in students:
+            reasons = []
+            if student.last_active and (now.date() - student.last_active).days >= 7:
+                reasons.append('no activity in 7+ days')
+            elif student.last_active is None:
+                reasons.append('never checked in')
+            if student.streak == 0:
+                reasons.append('streak broken')
+            if reasons:
+                at_risk.append({
+                    'user_id': student.id,
+                    'username': student.username,
+                    'reasons': reasons,
+                    'last_active': student.last_active.isoformat() if student.last_active else None,
+                })
+
+        return Response({
+            'course': {'id': course.id, 'name': course.name},
+            'range': key,
+            'roster_size': roster,
+            'totals': {
+                'xp_earned': xp_window,
+                'xp_change_pct': xp_change,
+                'avg_score_pct': avg_score,
+                'study_hours': round(sum(s.study_hours for s in students), 1),
+                'active_students_24h': active_today,
+                'quiz_attempts': len(attempts),
+                'ai_prompts': ai_prompts,
+            },
+            'engagement': {
+                'daily_active': _pct(active_today, roster),
+                'quiz_participation': _pct(quiz_students, roster),
+                'ai_usage': _pct(ai_students, roster),
+                'submission_rate': _pct(submissions, max(1, quizzes_graded * roster)) if quizzes_graded else 0,
+            },
+            'daily_series': daily_series,
+            'weak_topics': topic_stats[:5],
+            'at_risk': at_risk[:10],
+        })
 
 
 # --- Class Activities (paper-aligned academic tasks, no grading) ---

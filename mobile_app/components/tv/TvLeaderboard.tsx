@@ -26,6 +26,7 @@ import { useLocalSearchParams } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
 import { API_BASE_URL } from '@/config/api';
+import { getToken } from '@/services/authService';
 
 const POLL_INTERVAL = 2000;
 
@@ -623,6 +624,54 @@ export default function TvLeaderboard({ mode = 'live' }: { mode?: 'live' | 'demo
   const [room, setRoom] = useState<RoomData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // The leaderboard endpoint is authenticated. When this page is opened on a
+  // browser/TV there is no SecureStore to read a session from, so the host
+  // embeds their access token in the link fragment (`/ROOM#t=<jwt>`).
+  // Fragments are not sent in the request line nor in Referer, so the token
+  // stays out of server logs; we lift it into memory on mount and immediately
+  // scrub it from the address bar so it is not left on screen or in history.
+  // Opened inside the app instead (deep link / demo) there is a real session,
+  // so that is used as the fallback.
+  const [tvToken, setTvToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+
+    const fromHash = () => {
+      const match = /(?:^|[#&])t=([^&]+)/.exec(window.location.hash || '');
+      if (!match) return null;
+      try {
+        return decodeURIComponent(match[1]);
+      } catch {
+        return null;
+      }
+    };
+
+    const embedded = fromHash();
+    if (embedded) {
+      setTvToken(embedded);
+      // Replace rather than push so the token is not recoverable with Back.
+      window.history.replaceState(
+        null,
+        '',
+        window.location.pathname + window.location.search
+      );
+      return;
+    }
+
+    let cancelled = false;
+    getToken()
+      .then((t) => {
+        if (!cancelled) setTvToken(t);
+      })
+      .catch(() => {
+        if (!cancelled) setTvToken(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const isWeb = Platform.OS === 'web';
   const [isFullscreen, setIsFullscreen] = useState(false);
   const hintOpacity = useSharedValue(1);
@@ -800,10 +849,16 @@ export default function TvLeaderboard({ mode = 'live' }: { mode?: 'live' | 'demo
       return;
     }
     try {
-      const res = await fetch(`${API_BASE_URL}/game/rooms/${code}/leaderboard/`);
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (tvToken) headers.Authorization = `Bearer ${tvToken}`;
+      const res = await fetch(`${API_BASE_URL}/game/rooms/${code}/leaderboard/`, { headers });
       if (res.status === 404) {
         setRoom(null);
         setError('Room not found');
+        return;
+      }
+      if (res.status === 401 || res.status === 403) {
+        setError('This leaderboard link has expired. Copy a fresh TV link from the session.');
         return;
       }
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
@@ -812,7 +867,7 @@ export default function TvLeaderboard({ mode = 'live' }: { mode?: 'live' | 'demo
     } catch (e: any) {
       setError(e?.message || 'Cannot reach server');
     }
-  }, [code, applySnapshot]);
+  }, [code, applySnapshot, tvToken]);
 
   useEffect(() => {
     if (isDemo) return;

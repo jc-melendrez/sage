@@ -1,13 +1,4 @@
 {
-  "indexes": [
-    {
-      "collectionGroup": "gameRooms",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "schoolId", "order": "ASCENDING" },
-        { "fieldPath": "status", "order": "ASCENDING" }
-      ]
-    }
-  ],
+  "indexes": [],
   "fieldOverrides": []
 }

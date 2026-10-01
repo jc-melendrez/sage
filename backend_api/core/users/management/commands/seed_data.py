@@ -1,4 +1,8 @@
-from django.core.management.base import BaseCommand
+import os
+
+from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
+
 from users.models import User, Badge, Recommendation, Session, Activity, Course, Topic, LearningNode
 
 
@@ -6,6 +10,15 @@ class Command(BaseCommand):
     help = 'Seed the database with sample data'
 
     def handle(self, *args, **options):
+        # This writes demo accounts with a known password and fictional student
+        # records. Refuse to run it against a real database unless the operator
+        # opts in, so pointing it at production cannot happen by accident.
+        if not settings.DEBUG and os.environ.get('ALLOW_DEMO_SEED') != '1':
+            raise CommandError(
+                'seed_data creates demo accounts and is refused when DEBUG is '
+                'off. Set ALLOW_DEMO_SEED=1 to run it anyway.'
+            )
+
         user, created = User.objects.get_or_create(
             id=1,
             defaults={
@@ -18,7 +31,7 @@ class Command(BaseCommand):
         )
 
         if created:
-            user.set_password('testpass123')
+            user.set_password(os.environ.get('DEMO_USER_PASSWORD', ''))
             user.save()
             self.stdout.write(self.style.SUCCESS(f'Created user: {user.username}'))
 
@@ -98,7 +111,7 @@ class Command(BaseCommand):
             }
         )
         if edu_created:
-            educator.set_password('testpass123')
+            educator.set_password(os.environ.get('DEMO_EDUCATOR_PASSWORD', ''))
             educator.save()
             self.stdout.write(self.style.SUCCESS(f'Created educator: {educator.username}'))
 

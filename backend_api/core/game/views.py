@@ -6,6 +6,7 @@ import requests
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from django.conf import settings
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -327,6 +328,13 @@ class CreateGameView(APIView):
         room_data = {
             'status': 'waiting',
             'hostId': request.user.id,
+            # Firebase UIDs, not Django ids. The mobile client authenticates to
+            # Firestore with its Firebase UID, so this is the only identity the
+            # security rules can match a request against -- without it the rules
+            # cannot tell a player in the room from any other signed-in user.
+            # hostUid/members are what firestore.rules gates reads on.
+            'hostUid': request.user.firebase_uid,
+            'members': [request.user.firebase_uid] if request.user.firebase_uid else [],
             'hostName': get_display_name(request.user),
             'hostIsStudent': request.user.role == 'student',
             'topic': topic,
@@ -377,6 +385,11 @@ class CreateGameView(APIView):
         player_data = {
             'displayName': get_display_name(request.user),
             'avatar': request.user.avatar or '',
+            # Player docs are keyed by Django id, which the Firestore rules
+            # cannot map back to the caller's Firebase token, so the UID is
+            # carried on the document itself. This is what lets the rules let a
+            # player update their own powerups and nobody else's.
+            'uid': request.user.firebase_uid,
             'score': 0,
             'answeredCount': 0,
             'questionOrder': [],
@@ -504,6 +517,7 @@ class JoinGameView(APIView):
         player_data = {
             'displayName': get_display_name(request.user),
             'avatar': request.user.avatar or '',
+            'uid': request.user.firebase_uid,
             'score': 0,
             'answeredCount': 0,
             'correctCount': 0,
@@ -520,6 +534,12 @@ class JoinGameView(APIView):
         # merge=True so a re-join refreshes the profile without wiping a score
         # that was already banked (a plain .set() used to zero it).
         player_ref.set(player_data, merge=True)
+
+        # Mirror the join onto the room's Firebase-UID roster. This is what
+        # firestore.rules checks, so it has to be written on every join --
+        # ArrayUnion keeps a re-join from duplicating the entry.
+        if request.user.firebase_uid:
+            room_ref.update({'members': fs.ArrayUnion([request.user.firebase_uid])})
 
         response = {
             'roomCode': room_code,
@@ -1294,6 +1314,12 @@ class FinishGameView(APIView):
 
 class RoomLeaderboardView(APIView):
     permission_classes = [IsAuthenticated]
+    # The TV display polls this every 2s for the length of a session, which is
+    # far above the default 1000/day user budget. A dedicated scope keeps that
+    # traffic inside a limit sized for it instead of throttling real users out
+    # of the app they are playing in.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'tv'
 
     def get(self, request, room_code):
         room_code = room_code.upper()

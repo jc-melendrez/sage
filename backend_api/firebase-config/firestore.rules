@@ -2,74 +2,179 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ─── TENANT ISOLATION NOTE ───────────────────────────────────
-    // Firestore is read by the mobile app directly. Django is the only
-    // writer and must issue a Firebase custom token that embeds:
-    //   { schoolId: <school_id>, role: 'superadmin'|'admin'|... }
-    // (see users.views.sync_user_to_firestore — sync `schoolId` there).
-    // Without `schoolId` in the token, non-superadmin users only see
-    // their own school's documents below.
-    // ──────────────────────────────────────────────────────────────
+    // ─── HOW ACCESS IS DECIDED ────────────────────────────────────
+    // Django (Firebase Admin SDK) is the only writer of study groups, game
+    // rooms and chat messages, and it bypasses these rules entirely. The mobile
+    // app is the only client, and it authenticates with a Firebase ID token, so
+    // every rule below matches `request.auth.uid` (a Firebase UID) against
+    // identity data that Django writes onto the documents:
+    //
+    //   studyGroups.members  -> Firebase UIDs
+    //   gameRooms.members    -> Firebase UIDs
+    //   gameRooms.hostUid    -> Firebase UID of the host
+    //   players.uid          -> Firebase UID of that player
+    //
+    // An earlier version of this file gated on a `schoolId` claim and a
+    // `role == 'admin'` bypass. Neither is ever written now that the School model
+    // was removed, so both sides of those comparisons were null and every check
+    // silently evaluated true -- which left game rooms (including the question
+    // answer key) readable and writable by any signed-in user. Do not
+    // reintroduce claims that nothing sets.
+    //
+    // The superadmin bypass below reads a `role` custom claim that
+    // core/firebase.py does set.
+    // ─────────────────────────────────────────────────────────────
 
-    // Users can only read/write their own profile
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSuperadmin() {
+      return isSignedIn() && request.auth.token.role == 'superadmin';
+    }
+
+    // The key that a signed-in user is entitled to touch on a document, versus
+    // the one the stored document actually holds. Used to fail closed: if the
+    // stored field is absent the caller cannot match it.
+    function unchanged(key) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([key]);
+    }
+
+    // ─── Users ────────────────────────────────────────────────────
+    // Documents are keyed by Firebase UID (see firestore_service.create_user_profile).
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
-      
-      // Sub-collections (badges, activities, etc.)
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+
       match /{subcollection}/{docId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
+        allow read, write: if isSignedIn() && request.auth.uid == userId;
       }
     }
 
-    // Study groups — members can read; creator can write. Same-school only.
+    // ─── Study groups ─────────────────────────────────────────────
+    // Anyone may open a group; Django owns the join-code and approval flow and
+    // validates it server-side. Once created, only members can see it.
     match /studyGroups/{groupId} {
-      allow read: if request.auth != null &&
-                     request.auth.uid in resource.data.members &&
-                     (request.auth.token.schoolId == resource.data.schoolId ||
-                      request.auth.token.role == 'superadmin');
-      allow create: if request.auth != null;
-      allow update, delete: if request.auth != null &&
-                               request.auth.uid == resource.data.created_by &&
-                               (request.auth.token.schoolId == resource.data.schoolId ||
-                                request.auth.token.role == 'superadmin');
-      
-      // Messages — any member can read and write
+      function isMember() {
+        return isSignedIn() && request.auth.uid in resource.data.members;
+      }
+
+      allow get: if isMember() || isSuperadmin();
+      allow list: if isSignedIn() && request.auth.uid in resource.data.members;
+
+      allow create: if isSignedIn()
+                    && request.resource.data.created_by == request.auth.uid
+                    && request.resource.data.members == [request.auth.uid];
+
+      allow update: if (isSignedIn() && request.auth.uid == resource.data.created_by)
+                    || isSuperadmin();
+      allow delete: if (isSignedIn() && request.auth.uid == resource.data.created_by)
+                    || isSuperadmin();
+
+      // Chat messages. Django writes them (firestore_service.send_message) and
+      // re-checks membership on every REST call; the client only listens. Note
+      // the membership lookup is a get(), not a read of resource.data, so a
+      // brand-new message is evaluated against the parent group document.
       match /messages/{messageId} {
-        allow read, write: if request.auth != null && 
-                              request.auth.uid in get(/databases/$(database)/documents/studyGroups/$(groupId)).data.members &&
-                              (request.auth.token.schoolId == get(/databases/$(database)/documents/studyGroups/$(groupId)).data.schoolId ||
-                               request.auth.token.role == 'superadmin');
+        allow read: if isSignedIn()
+                    && request.auth.uid in get(
+                         /databases/$(database)/documents/studyGroups/$(groupId)
+                       ).data.members;
+        allow create, update, delete: if false;
       }
     }
 
-    // Quizzes — readable by group members (same school)
+    // ─── Quizzes ──────────────────────────────────────────────────
+    // Quizzes live in Postgres (ai_assistant.Quiz) and are shared into a chat as
+    // an embed validated server-side (_validate_quiz_embed). Nothing reads or
+    // writes a Firestore `quizzes` collection, so client access is denied rather
+    // than left on a stale schoolId check.
     match /quizzes/{quizId} {
-      allow read: if request.auth != null &&
-                     (request.auth.token.schoolId == resource.data.schoolId ||
-                      request.auth.token.role == 'superadmin');
-      allow write: if request.auth != null;
+      allow read, write: if false;
     }
 
-    // Game rooms — same-school players only (superadmin bypass)
+    // ─── Game rooms ───────────────────────────────────────────────
     match /gameRooms/{roomCode} {
-      allow read, write: if request.auth != null &&
-                            (request.auth.token.schoolId == resource.data.schoolId ||
-                             request.auth.token.role == 'superadmin');
-
-      match /players/{playerId} {
-        allow read, write: if request.auth != null &&
-                              (request.auth.token.schoolId == resource.data.schoolId ||
-                               request.auth.token.role == 'superadmin');
+      function room() {
+        return get(/databases/$(database)/documents/gameRooms/$(roomCode)).data;
       }
 
-      // Teams (group classic mode) — any authenticated user can read/create;
-      // updates must not grow a team past its room's maxTeamSize
+      function isPlayer() {
+        return isSignedIn() && request.auth.uid in room().members;
+      }
+
+      function isHost() {
+        return isSignedIn() && request.auth.uid == room().hostUid;
+      }
+
+      // Room state (questions, scores, status) is readable only by players.
+      allow get: if isPlayer() || isSuperadmin();
+      allow list: if false;
+
+      // Clients write exactly one field here: `mode`, when the host picks
+      // classic vs team play from the lobby. Everything else on the document --
+      // notably the `questions` array and its answer key -- is server-owned.
+      allow update: if isHost()
+                    && unchanged('questions')
+                    && unchanged('members')
+                    && unchanged('hostUid')
+                    && unchanged('hostId')
+                    && unchanged('status')
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['mode', 'maxTeamSize', 'teamCount']);
+
+      allow create, delete: if false;  // Django creates and reaps rooms
+
+      // Player rows. Reading a teammate's score is the point of the lobby, so
+      // any player may read any player row; writing is restricted to your own
+      // row, and only to spend a powerup.
+      match /players/{playerId} {
+        allow read: if isPlayer() || isSuperadmin();
+
+        // The client decrements its own powerups (question.tsx) as it spends
+        // them. Everything else on a player row -- score, streak, answered
+        // questions, the answer reveal -- is server-written inside the scoring
+        // transaction, so none of it is writable from a device.
+        allow update: if isPlayer()
+                      && resource.data.uid == request.auth.uid
+                      && request.resource.data.diff(resource.data).affectedKeys()
+                           .hasOnly(['powerups']);
+
+        // Leaving a game removes your own seat (game/index.tsx).
+        allow delete: if isPlayer() && resource.data.uid == request.auth.uid;
+
+        allow create: if false;  // Django seats players on create/join
+      }
+
+      // Teams. A player may join or leave a team from the client, so writes are
+      // limited to the membership array; the roster counters and all scoring
+      // stay server-owned.
       match /teams/{teamId} {
-        allow read: if request.auth != null;
-        allow create: if request.auth != null;
-        allow update: if request.auth != null &&
-          resource.data.memberIds.size() <
-            get(/databases/$(database)/documents/gameRooms/$(roomCode)).data.maxTeamSize;
+        allow read: if isPlayer() || isSuperadmin();
+        allow create, delete: if false;  // Django owns the team set
+
+        allow update: if isPlayer()
+                      && unchanged('score')
+                      && unchanged('correctCount')
+                      && unchanged('answeredCount')
+                      && unchanged('memberCount')
+                      && unchanged('teamCorrect')
+                      && unchanged('teamStreak')
+                      && unchanged('bestStreak')
+                      && unchanged('multiplier')
+                      && unchanged('maxMultiplier')
+                      && unchanged('maxSize')
+                      && unchanged('namedBy')
+                      && request.resource.data.diff(resource.data).affectedKeys()
+                           .hasOnly(['memberIds']);
+      }
+
+      // Live emoji reactions during a question. Django writes these from
+      // POST /game/react/ (ReactToGameView), which also resolves the sender's
+      // team; the client only ever listens, so a device cannot forge a reaction
+      // on someone else's behalf.
+      match /reactions/{reactionId} {
+        allow read: if isPlayer() || isSuperadmin();
+        allow create, update, delete: if false;
       }
     }
   }

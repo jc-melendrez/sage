@@ -16,7 +16,7 @@ from .models import Activity, Badge, ClassActivity, Course, LearningNode, Lesson
 from .serializers import RecommendationSerializer, BadgeSerializer
 from . import gamification
 from . import views as users_views
-from ai_assistant.models import Quiz, QuizGroupShare
+from ai_assistant.models import Quiz, QuizAttempt, QuizGroupShare
 
 User = get_user_model()
 
@@ -3030,3 +3030,138 @@ class GenerateTopicViewTests(APITestCase):
             'Learn 1 — The Water Cycle and Evaporation'
         resp = self._post(json.dumps(topic))
         self.assertEqual(resp.status_code, 400)
+
+
+class CourseAnalyticsTests(APITestCase):
+    """The educator analytics screen used to render hardcoded numbers. These
+    pin the replacement to the records it claims to summarise."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='analytics_teacher', password='pass123', role='educator',
+        )
+        self.student = User.objects.create_user(
+            username='analytics_student', password='pass123', role='student',
+            total_points=120, study_hours=3.5, streak=4,
+            last_active=timezone.now().date(),
+        )
+        self.idle = User.objects.create_user(
+            username='analytics_idle', password='pass123', role='student',
+            streak=0, last_active=timezone.now().date() - timedelta(days=12),
+        )
+        self.course = Course.objects.create(name='Algebra I', educator=self.educator)
+        self.course.students.add(self.student, self.idle)
+        self.url = reverse('course_analytics', args=[self.course.id])
+
+    def test_requires_authentication(self):
+        self.assertEqual(APIClient().get(self.url).status_code, 401)
+
+    def test_student_cannot_read_course_analytics(self):
+        """A roster member is not entitled to class-wide aggregates."""
+        self.client.force_authenticate(user=self.student)
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+
+    def test_other_educator_cannot_read_analytics(self):
+        other = User.objects.create_user(
+            username='analytics_other', password='pass123', role='educator',
+        )
+        self.client.force_authenticate(user=other)
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+
+    def test_educator_gets_roster_and_zeroed_totals_for_an_empty_class(self):
+        """No activity must render as zeroes, never as plausible filler."""
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['roster_size'], 2)
+        self.assertEqual(data['totals']['xp_earned'], 0)
+        self.assertEqual(data['totals']['avg_score_pct'], 0)
+        self.assertEqual(data['totals']['ai_prompts'], 0)
+        self.assertEqual(len(data['daily_series']), 7)
+        self.assertEqual(sum(d['active'] for d in data['daily_series']), 0)
+
+    def test_totals_reflect_real_activity(self):
+        Activity.objects.create(
+            user=self.student, kind='quiz', title='Fractions quiz',
+            description='done', activity_type='quiz', xp_earned=40,
+        )
+        self.client.force_authenticate(user=self.educator)
+        data = self.client.get(self.url).json()
+        self.assertEqual(data['totals']['xp_earned'], 40)
+        self.assertEqual(data['totals']['active_students_24h'], 1)
+        self.assertEqual(data['engagement']['daily_active'], 50)
+
+    def test_avg_score_is_percentage_not_raw_ratio(self):
+        quiz = Quiz.objects.create(title='Q1', user=self.educator)
+        QuizAttempt.objects.create(
+            quiz=quiz, user=self.student, score=7, total=10,
+            completed_at=timezone.now(),
+        )
+        self.client.force_authenticate(user=self.educator)
+        data = self.client.get(self.url).json()
+        self.assertEqual(data['totals']['avg_score_pct'], 70)
+        self.assertEqual(data['engagement']['quiz_participation'], 50)
+
+    def test_engagement_percentages_never_exceed_100(self):
+        """Percent is part/roster, so a duplicate day cannot push it past 100
+        and render a bar wider than its track."""
+        for _ in range(3):
+            Activity.objects.create(
+                user=self.student, kind='quiz', title='Quiz',
+                description='d', activity_type='quiz', xp_earned=10,
+            )
+        self.client.force_authenticate(user=self.educator)
+        data = self.client.get(self.url).json()
+        for key, value in data['engagement'].items():
+            self.assertGreaterEqual(value, 0, key)
+            self.assertLessEqual(value, 100, key)
+
+    def test_weak_topics_ranked_by_pass_rate(self):
+        strong = Topic.objects.create(course=self.course, title='Strong Topic', order=1)
+        weak = Topic.objects.create(course=self.course, title='Weak Topic', order=2)
+        node = LearningNode.objects.create(
+            topic=weak, node_type='learn', title='Hard node', description='d',
+            order=1,
+        )
+        node2 = LearningNode.objects.create(
+            topic=strong, node_type='learn', title='Easy node', description='d',
+            order=1,
+        )
+        NodeProgress.objects.create(user=self.student, node=node, passed=False, attempts=1)
+        NodeProgress.objects.create(user=self.student, node=node2, passed=True, attempts=1)
+
+        self.client.force_authenticate(user=self.educator)
+        topics = self.client.get(self.url).json()['weak_topics']
+        self.assertEqual([t['title'] for t in topics], ['Weak Topic', 'Strong Topic'])
+        self.assertEqual(topics[0]['pass_rate'], 0)
+        self.assertEqual(topics[1]['pass_rate'], 100)
+
+    def test_at_risk_flags_idle_student_with_a_reason(self):
+        self.client.force_authenticate(user=self.educator)
+        at_risk = self.client.get(self.url).json()['at_risk']
+        self.assertEqual([r['user_id'] for r in at_risk], [self.idle.id])
+        self.assertIn('no activity in 7+ days', at_risk[0]['reasons'])
+
+    def test_range_is_echoed_and_bounds_the_window(self):
+        Activity.objects.create(
+            user=self.student, kind='quiz', title='Old', description='d',
+            activity_type='quiz', xp_earned=5,
+        )
+        Activity.objects.filter(user=self.student).update(
+            created_at=timezone.now() - timedelta(days=60)
+        )
+        self.client.force_authenticate(user=self.educator)
+        self.assertEqual(self.client.get(self.url, {'range': 'today'}).json()['totals']['xp_earned'], 0)
+        self.assertEqual(self.client.get(self.url, {'range': 'semester'}).json()['totals']['xp_earned'], 5)
+
+    def test_unknown_range_falls_back_instead_of_erroring(self):
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(self.url, {'range': 'nonsense'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['range'], 'week')
+
+    def test_course_must_exist(self):
+        self.client.force_authenticate(user=self.educator)
+        self.assertEqual(self.client.get(reverse('course_analytics', args=[99999])).status_code, 404)

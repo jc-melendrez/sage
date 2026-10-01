@@ -153,7 +153,13 @@ class Activity(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ['-created_at']
+        # -id is a tiebreaker, not a second sort key. created_at is
+        # auto_now_add, so a burst of activity inside one clock tick produces
+        # identical timestamps and the database is then free to return them in
+        # any order -- which surfaced as the activity feed occasionally showing
+        # an older row above a newer one. The primary key is monotonic on
+        # insert, so it pins the order deterministically.
+        ordering = ['-created_at', '-id']
 
     def __str__(self):
         return f"{self.user.username} - {self.title}"
@@ -187,6 +193,53 @@ class GroupMessage(models.Model):
 
     def __str__(self):
         return f"{self.sender.username}: {self.text[:30]}"
+
+
+class GroupTask(models.Model):
+    """A shared checklist item a study group can see and tick off together.
+
+    Deliberately not a `ClassActivity`: that model is the educator's
+    assessment pipeline (submissions, grading, max_points). This is the
+    lightweight collaborative "what are we doing tonight" list, where every
+    member can add an item and members can mark their own work done.
+    """
+
+    class Status(models.TextChoices):
+        OPEN = 'open', 'Open'
+        DONE = 'done', 'Done'
+
+    # Study groups live in Firestore (`studyGroups`, string document ids), so
+    # this is the Firestore document id, not a FK to the mostly-vestigial
+    # Django StudyGroup table. Membership is enforced against Firestore by the
+    # view, exactly as it is for group chat.
+    group_id = models.CharField(max_length=128)
+    text = models.CharField(max_length=255)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='created_group_tasks',
+    )
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN)
+    # Exactly one of these is set when the item is ticked off. Keeping "who
+    # finished it" on the task (rather than a per-member join table) is enough
+    # for the collaborative use case and keeps the completion history auditable.
+    completed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='completed_group_tasks',
+    )
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Same tiebreaker reasoning as Activity: created_at alone leaves
+        # same-second inserts in an arbitrary order.
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        mark = 'x' if self.status == self.Status.DONE else ' '
+        return f"[{mark}] {self.text}"
+
+    @property
+    def is_done(self) -> bool:
+        return self.status == self.Status.DONE
 
 
 # --- COURSES: each course has its OWN set of students ---

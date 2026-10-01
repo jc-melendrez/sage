@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
+from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment, GroupTask
 from .gamification import describe_badge
 # --- Your Related Serializers (Unchanged, these are great!) ---
 from django.contrib.auth import get_user_model
@@ -112,6 +112,38 @@ class ActivitySerializer(serializers.ModelSerializer):
     class Meta:
         model = Activity
         fields = ['id', 'title', 'description', 'activity_type', 'created_at', 'kind', 'xp_earned', 'course_name', 'payload']
+
+
+class GroupTaskSerializer(serializers.ModelSerializer):
+    """A row of the shared group checklist.
+
+    The creator/completer are rendered as display names plus a `*_id`, so the
+    client can label an item without a second roster fetch, while still having
+    the stable id if it ever needs to key off identity.
+    """
+
+    created_by_name = serializers.SerializerMethodField()
+    completed_by_name = serializers.SerializerMethodField()
+    is_done = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = GroupTask
+        fields = [
+            'id', 'group_id', 'text', 'status', 'is_done',
+            'created_by', 'created_by_name', 'completed_by', 'completed_by_name',
+            'completed_at', 'created_at',
+        ]
+        read_only_fields = fields
+
+    @staticmethod
+    def _name(user):
+        return (user.get_full_name().strip() or user.username) if user else None
+
+    def get_created_by_name(self, obj):
+        return self._name(obj.created_by)
+
+    def get_completed_by_name(self, obj):
+        return self._name(obj.completed_by)
 
 # --- Updated User Serializers ---
 

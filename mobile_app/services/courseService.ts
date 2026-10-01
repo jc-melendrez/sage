@@ -78,6 +78,54 @@ export interface CreateCourseInput {
   description?: string;
 }
 
+export type AnalyticsRange = 'today' | 'week' | 'month' | 'semester';
+
+/** Real, server-computed numbers for one of the educator's own courses. */
+export interface CourseAnalyticsTotals {
+  xp_earned: number;
+  xp_change_pct: number;
+  avg_score_pct: number;
+  study_hours: number;
+  active_students_24h: number;
+  quiz_attempts: number;
+  ai_prompts: number;
+}
+
+export interface CourseAnalyticsDay {
+  date: string;
+  active: number;
+  activities: number;
+}
+
+export interface WeakTopic {
+  title: string;
+  pass_rate: number;
+  attempts: number;
+}
+
+export interface AtRiskStudent {
+  user_id: number;
+  username: string;
+  reasons: string[];
+  last_active: string | null;
+}
+
+export interface CourseAnalytics {
+  course: { id: number; name: string };
+  range: AnalyticsRange;
+  roster_size: number;
+  totals: CourseAnalyticsTotals;
+  engagement: {
+    daily_active: number;
+    quiz_participation: number;
+    ai_usage: number;
+    submission_rate: number;
+  };
+  daily_series: CourseAnalyticsDay[];
+  weak_topics: WeakTopic[];
+  at_risk: AtRiskStudent[];
+}
+
 export async function createCourse(input: CreateCourseInput): Promise<CourseSummary> {
   const course = await apiCall<CourseSummary>('/users/courses/create/', {
     method: 'POST',
@@ -104,6 +152,13 @@ export async function getCourseLeaderboard(
   sort: LeaderboardSort = 'points',
 ): Promise<CourseLeaderboard> {
   return apiCall<CourseLeaderboard>(`/users/courses/${courseId}/leaderboard/?sort=${sort}`);
+}
+
+export async function getCourseAnalytics(
+  courseId: number,
+  range: AnalyticsRange = 'week',
+): Promise<CourseAnalytics> {
+  return apiCall<CourseAnalytics>(`/users/courses/${courseId}/analytics/?range=${range}`);
 }
 
 export async function joinCourseByCode(joinCode: string): Promise<CourseRoster> {

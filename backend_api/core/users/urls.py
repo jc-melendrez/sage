@@ -34,6 +34,10 @@ urlpatterns = [
     path('groups/<str:group_id>/chat/', views.GroupChatView.as_view(), name='group_chat'),
     path('groups/<str:group_id>/attachments/', views.GroupAttachmentUploadView.as_view(), name='group_attachments'),
     path('groups/<str:group_id>/attachments/<path:key>/link/', views.GroupAttachmentLinkView.as_view(), name='group_attachment_link'),
+    path('groups/<str:group_id>/attachments/<path:key>/link/', views.GroupAttachmentLinkView.as_view(), name='group_attachment_link'),
+    path('groups/<str:group_id>/tasks/', views.GroupTaskListView.as_view(), name='group_tasks'),
+    path('groups/<str:group_id>/tasks/<str:task_id>/', views.GroupTaskDetailView.as_view(), name='group_task_detail'),
+
     path('groups/<str:group_id>/chat/<str:message_id>/reactions/', views.GroupChatReactionView.as_view(), name='group_chat_reactions'),
     path('groups/<str:group_id>/', views.GroupUpdateView.as_view(), name='group_update'),
 
@@ -47,7 +51,10 @@ urlpatterns = [
 
     # --- Class Activities ---
     path('courses/<int:course_id>/activities/', views.CourseActivitiesView.as_view(), name='course_activities'),
-    path('courses/<int:course_id>/leaderboard/', views.CourseLeaderboardView.as_view(), name='course_leaderboard'),
+path('courses/<int:course_id>/leaderboard/', views.CourseLeaderboardView.as_view(),
+         name='course_leaderboard'),
+    path('courses/<int:course_id>/analytics/', views.CourseAnalyticsView.as_view(),
+         name='course_analytics'),
     path('activities/', views.MyClassActivitiesView.as_view(), name='my_activities'),
     path('activities/<int:activity_id>/', views.ClassActivityDetailView.as_view(), name='activity_detail'),
 

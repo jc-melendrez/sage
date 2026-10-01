@@ -69,7 +69,22 @@ if not SECRET_KEY:
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
 
-ALLOWED_HOSTS = ['*']
+def _split_env_list(name):
+    """Comma-separated env var -> list, ignoring blanks."""
+    return [v.strip() for v in os.environ.get(name, '').split(',') if v.strip()]
+
+
+# Hosts Django will answer for. '*' means any Host header is accepted, which
+# reopens Host-header injection against anything derived from the request host.
+# Override with DJANGO_ALLOWED_HOSTS (comma-separated) to add names; the
+# defaults below keep the deployed app and local dev working without config.
+#
+# The leading dot matches any subdomain, so the service keeps answering after a
+# Render rename without a code change. It is deliberately scoped to onrender.com
+# rather than '*' so an arbitrary Host is still rejected.
+ALLOWED_HOSTS = _split_env_list('DJANGO_ALLOWED_HOSTS') or (
+    ['*'] if DEBUG else ['localhost', '127.0.0.1', '[::1]', '.onrender.com']
+)
 
 
 # Application definition
@@ -161,6 +176,13 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'users.authentication.TokenVersionAuthentication',
     ),
+    # Fail closed. DRF's built-in default is AllowAny, so a view that forgets
+    # `permission_classes` would otherwise be world-readable. The handful of
+    # genuinely public endpoints (firebase-login, verify-otp, register) opt out
+    # explicitly, as do the SimpleJWT token views.
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
 }
 
 SIMPLE_JWT = {
@@ -233,4 +255,8 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'anon': '100/day',
     'user': '1000/day',
     'otp': '20/hour',
+    # The TV leaderboard polls every 2s for a whole session (~1.8k/hour per
+    # display). Sized for one room's worth of displays rather than the shared
+    # per-user budget.
+    'tv': '4000/hour',
 }
