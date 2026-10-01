@@ -64,7 +64,6 @@ export default function LobbyScreen() {
   const [loading, setLoading] = useState(false);
   const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
   const [addingTeam, setAddingTeam] = useState(false);
-  const [maxTeamSize, setMaxTeamSize] = useState(20);
   // A custom lobby creates the room before a quiz exists, so the host picks one
   // here. These track what the room document currently has.
   const [quizPending, setQuizPending] = useState(false);
@@ -83,7 +82,6 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
   // their own in-flight flag so a double-tap cannot deal the roster twice.
   const [autoAssigning, setAutoAssigning] = useState(false);
   const [autoAssignDone, setAutoAssignDone] = useState(false);
-  const [resizingTeamId, setResizingTeamId] = useState<string | null>(null);
 
   // Joiner countdown shown when the host starts the game
   const [showCountdown, setShowCountdown] = useState(false);
@@ -106,9 +104,15 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
   const exitToPlay = useCallback(() => {
     if (isLAN) { router.back(); return; }
     // replace, not push: the lobby was pushed on top of this same screen, so
-    // pushing /game/index again would stack index on top of lobby and the next
-    // back press would return the student to the lobby they just left.
-    router.replace({ pathname: '/game/index', params: { leftLobby: '1' } } as any);
+    // pushing it again would stack the Play screen on top of the lobby and the
+    // next back press would return the student to the lobby they just left.
+    //
+    // The pathname is '/game', not '/game/index'. expo-router registers
+    // app/game/index.tsx under '/game'; '/game/index' matches no route at all
+    // and dropped the student on the "Unmatched Route" page. The `as any` that
+    // used to sit here suppressed exactly the typed-route error that would have
+    // caught it, so it stays off.
+    router.replace({ pathname: '/game', params: { leftLobby: '1' } });
   }, [isLAN, router]);
 
   // The phone's back gesture has to run the same cleanup as the on-screen
@@ -140,7 +144,6 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
         const d = snap?.data();
         setRoomStatus(d?.status ?? 'waiting');
         setTeamMode(!!d?.teamMode);
-        setMaxTeamSize(d?.maxTeamSize ?? 20);
         if (d?.topic) setRoomTopic(d.topic);
         setRoomQuestionCount(d?.questionCount ?? 0);
         setRoomTeamCount(d?.teamCount ?? null);
@@ -387,19 +390,6 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
       Alert.alert('Could not auto-assign', e?.message || 'Try again');
     } finally {
       setAutoAssigning(false);
-    }
-  };
-
-  /** The "+" beside a team's last slot. */
-  const doResizeTeam = async (teamId: string) => {
-    if (resizingTeamId) return;
-    setResizingTeamId(teamId);
-    try {
-      await post('teams/resize/', { roomCode, teamId, delta: 1 });
-    } catch (e: any) {
-      Alert.alert('Could not add a seat', e?.message || 'Try again');
-    } finally {
-      setResizingTeamId(null);
     }
   };
 
@@ -702,7 +692,6 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
               players={players}
               myId={currentUserId != null ? String(currentUserId) : null}
               myTeamId={myTeamId != null ? String(myTeamId) : null}
-              maxTeamSize={maxTeamSize}
               locked={roomStatus === 'active' || roomStatus === 'finished'}
               canRename={isHostUser || myTeamId != null}
               busyTeamId={busyTeamId}
@@ -711,14 +700,17 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
               canAddTeam={isHostUser}
               onAddTeam={doAddTeam}
               addingTeam={addingTeam}
-              canResizeTeam={isHostUser}
-              onResizeTeam={doResizeTeam}
-              resizingTeamId={resizingTeamId}
             />
           </Animated.View>
         )}
 
-        {/* ── roster ── */}
+        {/* ── roster ──
+            Classic mode only. In team mode every player is already accounted
+            for twice over -- once in the spectators bar if they have not picked
+            a team, once inside their team's column if they have -- so a third
+            flat list of the same people just made the screen longer and the
+            columns harder to reach. */}
+        {!teamMode && (
         <Animated.View
           style={{
             opacity: rosterAnim,
@@ -795,6 +787,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
             </Animated.View>
           ))}
         </Animated.View>
+        )}
       </ScrollView>
 
       {/* ── bottom CTA bar (safe-area fixed) ── */}

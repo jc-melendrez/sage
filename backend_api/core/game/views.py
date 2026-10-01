@@ -383,6 +383,10 @@ class CreateGameView(APIView):
             'isReady': True,
             'isFinished': False,
             'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            # Player docs are keyed by user id, so the id says nothing about who
+            # arrived first. The team-mode lobby lists spectators newest-first,
+            # which means arrival order has to live on the document itself.
+            'joinedAt': fs.SERVER_TIMESTAMP,
         }
         if team_mode:
             player_data['teamId'] = None
@@ -507,6 +511,9 @@ class JoinGameView(APIView):
             'isReady': True,
             'isFinished': False,
             'powerups': empty_powerups(),
+            # Refreshed on every join, so somebody who drops out and comes back
+            # is genuinely "newest" again rather than keeping a stale position.
+            'joinedAt': fs.SERVER_TIMESTAMP,
         }
         if is_team_mode:
             player_data['teamId'] = None
@@ -1674,65 +1681,6 @@ def _require_waiting_host(room_ref, room_data, request):
         raise _Rejected({'error': 'Only the host can do that'}, 403)
     if room_data.get('status') != 'waiting':
         raise _Rejected({'error': 'Teams are locked once the game starts'}, 400)
-
-
-class ResizeTeamView(APIView):
-    """Grow one team by a seat, for the "+" beside its last slot.
-
-    Seat count is per team, so this is the only thing that can raise a team's
-    ceiling: the room-wide estimate in team_capacity() is deliberately not used
-    here, or a small room could never seat more than ceil(players/teams).
-    """
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        room_code = (request.data.get('roomCode') or '').upper()
-        team_id = str(request.data.get('teamId') or '').strip()
-        try:
-            delta = int(request.data.get('delta', 1))
-        except (TypeError, ValueError):
-            return Response({'error': 'delta must be an integer'}, status=400)
-        if not room_code or not team_id:
-            return Response({'error': 'roomCode and teamId are required'}, status=400)
-
-        try:
-            room_ref, room_data = _room_and_teams(room_code)
-            _require_waiting_host(room_ref, room_data, request)
-        except _Rejected as rejected:
-            return Response(rejected.payload, status=rejected.status)
-
-        team_ref = room_ref.collection('teams').document(team_id)
-        team_doc = team_ref.get()
-        if not team_doc.exists:
-            return Response({'error': 'Team not found'}, status=404)
-        team_data = team_doc.to_dict() or {}
-
-        current = team_max_size(team_data)
-        members = len(team_data.get('memberIds', []) or [])
-        target = max(1, min(MAX_TEAM_MAX_SIZE, current + delta))
-        # Shrinking below the people already sitting there would make the roster
-        # unreadable (members with no slot) and could strand a team.
-        if target < members:
-            return Response({
-                'error': f'Cannot shrink below the {members} players already on this team',
-                'memberCount': members,
-                'maxSize': current,
-            }, status=400)
-        if target == current:
-            return Response({
-                'message': 'No change',
-                'teamId': team_id,
-                'maxSize': current,
-                'atMax': current >= MAX_TEAM_MAX_SIZE,
-            })
-
-        team_ref.update({'maxSize': target})
-        return Response({
-            'message': f'{team_data.get("name") or f"Team {team_id}"} now has {target} seats',
-            'teamId': team_id,
-            'maxSize': target,
-            'atMax': target >= MAX_TEAM_MAX_SIZE,
-        })
 
 
 class AutoAssignTeamsView(APIView):

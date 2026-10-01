@@ -34,6 +34,22 @@ export interface PlayerEntry {
   streak: number;
   isFinished: boolean;
   teamId?: string | null;
+  /**
+   * When this player last arrived in the room, as a Firestore timestamp.
+   * Player document ids are user ids, so there is no arrival order to recover
+   * from the id -- the lobby's "joined recently" strip sorts on this instead.
+   * A plain number is accepted too, and documents written before the field
+   * existed are simply absent, so read it through joinedAtMillis().
+   */
+  joinedAt?: { toMillis(): number } | number | null;
+}
+
+/** joinedAt as epoch milliseconds, or 0 when it was never written. */
+export function joinedAtMillis(player: Pick<PlayerEntry, 'joinedAt'>): number {
+  const raw = player.joinedAt;
+  if (raw == null) return 0;
+  if (typeof raw === 'number') return raw;
+  return typeof raw.toMillis === 'function' ? raw.toMillis() : 0;
 }
 
 export interface TeamMember extends PlayerEntry {

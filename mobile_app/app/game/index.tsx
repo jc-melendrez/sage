@@ -119,10 +119,8 @@ export default function GameCenterScreen() {
   const [roomMode, setRoomMode] = useState<'classic' | 'group' | null>(null);
   const [roomHostId, setRoomHostId] = useState<number | string | null>(null);
   const [teams, setTeams] = useState<any[]>([]);
-  // Team columns (GROUP MODE): the room publishes a per-team cap, and
-  // `busyTeamId` both shows a spinner and blocks further taps while the
-  // server decides the assignment.
-  const [roomMaxTeamSize, setRoomMaxTeamSize] = useState(20);
+  // Team columns (GROUP MODE): `busyTeamId` both shows a spinner and blocks
+  // further taps while the server decides the assignment.
   const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
   const [addingTeam, setAddingTeam] = useState(false);
   const [lanName, setLanName] = useState('Player');
@@ -137,8 +135,7 @@ export default function GameCenterScreen() {
   });
   const myLanIdRef = useRef<string | null>(null);
   const lanNavPushedRef = useRef(false);
-const [resizingTeamId, setResizingTeamId] = useState<string | null>(null);
-// Bumped every time a group lobby create starts, so a create that resolves
+  // Bumped every time a group lobby create starts, so a create that resolves
 // after the host has already changed their mind cannot navigate or write state.
 const lobbyTokenRef = useRef(0);
   const lanClientMsgRef = useRef<(msg: LanMessage) => void>(() => {});
@@ -276,7 +273,6 @@ const lobbyTokenRef = useRef(0);
         setRoomStatus(d.status ?? 'waiting');
         setRoomMode(d.mode === 'group' || d.teamMode ? 'group' : 'classic');
         setRoomHostId(d.hostId ?? null);
-        setRoomMaxTeamSize(d.maxTeamSize ?? 20);
         if (d.status === 'active') {
           startJoinedCountdown(roomCode);
         }
@@ -1124,20 +1120,6 @@ const lobbyTokenRef = useRef(0);
     }
   };
 
-  // The "+" beside a team's last slot. Separate from add-team: this grows an
-  // existing team by one seat, it does not create another team.
-  const resizeTeamServer = async (teamId: string) => {
-    if (!roomCode || resizingTeamId) return;
-    setResizingTeamId(teamId);
-    try {
-      await post('teams/resize/', { roomCode, teamId, delta: 1 });
-    } catch (e: any) {
-      Alert.alert('Could not add a seat', e?.message || 'Try again');
-    } finally {
-      setResizingTeamId(null);
-    }
-  };
-
   const doRename = async (teamId: string, name: string) => {
     if (!roomCode) return;
     await post('teams/rename/', { roomCode, teamId, name });
@@ -1433,7 +1415,6 @@ const lobbyTokenRef = useRef(0);
                             players={roomPlayers as PlayerEntry[]}
                             myId={currentUserId != null ? String(currentUserId) : null}
                             myTeamId={myTeamId ?? null}
-                            maxTeamSize={roomMaxTeamSize}
                             locked={roomStatus !== 'waiting'}
                             canRename={isHostUser || myTeamId != null}
                             busyTeamId={busyTeamId}
@@ -1442,9 +1423,6 @@ const lobbyTokenRef = useRef(0);
                             canAddTeam={isHostUser}
                             onAddTeam={addTeamServer}
                             addingTeam={addingTeam}
-                            canResizeTeam={isHostUser}
-                            onResizeTeam={resizeTeamServer}
-                            resizingTeamId={resizingTeamId}
                         />
                     </View>
                 )}

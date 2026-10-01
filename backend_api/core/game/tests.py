@@ -156,6 +156,21 @@ class TeamModeGameTests(TestCase):
         player = self.store.collection('gameRooms').document(room_code) \
             .collection('players').document(str(self.player2.id)).get().to_dict()
         self.assertIsNone(player['teamId'])
+        # The lobby sorts spectators newest-first, and player docs are keyed by
+        # user id, so arrival order has to be stamped on the doc itself.
+        self.assertIn('joinedAt', player)
+
+    def test_every_player_doc_records_when_they_joined(self):
+        resp = self.create_team_room(team_count=2)
+        room_code = resp.json()['roomCode']
+        room_ref = self.store.collection('gameRooms').document(room_code)
+
+        self.client.force_authenticate(user=self.player2)
+        self.client.post(reverse('join-game'), {'roomCode': room_code}, format='json')
+
+        players_ref = room_ref.collection('players')
+        for doc in players_ref.stream():
+            self.assertIn('joinedAt', doc.to_dict())
 
     def test_start_requires_all_players_assigned(self):
         resp = self.create_team_room(team_count=2)
@@ -912,62 +927,21 @@ class TeamSeatTests(TestCase):
     def player(self, user):
         return self.room_ref.collection('players').document(str(user.id)).get().to_dict()
 
-    # ── resize ──
+    # ── seat caps ──
 
-    def test_resize_grows_a_team_by_one(self):
-        self.client.force_authenticate(user=self.host)
-        resp = self.client.post(reverse('resize-team'),
-                                {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()['maxSize'], 6)
-        self.assertEqual(self.team('1')['maxSize'], 6)
-
-    def test_resize_stops_at_ten(self):
-        self.client.force_authenticate(user=self.host)
-        for _ in range(12):
-            resp = self.client.post(reverse('resize-team'),
-                                    {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
-        self.assertEqual(resp.json()['maxSize'], 10)
-        self.assertTrue(resp.json()['atMax'])
-        self.assertEqual(self.team('1')['maxSize'], 10)
-
-    def test_only_the_host_can_resize(self):
-        self.client.force_authenticate(user=self.p1)
-        resp = self.client.post(reverse('resize-team'),
-                                {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
-        self.assertEqual(resp.status_code, 403)
-        self.assertEqual(self.team('1')['maxSize'], 5)
-
-    def test_resize_is_refused_once_the_game_starts(self):
-        self.room_ref.update({'status': 'active'})
-        self.client.force_authenticate(user=self.host)
-        resp = self.client.post(reverse('resize-team'),
-                                {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
-        self.assertEqual(resp.status_code, 400)
-
-    def test_resize_cannot_shrink_below_the_current_members(self):
-        self.room_ref.collection('teams').document('1').set(
-            {'memberIds': [str(self.p1.id), str(self.p2.id)], 'memberCount': 2}, merge=True)
-        self.client.force_authenticate(user=self.host)
-        resp = self.client.post(reverse('resize-team'),
-                                {'roomCode': 'SEAT', 'teamId': '1', 'delta': -9}, format='json')
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(self.team('1')['maxSize'], 5)
-
-    def test_a_grown_team_actually_admits_another_player(self):
-        # The whole point of the "+": if the full check still used the old
-        # room-wide estimate, growing a team would never let anybody in.
-        self.room_ref.collection('teams').document('1').set(
-            {'memberIds': [str(self.p1.id)] * 5, 'memberCount': 5}, merge=True)
+    def test_max_size_governs_admission(self):
+        # There is no longer a manual "+": a team's maxSize only moves when
+        # auto-assign deals people onto it. The rule that matters is still
+        # that maxSize -- not the old room-wide estimate -- is what fills a
+        # team, otherwise growing one would never actually let anybody in.
+        team_ref = self.room_ref.collection('teams').document('1')
+        team_ref.set({'memberIds': [str(self.p1.id)] * 5, 'memberCount': 5}, merge=True)
         self.client.force_authenticate(user=self.p2)
         blocked = self.client.post(reverse('assign-team'),
                                    {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
         self.assertEqual(blocked.status_code, 400)
 
-        self.client.force_authenticate(user=self.host)
-        self.client.post(reverse('resize-team'),
-                         {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
-        self.client.force_authenticate(user=self.p2)
+        team_ref.update({'maxSize': 6})
         admitted = self.client.post(reverse('assign-team'),
                                     {'roomCode': 'SEAT', 'teamId': '1'}, format='json')
         self.assertEqual(admitted.status_code, 200)
