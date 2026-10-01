@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Alert, TextInput, Platform, Modal } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Alert, TextInput, Keyboard, Platform, Modal } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
@@ -92,6 +92,7 @@ export default function TaskSubmissionsScreen() {
     setGrading(true);
     try {
       await gradeTaskSubmission(tid, gradingSub.id, { score, feedback: feedbackInput.trim() });
+      Keyboard.dismiss();
       setGradingSub(null);
       setGradingFull(null);
       setScoreInput('');
@@ -110,6 +111,7 @@ export default function TaskSubmissionsScreen() {
     setGrading(true);
     try {
       await gradeTaskSubmission(tid, gradingSub.id, { score: null, feedback: '' });
+      Keyboard.dismiss();
       setGradingSub(null);
       setGradingFull(null);
       setScoreInput('');
@@ -123,6 +125,8 @@ export default function TaskSubmissionsScreen() {
   };
 
   const closeGradingModal = () => {
+    // Dismiss the keyboard before the sheet animates out, or the two race and it judders.
+    Keyboard.dismiss();
     setGradingSub(null);
     setGradingFull(null);
     setScoreInput('');
@@ -239,17 +243,18 @@ export default function TaskSubmissionsScreen() {
         </ScrollView>
       )}
 
-      {/* Grading Modal */}
-      {gradingSub && gradingFull && (
-        <Modal
-          animationType="slide"
-          transparent
-          visible={true}
-          onRequestClose={closeGradingModal}
-        >
-          <KeyboardSafeView
-            style={styles.modalOverlay}
-          >
+{/* Grading Modal. Always mounted with `visible` driven off the state so the
+          slide-out animation can actually play — conditionally mounting it made the
+          modal vanish instantly on close, racing the keyboard teardown. The body is
+          guarded instead, since it dereferences gradingSub/gradingFull. */}
+      <Modal
+        animationType="slide"
+        transparent
+        visible={!!gradingSub && !!gradingFull}
+        onRequestClose={closeGradingModal}
+      >
+        {gradingSub && gradingFull && (
+          <KeyboardSafeView style={styles.modalOverlay}>
             <View style={styles.modalContent}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Grade Submission</Text>
@@ -356,9 +361,9 @@ export default function TaskSubmissionsScreen() {
                 )}
               </View>
             </View>
-          </KeyboardSafeView>
-        </Modal>
-      )}
+</KeyboardSafeView>
+        )}
+      </Modal>
     </View>
   );
 }

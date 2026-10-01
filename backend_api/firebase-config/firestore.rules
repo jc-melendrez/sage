@@ -62,12 +62,20 @@ service cloud.firestore {
                                request.auth.token.role == 'superadmin');
       }
 
+      // Server-only race state, including the Team Race answer key. Clients must
+      // never read or write this — it would reveal the correct option.
+      match /_server/{docId} {
+        allow read, write: if false;
+      }
+
       // Teams (group classic mode) — any authenticated user can read/create;
-      // updates must not grow a team past its room's maxTeamSize
+      // updates must not grow a team past its room's maxTeamSize. Race rooms keep
+      // team state server-authoritative, so clients cannot update race teams.
       match /teams/{teamId} {
         allow read: if request.auth != null;
         allow create: if request.auth != null;
         allow update: if request.auth != null &&
+          get(/databases/$(database)/documents/gameRooms/$(roomCode)).data.teamStyle != 'race' &&
           resource.data.memberIds.size() <
             get(/databases/$(database)/documents/gameRooms/$(roomCode)).data.maxTeamSize;
       }

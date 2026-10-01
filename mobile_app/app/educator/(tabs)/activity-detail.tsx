@@ -14,6 +14,7 @@ import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
+import { useEducatorBack } from '@/hooks/useEducatorBack';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { DueDateField } from '@/components/educator/DueDateField';
 import { Pill } from '@/components/educator/EducatorPrimitives';
@@ -45,6 +46,7 @@ const KIND_META: Record<ClassActivity['kind'], { label: string; icon: keyof type
 export default function ActivityDetailScreen() {
   const { activityId } = useLocalSearchParams<{ activityId: string }>();
   const router = useRouter();
+  const goBack = useEducatorBack();
   const id = Number(activityId);
 
   const [activity, setActivity] = useState<ClassActivity | null>(null);
@@ -75,11 +77,11 @@ export default function ActivityDetailScreen() {
       hydrate(await getActivity(id));
     } catch (e) {
       Alert.alert('Not found', e instanceof Error ? e.message : 'Could not load this activity.');
-      router.back();
+      goBack();
     } finally {
       setLoading(false);
     }
-  }, [id, hydrate, router]);
+  }, [id, hydrate, goBack]);
 
   useEffect(() => {
     load();
@@ -157,7 +159,7 @@ export default function ActivityDetailScreen() {
         onPress: () => {
           setSaving(true);
           deleteActivity(id)
-            .then(() => router.back())
+            .then(() => goBack())
             .catch((e) =>
               Alert.alert('Delete failed', e instanceof Error ? e.message : 'Something went wrong.')
             )

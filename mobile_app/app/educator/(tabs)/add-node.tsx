@@ -12,8 +12,9 @@ import {
   } from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
+import { useEducatorBack } from '@/hooks/useEducatorBack';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { createNode, updateNode, deleteNode, getNode } from '@/services/courseService';
 import {
@@ -43,7 +44,7 @@ const BLOCK_TYPES: { type: string; label: string; icon: string }[] = [
 ];
 
 export default function AddNodeScreen() {
-  const router = useRouter();
+  const goBack = useEducatorBack();
   const { topicId, order, nodeId } = useLocalSearchParams<{ topicId: string; order: string; nodeId: string }>();
   const tid = Number(topicId);
   const nodeOrder = Number(order) || 0;
@@ -90,14 +91,14 @@ export default function AddNodeScreen() {
         Alert.alert(
           'Failed to load node',
           err instanceof Error ? err.message : 'Something went wrong.',
-          [{ text: 'OK', onPress: () => router.back() }],
+          [{ text: 'OK', onPress: goBack }],
         );
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [editing, nid, router]);
+  }, [editing, nid, goBack]);
 
   const handleSave = async () => {
     if (!title.trim()) {
@@ -136,7 +137,7 @@ export default function AddNodeScreen() {
       } else {
         await createNode(tid, payload);
       }
-      router.back();
+      goBack();
     } catch (err) {
       Alert.alert(editing ? 'Failed to save node' : 'Failed to create node', err instanceof Error ? err.message : 'Something went wrong.');
     } finally {
@@ -154,7 +155,7 @@ export default function AddNodeScreen() {
           setDeleting(true);
           try {
             await deleteNode(nid);
-            router.back();
+            goBack();
           } catch (err) {
             Alert.alert('Failed to delete node', err instanceof Error ? err.message : 'Something went wrong.');
             setDeleting(false);

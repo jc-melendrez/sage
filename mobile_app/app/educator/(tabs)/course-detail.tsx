@@ -23,7 +23,8 @@ import { QuizDetailModal } from '@/components/educator/QuizDetailModal';
 import { QuizOverflowButton, QuizOverflowMenu } from '@/components/educator/QuizOverflowMenu';
 import { QuizEditorSheet } from '@/components/educator/QuizEditorSheet';
 import { QuizGeneratorSheet } from '@/components/educator/QuizGeneratorSheet';
-import { getCoursePath, createTopic, createNode, generateTopic, GenerateTopicResponse, getCourseLeaderboard, CourseLeaderboard, LeaderboardSort } from '@/services/courseService';
+import { TopicOverflowButton, TopicOverflowMenu } from '@/components/educator/TopicOverflowMenu';
+import { getCoursePath, createTopic, updateTopic, deleteTopic, createNode, generateTopic, GenerateTopicResponse, getCourseLeaderboard, CourseLeaderboard, LeaderboardSort } from '@/services/courseService';
 import { getQuizzes, Quiz } from '@/services/quizService';
 import { getCourseActivities, createActivity, deleteActivity, updateActivity, ClassActivity, ActivityKind } from '@/services/activityService';
 import { describeDue } from '@/services/dueDate';
@@ -121,11 +122,18 @@ export default function CourseDetailScreen() {
   const [datePickerMode, setDatePickerMode] = useState<'date' | 'time'>('date');
   const [tempDate, setTempDate] = useState<Date>(new Date());
 
-  // Add topic modal
+  // Add topic modal. Doubles as the edit modal: editTopicTarget is null when
+  // adding, non-null when editing that topic.
   const [modalVisible, setModalVisible] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [savingTopic, setSavingTopic] = useState(false);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [editTopicTarget, setEditTopicTarget] = useState<CoursePathTopic | null>(null);
+
+  // Per-topic options menu (preview / edit / delete). Its anchor is separate
+  // from the quiz menu's menuAnchor above so the two can never cross-wire.
+  const [menuTopic, setMenuTopic] = useState<CoursePathTopic | null>(null);
+  const [topicMenuAnchor, setTopicMenuAnchor] = useState<{ x: number; y: number } | null>(null);
 
   // AI generation modal
   const [aiModalVisible, setAiModalVisible] = useState(false);
@@ -386,27 +394,106 @@ export default function CourseDetailScreen() {
     );
   };
 
-  const handleCreate = async () => {
+  /**
+   * Opens the shared topic form. Adding always starts from a blank form —
+   * the bare setModalVisible(true) this replaced left the last edited topic's
+   * title and description sitting in the inputs.
+   */
+  const openAddTopic = () => {
+    setEditTopicTarget(null);
+    setTitle('');
+    setDescription('');
+    setModalVisible(true);
+  };
+
+  const openEditTopic = (topic: CoursePathTopic) => {
+    setEditTopicTarget(topic);
+    setTitle(topic.title);
+    setDescription(topic.description || '');
+    setModalVisible(true);
+  };
+
+  /** One form for both paths; editTopicTarget is what makes it an edit. */
+  const handleSaveTopic = async () => {
     if (!title.trim()) {
       Alert.alert('Title required', 'Please give your topic a name.');
       return;
     }
-    setCreating(true);
+    setSavingTopic(true);
     try {
-      await createTopic(cid, {
-        title: title.trim(),
-        description: description.trim(),
-        order: topics.length,
-      });
+      if (editTopicTarget) {
+        await updateTopic(editTopicTarget.id, {
+          title: title.trim(),
+          description: description.trim(),
+        });
+      } else {
+        await createTopic(cid, {
+          title: title.trim(),
+          description: description.trim(),
+          order: topics.length,
+        });
+      }
       setModalVisible(false);
       setTitle('');
       setDescription('');
+      setEditTopicTarget(null);
       await loadTopics();
     } catch (err) {
-      Alert.alert('Failed to create topic', err instanceof Error ? err.message : 'Something went wrong.');
+      Alert.alert(
+        editTopicTarget ? 'Failed to update topic' : 'Failed to create topic',
+        err instanceof Error ? err.message : 'Something went wrong.',
+      );
     } finally {
-      setCreating(false);
+      setSavingTopic(false);
     }
+  };
+
+  const openTopicMenu = (topic: CoursePathTopic, anchor: { x: number; y: number }) => {
+    if (menuTopic?.id === topic.id) {
+      setMenuTopic(null);
+      setTopicMenuAnchor(null);
+      return;
+    }
+    setMenuTopic(topic);
+    setTopicMenuAnchor(anchor);
+  };
+
+  const closeTopicMenu = () => {
+    setMenuTopic(null);
+    setTopicMenuAnchor(null);
+  };
+
+  const openTopicPreview = (topic: CoursePathTopic) => {
+    router.push({
+      pathname: '/educator/(tabs)/topic-preview',
+      params: {
+        topicId: String(topic.id),
+        courseId: String(cid),
+        title: topic.title,
+      },
+    } as any);
+  };
+
+  const confirmDeleteTopic = (topic: CoursePathTopic) => {
+    Alert.alert(
+      'Delete topic?',
+      `"${topic.title}" and all ${topic.nodes.length} node${topic.nodes.length === 1 ? '' : 's'} inside it will be removed from the course.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteTopic(topic.id);
+              await loadTopics();
+            } catch (err) {
+              Alert.alert('Failed to delete topic', err instanceof Error ? err.message : 'Something went wrong.');
+            }
+          },
+        },
+      ],
+    );
   };
 
   const handlePickFile = async () => {
@@ -508,7 +595,7 @@ export default function CourseDetailScreen() {
         onRightPress={() => {
           if (section === 'quizzes') openQuizGenerator();
           else if (section === 'activities') setActVisible(true);
-          else if (section === 'topics') setModalVisible(true);
+          else if (section === 'topics') openAddTopic();
         }}
       />
 
@@ -536,7 +623,7 @@ export default function CourseDetailScreen() {
 
         {section === 'topics' && (
           <>
-            <SectionHeader title="Topics" actionLabel="Add" onAction={() => setModalVisible(true)} />
+            <SectionHeader title="Topics" actionLabel="Add" onAction={openAddTopic} />
 
             {loading ? (
               <View style={styles.loadingBox}>
@@ -564,25 +651,9 @@ export default function CourseDetailScreen() {
                           <Text style={styles.topicDesc} numberOfLines={1}>{topic.description}</Text>
                         ) : null}
                       </View>
-                      <TouchableOpacity
-                        style={styles.previewBtn}
-                        activeOpacity={0.7}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          router.push({
-                            pathname: '/educator/(tabs)/topic-preview',
-                            params: {
-                              topicId: String(topic.id),
-                              courseId: String(cid),
-                              title: topic.title,
-                            },
-                          } as any);
-                        }}
-                      >
-                        <Ionicons name="eye" size={14} color={COLORS.purpleVibrant} />
-                        <Text style={styles.previewBtnText}>Preview</Text>
-                      </TouchableOpacity>
-                      <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                      {/* Stops propagation internally so this never opens the
+                          topic; the rest of the card still navigates. */}
+                      <TopicOverflowButton topic={topic} onOpen={openTopicMenu} />
                     </View>
 
                     {topic.nodes.length > 0 ? (
@@ -812,12 +883,12 @@ export default function CourseDetailScreen() {
 
 </ScrollView>
 
-      {/* Add topic modal */}
+      {/* Add / edit topic modal — one form, editTopicTarget decides which */}
       <Modal animationType="slide" transparent visible={modalVisible} onRequestClose={() => setModalVisible(false)}>
         <KeyboardSafeView style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Add Topic</Text>
+              <Text style={styles.modalTitle}>{editTopicTarget ? 'Edit Topic' : 'Add Topic'}</Text>
               <TouchableOpacity onPress={() => setModalVisible(false)} activeOpacity={0.7}>
                 <Ionicons name="close" size={24} color={COLORS.textPrimary} />
               </TouchableOpacity>
@@ -845,17 +916,17 @@ export default function CourseDetailScreen() {
             />
 
             <TouchableOpacity
-              style={[styles.createBtn, creating && { opacity: 0.7 }]}
+              style={[styles.createBtn, savingTopic && { opacity: 0.7 }]}
               activeOpacity={0.85}
-              onPress={handleCreate}
-              disabled={creating}
+              onPress={handleSaveTopic}
+              disabled={savingTopic}
             >
-              {creating ? (
+              {savingTopic ? (
                 <ActivityIndicator color="white" />
               ) : (
                 <>
-                  <Ionicons name="add-circle" size={18} color="white" />
-                  <Text style={styles.createBtnText}>Create Topic</Text>
+                  <Ionicons name={editTopicTarget ? 'checkmark' : 'add-circle'} size={18} color="white" />
+                  <Text style={styles.createBtnText}>{editTopicTarget ? 'Save Topic' : 'Create Topic'}</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -1221,6 +1292,15 @@ export default function CourseDetailScreen() {
         onChanged={loadQuizzes}
       />
 
+      <TopicOverflowMenu
+        topic={menuTopic}
+        anchor={topicMenuAnchor}
+        onClose={closeTopicMenu}
+        onPreview={openTopicPreview}
+        onEdit={openEditTopic}
+        onDelete={confirmDeleteTopic}
+      />
+
       <QuizGeneratorSheet
         visible={generatingQuiz}
         initialCourseId={cid}
@@ -1328,17 +1408,6 @@ const styles = StyleSheet.create({
   },
   topicName: { fontSize: 15, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.textPrimary, marginBottom: 2 },
   topicDesc: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted },
-
-  previewBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: RADIUS.pill,
-    backgroundColor: tint(COLORS.purpleVibrant),
-  },
-  previewBtnText: { fontSize: 11, fontFamily: FONTS.bold, fontWeight: '700', color: COLORS.purpleVibrant },
 
   nodeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 12 },
   noNodes: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 10, fontStyle: 'italic' },

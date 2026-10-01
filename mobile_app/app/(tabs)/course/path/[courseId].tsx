@@ -17,10 +17,13 @@ import { getCoursePath } from '@/services/courseService';
 import { LearningNode, NODE_TYPE_CONFIG, CoursePathTopic } from '@/types/learning';
 
 // --- Modern palette: deeper, richer violets + a warm accent pair -----------
+// bgTop/bgMid/bgBottom drive the full-screen trail gradient. These stops are
+// kept identical to components/courses/TopicPathView.tsx so the course path
+// and the single-topic view render the same background.
 const COLORS = {
-  bgTop: '#4C1D95',
-  bgMid: '#6D28D9',
-  bgBottom: '#F5F3FF',
+  bgTop: '#2E1065',
+  bgMid: '#5B21B6',
+  bgBottom: '#EDE9FE',
   surface: '#FFFFFF',
   surfaceTint: '#F5F3FF',
   purpleDeep: '#3B0F70',
@@ -461,9 +464,9 @@ export default function CoursePathScreen() {
 
   if (loading) {
     return (
-      <View style={[styles.center, { backgroundColor: COLORS.bgBottom }]}>
-        <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
-      </View>
+      <LinearGradient colors={[COLORS.bgTop, COLORS.bgMid, COLORS.bgBottom]} style={styles.center}>
+        <ActivityIndicator size="large" color="#FFFFFF" />
+      </LinearGradient>
     );
   }
 
@@ -476,9 +479,13 @@ export default function CoursePathScreen() {
       : topics.length > 0 ? topics[0].title : 'Learning Path';
 
   return (
-    <View style={styles.container}>
-      {/* Header keeps the dark gradient; the trail below is light. */}
-      <LinearGradient colors={[COLORS.bgTop, COLORS.bgMid]} style={styles.header}>
+    <LinearGradient
+      colors={[COLORS.bgTop, COLORS.bgMid, COLORS.bgBottom]}
+      locations={[0, 0.32, 0.75]}
+      style={styles.container}
+    >
+      {/* The header is transparent so the root gradient shows through it. */}
+      <View style={styles.header}>
         <View style={styles.headerRow}>
           <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
             <Ionicons name="chevron-back" size={22} color="white" />
@@ -500,7 +507,7 @@ export default function CoursePathScreen() {
             style={[styles.progressFill, { width: `${Math.max(progressPct * 100, flat.length ? 4 : 0)}%` }]}
           />
         </View>
-      </LinearGradient>
+      </View>
 
       <ScrollView
         collapsable={false}
@@ -729,14 +736,14 @@ export default function CoursePathScreen() {
           </Pressable>
         );
       })()}
-    </View>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bgBottom },
+  container: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  trailBody: { flex: 1, backgroundColor: COLORS.bgBottom },
+  trailBody: { flex: 1 },
 
   header: {
     paddingTop: 52,
@@ -786,8 +793,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 4,
   },
-  emptyTitle: { fontSize: 17, fontFamily: FONTS.bold, color: COLORS.textPrimary },
-  emptySub: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textSecondary, textAlign: 'center' },
+  // The empty state sits directly on the gradient, so it needs light text.
+  emptyTitle: { fontSize: 17, fontFamily: FONTS.bold, color: COLORS.textOnDark },
+  emptySub: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textOnDarkMuted, textAlign: 'center' },
 
   trailDot: {
     position: 'absolute',

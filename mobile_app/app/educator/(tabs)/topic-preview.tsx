@@ -1,5 +1,6 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import TopicPathView from '@/components/courses/TopicPathView';
+import { useEducatorBack } from '@/hooks/useEducatorBack';
 
 export default function EducatorTopicPreview() {
   const { topicId, courseId, title } = useLocalSearchParams<{
@@ -8,6 +9,7 @@ export default function EducatorTopicPreview() {
     title?: string;
   }>();
   const router = useRouter();
+  const goBack = useEducatorBack();
 
   return (
     <TopicPathView
@@ -15,7 +17,7 @@ export default function EducatorTopicPreview() {
       courseId={Number(courseId)}
       title={title}
       isPreview
-      onBack={() => router.back()}
+      onBack={goBack}
       onOpenNode={(nodeId) =>
         router.push({
           pathname: '/educator/(tabs)/node-preview',

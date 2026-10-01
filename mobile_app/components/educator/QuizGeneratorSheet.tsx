@@ -9,6 +9,7 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
+  Keyboard,
   Platform,
 } from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
@@ -79,11 +80,6 @@ export function QuizGeneratorSheet({
     loadCourses();
   }, [visible, allowCourseSelection, loadCourses]);
 
-  // Close the dropdown when the sheet goes away so reopening starts clean.
-  useEffect(() => {
-    if (!visible) setIsTypeDropdownOpen(false);
-  }, [visible]);
-
   // Deadline picker state
   const [showDeadlinePicker, setShowDeadlinePicker] = useState(false);
   const [deadlinePickerMode, setDeadlinePickerMode] = useState<'date' | 'time'>('date');
@@ -97,11 +93,26 @@ export function QuizGeneratorSheet({
     setInstructions('');
     setAvailableUntil('');
     setIsTypeDropdownOpen(false);
+    setShowDeadlinePicker(false);
   };
+
+  /**
+   * Reset on open rather than on close. Wiping the fields while the sheet is
+   * still animating out reads as a flicker, and doing it in the same frame the
+   * keyboard tears down is what made the sheet jump on dismiss. Reopening is
+   * clean either way. Also tear the deadline picker down on close — it renders
+   * outside the modal and would otherwise linger over the host screen.
+   */
+  useEffect(() => {
+    if (visible) resetForm();
+    else setShowDeadlinePicker(false);
+  }, [visible]);
 
   const close = () => {
     if (isGenerating) return;
-    resetForm();
+    // Dismiss the keyboard before the modal starts animating out, otherwise the
+    // two teardowns race and the sheet visibly snaps.
+    Keyboard.dismiss();
     onClose();
   };
 
@@ -171,6 +182,10 @@ export function QuizGeneratorSheet({
       deadlineIso = parsed.toISOString();
     }
 
+    // The keyboard has to go before the form is swapped for the progress view,
+    // or the window resize lands on top of the swap.
+    Keyboard.dismiss();
+
     setIsGenerating(true);
     try {
       setGenerationStatus('Reading file...');
@@ -197,7 +212,6 @@ export function QuizGeneratorSheet({
       await new Promise(resolve => setTimeout(resolve, 1000));
 
       Alert.alert('Quiz Ready!', `Successfully generated ${count} ${difficulty} ${questionType} questions.`);
-      resetForm();
       onClose();
       await onGenerated?.();
     } catch (err) {
@@ -218,7 +232,7 @@ export function QuizGeneratorSheet({
         transparent
         onRequestClose={close}
       >
-        <KeyboardSafeView style={styles.overlay}>
+<KeyboardSafeView style={styles.overlay}>
           <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={close} />
           <View style={styles.sheet}>
             <View style={styles.grabber} />
@@ -246,6 +260,7 @@ export function QuizGeneratorSheet({
               <ScrollView
                 showsVerticalScrollIndicator={false}
                 keyboardShouldPersistTaps="handled"
+                keyboardDismissMode="on-drag"
                 nestedScrollEnabled={true}
                 contentContainerStyle={styles.content}
               >

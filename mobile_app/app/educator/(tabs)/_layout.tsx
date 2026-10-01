@@ -31,6 +31,15 @@ export default function EducatorTabLayout() {
 
   return (
     <Tabs
+      // The educator detail screens (course-detail, topic-detail, activity-detail,
+      // assignments, ...) are `href: null` siblings in this tab navigator, not a
+      // stack, so `router.push()` into them is downgraded to a tab jump and never
+      // creates a stack entry. The default backBehavior rebuilds tab history as
+      // [routes[0], current], which made every back button (and Android hardware
+      // back) resolve to `dashboard`. 'history' accumulates instead, so back
+      // returns to the screen you actually came from. useEducatorBack() guards the
+      // depth-1 case (cold start / deep link) by falling back to the dashboard.
+      backBehavior="history"
       screenOptions={{
         tabBarActiveTintColor: '#ffe081',
         tabBarInactiveTintColor: isDark ? '#f6f0ff' : '#c0a7e7',

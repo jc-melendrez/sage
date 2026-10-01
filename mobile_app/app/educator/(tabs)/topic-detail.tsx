@@ -9,11 +9,13 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
-  } from 'react-native';
+  Keyboard,
+} from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
+import { useEducatorBack } from '@/hooks/useEducatorBack';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { SectionHeader, EmptyState } from '@/components/educator/EducatorPrimitives';
 import { getCoursePath, updateTopic, deleteTopic } from '@/services/courseService';
@@ -21,6 +23,7 @@ import { LearningNode, NODE_TYPE_CONFIG } from '@/types/learning';
 
 export default function TopicDetailScreen() {
   const router = useRouter();
+  const goBack = useEducatorBack();
   const { topicId, topicName, courseId } = useLocalSearchParams<{ topicId: string; topicName: string; courseId: string }>();
   const tid = Number(topicId);
 
@@ -69,6 +72,12 @@ export default function TopicDetailScreen() {
     setEditOpen(true);
   };
 
+  /** Dismiss the keyboard before the dialog animates out, or the two race and it judders. */
+  const closeEditModal = useCallback(() => {
+    Keyboard.dismiss();
+    setEditOpen(false);
+  }, []);
+
   const handleSaveTopic = async () => {
     if (!editTitle.trim()) {
       Alert.alert('Title required', 'Give the topic a name.');
@@ -82,6 +91,7 @@ export default function TopicDetailScreen() {
       });
       setTopicTitle(updated.title);
       setTopicDescription(updated.description);
+      Keyboard.dismiss();
       setEditOpen(false);
     } catch (err) {
       Alert.alert('Failed to save topic', err instanceof Error ? err.message : 'Something went wrong.');
@@ -100,7 +110,7 @@ export default function TopicDetailScreen() {
           setDeleting(true);
           try {
             await deleteTopic(tid);
-            router.back();
+            goBack();
           } catch (err) {
             Alert.alert('Failed to delete topic', err instanceof Error ? err.message : 'Something went wrong.');
             setDeleting(false);
@@ -205,12 +215,12 @@ export default function TopicDetailScreen() {
       </ScrollView>
 
       {/* Edit topic modal */}
-      <Modal visible={editOpen} transparent animationType="fade" onRequestClose={() => setEditOpen(false)}>
+<Modal visible={editOpen} transparent animationType="fade" onRequestClose={closeEditModal}>
         <KeyboardSafeView style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Edit Topic</Text>
-              <TouchableOpacity onPress={() => setEditOpen(false)}>
+              <TouchableOpacity onPress={closeEditModal}>
                 <Ionicons name="close" size={22} color={COLORS.textMuted} />
               </TouchableOpacity>
             </View>
@@ -250,7 +260,7 @@ export default function TopicDetailScreen() {
               )}
             </TouchableOpacity>
           </View>
-        </KeyboardSafeView>
+</KeyboardSafeView>
       </Modal>
     </View>
   );

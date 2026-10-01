@@ -27,7 +27,7 @@ export default function AnalyticsScreen() {
 
   return (
     <View style={styles.container}>
-      <EducatorHeader title="Analytics" rightIcon="download-outline" />
+      <EducatorHeader title="Analytics" showBack rightIcon="download-outline" />
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
         {/* AI Insights shortcut */}

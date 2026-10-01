@@ -1,15 +1,16 @@
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import NodePlayerView from '@/components/courses/NodePlayerView';
+import { useEducatorBack } from '@/hooks/useEducatorBack';
 
 export default function EducatorNodePreview() {
   const { nodeId } = useLocalSearchParams<{ nodeId: string }>();
-  const router = useRouter();
+  const goBack = useEducatorBack();
 
   return (
     <NodePlayerView
       nodeId={Number(nodeId)}
       isPreview
-      onBack={() => router.back()}
+      onBack={goBack}
     />
   );
 }

@@ -9,6 +9,7 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
+  Keyboard,
   Platform,
 } from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
@@ -84,6 +85,8 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
 
   const close = () => {
     if (isSaving) return;
+    // Dismiss the keyboard first so its teardown doesn't race the modal.
+    Keyboard.dismiss();
     setDraft(null);
     onClose();
   };
@@ -239,10 +242,7 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
 
   return (
     <>
-      {/* statusBarTranslucent + the sheet's top inset: Android is edge-to-edge
-          by default, so this bottom-anchored sheet (maxHeight 90%) put its
-          header -- the X and Save -- underneath the status bar. */}
-      <Modal visible={!!quiz} animationType="slide" transparent statusBarTranslucent onRequestClose={close}>
+<Modal visible={!!quiz} animationType="slide" transparent statusBarTranslucent onRequestClose={close}>
         <KeyboardSafeView style={styles.overlay}>
           <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={close} />
           <View style={[styles.sheet, { paddingTop: insets.top }]}>
@@ -266,6 +266,7 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
             <ScrollView
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
               nestedScrollEnabled={true}
               contentContainerStyle={styles.content}
             >
@@ -387,7 +388,7 @@ export function QuizEditorSheet({ quiz, onClose, onSaved }: Props) {
               </TouchableOpacity>
             </ScrollView>
           </View>
-        </KeyboardSafeView>
+</KeyboardSafeView>
       </Modal>
 
       {showDeadlinePicker && Platform.OS !== 'web' && (

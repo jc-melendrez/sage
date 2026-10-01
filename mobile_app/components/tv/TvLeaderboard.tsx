@@ -3,6 +3,7 @@ import {
   Platform,
   View,
   Text,
+  Image,
   StyleSheet,
   ActivityIndicator,
   ScrollView,
@@ -26,6 +27,7 @@ import { useLocalSearchParams } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
 import { API_BASE_URL } from '@/config/api';
+import { pfpSource, PFP_OPTIONS } from '@/constants/pfps';
 
 const POLL_INTERVAL = 2000;
 
@@ -62,6 +64,7 @@ type RoomStatus = 'waiting' | 'active' | 'finished';
 interface PlayerEntry {
   id: string;
   displayName: string;
+  avatar?: string;
   score: number;
   answeredCount: number;
   streak: number;
@@ -100,6 +103,8 @@ interface RankedEntry {
   streak?: number;
   color?: string;
   finished?: boolean;
+  avatar?: string;
+  kind?: 'player' | 'team';
 }
 
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -149,6 +154,7 @@ function buildDemoRoom(index: number): RoomData {
       streak,
       isFinished: step.status === 'finished',
       teamId: null,
+      avatar: PFP_OPTIONS[slot % PFP_OPTIONS.length].key,
     });
   });
   return {
@@ -386,6 +392,12 @@ function RankRow({
       )}
 
       <View style={styles.rowInner}>
+        {entry.kind === 'player' && (
+          <View style={styles.rowAvatar}>
+            <PlayerAvatar avatar={entry.avatar} name={entry.name} id={entry.id} size={40} />
+          </View>
+        )}
+
         {rank <= 3 ? (
           <Text style={[styles.rank, rank === 1 && styles.rankMedal]}>{medal}</Text>
         ) : (
@@ -539,6 +551,48 @@ function AmbientGlow() {
   );
 }
 
+// ── player avatar: profile picture when set, initials circle otherwise ──
+function colorIndexFor(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return h % AVATAR_COLORS.length;
+}
+
+function PlayerAvatar({
+  avatar,
+  name,
+  id,
+  size = 36,
+}: {
+  avatar?: string;
+  name: string;
+  id: string;
+  size?: number;
+}) {
+  const src = pfpSource(avatar);
+  const circle = {
+    width: size,
+    height: size,
+    borderRadius: size / 2,
+  };
+
+  if (src) {
+    return <Image source={src} style={[styles.avatar, circle]} resizeMode="cover" />;
+  }
+
+  return (
+    <View
+      style={[
+        styles.avatar,
+        circle,
+        { backgroundColor: AVATAR_COLORS[colorIndexFor(id)] },
+      ]}
+    >
+      <Text style={styles.avatarText}>{(name || '?').charAt(0).toUpperCase()}</Text>
+    </View>
+  );
+}
+
 function WaitingScene({ room, code }: { room: RoomData; code: string }) {
   const joiners = room.players.filter((p) => p.id !== room.hostId);
   const pulse = useSharedValue(1);
@@ -593,16 +647,7 @@ function WaitingScene({ room, code }: { room: RoomData; code: string }) {
                 entering={FadeInDown.delay(420 + i * 90).springify().damping(16)}
                 style={styles.rosterChip}
               >
-                <View
-                  style={[
-                    styles.avatar,
-                    { backgroundColor: AVATAR_COLORS[i % AVATAR_COLORS.length] },
-                  ]}
-                >
-                  <Text style={styles.avatarText}>
-                    {p.displayName.charAt(0).toUpperCase()}
-                  </Text>
-                </View>
+                <PlayerAvatar avatar={p.avatar} name={p.displayName} id={p.id} />
                 <Text style={styles.rosterName} numberOfLines={1}>
                   {p.displayName}
                 </Text>
@@ -884,6 +929,7 @@ export default function TvLeaderboard({ mode = 'live' }: { mode?: 'live' | 'demo
           score: t.score,
           answeredCount: t.answeredCount,
           color: t.color,
+          kind: 'team' as const,
         }))
       : students.map((p) => ({
           id: p.id,
@@ -892,6 +938,8 @@ export default function TvLeaderboard({ mode = 'live' }: { mode?: 'live' | 'demo
           answeredCount: p.answeredCount,
           streak: p.streak,
           finished: p.isFinished,
+          avatar: p.avatar,
+          kind: 'player' as const,
         }))
     : [];
   liveEntries.sort((x, y) => y.score - x.score);
@@ -1115,7 +1163,8 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(251, 191, 36, 0.06)',
   },
   rowInner: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 24, paddingVertical: 20 },
-  rank: { width: 40, fontSize: 26, fontFamily: FONTS.extraBold, color: COLORS.textSecondary },
+  rowAvatar: { marginRight: 14 },
+  rank: { width: 32, fontSize: 26, fontFamily: FONTS.extraBold, color: COLORS.textSecondary },
   rankMedal: { fontSize: 30 },
   teamDot: { width: 14, height: 14, borderRadius: 7, marginRight: 10 },
   rowNameWrap: { flex: 1, marginHorizontal: 12 },

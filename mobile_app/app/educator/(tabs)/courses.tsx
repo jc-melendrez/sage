@@ -10,6 +10,7 @@ import {
   Alert,
   ActivityIndicator,
   RefreshControl,
+  Keyboard,
   Platform,
 } from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
@@ -62,6 +63,12 @@ export default function EducatorCoursesScreen() {
     loadCourses();
   };
 
+  /** Dismiss the keyboard before the sheet animates out, or the two race and it judders. */
+  const closeCourseModal = useCallback(() => {
+    Keyboard.dismiss();
+    setModalVisible(false);
+  }, []);
+
   const handleCreate = async () => {
     if (!name.trim()) {
       Alert.alert('Course name required', 'Please give your course a name.');
@@ -70,6 +77,7 @@ export default function EducatorCoursesScreen() {
     setCreating(true);
     try {
       const course = await createCourse({ name: name.trim(), description: description.trim() });
+      Keyboard.dismiss();
       setModalVisible(false);
       setName('');
       setDescription('');
@@ -85,6 +93,8 @@ export default function EducatorCoursesScreen() {
   return (
     <View style={styles.container}>
       <EducatorHeader
+        inlineTitle
+        compact
         title="My Classes"
         subtitle={`${courses.length} course${courses.length === 1 ? '' : 's'}`}
         rightIcon="add"
@@ -162,12 +172,12 @@ export default function EducatorCoursesScreen() {
       </ScrollView>
 
       {/* Create course modal */}
-      <Modal animationType="slide" transparent visible={modalVisible} onRequestClose={() => setModalVisible(false)}>
+<Modal animationType="slide" transparent visible={modalVisible} onRequestClose={closeCourseModal}>
         <KeyboardSafeView style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Create Course</Text>
-              <TouchableOpacity onPress={() => setModalVisible(false)} activeOpacity={0.7}>
+              <TouchableOpacity onPress={closeCourseModal} activeOpacity={0.7}>
                 <Ionicons name="close" size={24} color={COLORS.textPrimary} />
               </TouchableOpacity>
             </View>

@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useRouter } from 'expo-router';
+import { useEducatorBack } from '@/hooks/useEducatorBack';
 import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
 import * as DocumentPicker from 'expo-document-picker';
@@ -57,6 +58,7 @@ interface SavedQuiz {
 
 export default function HostGameScreen() {
   const router = useRouter();
+  const goBack = useEducatorBack();
 
   const [quizzes, setQuizzes] = useState<SavedQuiz[]>([]);
   const [loadingQuizzes, setLoadingQuizzes] = useState(false);
@@ -194,7 +196,7 @@ export default function HostGameScreen() {
 
         {/* â”€â”€ header â”€â”€ */}
         <View style={styles.header}>
-          <TouchableOpacity style={styles.backChip} onPress={() => router.back()} activeOpacity={0.7}>
+          <TouchableOpacity style={styles.backChip} onPress={goBack} activeOpacity={0.7}>
             <Ionicons name="arrow-back" size={18} color={COLORS.purpleLight} />
             <Text style={styles.backChipText}>Back</Text>
           </TouchableOpacity>

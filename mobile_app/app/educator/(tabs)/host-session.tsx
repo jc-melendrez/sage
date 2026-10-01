@@ -6,6 +6,7 @@ import {
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getToken, getCurrentUser } from '@/services/authService';
+import { useEducatorBack } from '@/hooks/useEducatorBack';
 import { API_BASE_URL, getTvPageBaseUrl } from '@/config/api';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -606,6 +607,7 @@ function PresentationView({
 
 export default function HostSessionScreen() {
   const router = useRouter();
+  const goBack = useEducatorBack();
   const { roomCode, topic } = useLocalSearchParams<{ roomCode: string; topic: string }>();
   const code = String(roomCode || '');
 
@@ -761,6 +763,8 @@ export default function HostSessionScreen() {
     }
   };
 
+  // Deliberate end-of-session jump, not a back action: after a room is created the
+  // educator has no screen to return to, so this one keeps going to the dashboard.
   const goHome = () => router.replace('/educator/dashboard');
 
   const students = players.filter((p) => p.id !== hostId && p.id !== currentUserId);
@@ -793,7 +797,7 @@ export default function HostSessionScreen() {
       >
         <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
         <View style={styles.header}>
-          <TouchableOpacity style={styles.backChip} onPress={() => router.back()} activeOpacity={0.7}>
+          <TouchableOpacity style={styles.backChip} onPress={goBack} activeOpacity={0.7}>
             <Ionicons name="arrow-back" size={18} color={COLORS.purpleLight} />
             <Text style={styles.backChipText}>Back</Text>
           </TouchableOpacity>
@@ -831,7 +835,7 @@ export default function HostSessionScreen() {
 
       {/* ── header ── */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backChip} onPress={() => router.back()} activeOpacity={0.7}>
+        <TouchableOpacity style={styles.backChip} onPress={goBack} activeOpacity={0.7}>
           <Ionicons name="arrow-back" size={18} color={COLORS.purpleLight} />
           <Text style={styles.backChipText}>Back</Text>
         </TouchableOpacity>
