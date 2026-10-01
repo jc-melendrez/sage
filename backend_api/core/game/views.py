@@ -14,6 +14,7 @@ from firebase_admin import firestore as fs
 from users.utils.file_parser import extract_text_from_file
 from users.gamification import award_xp, log_activity, record_game_finish
 from users.models import User
+from core.throttling import AIGameThrottle
 from .models import OfflineGameResult
 
 
@@ -268,6 +269,7 @@ def build_questions_from_quiz(quiz):
 
 class CreateGameView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [AIGameThrottle]
 
     def post(self, request):
         quiz_id = request.data.get('quizId')

@@ -29,6 +29,13 @@ from core.llm import (  # noqa: F401
     deepseek_chat_completion,
     safe_json_parse,
 )
+from core.throttling import (
+    AIChatThrottle,
+    AIGameThrottle,
+    AILessonThrottle,
+    AIRecommendThrottle,
+    AITopicThrottle,
+)
 from .gamification import (
     record_quiz_completion,
     record_lesson_completion,
@@ -51,7 +58,7 @@ from .serializers import (
 )
 from .permissions import IsSuperadmin
 from .utils.file_parser import extract_text_from_file, UnsupportedDocumentFormat
-from rest_framework.decorators import api_view, permission_classes, parser_classes
+from rest_framework.decorators import api_view, permission_classes, parser_classes, throttle_classes
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework_simplejwt.tokens import RefreshToken  # noqa: F401 (kept for imports elsewhere)
 from .authentication import SAGERefreshToken
@@ -1061,6 +1068,7 @@ def _generate_recommendations(user):
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
+@throttle_classes([AIRecommendThrottle])
 def user_recommendations(request, user_id):
     try:
         user = User.objects.get(id=user_id)
@@ -2667,6 +2675,7 @@ def sync_user_to_firestore(user):
 # ---------- AI Lesson Generation (Multi‑Level Course) ----------
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@throttle_classes([AILessonThrottle])
 @parser_classes([MultiPartParser, FormParser])
 def generate_lesson(request):
     """
@@ -2858,6 +2867,7 @@ Each level must have:
 class GenerateTopicView(APIView):
     """Generate a full topic with nodes from a file using DeepSeek AI."""
     permission_classes = [IsAuthenticated]
+    throttle_classes = [AITopicThrottle]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, course_id):

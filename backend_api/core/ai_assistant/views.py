@@ -35,6 +35,7 @@ from core.llm import (
     deepseek_chat_completion,
     safe_json_parse,
 )
+from core.throttling import AIChatThrottle, AIQuizThrottle
 
 # Upper bound on questions in one generated quiz. The educator UI tops out at
 # 50; anything past this cannot fit the token budget inside the generation
@@ -476,6 +477,7 @@ class SessionListView(APIView):
 
 class AskSAGEView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [AIChatThrottle]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def post(self, request):
@@ -638,6 +640,7 @@ class SessionDetailView(APIView):
 
 class GenerateQuizView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [AIQuizThrottle]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
