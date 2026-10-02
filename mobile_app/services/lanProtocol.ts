@@ -15,6 +15,20 @@ export interface GameQuestionPick {
   explanation?: string | null;
 }
 
+/**
+ * One recorded answer on a LAN game, keyed by canonical question index.
+ *
+ * Structurally identical to the server's persisted log, so the same breakdown
+ * renders on a LAN results screen as on an online one.
+ */
+export interface LanAnswer {
+  correct: boolean;
+  points: number;
+  picked: string;
+}
+
+export type LanAnswerLog = Record<string, LanAnswer>;
+
 export interface LanPlayer {
   id: string;
   name: string;
@@ -25,6 +39,11 @@ export interface LanPlayer {
   correctCount: number;
   answeredCount: number;
   totalQuestions: number;
+  /**
+   * Optional so an older build still interoperates: the host simply has no
+   * breakdown to show for a player that did not send one.
+   */
+  answers?: LanAnswerLog;
 }
 
 export interface LanResultPayload {
@@ -36,6 +55,8 @@ export interface LanResultPayload {
   correctCount: number;
   answeredCount: number;
   totalQuestions: number;
+  /** See LanPlayer.answers -- absent on an older client build. */
+  answers?: LanAnswerLog;
 }
 
 export type LanMessage =

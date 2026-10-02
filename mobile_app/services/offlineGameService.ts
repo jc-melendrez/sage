@@ -1,6 +1,8 @@
 import * as SQLite from 'expo-sqlite';
 import { Platform } from 'react-native';
 import { OfflineGame, QuizPayload, OfflineGameOptions } from './offlineEngine';
+import { answerLogFromOutcomes } from './gameBreakdown';
+import type { GameQuestion, PlayerAnswerLog } from '../types/game';
 
 let db: SQLite.SQLiteDatabase | null = null;
 
@@ -23,6 +25,18 @@ export interface OfflineGameRow {
   total_questions: number;
   completed_at: string;
   is_synced: number;
+  /**
+   * JSON PlayerAnswerLog for the session. Null on rows written before the
+   * column existed, so the summary has to degrade rather than assume it.
+   */
+  answer_log: string | null;
+  /**
+   * JSON GameQuestion[] as served, including `explanation`. Stored because the
+   * results screen needs the wording and the teaching text, and neither is
+   * reachable from the quiz id without a network call the practice screen does
+   * not otherwise make.
+   */
+  questions: string | null;
 }
 
 let currentOfflineGame: OfflineGame | null = null;
@@ -48,9 +62,23 @@ export function initOfflineGameDb() {
       answered_count INTEGER DEFAULT 0,
       total_questions INTEGER DEFAULT 0,
       completed_at TEXT NOT NULL,
-      is_synced INTEGER DEFAULT 0
+      is_synced INTEGER DEFAULT 0,
+      answer_log TEXT,
+      questions TEXT
     );
   `);
+
+  // `CREATE TABLE IF NOT EXISTS` silently leaves an EXISTING table alone, so on
+  // any device that already has sage_offline.db the columns above are never
+  // added and the insert below would fail. Migrate them in explicitly.
+  const cols = d.getAllSync<{ name: string }>('PRAGMA table_info(offline_games)');
+  if (cols.length) {
+    for (const name of ['answer_log', 'questions']) {
+      if (!cols.some(c => c.name === name)) {
+        d.execSync(`ALTER TABLE offline_games ADD COLUMN ${name} TEXT`);
+      }
+    }
+  }
 }
 
 export function cacheQuizzes(quizzes: QuizPayload[]): number {
@@ -130,8 +158,8 @@ export function saveOfflineGameResult(game: OfflineGame): number {
   d.runSync(
     `INSERT INTO offline_games (
        session_key, quiz_id, quiz_title, quiz_type, time_per_question,
-       score, correct_count, answered_count, total_questions, completed_at, is_synced
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+       score, correct_count, answered_count, total_questions, completed_at, is_synced, answer_log, questions
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     [
       sessionKey,
       game.quizId,
@@ -143,10 +171,58 @@ export function saveOfflineGameResult(game: OfflineGame): number {
       game.answeredCount,
       game.totalQuestions,
       new Date().toISOString(),
+      JSON.stringify(answerLogFromOutcomes(game.outcomeLog)),
+      JSON.stringify(game.questions ?? []),
     ]
   );
   const id = d.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;
   return id;
+}
+
+/**
+ * The questions and answers needed to render the post-game breakdown for a
+ * finished offline or LAN session.
+ *
+ * Both fields degrade to empty rather than throwing: the row can predate the
+ * columns, either can be null, and the JSON can be unreadable. A missing
+ * breakdown costs the review list, not the whole results screen.
+ */
+export function getOfflineGameSession(id: number): {
+  questions: GameQuestion[];
+  answerLog: PlayerAnswerLog;
+} {
+  const empty = { questions: [] as GameQuestion[], answerLog: {} as PlayerAnswerLog };
+  if (!Number.isFinite(id) || id <= 0) return empty;
+  const d = getDb();
+  if (!d) return empty;
+  const row = d.getFirstSync<{ answer_log: string | null; questions: string | null }>(
+    'SELECT answer_log, questions FROM offline_games WHERE id = ?',
+    [id],
+  );
+  if (!row) return empty;
+  const parse = <T,>(raw: string | null, fallback: T): T => {
+    if (!raw) return fallback;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return fallback;
+    }
+  };
+  return {
+    questions: parse<GameQuestion[]>(row.questions, []),
+    answerLog: parse<PlayerAnswerLog>(row.answer_log, {}),
+  };
+}
+
+/**
+ * The recorded answers for a finished offline session.
+ *
+ * Degrades to an empty log rather than throwing: the row can predate the
+ * column, the column can be null, and the JSON can be unreadable. A missing
+ * log costs the question breakdown, not the results screen.
+ */
+export function getOfflineGameAnswerLog(id: number): PlayerAnswerLog {
+  return getOfflineGameSession(id).answerLog;
 }
 
 export function getPendingOfflineGames(): OfflineGameRow[] {

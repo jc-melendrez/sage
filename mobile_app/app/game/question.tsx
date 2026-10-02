@@ -37,8 +37,9 @@ import { API_BASE_URL } from '@/config/api';
 import TeamRevealOverlay from '@/components/TeamRevealOverlay';
 import { Ionicons } from '@expo/vector-icons';
 import TeamMomentumHUD from '@/components/game/TeamMomentumHUD';
+import { answerLogFromOutcomes } from '@/services/gameBreakdown';
 import ReactionBar from '@/components/game/ReactionBar';
-import { formatMultiplier, sameTeamId, type PowerupKey, type TeamEntry } from '@/types/game';
+import { formatMultiplier, sameTeamId, activeMembersByTeam, teamRankValue, type PowerupKey, type TeamEntry } from '@/types/game';
 import { pfpSource } from '@/constants/pfps';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -167,7 +168,17 @@ export default function QuestionScreen() {
   const [questionOrder, setQuestionOrder] = useState<number[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
-  const [result, setResult] = useState<{ correct: boolean; correctAnswer: string; points: number } | null>(null);
+  const [result, setResult] = useState<{
+    correct: boolean;
+    correctAnswer: string;
+    points: number;
+    /** Part of `points` earned by answering fast, above the 500 floor. */
+    speedBonus?: number;
+    /** Momentum rung that was applied to this answer. */
+    multiplier?: number;
+    /** What the player chose; '' on timeout. */
+    picked?: string;
+  } | null>(null);
   const [typedAnswer, setTypedAnswer] = useState('');
   const [boxChars, setBoxChars] = useState<string[]>([]);
   const [wordLengths, setWordLengths] = useState<number[]>([]);
@@ -194,6 +205,15 @@ const [freezeBusy, setFreezeBusy] = useState(false);
   const [teamMode, setTeamMode] = useState(false);
   const [teams, setTeams] = useState<TeamEntry[]>([]);
   const [myTeamId, setMyTeamId] = useState<string | null>(null);
+  // The rung the server last granted this player. Mirrors player.multiplier so
+  // classic gets the same "you're building a streak" read that teams get from
+  // TeamMomentumHUD.
+  const [myMultiplier, setMyMultiplier] = useState(1.0);
+  // Feeds the "N more to 1.4x" hint, same as the team's `teamCorrect`.
+  const [myCorrectCount, setMyCorrectCount] = useState(0);
+  // Latched once the server refuses an answer. The team-missing case is derived
+  // from myTeamId instead, because it is known before the first tap.
+  const [isSpectating, setIsSpectating] = useState(false);
   const [teammates, setTeammates] = useState<{ id: string; displayName: string; avatar?: string }[]>([]);
   const [boostingId, setBoostingId] = useState<string | null>(null);
   const [boostedName, setBoostedName] = useState<string | null>(null);
@@ -201,6 +221,13 @@ const [freezeBusy, setFreezeBusy] = useState(false);
   const [showTeamReveal, setShowTeamReveal] = useState(false);
   const [waitTimer, setWaitTimer] = useState(0);
   const [engineError, setEngineError] = useState<string | null>(null);
+  // A spectator is a player in a team game who has no team assigned. The server
+  // rejects their POST /game/answer/ with 403 and ignores them in settlement, so
+  // the UI must not offer them an answer path in the first place.
+  //
+  // Declared up here rather than beside `myTeam` because the auto-advance effect
+  // needs it in its dependency array, which is evaluated during render.
+  const spectator = isSpectating || (!!teamMode && !myTeamId);
 
   // ✨ UPDATED: RNAnimated refs
   const standingsAnim = useRef(new RNAnimated.Value(0)).current;
@@ -208,6 +235,9 @@ const [freezeBusy, setFreezeBusy] = useState(false);
   const startTimeRef = useRef<number>(Date.now());
   const standingsUnsubRef = useRef<(() => void) | null>(null);
   const roomUnsubRef = useRef<(() => void) | null>(null);
+  // The players snapshot effect closes over mount-time values, so the
+  // subscription cannot read `userId` from state to find our own document.
+  const myDocIdRef = useRef<string | null>(null);
   const previousStateRef = useRef<{ [id: string]: { rank: number; score: number } }>({});
   const pendingStandingsRef = useRef<any[] | null>(null);
   const throttleTimerRef = useRef<any>(null);
@@ -217,6 +247,9 @@ const [freezeBusy, setFreezeBusy] = useState(false);
   const lanPlayersRef = useRef<LanPlayer[]>([]);
   const lanPrevStandingsRef = useRef<Record<string, { rank: number; score: number }>>({});
   const lanSubmittedRef = useRef(false);
+  // Row id of the saved offline/LAN session, handed to the results screen so it
+  // can read the questions and answer log back.
+  const lanSavedIdRef = useRef(0);
   const lcRef = useRef<ReturnType<typeof getLanClient>>(null);
   const applyLanLeaderboardRef = useRef<(players: LanPlayer[]) => void>(() => {});
   const finalizeLanGameRef = useRef<() => void>(() => {});
@@ -321,6 +354,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         correctCount: game.correctCount,
         answeredCount: game.answeredCount,
         totalQuestions: game.totalQuestions,
+        answers: answerLogFromOutcomes(game.outcomeLog),
       });
       // Give the host a moment to broadcast the updated leaderboard so the
       // final screen shows every player, not just the local one.
@@ -349,13 +383,18 @@ const [freezeBusy, setFreezeBusy] = useState(false);
     setLanFinalStandings(list);
     if (game) {
       try {
-        saveOfflineGameResult(game);
+        lanSavedIdRef.current = saveOfflineGameResult(game);
       } catch {}
       clearCurrentOfflineGame();
     }
     router.replace({
       pathname: '/game/final',
-      params: { roomCode: lanGame.roomCode || 'LAN', lan: 'true', playerId: myId || '' },
+      params: {
+        roomCode: lanGame.roomCode || 'LAN',
+        lan: 'true',
+        playerId: myId || '',
+        offlineId: String(lanSavedIdRef.current),
+      },
     } as any);
   };
 
@@ -435,10 +474,13 @@ const [freezeBusy, setFreezeBusy] = useState(false);
       }
       const user = await getCurrentUser();
       setUserId(user?.id);
+      myDocIdRef.current = user?.id != null ? String(user.id) : null;
       const player = await firestore().collection('gameRooms').doc(roomCode)
         .collection('players').doc(String(user?.id)).get();
       setQuestionOrder(player.data()?.questionOrder || []);
       setMyTeamId(player.data()?.teamId ?? null);
+      setMyCorrectCount(player.data()?.correctCount ?? 0);
+      setMyMultiplier(player.data()?.multiplier ?? 1.0);
       const pPowerups = player.data()?.powerups;
       if (pPowerups) setPowerups(pPowerups);
     };
@@ -517,6 +559,14 @@ const [freezeBusy, setFreezeBusy] = useState(false);
       .collection('gameRooms').doc(roomCode)
       .collection('players')
       .onSnapshot(snap => {
+        // Our own momentum lives on the player doc. Read it here rather than
+        // deriving it from the standings list, so the classic flame matches
+        // exactly what the server will use to score the next answer.
+        const mine = myDocIdRef.current ? snap.docs.find(d => d.id === myDocIdRef.current) : undefined;
+        if (mine) {
+          setMyCorrectCount(mine.data().correctCount ?? 0);
+          setMyMultiplier(mine.data().multiplier ?? 1.0);
+        }
         pendingStandingsRef.current = snap.docs
           .map(d => ({
             id: d.id,
@@ -524,6 +574,11 @@ const [freezeBusy, setFreezeBusy] = useState(false);
             avatar: d.data().avatar,
             score: d.data().score || 0,
             streak: d.data().streak || 0,
+            // Carried for the team standings: the averaging denominator is the
+            // count of members who have actually answered, and that can only be
+            // counted from the roster.
+            teamId: d.data().teamId ?? null,
+            answeredCount: d.data().answeredCount || 0,
           }))
           .sort((a, b) => b.score - a.score)
           .map((p, i) => {
@@ -722,7 +777,9 @@ const [freezeBusy, setFreezeBusy] = useState(false);
 
   /* ── auto-advance: countdown then skip ── */
   useEffect(() => {
-    if (!result) { setAutoCountdown(0); return; }
+    // A spectator never sets `result`, but they still need to be carried forward
+    // or the game would sit on question one for them forever.
+    if (!result && !spectator) { setAutoCountdown(0); return; }
 
     // If the powerup roulette is already showing, pause the countdown
     // so the reward is actually visible before we auto-advance. The
@@ -731,7 +788,9 @@ const [freezeBusy, setFreezeBusy] = useState(false);
     if (showRoulette) { setAutoCountdown(0); return; }
 
     const isLast = currentIndex + 1 >= questionOrder.length;
-    const total = isLast ? 3 : 2;
+    // The 2s default is the "you already answered this" skip. A spectator has
+    // nothing to answer, so they get a real read of the question instead.
+    const total = spectator ? 5 : (isLast ? 3 : 2);
     setAutoCountdown(total);
     autoAdvanceRef.current = window.setInterval(() => {
       setAutoCountdown(prev => {
@@ -745,7 +804,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
       });
     }, 1000);
     return () => { if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; } };
-  }, [result, showRoulette]);
+  }, [result, showRoulette, spectator]);
 
   /* ── all handlers below are UNCHANGED ── */
   const joinWithSpaces = (chars: string[]) => {
@@ -816,13 +875,46 @@ const [freezeBusy, setFreezeBusy] = useState(false);
     }
   };
 
-  const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : null;
-  const sortedTeams = [...teams].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : null;
+  // Rank by average per active member, matching the server. A teammate who has
+  // not answered yet must not push their team up the table.
+  //
+  // Mid-game there is no settled `rankScore` yet, so the denominator has to be
+  // counted live off the roster. Left to read `score` alone this ranked a
+  // three-person team against a one-person team on raw totals, which is the
+  // same thing the results screen was fixed for.
+  const activeByTeam = activeMembersByTeam(
+    (standings as any[]).map(r => ({ teamId: r.teamId, answeredCount: r.answeredCount })),
+  );
+  const sortedTeams = [...teams].sort(
+    (a, b) => teamRankValue(b, activeByTeam[String(b.id)]) - teamRankValue(a, activeByTeam[String(a.id)]),
+  );
   const myTeamRank = sortedTeams.findIndex(t => sameTeamId(t.id, myTeamId)) + 1;
   // Team mode spends from the team's shared pool; classic/offline/LAN from the
   // personal one. One source of truth for both the buttons and their guards,
   // so a teammate's award cannot leave this player tapping a dead button.
   const pool = (teamMode && myTeam ? myTeam.powerups : powerups) ?? powerups;
+  // Classic has no team document to hang the momentum HUD on, so synthesize one
+  // from the player's own stats. Feeding TeamMomentumHUD the same shape it
+  // already renders for a team is what makes the solo ladder read identically
+  // instead of looking like a different, flatter game.
+  const momentumTeam: TeamEntry | null = teamMode
+    ? myTeam
+    : {
+        id: 'me',
+        name: 'Your momentum',
+        color: '#F59E0B',
+        score: 0,
+        correctCount: myCorrectCount,
+        answeredCount: 0,
+        memberIds: [],
+        memberCount: 1,
+        multiplier: myMultiplier,
+        teamCorrect: myCorrectCount,
+        teamStreak: 0,
+        bestStreak: 0,
+        powerups,
+      };
   const hasPoolPowerups = pool.freeze > 0 || pool.hint > 0 || pool.doublePoints > 0 || pool.shield > 0;
 
   // In team mode the pool belongs to the team and the server spends from it
@@ -916,7 +1008,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
   };
 
   const handleAnswer = async (answer: string | null) => {
-    if (selected) return;
+    if (selected || spectator) return;
     clearInterval(timerRef.current);
     setSelected(answer || '');
     setPendingAnswer(answer);
@@ -931,8 +1023,17 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         useDoublePoints: activePowerups.doublePoints,
         useShield: activePowerups.shield,
       });
-      setResult({ correct: outcome.correct, correctAnswer: outcome.correctAnswer, points: outcome.pointsAwarded });
+      setResult({
+        correct: outcome.correct,
+        correctAnswer: outcome.correctAnswer,
+        points: outcome.pointsAwarded,
+        speedBonus: outcome.speedBonus,
+        multiplier: outcome.multiplier,
+        picked: outcome.picked,
+      });
       setPowerups({ ...game.powerups });
+      setMyMultiplier(game.multiplier);
+      setMyCorrectCount(game.correctCount);
       if (isOffline) {
         setStandings([{
           id: 'me',
@@ -978,9 +1079,29 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         signal: controller.signal,
       });
       clearTimeout(timeout);
-      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || `Server error ${res.status}`); }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        // The server decides who may compete. If it says this player has no
+        // team, drop into watch-only rather than letting them retry into
+        // another 403.
+        if (res.status === 403 && /team/i.test(err.error || '')) {
+          setIsSpectating(true);
+          setSelected(null);
+          setPendingAnswer(null);
+          setError(null);
+          return;
+        }
+        throw new Error(err.error || `Server error ${res.status}`);
+      }
       const data = await res.json();
-      setResult({ correct: data.correct, correctAnswer: data.correctAnswer, points: data.pointsAwarded });
+      setResult({
+        correct: !!data.correct,
+        correctAnswer: data.correctAnswer,
+        points: data.pointsAwarded ?? 0,
+        speedBonus: data.speedBonus ?? 0,
+        multiplier: data.multiplier ?? 1.0,
+        picked: answer || '',
+      });
       if (data.powerupEarned) {
         setShowRoulette(true);
         setRouletteTarget(data.powerupEarned);
@@ -1024,7 +1145,9 @@ const [freezeBusy, setFreezeBusy] = useState(false);
       }
       if (isOffline) {
         const game = getCurrentOfflineGame();
-        if (game) saveOfflineGameResult(game);
+        // The results screen reads the questions and the answer log back out of
+        // this row, so the id has to travel with the navigation.
+        const savedId = game ? saveOfflineGameResult(game) : 0;
         clearCurrentOfflineGame();
         if (!claimNav()) return;
         router.replace({
@@ -1032,6 +1155,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
           params: {
             roomCode: 'OFFLINE',
             offline: 'true',
+            offlineId: String(savedId),
             quizTitle: params.quizTitle || game?.quizTitle || '',
             score: String(game?.score ?? 0),
             correctCount: String(game?.correctCount ?? 0),
@@ -1195,10 +1319,10 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         ]} />
       </View>
 
-      {/* ── TEAM MOMENTUM + SHARED POOL ── */}
-      {myTeam && !result && (
+      {/* ── MOMENTUM + POWERUP POOL (team doc, or the player's own in classic) ── */}
+      {momentumTeam && !spectator && !result && (
         <TeamMomentumHUD
-          team={myTeam}
+          team={momentumTeam}
           pool={pool}
           active={activePowerups}
           shared={teamMode}
@@ -1228,6 +1352,21 @@ const [freezeBusy, setFreezeBusy] = useState(false);
           <TouchableOpacity style={styles.retryBtn} onPress={handleRetry} activeOpacity={0.8}>
             <Text style={styles.retryBtnText}>Retry</Text>
           </TouchableOpacity>
+        </View>
+      )}
+
+      {/* ── SPECTATOR NOTICE ──
+          Latched from the server's 403, so this only ever appears when it has
+          actually decided this player cannot compete. */}
+      {spectator && (
+        <View style={styles.spectatorBanner}>
+          <Text style={styles.spectatorIcon}>👁</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.spectatorTitle}>Watching only</Text>
+            <Text style={styles.spectatorBody}>
+              You&rsquo;re not on a team, so you&rsquo;re not scoring. You can follow every question and the standings.
+            </Text>
+          </View>
         </View>
       )}
 
@@ -1281,17 +1420,34 @@ const [freezeBusy, setFreezeBusy] = useState(false);
               },
             ]}
           >
-            <Text style={styles.resultStripLabel}>
-              {result.correct ? '✅ Correct!' : `✗ Wrong — Answer: ${result.correctAnswer}`}
-            </Text>
-            <Text style={[styles.resultStripPts, result.correct ? styles.ptsGreen : styles.ptsRed]}>
-              +{result.points}
-            </Text>
+            <View style={styles.resultStripMain}>
+              <Text style={styles.resultStripLabel}>
+                {result.correct
+                  ? `✅ Correct!${result.multiplier && result.multiplier > 1 ? `  🔥 ${formatMultiplier(result.multiplier)}` : ''}`
+                  : (result.picked
+                      ? `✗ You picked: ${result.picked}`
+                      : `✗ Time's up — Answer: ${result.correctAnswer}`)}
+              </Text>
+              {/* Speed shown as its own line: a single "+840" hides the fact
+                  that part of it was earned by being quick, which is the
+                  reward the timer is actually asking for. */}
+              {result.correct ? (
+                <Text style={[styles.resultStripPts, styles.ptsGreen]}>
+                  +{result.points}
+                  {(result.speedBonus ?? 0) > 0 ? `  (${result.speedBonus} speed)` : ''}
+                </Text>
+              ) : (
+                <Text style={styles.resultAnswerLine}>Answer: {result.correctAnswer}</Text>
+              )}
+            </View>
+            {!result.correct && question.explanation ? (
+              <Text style={styles.resultExplanation}>{question.explanation}</Text>
+            ) : null}
           </RNAnimated.View>
         )}
 
         {/* ── MCQ CHOICES ── */}
-        {question.type === 'mcq' && (
+        {!spectator && question.type === 'mcq' && (
           <View style={styles.choicesWrap}>
             {visibleChoices.map((choice: string) => {
               const isCorrect = result && choice === result.correctAnswer;
@@ -1345,7 +1501,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         )}
 
         {/* ── IDENTIFICATION INPUT ── */}
-        {question.type === 'identification' && (
+        {!spectator && question.type === 'identification' && (
           <View style={styles.idArea}>
             {activePowerups.hint && question.correctAnswer && (
               <View style={styles.hintBanner}>
@@ -1482,8 +1638,8 @@ const [freezeBusy, setFreezeBusy] = useState(false);
       )}
 
       {/* ── POWERUP BAR (pinned bottom) ── */}
-      {!selected && !result && hasPoolPowerups && (
-        <View style={styles.powerupBar}>
+{!spectator && !selected && !result && hasPoolPowerups && (
+          <View style={styles.powerupBar}>
           {pool.freeze > 0 && (
             <TouchableOpacity
               style={[styles.puBtn, isFrozen && styles.puBtnFreezeActive]}
@@ -1877,12 +2033,32 @@ const styles = StyleSheet.create({
 
   /* ── result strip ── */
   resultStrip: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: 'column',
+    alignItems: 'stretch',
     borderRadius: 14,
     paddingVertical: 12,
     paddingHorizontal: 18,
     marginTop: 14,
+  },
+  // The strip became a column when the explanation was added, so the label and
+  // the points share a row of their own instead of sitting on one line.
+  resultStripMain: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  resultAnswerLine: {
+    marginLeft: 12,
+    fontSize: 13,
+    fontFamily: FONTS.bold,
+    color: '#34D399',
+  },
+  resultExplanation: {
+    marginTop: 8,
+    fontSize: 12,
+    lineHeight: 18,
+    fontFamily: FONTS.medium,
+    color: COLORS.textSecondary,
   },
   resultStripCorrect: {
     backgroundColor: 'rgba(16,185,129,0.15)',
@@ -1906,6 +2082,32 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontFamily: FONTS.black,
     marginLeft: 12,
+  },
+
+  /* ── spectator notice ── */
+  spectatorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 10,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(148,163,184,0.35)',
+    backgroundColor: 'rgba(148,163,184,0.10)',
+  },
+  spectatorIcon: { fontSize: 20 },
+  spectatorTitle: {
+    fontSize: 13,
+    fontFamily: FONTS.extraBold,
+    color: COLORS.textPrimary,
+  },
+  spectatorBody: {
+    marginTop: 2,
+    fontSize: 11,
+    lineHeight: 16,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
   },
 
   /* ── MCQ choices ── */

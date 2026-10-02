@@ -1,11 +1,24 @@
-import { useEffect, useState } from 'react';
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, Animated } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { View, Text, FlatList, TouchableOpacity, StyleSheet, Animated, ScrollView } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getCurrentUser } from '@/services/authService';
 import { getLanFinalStandings, lanGame } from '@/services/lanSession';
 import TeamResultCard from '@/components/game/TeamResultCard';
-import { sameTeamId, type TeamEntry, type TeamMember } from '@/types/game';
+import SessionSummary, { type TeamNameLookup } from '@/components/game/SessionSummary';
+import { getOfflineGameSession } from '@/services/offlineGameService';
+import {
+  buildBreakdown,
+  mergeSettledRank,
+  orderTeamsForResults,
+} from '@/services/gameBreakdown';
+import {
+  sameTeamId,
+  type GameQuestion,
+  type PlayerEntry,
+  type TeamEntry,
+  type TeamMember,
+} from '@/types/game';
 
 const PLACEMENT_XP: Record<number, number> = { 1: 100, 2: 60, 3: 40 };
 
@@ -15,11 +28,12 @@ function placementXpFor(rank: number) {
 
 export default function FinalScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ roomCode: string; offline?: string; lan?: string; playerId?: string; quizTitle?: string; score?: string; correctCount?: string; totalQuestions?: string }>();
+  const params = useLocalSearchParams<{ roomCode: string; offline?: string; lan?: string; playerId?: string; quizTitle?: string; score?: string; correctCount?: string; totalQuestions?: string; offlineId?: string }>();
   const roomCode = params.roomCode;
   const isOffline = params.offline === 'true';
   const isLan = params.lan === 'true';
   const [players, setPlayers] = useState<any[]>([]);
+  const [questions, setQuestions] = useState<GameQuestion[]>([]);
   const [myRank, setMyRank] = useState<number | null>(null);
   const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const [teams, setTeams] = useState<TeamEntry[]>([]);
@@ -28,6 +42,10 @@ export default function FinalScreen() {
   // (see snapshot_team_results). Live team docs carry stats but no roster, so
   // the breakdown has to come from here and be merged onto the live entries.
   const [teamResults, setTeamResults] = useState<Record<string, TeamMember[]>>({});
+  // The same `teamResults` array, kept for its ranking fields. The settled
+  // rankScore is what the placement XP was actually paid from, so the ordering
+  // below follows it instead of recomputing and risking a different order.
+  const [settledRank, setSettledRank] = useState<any[]>([]);
   const podiumAnim = useState(new Animated.Value(0))[0];
 
   // Only the user's own id is resolved here. Their rank and team used to be
@@ -83,6 +101,8 @@ export default function FinalScreen() {
       .onSnapshot(snap => {
         const data = snap.data();
         setTeamMode(!!data?.teamMode);
+        setQuestions((data?.questions ?? []) as GameQuestion[]);
+        setSettledRank(data?.teamResults ?? []);
         // The server keys members by `userId`; the client expects `id`, so
         // normalise here rather than patching every consumer.
         const byTeam: Record<string, TeamMember[]> = {};
@@ -132,6 +152,76 @@ export default function FinalScreen() {
     : [];
   const playersList = isOffline ? offlinePlayers! : isLan ? lanRows : players;
 
+  /* ── the shared breakdown ────────────────────────────────────────────────
+     One derivation for all three modes. They differ only in where the
+     questions and the per-player answer logs come from:
+       online  — the room doc and each player doc's `answers` map
+       offline — the SQLite row written when the practice run was saved
+       LAN     — the local SQLite row for questions, plus the logs the host
+                  relayed in the final leaderboard
+     Anything missing degrades to an empty log, which renders the score-only
+     screen this used to show. */
+const localSession = isOffline || isLan
+    ? getOfflineGameSession(Number(params.offlineId ?? 0))
+    : { questions: [] as GameQuestion[], answerLog: {} };
+  const sessionQuestions = isOffline || isLan ? localSession.questions : questions;
+
+  // Memoised: rebuilt inline it would be a fresh array every render, which would
+  // cascade into a fresh breakdown and a fresh rankedTeams on every render too.
+  const sessionPlayers: PlayerEntry[] = useMemo(() => (isOffline
+    ? [{
+        id: 'me',
+        displayName: 'You',
+        score: Number(params.score ?? 0),
+        correctCount: Number(params.correctCount ?? 0),
+        // Counted from the log, not from `totalQuestions`: a run abandoned
+        // early would otherwise report full attendance and drag the accuracy
+        // tiles down with it.
+        answeredCount: Object.keys(localSession.answerLog).length,
+        streak: 0,
+        isFinished: true,
+        answers: localSession.answerLog,
+      }]
+    : isLan
+      ? (getLanFinalStandings().map(p => ({
+          id: p.id || 'me',
+          displayName: p.name || 'You',
+          score: Number(p.score ?? 0),
+          correctCount: Number(p.correctCount ?? 0),
+          answeredCount: Object.keys(p.answers ?? {}).length,
+          streak: 0,
+          isFinished: true,
+          answers: p.answers,
+        })) as unknown as PlayerEntry[])
+      : (players as unknown as PlayerEntry[])),
+  [isOffline, isLan, localSession.answerLog, params.score, params.correctCount, players]);
+
+const breakdown = useMemo(() => buildBreakdown({
+    questions: sessionQuestions,
+    players: sessionPlayers,
+    myUserId: isOffline
+      ? 'me'
+      : isLan
+        ? (params.playerId || 'me')
+        : myUserId,
+  }),
+  [sessionQuestions, sessionPlayers, isOffline, isLan, params.playerId, myUserId]);
+
+  const teamNames: Record<string, TeamNameLookup> = useMemo(() => {
+    const out: Record<string, TeamNameLookup> = {};
+    for (const t of teams) out[String(t.id)] = { name: t.name, color: t.color };
+    return out;
+  }, [teams]);
+
+  // Ranked by the settled score where the server published one, otherwise by
+  // average per active member. Replaces the raw-score sort, which ranked a
+  // three-person team and a one-person team by total and made the larger team
+  // look like it was playing better.
+  const rankedTeams = useMemo(
+    () => orderTeamsForResults(mergeSettledRank(teams, settledRank), sessionPlayers),
+    [teams, settledRank, sessionPlayers],
+  );
+
   useEffect(() => {
     if (teamMode ? teams.length === 0 : playersList.length === 0) return;
     Animated.spring(podiumAnim, { toValue: 1, friction: 6, tension: 60, useNativeDriver: true }).start();
@@ -147,9 +237,11 @@ export default function FinalScreen() {
 
   // In team mode the player ranks with their team, not with themselves. The
   // individual score is still shown — inside the team card as a contribution.
-  const rankOf = (t: TeamEntry) => teams.findIndex(x => x.id === t.id) + 1;
-  const myTeamIndex = teams.findIndex(t => sameTeamId(t.id, myTeamId));
-  const myTeam = myTeamIndex >= 0 ? teams[myTeamIndex] : null;
+  // Indexed into `rankedTeams`, not the raw subscription order, so every rank
+  // on this screen comes from the same ordering the XP was paid on.
+  const rankOf = (t: TeamEntry) => rankedTeams.findIndex(x => x.id === t.id) + 1;
+  const myTeamIndex = rankedTeams.findIndex(t => sameTeamId(t.id, myTeamId));
+  const myTeam = myTeamIndex >= 0 ? rankedTeams[myTeamIndex] : null;
   const finalRank = isOffline
     ? 1
     : isLan
@@ -158,10 +250,10 @@ export default function FinalScreen() {
         ? (myTeamIndex >= 0 ? myTeamIndex + 1 : null)
         : myRank;
 
-  const showPodium = teamMode ? teams.length >= 3 : playersList.length >= 3;
-  const podiumSecond = teamMode ? teams[1] : playersList[1];
-  const podiumFirst = teamMode ? teams[0] : playersList[0];
-  const podiumThird = teamMode ? teams[2] : playersList[2];
+  const showPodium = teamMode ? rankedTeams.length >= 3 : playersList.length >= 3;
+  const podiumSecond = teamMode ? rankedTeams[1] : playersList[1];
+  const podiumFirst = teamMode ? rankedTeams[0] : playersList[0];
+  const podiumThird = teamMode ? rankedTeams[2] : playersList[2];
   const podiumName = (t: any) => t?.displayName ?? t?.name ?? '?';
   const podiumScore = (t: any) => t?.score ?? 0;
   const podiumColor = (t: any) => (teamMode && t?.color) || '#2d2a6e';
@@ -175,7 +267,7 @@ export default function FinalScreen() {
   const onPodium = !!myTeam && showPodium && rankOf(myTeam) <= 3;
   const detailTeam = teamMode && myTeam && !onPodium ? myTeam : null;
   const listData = teamMode
-    ? teams.filter(t => !(showPodium && rankOf(t) <= 3) && !(detailTeam && sameTeamId(t.id, detailTeam.id)))
+    ? rankedTeams.filter(t => !(showPodium && rankOf(t) <= 3) && !(detailTeam && sameTeamId(t.id, detailTeam.id)))
     : showPodium ? playersList.slice(3) : playersList;
   // Cards below the podium keep their true overall rank, which can be far
   // lower than their position in the filtered list.
@@ -183,7 +275,10 @@ export default function FinalScreen() {
 
 
   return (
-    <View style={styles.container}>
+    // ScrollView rather than a bare View: the breakdown below is longer than
+    // the leaderboard it now sits under, and without this the review was simply
+    // unreachable on a long session.
+    <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <Text style={styles.title}>Game Over!</Text>
       <Text style={styles.subtitle}>{teamMode ? 'Team Battle Results' : isOffline ? 'Offline Practice Complete' : isLan ? 'Friend Game Results' : 'Final Leaderboard'}</Text>
       {teamMode && !myTeam && (
@@ -272,6 +367,10 @@ export default function FinalScreen() {
         <FlatList
           data={listData}
           keyExtractor={i => i.id}
+          // The whole screen is a ScrollView now, so this list must not scroll
+          // itself or RN warns about a VirtualizedList inside a plain
+          // ScrollView and the inner gesture swallows the outer one.
+          scrollEnabled={false}
           renderItem={({ item, index }) => {
             const rank = showPodium ? index + 4 : index + 1;
             return (
@@ -284,15 +383,22 @@ export default function FinalScreen() {
           }}
         />
       )}
+
+      {/* The one post-game review, shared by classic, team, online, offline and
+          LAN. Renders its own empty state when no answers were logged, so a
+          room saved before this existed still gets a working screen. */}
+      <SessionSummary breakdown={breakdown} teams={teamNames} />
+
       <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(tabs)/games')}>
         <Text style={styles.btnText}>Back to Game Center</Text>
       </TouchableOpacity>
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0f0c29', padding: 24, paddingTop: 60 },
+  container: { flex: 1, backgroundColor: '#0f0c29' },
+  content: { padding: 24, paddingTop: 60, paddingBottom: 40 },
   title: { fontSize: 32, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 4 },
   subtitle: { color: '#aaa', textAlign: 'center', marginBottom: 24 },
   youBanner: {

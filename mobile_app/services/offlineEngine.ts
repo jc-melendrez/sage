@@ -10,6 +10,7 @@ export interface GameQuestion {
   question: string;
   choices?: string[];
   correctAnswer: string;
+  explanation?: string | null;
 }
 
 export interface QuizPayload {
@@ -37,6 +38,12 @@ export interface AnswerOutcome {
   pointsAwarded: number;
   powerupEarned: PowerupKey | null;
   newStreak: number;
+  /** What the player chose, '' on a timeout. Powers the "you picked X" review. */
+  picked: string;
+  /** Portion of `pointsAwarded` earned by answering fast, above the 500 floor. */
+  speedBonus: number;
+  /** The momentum rung that was applied to this answer. */
+  multiplier: number;
 }
 
 const LETTERS = ['A', 'B', 'C', 'D'];
@@ -59,12 +66,14 @@ export function buildQuestions(quiz: QuizPayload): GameQuestion[] {
         question: q.question_text,
         choices,
         correctAnswer: choices[correctIdx >= 0 ? correctIdx : 0],
+        explanation: q.explanation ?? null,
       });
     } else {
       out.push({
         type: 'identification',
         question: q.question_text,
         correctAnswer: String(q.correct_answer || ''),
+        explanation: q.explanation ?? null,
       });
     }
   }
@@ -94,6 +103,35 @@ export interface OfflineGameOptions {
   order?: number[];
 }
 
+/**
+ * Momentum ladder, mirroring TEAM_MOMENTUM_TIERS in
+ * backend_api/core/game/views.py so an offline run climbs the same rungs as an
+ * online classic game.
+ */
+export const MOMENTUM_TIERS: { at: number; multiplier: number }[] = [
+  { at: 0, multiplier: 1.0 },
+  { at: 5, multiplier: 1.2 },
+  { at: 10, multiplier: 1.4 },
+  { at: 15, multiplier: 1.6 },
+  { at: 20, multiplier: 2.0 },
+];
+
+export function momentumFor(correctCount: number): number {
+  let multiplier = 1.0;
+  for (const tier of MOMENTUM_TIERS) {
+    if (correctCount >= tier.at) multiplier = tier.multiplier;
+  }
+  return multiplier;
+}
+
+function demoteMomentum(current: number): number {
+  let floor = 1.0;
+  for (const tier of MOMENTUM_TIERS) {
+    if (tier.multiplier < current) floor = Math.max(floor, tier.multiplier);
+  }
+  return floor;
+}
+
 export class OfflineGame {
   readonly quizId: number;
   readonly quizTitle: string;
@@ -107,6 +145,9 @@ export class OfflineGame {
   streak = 0;
   correctCount = 0;
   answeredCount = 0;
+  bestStreak = 0;
+  /** Rung just earned; a miss drops it one step. Display value only. */
+  multiplier = 1.0;
   private lastResults: Record<number, AnswerOutcome> = {};
 
   constructor(quiz: QuizPayload, timePerQuestion: number, opts: OfflineGameOptions = {}) {
@@ -130,6 +171,15 @@ export class OfflineGame {
     return this.answeredCount >= this.totalQuestions;
   }
 
+  /**
+   * Per-question outcomes, for the end-of-session summary. Offline and LAN
+   * games never reach Firestore, so this in-memory log is their only record of
+   * what was answered -- copy it before clearing the game.
+   */
+  get outcomeLog(): Record<number, AnswerOutcome> {
+    return { ...this.lastResults };
+  }
+
   answer(questionIndex: number, answer: string, timeTaken: number, flags: AnswerFlags = {}): AnswerOutcome {
     const cached = this.lastResults[questionIndex];
     if (cached) return cached;
@@ -141,14 +191,28 @@ export class OfflineGame {
       ? answer.trim().toLowerCase() === question.correctAnswer.trim().toLowerCase()
       : answer === question.correctAnswer;
 
+    // Read before the increment: the rung that scores THIS answer is the one
+    // reached by the answers before it, exactly as the server does it.
+    const priorCorrect = this.correctCount;
+
     this.answeredCount += 1;
 
     if (isCorrect) {
       this.correctCount += 1;
-      const base = Math.floor(1000 * (1 - (timeTaken / this.timePerQuestion) * 0.5));
-      const earned = flags.useDoublePoints ? Math.max(base, 500) * 2 : Math.max(base, 500);
+      // Mirrors the server exactly, so an offline score is the score the same
+      // answers would have earned online.
+      const basePoints = Math.max(Math.floor(1000 * (1 - (timeTaken / this.timePerQuestion) * 0.5)), 500);
+      const speedBonus = basePoints - 500;
+      const momentum = momentumFor(priorCorrect);
+      const boosted = Math.round(basePoints * momentum);
+      const earned = flags.useDoublePoints ? boosted * 2 : boosted;
       const newStreak = this.streak + 1;
       this.streak = newStreak;
+      this.bestStreak = Math.max(this.bestStreak, newStreak);
+      // Store the rung just reached, so the flame the player sees leads the
+      // boost by one answer. A miss drops it a step; the next correct answer
+      // restores it from correctCount.
+      this.multiplier = momentumFor(this.correctCount);
       this.score += earned;
 
       let powerupEarned: PowerupKey | null = null;
@@ -166,18 +230,27 @@ export class OfflineGame {
         pointsAwarded: earned,
         powerupEarned,
         newStreak,
+        picked: answer,
+        speedBonus,
+        multiplier: momentum,
       };
       this.lastResults[questionIndex] = outcome;
       return outcome;
     }
 
-    if (!flags.useShield) this.streak = 0;
+    if (!flags.useShield) {
+      this.streak = 0;
+      this.multiplier = demoteMomentum(this.multiplier);
+    }
     const outcome: AnswerOutcome = {
       correct: false,
       correctAnswer: question.correctAnswer,
       pointsAwarded: 0,
       powerupEarned: null,
       newStreak: this.streak,
+      picked: answer,
+      speedBonus: 0,
+      multiplier: 1.0,
     };
     this.lastResults[questionIndex] = outcome;
     return outcome;

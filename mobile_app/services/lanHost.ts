@@ -202,6 +202,12 @@ export class LanHostServer {
     p.correctCount = data.correctCount;
     p.answeredCount = data.answeredCount;
     p.totalQuestions = data.totalQuestions;
+    // Optional: a client build from before the answer log was added simply
+    // omits it, and its row renders without a breakdown rather than breaking
+    // the whole leaderboard broadcast.
+    if (data.answers && typeof data.answers === 'object') {
+      p.answers = data.answers;
+    }
     p.finished = true;
     this.broadcast({ t: 'leaderboard', players: this.sortedPlayers(), final: this.allFinished() });
     if (this.allFinished() && !this.endedOnce) {

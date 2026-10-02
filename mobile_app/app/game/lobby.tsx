@@ -1066,19 +1066,31 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
               <Text style={styles.autoAssignDone}>Teams assigned · press Start when ready</Text>
             )}
           </View>
-        ) : (
-          <View style={styles.waitBar}>
-            <Animated.View
+) : (
+            <>
+              {/* Personal spectator notice. The wait bar below already offers
+                  "or wait in the spectators" as a suggestion; this says what it
+                  will actually mean for their score, before the game starts. */}
+              {teamMode && !myTeam && (
+                <View style={styles.spectatorNote}>
+                  <Text style={styles.spectatorNoteText}>
+                    👁 Watching only — your answers won&rsquo;t score. Pick a team above if you want to play.
+                  </Text>
+                </View>
+              )}
+              <View style={styles.waitBar}>
+              <Animated.View
               style={[styles.waitBarDot, {
                 opacity: livePulse.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }),
                 transform: [{ scale: livePulse.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1.2] }) }],
               }]}
             />
             <Text style={styles.waitBarText}>
-                {teamMode && !allAssigned ? 'Pick a team if you want one, or wait in the spectators' : 'Waiting for host to start...'}
+{teamMode && !allAssigned ? 'Pick a team if you want one, or wait in the spectators' : 'Waiting for host to start...'}
             </Text>
-          </View>
-        )}
+              </View>
+            </>
+          )}
       </Animated.View>
 
       {/* Host quiz picker. Plain RN Modal: the existing <Modal> screens in this
@@ -1401,6 +1413,22 @@ const styles = StyleSheet.create({
     textAlign: 'center', marginTop: 2,
   },
 
+  /* ── personal spectator notice ── */
+  spectatorNote: {
+    marginBottom: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(148,163,184,0.35)',
+    backgroundColor: 'rgba(148,163,184,0.10)',
+  },
+  spectatorNoteText: {
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: FONTS.medium,
+    color: COLORS.textSecondary,
+  },
   waitBar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
     backgroundColor: COLORS.surface, borderRadius: 16, paddingVertical: 16,
