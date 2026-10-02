@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import unittest
 from datetime import date, timedelta
@@ -6,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -1234,6 +1236,108 @@ class RecommendationRotationTests(APITestCase):
         self._make(1)
         resp = self.client.get(reverse('user_recommendations', args=[self.student.id]))
         self.assertEqual([r['title'] for r in resp.data], ['Rec 0'])
+
+
+class RecommendationCooldownTests(APITestCase):
+    """Auto-generating recommendations on a GET has to stop being a retry loop.
+
+    The original code treated "no cards stored" as the trigger for regenerating.
+    A generation attempt that failed stores nothing, so it stays true forever
+    and every subsequent GET calls the provider again -- and the app's own
+    GET-then-POST escalation doubles that. The fix is a cache marker claimed
+    before the call, so at most one attempt happens per cooldown window.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.student = User.objects.create_user(
+            username='cooldown-student', password='pass12345', role='student',
+        )
+        self.client.force_authenticate(user=self.student)
+        self.url = reverse('user_recommendations', args=[self.student.id])
+
+    def _fake_groq(self, title='Generated card'):
+        """Patch the provider so a "successful" generation stores one card."""
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            'choices': [{'message': {'content': json.dumps({
+                'recommendations': [{'title': title, 'description': 'x'}],
+            })}}],
+        }
+        return patch.object(
+            users_views.requests, 'post', return_value=response,
+        )
+
+    def test_first_get_generates(self):
+        with self._fake_groq(), override_settings(GROQ_API_KEY='test-key'):
+            resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data), 1)
+
+    def test_second_get_serves_stored_cards_without_calling_the_provider(self):
+        """The regression this exists for: with cards already stored the
+        response is identical and the provider is not touched again."""
+        Recommendation.objects.create(
+            user=self.student, title='Existing', description='x',
+        )
+        with patch.object(users_views.requests, 'post') as mock_post:
+            resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([r['title'] for r in resp.data], ['Existing'])
+        mock_post.assert_not_called()
+
+    def test_failed_generation_does_not_cause_the_next_get_to_retry(self):
+        """The key case. A provider error stores nothing, so without the marker
+        every subsequent poll would call the provider again."""
+        boom = Mock()
+        boom.raise_for_status.side_effect = RuntimeError('provider down')
+        with patch.object(users_views.requests, 'post', return_value=boom), \
+             override_settings(GROQ_API_KEY='test-key'):
+            first = self.client.get(self.url)
+            second = self.client.get(self.url)
+
+        # Both must still succeed as reads -- the endpoint's job is to show
+        # recommendations, and auto-generation is a side effect.
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.data, [])
+
+    def test_marker_claim_is_what_stops_the_retry(self):
+        """Directly exercise the claim: the second call must lose."""
+        self.assertTrue(users_views._claim_recs_attempt(self.student))
+        self.assertFalse(users_views._claim_recs_attempt(self.student))
+
+    def test_cooldown_is_per_user(self):
+        """One student generating must not lock another student out."""
+        other = User.objects.create_user(
+            username='cooldown-other', password='pass12345', role='student',
+        )
+        self.assertTrue(users_views._claim_recs_attempt(self.student))
+        self.assertTrue(users_views._claim_recs_attempt(other))
+
+    def test_post_bypasses_the_cooldown(self):
+        """POST is an explicit user action, so it must not be gated behind the
+        marker that exists only to throttle automatic generation."""
+        self.assertTrue(users_views._claim_recs_attempt(self.student))
+        with self._fake_groq('Refreshed'), override_settings(GROQ_API_KEY='test-key'):
+            resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([r['title'] for r in resp.data], ['Refreshed'])
+
+    def test_post_is_still_charged_the_daily_budget(self):
+        with self._fake_groq(), override_settings(GROQ_API_KEY='test-key'):
+            self.client.post(self.url)
+        from .models import AIUsage
+        row = AIUsage.objects.get(user=self.student, day=timezone.localdate())
+        self.assertEqual(row.points, 1)  # WEIGHTS['recommend']
+
+    def test_cooldown_can_be_disabled_by_env(self):
+        """ttl=0 must mean "always allow", not "always deny"."""
+        with patch.dict(os.environ, {'AI_RECS_GET_COOLDOWN_HOURS': '0'}):
+            self.assertTrue(users_views._claim_recs_attempt(self.student))
+            self.assertTrue(users_views._claim_recs_attempt(self.student))
 
 
 class BadgeDescriptionTests(APITestCase):
