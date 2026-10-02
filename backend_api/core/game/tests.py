@@ -543,7 +543,10 @@ class TeamMomentumTests(TestCase):
         payload.update(extra)
         return self.client.post(reverse('answer-question'), payload, format='json')
 
-    def test_multiplier_lifts_the_team_but_not_a_solo_room(self):
+    def test_multiplier_lifts_the_team(self):
+        # Renamed: this used to assert that a *solo* room never gets a
+        # multiplier, which was the old design. Classic mode now climbs the
+        # same ladder (see SoloMomentumTests), so the name was a lie.
         self.answer(0, self.a)
         self.assertEqual(self.team()['multiplier'], 1.0)
         self.assertEqual(self.answer(0, self.a).json()['multiplier'], 1.0)
@@ -1707,3 +1710,476 @@ class SpectatorColumnAndAddTeamTests(TestCase):
         self.assertEqual(forced.status_code, 200)
         for user in (self.host, self.p1, self.p2):
             self.assertIsNotNone(self.player(user)['teamId'])
+
+
+class SpectatorCannotCompeteTests(TestCase):
+    """A spectator watches. They must not score, and they must not be able to
+    hold the room open forever."""
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='fhost', password='pass')
+        self.member = User.objects.create_user(username='fmember', password='pass')
+        self.watcher = User.objects.create_user(username='fwatcher', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('WATCH1')
+        self.room_ref.set({
+            'status': 'active', 'hostId': self.host.id, 'teamMode': True,
+            'teamCount': 2, 'timePerQuestion': 15,
+            'questions': [
+                {'type': 'mcq', 'question': f'Q{i}', 'choices': ['A. yes', 'B. no'],
+                 'correctAnswer': 'A. yes'} for i in range(4)
+            ],
+        })
+        teams = self.room_ref.collection('teams')
+        teams.document('1').set({
+            'name': 'Alphas', 'color': '#22D3EE', 'score': 0, 'correctCount': 0,
+            'answeredCount': 0, 'memberIds': [str(self.member.id)], 'memberCount': 1,
+            'teamCorrect': 0, 'multiplier': 1.0,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+        teams.document('2').set({
+            'name': 'Betas', 'color': '#10B981', 'score': 0, 'correctCount': 0,
+            'answeredCount': 0, 'memberIds': [], 'memberCount': 0,
+            'teamCorrect': 0, 'multiplier': 1.0,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+        for user, team_id in ((self.member, '1'), (self.watcher, None)):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': 0, 'answeredCount': 0,
+                'correctCount': 0, 'streak': 0, 'questionOrder': [0, 1, 2, 3],
+                'teamId': team_id, 'isFinished': False,
+                'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            })
+
+    def player(self, user):
+        return self.room_ref.collection('players').document(str(user.id)).get().to_dict()
+
+    def answer(self, user, index=0, answer='A. yes'):
+        self.client.force_authenticate(user=user)
+        return self.client.post(reverse('answer-question'), {
+            'roomCode': 'WATCH1', 'questionIndex': index,
+            'answer': answer, 'timeTaken': '1',
+        }, format='json')
+
+    def finish(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.post(reverse('finish-game'), {'roomCode': 'WATCH1'}, format='json')
+
+    def test_a_spectator_answer_is_rejected(self):
+        resp = self.answer(self.watcher)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(resp.json()['spectator'])
+
+    def test_a_rejected_spectator_answer_writes_nothing(self):
+        self.answer(self.watcher, answer='A. yes')
+        watcher = self.player(self.watcher)
+        self.assertEqual(watcher['score'], 0)
+        self.assertEqual(watcher['answeredCount'], 0)
+        self.assertEqual(watcher.get('answers'), None)
+
+    def test_a_spectator_cannot_drain_a_powerup_pool(self):
+        # The spectator carries a pool of their own; answering must not debit it.
+        self.room_ref.collection('players').document(str(self.watcher.id)).update({
+            'powerups': {'freeze': 0, 'hint': 1, 'doublePoints': 1, 'shield': 1},
+        })
+        self.answer(self.watcher, index=0)
+        self.assertEqual(self.player(self.watcher)['powerups']['hint'], 1)
+
+    def test_a_team_member_can_still_answer(self):
+        self.assertEqual(self.answer(self.member).status_code, 200)
+
+    def test_a_spectator_does_not_block_auto_settlement(self):
+        # The member finishes; the spectator never will. The room must settle,
+        # otherwise placement XP is never paid to anyone.
+        self.client.force_authenticate(user=self.member)
+        self.room_ref.collection('players').document(str(self.member.id)).update({
+            'isFinished': True,
+        })
+        resp = self.finish(self.member)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()['allFinished'])
+        self.assertEqual(self.room_ref.get().to_dict()['status'], 'finished')
+
+    def test_classic_mode_still_waits_for_every_non_host(self):
+        # A third player who is still playing. Without them this proves
+        # nothing: the finish view marks the CALLER finished before it checks
+        # the room, so with only one other player everybody is always done.
+        lurker = User.objects.create_user(username='flurker', password='pass')
+        self.room_ref.collection('players').document(str(lurker.id)).set({
+            'displayName': 'lurker', 'score': 0, 'answeredCount': 0,
+            'isFinished': False, 'teamId': None,
+        })
+
+        # No teamId anywhere, so nobody is a spectator here: the spectator
+        # branch must not fire and a still-playing friend must still hold the
+        # room open, exactly as before.
+        self.room_ref.update({'teamMode': False})
+        self.room_ref.collection('players').document(str(self.member.id)).update({
+            'teamId': None, 'isFinished': True,
+        })
+        resp = self.finish(self.watcher)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()['allFinished'])
+
+    def test_classic_mode_lets_a_teamless_player_answer(self):
+        # "No teamId" only means spectator in TEAM mode. In classic mode the
+        # field is simply unused and answering must still work.
+        self.room_ref.update({'teamMode': False})
+        self.assertEqual(self.answer(self.watcher).status_code, 200)
+
+
+class SoloMomentumTests(TestCase):
+    """Classic mode used to be a flat line: every correct answer was worth the
+    same base points, and `multiplier`/`bestStreak` were read off the player
+    document but never written to it."""
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='shost2', password='pass')
+        self.solo = User.objects.create_user(username='ssolo', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('SOLO9')
+        self.room_ref.set({
+            'status': 'active', 'hostId': self.host.id, 'teamMode': False,
+            'timePerQuestion': 15,
+            'questions': [
+                {'type': 'mcq', 'question': f'Q{i}', 'choices': ['A. yes', 'B. no'],
+                 'correctAnswer': 'A. yes'} for i in range(30)
+            ],
+        })
+        self.room_ref.collection('players').document(str(self.solo.id)).set({
+            'displayName': 'Solo', 'score': 0, 'answeredCount': 0, 'correctCount': 0,
+            'streak': 0, 'questionOrder': list(range(30)), 'teamId': None,
+            'isFinished': False, 'multiplier': 1.0, 'bestStreak': 0,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+
+    def player(self):
+        return self.room_ref.collection('players').document(str(self.solo.id)).get().to_dict()
+
+    def answer(self, index, answer='A. yes', **extra):
+        self.client.force_authenticate(user=self.solo)
+        payload = {'roomCode': 'SOLO9', 'questionIndex': index, 'answer': answer, 'timeTaken': '1'}
+        payload.update(extra)
+        return self.client.post(reverse('answer-question'), payload, format='json')
+
+    def test_the_first_five_answers_are_ungripped_then_the_sixth_is_boosted(self):
+        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
+        for i in range(5):
+            self.assertEqual(self.answer(i).json()['pointsAwarded'], base)
+
+        # The 6th answer is the first one past the 5-correct threshold, exactly
+        # as with a team: the tier you earn applies to the NEXT answer.
+        sixth = self.answer(5).json()
+        self.assertEqual(sixth['pointsAwarded'], round(base * 1.2))
+        self.assertEqual(sixth['multiplier'], 1.2)
+
+    def test_the_multiplier_is_persisted_on_the_player_document(self):
+        for i in range(5):
+            self.answer(i)
+        self.assertEqual(self.player()['multiplier'], 1.2)
+
+    def test_best_streak_is_persisted_and_survives_a_miss(self):
+        for i in range(4):
+            self.answer(i)
+        self.assertEqual(self.player()['bestStreak'], 4)
+
+        self.answer(4, answer='B. no')
+        self.assertEqual(self.player()['streak'], 0)
+        self.assertEqual(self.player()['bestStreak'], 4)
+
+    def test_a_miss_demotes_one_rung_and_a_correct_answer_restores_it(self):
+        for i in range(5):
+            self.answer(i)
+        self.assertEqual(self.player()['multiplier'], 1.2)
+
+        self.answer(5, answer='B. no')
+        self.assertEqual(self.player()['multiplier'], 1.0)
+
+        # correctCount is untouched by the miss, so the ladder comes back.
+        self.answer(6)
+        self.assertEqual(self.player()['multiplier'], 1.2)
+
+    def test_a_shield_holds_the_rung_on_a_miss(self):
+        for i in range(5):
+            self.answer(i)
+        # The shield has to actually be in the pool: `can_use` only honours the
+        # flag when the pool can pay for it, so an empty shield is a no-op.
+        self.room_ref.collection('players').document(str(self.solo.id)).update({
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 1},
+        })
+        self.answer(5, answer='B. no', useShield='true')
+        self.assertEqual(self.player()['multiplier'], 1.2)
+
+    def test_the_speed_bonus_is_reported_separately_from_the_points(self):
+        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
+        body = self.answer(0).json()
+        self.assertEqual(body['basePoints'], base)
+        self.assertEqual(body['speedBonus'], base - 500)
+
+    def test_a_slow_answer_has_no_speed_bonus(self):
+        body = self.answer(0, timeTaken='15').json()
+        self.assertEqual(body['basePoints'], 500)
+        self.assertEqual(body['speedBonus'], 0)
+
+    def test_a_wrong_answer_reports_no_points_and_no_speed_bonus(self):
+        body = self.answer(0, answer='B. no').json()
+        self.assertFalse(body['correct'])
+        self.assertEqual(body['pointsAwarded'], 0)
+        self.assertEqual(body['speedBonus'], 0)
+
+
+class AnswerLogTests(TestCase):
+    """The per-question log the results screen reads."""
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='lhost', password='pass')
+        self.a = User.objects.create_user(username='la', password='pass')
+        self.b = User.objects.create_user(username='lb', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('LOG1')
+        self.room_ref.set({
+            'status': 'active', 'hostId': self.host.id, 'teamMode': True,
+            'teamCount': 2, 'timePerQuestion': 15,
+            'questions': [
+                {'type': 'mcq', 'question': f'Q{i}', 'choices': ['A. yes', 'B. no'],
+                 'correctAnswer': 'A. yes'} for i in range(4)
+            ],
+        })
+        teams = self.room_ref.collection('teams')
+        for i, name in ((1, 'Alphas'), (2, 'Betas')):
+            teams.document(str(i)).set({
+                'name': name, 'color': TEAM_COLORS[i - 1], 'score': 0,
+                'correctCount': 0, 'answeredCount': 0, 'memberIds': [], 'memberCount': 0,
+                'teamCorrect': 0, 'multiplier': 1.0,
+                'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            })
+        # Deliberately DIFFERENT orders, to prove the log is keyed by the
+        # canonical question index and not by each player's position in their
+        # own shuffle.
+        for user, team_id, order in ((self.a, '1', [2, 0, 1, 3]), (self.b, '2', [3, 1, 0, 2])):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': 0, 'answeredCount': 0,
+                'correctCount': 0, 'streak': 0, 'questionOrder': order,
+                'teamId': team_id, 'isFinished': False,
+                'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            })
+
+    def answers(self, user):
+        return self.room_ref.collection('players').document(str(user.id)).get().to_dict()['answers']
+
+    def answer(self, user, index, answer='A. yes'):
+        self.client.force_authenticate(user=user)
+        return self.client.post(reverse('answer-question'), {
+            'roomCode': 'LOG1', 'questionIndex': index,
+            'answer': answer, 'timeTaken': '1',
+        }, format='json')
+
+    def test_each_answer_is_logged_under_its_canonical_question_index(self):
+        self.answer(self.a, 0)
+        self.assertIn('q0', self.answers(self.a))
+
+        # Same canonical question, different position in each shuffle.
+        self.answer(self.a, 2, answer='B. no')
+        self.answer(self.b, 1, answer='B. no')
+        self.assertIn('q2', self.answers(self.a))
+        self.assertIn('q1', self.answers(self.b))
+
+    def test_the_log_records_what_was_picked_and_whether_it_was_right(self):
+        self.answer(self.a, 0, answer='B. no')
+        entry = self.answers(self.a)['q0']
+        self.assertFalse(entry['correct'])
+        self.assertEqual(entry['picked'], 'B. no')
+        self.assertEqual(entry['points'], 0)
+
+        self.answer(self.a, 1, answer='A. yes')
+        entry = self.answers(self.a)['q1']
+        self.assertTrue(entry['correct'])
+        self.assertEqual(entry['picked'], 'A. yes')
+        self.assertGreater(entry['points'], 0)
+
+    def test_a_timeout_is_logged_as_a_miss_with_nothing_picked(self):
+        self.answer(self.a, 0, answer='')
+        entry = self.answers(self.a)['q0']
+        self.assertFalse(entry['correct'])
+        self.assertEqual(entry['picked'], '')
+
+    def test_a_replayed_answer_does_not_duplicate_or_overwrite_its_entry(self):
+        first = self.answer(self.a, 0, answer='A. yes').json()
+        again = self.answer(self.a, 0, answer='A. yes').json()
+        # The idempotency cache means the replay scores nothing new.
+        self.assertEqual(first['pointsAwarded'], again['pointsAwarded'])
+        self.assertEqual(len(self.answers(self.a)), 1)
+
+
+class FairTeamRankingTests(TestCase):
+    """Teams are ranked on average points per active member, and the XP that
+    gets paid is computed from that same number."""
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='rhost', password='pass')
+        self.bigs = [User.objects.create_user(username=f'rbig{i}', password='pass') for i in range(3)]
+        self.small = User.objects.create_user(username='rsmall', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('FAIR1')
+        self.room_ref.set({
+            'status': 'active', 'hostId': self.host.id, 'teamMode': True,
+            'teamCount': 2, 'timePerQuestion': 15, 'questions': [],
+        })
+        teams = self.room_ref.collection('teams')
+        # Big team banks 3x the total but only matches on the average.
+        teams.document('1').set({
+            'name': 'Big', 'color': TEAM_COLORS[0], 'score': 3000,
+            'correctCount': 3, 'answeredCount': 3,
+            'memberIds': [str(u.id) for u in self.bigs], 'memberCount': 3,
+            'powerups': {},
+        })
+        teams.document('2').set({
+            'name': 'Small', 'color': TEAM_COLORS[1], 'score': 2000,
+            'correctCount': 2, 'answeredCount': 2,
+            'memberIds': [str(self.small.id)], 'memberCount': 1,
+            'powerups': {},
+        })
+        for u in self.bigs:
+            self.room_ref.collection('players').document(str(u.id)).set({
+                'displayName': u.username, 'score': 1000, 'answeredCount': 1,
+                'correctCount': 1, 'streak': 1, 'teamId': '1', 'isFinished': True,
+            })
+        self.room_ref.collection('players').document(str(self.small.id)).set({
+            'displayName': 'small', 'score': 2000, 'answeredCount': 2,
+            'correctCount': 2, 'streak': 2, 'teamId': '2', 'isFinished': True,
+        })
+
+    def finish_as(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.post(reverse('finish-game'), {'roomCode': 'FAIR1'}, format='json')
+
+    def test_the_smaller_team_wins_on_average_not_on_raw_total(self):
+        # Raw scores are 3000 vs 2000, so ranking on totals puts Big first.
+        self.assertEqual(self.room_ref.collection('teams').document('1').get().to_dict()['score'], 3000)
+        resp = self.finish_as(self.small)
+        self.assertEqual(resp.json()['teamRank'], 1)
+
+    def test_team_results_snapshot_carries_the_rank_score_it_sorted_on(self):
+        self.finish_as(self.small)
+        results = self.room_ref.get().to_dict()['teamResults']
+        self.assertEqual([r['teamId'] for r in results], ['2', '1'])
+        self.assertEqual(results[0]['rankScore'], 2000)
+        self.assertEqual(results[1]['rankScore'], 1000)
+        # The raw banked total is still there for the "total points" line.
+        self.assertEqual(results[0]['score'], 2000)
+        self.assertEqual(results[1]['score'], 3000)
+
+    def test_a_member_who_never_answered_does_not_dilute_the_average(self):
+        # Add a fourth member to the small team who never played. If the
+        # denominator counted them, Small's average would halve and lose.
+        self.room_ref.collection('players').document(str(self.bigs[2].id)).update({
+            'teamId': '2', 'score': 0, 'answeredCount': 0, 'correctCount': 0,
+        })
+        results = self.finish_as(self.small) and self.room_ref.get().to_dict()['teamResults']
+        by_id = {r['teamId']: r for r in results}
+        self.assertEqual(by_id['2']['activeMembers'], 1)
+        self.assertEqual(by_id['2']['rankScore'], 2000)
+        self.assertEqual(by_id['1']['activeMembers'], 2)
+
+    def test_placement_xp_is_paid_on_the_averaged_ranking(self):
+        small_activity = Activity.objects.filter(user=self.small).count()
+        self.finish_as(self.small)
+        self.assertGreater(Activity.objects.filter(user=self.small).count(), small_activity)
+
+    def test_tied_averages_share_a_rank(self):
+        # Both teams at 1000 average -> both rank 1, and the next would be 3.
+        self.room_ref.collection('teams').document('1').update({'score': 3000})
+        self.room_ref.collection('teams').document('2').update({'score': 1000})
+        self.finish_as(self.small)
+        results = self.room_ref.get().to_dict()['teamResults']
+        self.assertEqual([r['rankScore'] for r in results], [1000, 1000])
+
+    def test_a_team_with_no_active_members_still_has_a_defined_value(self):
+        self.room_ref.collection('players').document(str(self.bigs[0].id)).update({
+            'score': 0, 'answeredCount': 0,
+        })
+        results = self.finish_as(self.small) and self.room_ref.get().to_dict()['teamResults']
+        by_id = {r['teamId']: r for r in results}
+        # Two of Big's three members played, so 3000 / 2.
+        self.assertEqual(by_id['1']['rankScore'], 1500)
+
+
+class QuestionExplanationTests(TestCase):
+    """`explanation` is what makes the end-of-session review worth reading, so it
+    has to survive the trip from the quiz row into the room document. Without it
+    the results screen can only say "wrong" and never why."""
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='exhost', password='pass')
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.host)
+
+    def create_with_quiz(self, quiz):
+        resp = self.client.post(
+            reverse('create-game'),
+            {'quizId': quiz.id, 'teamMode': False, 'timePerQuestion': 15},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        return self.store.collection('gameRooms')\
+            .document(resp.data['roomCode']).get().to_dict()['questions']
+
+    def test_an_explained_question_reaches_the_room(self):
+        quiz = Quiz.objects.create(user=self.host, title='Explained')
+        QuizQuestion.objects.create(
+            quiz=quiz, question_text='Capital of France?', options=['Paris', 'Rome'],
+            correct_answer='Paris', explanation='Paris has been the capital since 987.',
+        )
+        questions = self.create_with_quiz(quiz)
+        self.assertEqual(questions[0]['explanation'], 'Paris has been the capital since 987.')
+
+    def test_a_question_with_no_explanation_serialises_as_null(self):
+        # Null rather than a missing key, so the client's single
+        # `question.explanation` check covers both cases.
+        quiz = Quiz.objects.create(user=self.host, title='Bare')
+        QuizQuestion.objects.create(
+            quiz=quiz, question_text='Bare question', options=['yes', 'no'],
+            correct_answer='yes',
+        )
+        questions = self.create_with_quiz(quiz)
+        self.assertIsNone(questions[0]['explanation'])
+
+    def test_an_identification_question_carries_its_explanation_too(self):
+        # The else-branch of the builder is a separate dict literal, so the MCQ
+        # case passing on its own says nothing about this one.
+        quiz = Quiz.objects.create(user=self.host, title='Typo')
+        QuizQuestion.objects.create(
+            quiz=quiz, question_text='Spelling of colour', options=[], correct_answer='colour',
+            explanation='British English uses "colour".',
+        )
+        questions = self.create_with_quiz(quiz)
+        self.assertEqual(questions[0]['type'], 'identification')
+        self.assertEqual(questions[0]['explanation'], 'British English uses "colour".')

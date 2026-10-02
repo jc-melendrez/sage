@@ -100,12 +100,25 @@ def team_color(team_id):
     return TEAM_COLORS[max(0, index) % len(TEAM_COLORS)]
 
 
-def team_multiplier(team_correct):
-    """Momentum multiplier for a team that has answered `team_correct` right."""
+def momentum_multiplier(correct_count):
+    """Momentum rung for `correct_count` right answers.
+
+    Deliberately shared by both modes. Team mode feeds it the team's running
+    `teamCorrect`; classic mode feeds it the player's own `correctCount`. Both
+    therefore climb the identical ladder (x1 -> x1.2 -> x1.4 -> x1.6 -> x2.0), so
+    a solo player gets the same sense of escalation that playing together pays
+    for. Previously the tiers were team-only, which left classic play a flat
+    line: every correct answer was worth the same base points forever.
+    """
     for threshold, multiplier in TEAM_MOMENTUM_TIERS:
-        if team_correct >= threshold:
+        if correct_count >= threshold:
             return multiplier
     return 1.0
+
+
+def team_multiplier(team_correct):
+    """Momentum multiplier for a team that has answered `team_correct` right."""
+    return momentum_multiplier(team_correct)
 
 
 def demote_multiplier(current_multiplier):
@@ -203,16 +216,60 @@ def _team_stats(team_data):
     }
 
 
+def _active_members_by_team(room_ref):
+    """How many members of each team actually played, keyed by team id.
+
+    "Active" means the member answered at least one question. Averaging over
+    the raw `memberIds` roster instead would punish a team for a member who
+    joined, never answered, and went quiet -- and would let a five-person team
+    be beaten by two people who simply out-scored the other three.
+    """
+    counts = {}
+    for p in room_ref.collection('players').stream():
+        data = p.to_dict() or {}
+        team_id = data.get('teamId')
+        if team_id is None or team_id == '':
+            continue
+        if (data.get('answeredCount', 0) or 0) <= 0:
+            continue
+        key = str(team_id)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def team_rank_value(team_data, active_members=0):
+    """Average points per active member -- the number teams are ranked on.
+
+    Floored at one member so a team whose members all answered nothing (or a
+    team that has not taken a single member yet) still has a defined, non-zero
+    denominator rather than dividing by zero.
+    """
+    score = (team_data or {}).get('score', 0) or 0
+    try:
+        members = int(active_members or 0)
+    except (TypeError, ValueError):
+        members = 0
+    return score / max(1, members)
+
+
 def snapshot_team_results(room_ref, room_data):
     """Additive: persist final team standings to room.teamResults (team mode only)."""
     if not room_data.get('teamMode', False):
         return
+    active = _active_members_by_team(room_ref)
     teams = room_ref.collection('teams').stream()
     results = [{
         'teamId': t.id,
         'name': d.get('name', f'Team {t.id}'),
         'color': d.get('color'),
         'score': d.get('score', 0),
+        # `score` stays the raw team total because that is what the player
+        # actually banked; `rankScore` is what the team is RANKED on, and it is
+        # the value the placement XP above was computed from. Both are
+        # persisted together so the results screen can never sort on a
+        # different number than the one that was paid out.
+        'rankScore': team_rank_value(d, active.get(str(t.id), 0)),
+        'activeMembers': active.get(str(t.id), 0),
         'correctCount': d.get('correctCount', 0),
         'answeredCount': d.get('answeredCount', 0),
         **_team_stats(d),
@@ -232,7 +289,7 @@ def snapshot_team_results(room_ref, room_data):
         total = sum(m['score'] for m in result['members']) or 1
         for member in result['members']:
             member['contribution'] = round(member['score'] / total * 100)
-    results.sort(key=lambda r: r['score'], reverse=True)
+    results.sort(key=lambda r: r['rankScore'], reverse=True)
     room_ref.update({'teamResults': results})
 
 
@@ -244,6 +301,10 @@ def build_questions_from_quiz(quiz):
     """
     questions = []
     for q in quiz.questions.all():
+        # Carried through so a missed question can be explained on the results
+        # screen. Read defensively: rooms created before this existed, and any
+        # question without one, must still serialise exactly as they did.
+        explanation = getattr(q, 'explanation', None) or None
         if q.options and len(q.options) > 0:
             letters = ['A', 'B', 'C', 'D']
             choices = [f"{letters[i]}. {opt}" for i, opt in enumerate(q.options)]
@@ -258,12 +319,14 @@ def build_questions_from_quiz(quiz):
                 'question': q.question_text,
                 'choices': choices,
                 'correctAnswer': correct_answer,
+                'explanation': explanation,
             })
         else:
             questions.append({
                 'type': 'identification',
                 'question': q.question_text,
                 'correctAnswer': q.correct_answer,
+                'explanation': explanation,
             })
     return questions
 
@@ -822,6 +885,20 @@ class AnswerQuestionView(APIView):
             team_mode = bool(room.get('teamMode', False))
 
             player_data = player_ref.get().to_dict() or {}
+
+            # Spectators watch; they do not compete. Rejected here, before any
+            # powerup is charged and before the transaction opens, so a
+            # spectating player can neither write a score nor drain the pool
+            # they have no claim to. Their points would land on no team
+            # anyway, and FinishGameView deliberately does not wait for a
+            # spectator to finish -- so letting them answer would have let a
+            # non-participant quietly move the leaderboard.
+            if team_mode and not player_data.get('teamId'):
+                return Response({
+                    'error': 'Spectators cannot answer',
+                    'spectator': True,
+                }, status=403)
+
             team_ref = None
             team_snapshot = {}
             if team_mode and player_data.get('teamId'):
@@ -885,6 +962,12 @@ class AnswerQuestionView(APIView):
                 # 2. SCORING LOGIC (Moved inside transaction)
                 earned_points = 0
                 powerup_earned = None
+                # Surfaced in the response so the client can animate the speed
+                # bonus as a reward of its own instead of an opaque point
+                # total. Every correct answer is floored at 500, so the part
+                # above the floor is exactly the speed the player earned.
+                base_points = 0
+                speed_bonus = 0
                 # Seeded before the correct/wrong branch so a team powerup
                 # reward earned in that branch survives into the team update
                 # further down.
@@ -930,6 +1013,8 @@ class AnswerQuestionView(APIView):
                     # Formula: 1000 pts max, decaying by 50% over the full time limit
                     base_score = int(1000 * (1 - (time_taken / time_per_q) * 0.5))
                     earned_points = max(base_score, 500) # Minimum 500 pts
+                    base_points = earned_points
+                    speed_bonus = earned_points - 500
 
                     if team_ref is not None:
                         # Team momentum: the multiplier the whole team has
@@ -946,6 +1031,17 @@ class AnswerQuestionView(APIView):
                         team_correct = (team_now.get('teamCorrect', 0) or 0)
                         multiplier = team_multiplier(team_correct)
                         earned_points = int(round(earned_points * multiplier))
+                    else:
+                        # Classic mode momentum: the same ladder team mode
+                        # climbs, driven by this player's own correct answers.
+                        # This is what makes solo play escalate instead of
+                        # sitting on a flat line, and it reads `data` -- the
+                        # transactional player snapshot -- for exactly the
+                        # same stale-state reason as the team branch above.
+                        solo_correct = data.get('correctCount', 0) or 0
+                        multiplier = momentum_multiplier(solo_correct)
+                        if multiplier != 1.0:
+                            earned_points = int(round(earned_points * multiplier))
 
                     # Apply 2x Multiplier
                     if use_double:
@@ -1025,12 +1121,53 @@ class AnswerQuestionView(APIView):
                     final_updates.update(powerups_spent)
                     powerups_spent = {}
 
+                    # Persist the personal momentum rung and the best streak.
+                    # `_public_player` has always read `multiplier` and
+                    # `bestStreak` off the player document, but nothing ever
+                    # wrote them for a solo player -- the fields sat at their
+                    # initial 1.0/0 for a whole game, which is exactly why
+                    # classic mode had no flame to show or climb.
+                    if is_correct:
+                        prior_streak = data.get('streak', 0) or 0
+                        prior_correct = data.get('correctCount', 0) or 0
+                        # Store the rung just EARNED, not the rung that scored
+                        # this answer. A team stores `team_multiplier(new)` while
+                        # scoring with `team_multiplier(prior)`, so the flame the
+                        # player is shown is always the tier they have reached,
+                        # and the boost lands on the NEXT answer.
+                        final_updates['multiplier'] = momentum_multiplier(prior_correct + 1)
+                        final_updates['bestStreak'] = max(
+                            data.get('bestStreak', 0) or 0, prior_streak + 1)
+                    elif not use_shield:
+                        # A miss costs one rung, mirroring how a team miss
+                        # demotes the team. Soft by design: the next correct
+                        # answer restores the ladder from `correctCount`.
+                        final_updates['multiplier'] = demote_multiplier(
+                            data.get('multiplier', 1.0) or 1.0)
+
                 final_updates['answeredQuestions'] = fs.ArrayUnion([question_index])
+
+                # Per-question answer log, written as a dot path so each
+                # question merges one key instead of rewriting the whole map.
+                # This is what lets the results screen show which questions
+                # were missed and what was picked instead, and compute how
+                # hard each question turned out to be across the whole room.
+                # Keyed by the canonical index into the room's `questions`
+                # array, which is shared by every player despite each one
+                # getting a different shuffled order.
+                final_updates[f'answers.q{question_index}'] = {
+                    'correct': bool(is_correct),
+                    'points': int(earned_points) if is_correct else 0,
+                    'picked': (answer or '')[:200],
+                }
+
                 final_updates['lastAnswerResult'] = {
                     'correct': is_correct,
                     'correctAnswer': correct_answer,
                     'pointsAwarded': earned_points,
                     'multiplier': multiplier if is_correct else 1.0,
+                    'basePoints': base_points,
+                    'speedBonus': speed_bonus,
                 }
 
                 # 3. TEAM SCORE — inside the SAME transaction as the player update.
@@ -1086,6 +1223,8 @@ class AnswerQuestionView(APIView):
                     'pointsAwarded': earned_points,
                     'powerupEarned': powerup_earned,
                     'multiplier': multiplier if is_correct else 1.0,
+                    'basePoints': base_points,
+                    'speedBonus': speed_bonus,
                     'scored': True,
                 }
 
@@ -1102,6 +1241,10 @@ class AnswerQuestionView(APIView):
                 'pointsAwarded': result['pointsAwarded'],
                 'powerupEarned': result['powerupEarned'],
                 'multiplier': result.get('multiplier', 1.0),
+                # Additive: lets the client show "+840 · 340 speed" instead of
+                # a single unexplained number.
+                'basePoints': result.get('basePoints', 0),
+                'speedBonus': result.get('speedBonus', 0),
             })
 
         except ValueError as e:
@@ -1171,11 +1314,24 @@ class FinishGameView(APIView):
                     **settle(),
                 })
 
-            # Check if all non-host players are finished
+            # Check if all *participating* players are finished.
+            #
+            # Spectators are deliberately not waited on. They cannot answer
+            # (AnswerQuestionView rejects them), so requiring their
+            # `isFinished` meant a single watcher could hold the whole room
+            # open forever and nobody would ever be paid their placement XP.
+            # Classic mode is untouched: it has no teamId, so the spectator
+            # branch never triggers and every non-host still has to finish.
+            def _counts_as_done(p):
+                data = p.to_dict() or {}
+                if p.id == host_id:
+                    return True
+                if team_mode and not data.get('teamId'):
+                    return True
+                return bool(data.get('isFinished', False))
+
             players = room_ref.collection('players').stream()
-            all_finished = all(
-                p.id == host_id or p.to_dict().get('isFinished', False) for p in players
-            )
+            all_finished = all(_counts_as_done(p) for p in players)
 
             # Only award placement XP on the transition to finished (once per room)
             already_finished = room_data.get('status') == 'finished'
@@ -1231,18 +1387,31 @@ class FinishGameView(APIView):
         return entries
 
     def _get_team_standings(self, room_ref, room_data):
-        """Rank-ordered teams, plus the caller's team placement."""
+        """Rank-ordered teams, plus the caller's team placement.
+
+        Teams are ranked on average points per *active* member rather than on
+        their raw total, so a five-person team is not automatically ahead of a
+        two-person one just by having more seats to fill. `rank_score` is the
+        same number `_award_placement_xp` ranks and pays on, so the placement
+        the client is told about can never disagree with the XP paid.
+        """
+        active = _active_members_by_team(room_ref)
         teams = [{
             'team_id': t.id,
             'name': (d or {}).get('name', f'Team {t.id}'),
-            'score': (d or {}).get('score', 0),
+            'score': (d or {}).get('score', 0) or 0,
+            'rank_score': team_rank_value(d, active.get(str(t.id), 0)),
             'member_ids': [str(uid) for uid in ((d or {}).get('memberIds', []) or [])],
         } for t in room_ref.collection('teams').stream() for d in [t.to_dict() or {}]]
-        teams.sort(key=lambda t: t['score'], reverse=True)
+        teams.sort(key=lambda t: t['rank_score'], reverse=True)
 
         uid = str(self.request.user.id)
-        mine = next((t for t in teams if uid in t['member_ids']), None)
-        team_rank = (teams.index(mine) + 1) if mine else 0
+        # Enumerated rather than `teams.index(mine)`: two teams with identical
+        # contents compare equal and `.index` would return the wrong one.
+        mine_id = next((t['team_id'] for t in teams if uid in t['member_ids']), None)
+        team_rank = next(
+            (i + 1 for i, t in enumerate(teams) if t['team_id'] == mine_id), 0)
+        mine = next((t for t in teams if t['team_id'] == mine_id), None)
         return {
             # In team mode there is no individual placement to report, so both
             # keys carry the team's finishing position. This is what the final
@@ -1250,6 +1419,7 @@ class FinishGameView(APIView):
             'rank': team_rank,
             'teamRank': team_rank,
             'teamId': mine['team_id'] if mine else None,
+            'rankScore': mine['rank_score'] if mine else 0,
         }
 
     @staticmethod
@@ -1280,8 +1450,17 @@ class FinishGameView(APIView):
                 data = t.to_dict() or {}
                 team_doc[t.id] = data
             team_ids = list(team_doc)
-            ordered = sorted(team_ids, key=lambda tid: team_doc[tid].get('score', 0) or 0, reverse=True)
-            ranks = self._competition_ranks([team_doc[tid].get('score', 0) or 0 for tid in ordered])
+            # Rank and pay on the SAME value: average points per active member.
+            # `_competition_ranks` compares the numbers it is handed, so feeding
+            # it raw scores here while the standings above ranked on averages
+            # would hand two players the same rank on different metrics.
+            active = _active_members_by_team(room_ref)
+            rank_values = {
+                tid: team_rank_value(team_doc[tid], active.get(str(tid), 0))
+                for tid in team_ids
+            }
+            ordered = sorted(team_ids, key=lambda tid: rank_values[tid], reverse=True)
+            ranks = self._competition_ranks([rank_values[tid] for tid in ordered])
             team_rank = dict(zip(ordered, ranks))
 
             for p in room_ref.collection('players').stream():
