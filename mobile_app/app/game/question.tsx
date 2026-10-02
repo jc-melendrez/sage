@@ -290,9 +290,24 @@ const [freezeBusy, setFreezeBusy] = useState(false);
     setBiggestMover(top ? { name: top.id === 'me' ? 'You' : top.displayName, jump: top.movement } : null);
   };
 
-  const finalizeLanGame = async () => {
-    if (navigatedRef.current) return;
+  /**
+   * Take the single right to leave this screen.
+   *
+   * The room listener and the local finish handler can both decide to leave, and
+   * POST /game/finish/ makes the server flip the room to 'finished', which
+   * streams straight back to that same listener. Whichever path claims first
+   * wins; the other becomes a no-op. Claiming after the request instead let
+   * both through, which mounted the results screen twice and replayed the
+   * podium animation over the top of it.
+   */
+  const claimNav = () => {
+    if (navigatedRef.current) return false;
     navigatedRef.current = true;
+    return true;
+  };
+
+  const finalizeLanGame = async () => {
+    if (!claimNav()) return;
     const game = getCurrentOfflineGame();
     const lc = lcRef.current ?? getLanClient();
     if (game && lc && !lanSubmittedRef.current) {
@@ -477,8 +492,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
           const assignments = data.teamAssignments || null;
           setTeamAssignments(assignments);
           setShowTeamReveal(!!(data.teamMode && data.status === 'active' && assignments));
-        } else if (data.status === 'finished' && !navigatedRef.current) {
-          navigatedRef.current = true;
+        } else if (data.status === 'finished' && claimNav()) {
           setRoomStatus('finished');
           router.replace({ pathname: '/game/final', params: { roomCode } });
         }
@@ -1012,7 +1026,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         const game = getCurrentOfflineGame();
         if (game) saveOfflineGameResult(game);
         clearCurrentOfflineGame();
-        navigatedRef.current = true;
+        if (!claimNav()) return;
         router.replace({
           pathname: '/game/final',
           params: {
@@ -1026,13 +1040,21 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         });
         return;
       }
-      const token = await getToken();
-      await fetch(`${API_BASE_URL}/game/finish/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ roomCode }),
-      });
-      navigatedRef.current = true;
+      // Claim before the request goes out. The finish call makes the server flip the
+      // room to 'finished', which arrives back on the room listener above; taking
+      // the claim first means that listener loses the race instead of winning it.
+      // Losing the claim means the room already settled, so this call is redundant.
+      if (!claimNav()) return;
+      try {
+        const token = await getToken();
+        await fetch(`${API_BASE_URL}/game/finish/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ roomCode }),
+        });
+      } catch {
+        // Never strand the player on a dead question card if the call fails.
+      }
       router.replace({ pathname: '/game/final', params: { roomCode } });
       return;
     }
@@ -1082,8 +1104,8 @@ const [freezeBusy, setFreezeBusy] = useState(false);
             <TouchableOpacity
               style={styles.backButton}
               onPress={() => {
-                navigatedRef.current = true;
-                router.replace('/(tabs)' as any);
+                if (!claimNav()) return;
+                router.replace('/(tabs)/games' as any);
               }}
             >
               <Text style={styles.backButtonText}>Back to Game Center</Text>

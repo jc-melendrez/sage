@@ -2,64 +2,51 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ─── TENANT ISOLATION NOTE ───────────────────────────────────
-    // Firestore is read by the mobile app directly. Django is the only
-    // writer and must issue a Firebase custom token that embeds:
-    //   { schoolId: <school_id>, role: 'superadmin'|'admin'|... }
-    // (see users.views.sync_user_to_firestore — sync `schoolId` there).
-    // Without `schoolId` in the token, non-superadmin users only see
-    // their own school's documents below.
-    // ──────────────────────────────────────────────────────────────
+    // Firestore is read by the mobile app directly; Django is the writer and
+    // goes through the Admin SDK, which bypasses these rules. The only custom
+    // claim the app carries is `role` — there is no `schoolId` claim or field,
+    // so school scoping below would deny every ordinary user.
 
     // Users can only read/write their own profile
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
-      
+
       // Sub-collections (badges, activities, etc.)
       match /{subcollection}/{docId} {
         allow read, write: if request.auth != null && request.auth.uid == userId;
       }
     }
 
-    // Study groups — members can read; creator can write. Same-school only.
+    // Study groups — members can read; creator can write
     match /studyGroups/{groupId} {
       allow read: if request.auth != null &&
-                     request.auth.uid in resource.data.members &&
-                     (request.auth.token.schoolId == resource.data.schoolId ||
-                      request.auth.token.role == 'superadmin');
+                     request.auth.uid in resource.data.members;
       allow create: if request.auth != null;
       allow update, delete: if request.auth != null &&
-                               request.auth.uid == resource.data.created_by &&
-                               (request.auth.token.schoolId == resource.data.schoolId ||
-                                request.auth.token.role == 'superadmin');
-      
+                               request.auth.uid == resource.data.created_by;
+
       // Messages — any member can read and write
       match /messages/{messageId} {
-        allow read, write: if request.auth != null && 
-                              request.auth.uid in get(/databases/$(database)/documents/studyGroups/$(groupId)).data.members &&
-                              (request.auth.token.schoolId == get(/databases/$(database)/documents/studyGroups/$(groupId)).data.schoolId ||
-                               request.auth.token.role == 'superadmin');
+        allow read, write: if request.auth != null &&
+                              request.auth.uid in get(/databases/$(database)/documents/studyGroups/$(groupId)).data.members;
       }
     }
 
-    // Quizzes — readable by group members (same school)
+    // Quizzes — readable by group members
     match /quizzes/{quizId} {
-      allow read: if request.auth != null &&
-                     (request.auth.token.schoolId == resource.data.schoolId ||
-                      request.auth.token.role == 'superadmin');
+      allow read: if request.auth != null;
       allow write: if request.auth != null;
     }
 
-    // Game rooms — same-school players only (superadmin bypass)
+    // Game rooms — any authenticated user can read and write.
+    // NOTE: rules do not cascade to subcollections, so each one needs its own
+    // match. Omitting one denies that subcollection outright, which is what
+    // made +TEAM silently dead while the room and roster still worked.
     match /gameRooms/{roomCode} {
-      allow read, write: if request.auth != null &&
-                            (request.auth.token.schoolId == resource.data.schoolId ||
-                             request.auth.token.role == 'superadmin');
+      allow read, write: if request.auth != null;
 
       match /players/{playerId} {
-        allow read, write: if request.auth != null &&
-                              (request.auth.token.schoolId == resource.data.schoolId ||
-                               request.auth.token.role == 'superadmin');
+        allow read, write: if request.auth != null;
       }
 
       // Server-only race state, including the Team Race answer key. Clients must
@@ -78,6 +65,12 @@ service cloud.firestore {
           get(/databases/$(database)/documents/gameRooms/$(roomCode)).data.teamStyle != 'race' &&
           resource.data.memberIds.size() <
             get(/databases/$(database)/documents/gameRooms/$(roomCode)).data.maxTeamSize;
+      }
+
+      // Reactions — the app only listens to this feed (ReactionBar); Django
+      // prunes it server-side when the game finishes.
+      match /reactions/{reactionId} {
+        allow read: if request.auth != null;
       }
     }
   }

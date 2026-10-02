@@ -284,8 +284,8 @@ export default function FinalScreen() {
           }}
         />
       )}
-      <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(tabs)')}>
-        <Text style={styles.btnText}>Back to Home</Text>
+      <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(tabs)/games')}>
+        <Text style={styles.btnText}>Back to Game Center</Text>
       </TouchableOpacity>
     </View>
   );
