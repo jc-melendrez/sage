@@ -276,3 +276,21 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'ai_recommend': os.environ.get('AI_THROTTLE_RECOMMEND', '5/hour'),
     'ai_game': os.environ.get('AI_THROTTLE_GAME', '10/hour'),
 }
+
+# --- AI daily budget (users/ai_usage.py) ---
+# Documented here rather than in the module so every AI limit is visible in one
+# place; users/ai_usage.py is what actually reads them. Note the burst throttles
+# above and the budget here are independent: raising AI_THROTTLE_LESSON to 50/h
+# does not let a student generate 50 lessons, and lowering AI_BUDGET_STUDENT does
+# not tighten the per-minute ceiling.
+AI_BUDGET_DEFAULTS = {
+    'AI_BUDGET_STUDENT': '50',
+    'AI_BUDGET_EDUCATOR': '300',
+    # 0 means unlimited -- there is no superadmin budget.
+    'AI_BUDGET_SUPERADMIN': '0',
+    # 0 means "no system-wide cap". Per-user budgets are the primary control.
+    'AI_BUDGET_GLOBAL': '0',
+    # Hours before an auto-generated recommendations request may call the
+    # provider again. An explicit POST from the user ignores this.
+    'AI_RECS_GET_COOLDOWN_HOURS': '6',
+}

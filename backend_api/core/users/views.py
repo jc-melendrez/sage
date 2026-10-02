@@ -38,7 +38,7 @@ from core.throttling import (
     AIRecommendThrottle,
     AITopicThrottle,
 )
-from .ai_usage import charge, record_tokens
+from .ai_usage import limit_setting, charge, record_tokens
 from .gamification import (
     record_quiz_completion,
     record_lesson_completion,
@@ -800,7 +800,7 @@ def _claim_recs_attempt(user):
     the provider call and is deliberately not released on failure, otherwise a
     failing provider turns this back into an unbounded retry loop.
     """
-    ttl = int(os.getenv('AI_RECS_GET_COOLDOWN_HOURS', '6')) * 3600
+    ttl = int(limit_setting('AI_RECS_GET_COOLDOWN_HOURS', '6')) * 3600
     if ttl <= 0:
         return True  # cooldown disabled
     return cache.add(f'ai:recs:attempt:{user.id}', '1', timeout=ttl)

@@ -26,12 +26,29 @@ no SELECT ... FOR UPDATE.
 import os
 from datetime import datetime, time as dt_time, timedelta
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
 from rest_framework.exceptions import Throttled
 
 from .models import AIUsage
+
+
+def limit_setting(name, default=None):
+    """Env var, falling back to the documented default in settings.
+
+    Every AI limit lives in settings.AI_BUDGET_DEFAULTS / DEFAULT_THROTTLE_RATES
+    so the whole set is readable in one place; this keeps the two from drifting
+    by treating settings as the fallback rather than repeating literals.
+    """
+    raw = os.environ.get(name)
+    if raw is not None:
+        return raw
+    defaults = getattr(settings, 'AI_BUDGET_DEFAULTS', {})
+    if name in defaults:
+        return defaults[name]
+    return default
 
 # What each action costs, relative to one chat turn.
 #
@@ -42,14 +59,19 @@ from .models import AIUsage
 #   quiz        a whole quiz; scales with the question count
 #   topic       up to 6 nodes, up to 8100 output tokens
 #   lesson      12000 output tokens plus the whole document
+#
+# Read from the environment at import time, so a change needs a worker restart
+# (which is what a deploy is) rather than taking effect mid-process. That is
+# fine for a rate limit: the two only ever disagree for the length of one
+# request between a deploy and the workers recycling.
 WEIGHTS = {
-    'chat': 1,
-    'chat_image': 2,
-    'recommend': 1,
-    'game': 3,
-    'quiz': 3,
-    'topic': 8,
-    'lesson': 12,
+    'chat': int(limit_setting('AI_WEIGHT_CHAT', '1')),
+    'chat_image': int(limit_setting('AI_WEIGHT_CHAT_IMAGE', '2')),
+    'recommend': int(limit_setting('AI_WEIGHT_RECOMMEND', '1')),
+    'game': int(limit_setting('AI_WEIGHT_GAME', '3')),
+    'quiz': int(limit_setting('AI_WEIGHT_QUIZ', '3')),
+    'topic': int(limit_setting('AI_WEIGHT_TOPIC', '8')),
+    'lesson': int(limit_setting('AI_WEIGHT_LESSON', '12')),
 }
 
 # Points per calendar day, by role. None means unlimited.
@@ -59,9 +81,11 @@ WEIGHTS = {
 # more. These are starting points to be tuned against the token counters once
 # there is real traffic.
 BUDGETS = {
-    'student': int(os.environ.get('AI_BUDGET_STUDENT', '50')),
-    'educator': int(os.environ.get('AI_BUDGET_EDUCATOR', '300')),
-    'superadmin': None,  # env('AI_BUDGET_SUPERADMIN', '0') meaning unlimited
+    'student': int(limit_setting('AI_BUDGET_STUDENT', '50')),
+    'educator': int(limit_setting('AI_BUDGET_EDUCATOR', '300')),
+    # 0 means unlimited. Kept as a real setting rather than hardcoded so an
+    # admin who wants their own account capped can set it without a code change.
+    'superadmin': int(limit_setting('AI_BUDGET_SUPERADMIN', '0')) or None,
 }
 
 # Set to a positive number to cap the whole system regardless of role. Left
@@ -69,7 +93,7 @@ BUDGETS = {
 # single global bucket would let one noisy student starve everyone else in a
 # classroom. The per-user budgets are the primary control; this is a backstop
 # for when the provider plan itself has a hard ceiling.
-GLOBAL_BUDGET = int(os.environ.get('AI_BUDGET_GLOBAL', '0')) or None
+GLOBAL_BUDGET = int(limit_setting('AI_BUDGET_GLOBAL', '0')) or None
 
 
 def weight_for(action):
