@@ -36,6 +36,7 @@ from core.llm import (
     safe_json_parse,
 )
 from core.throttling import AIChatThrottle, AIQuizThrottle
+from users.ai_usage import charge, record_tokens
 
 # Upper bound on questions in one generated quiz. The educator UI tops out at
 # 50; anything past this cannot fit the token budget inside the generation
@@ -240,7 +241,7 @@ def _chat_history_for(session, limit=None):
     ]
 
 
-def _ask_deepseek(attachment_text, user_message, session):
+def _ask_deepseek(attachment_text, user_message, session, user=None):
     """Text path: plain questions and extracted document text."""
     api_key = getattr(settings, 'DEEPSEEK_API_KEY', None)
     if not api_key:
@@ -282,13 +283,18 @@ def _ask_deepseek(attachment_text, user_message, session):
             timeout=10,
         )
         response.raise_for_status()
-        return response.json()['choices'][0]['message']['content']
+        data = response.json()
+        # Token accounting only. Observability, never enforcement -- a failure
+        # here must not turn a good answer into an error.
+        if user is not None:
+            record_tokens(user, data, prompt_chars=len(prompt))
+        return data['choices'][0]['message']['content']
     except Exception as exc:
         print(f"DeepSeek API Error: {exc}")
         return "I'm sorry, my AI brain is temporarily offline. Please check the server logs!"
 
 
-def _ask_gemini_about_image(image_bytes, image_mime, user_message, file_name, session):
+def _ask_gemini_about_image(image_bytes, image_mime, user_message, file_name, session, user=None):
     """Vision path: the image is inlined and the model answers about it."""
     api_key = getattr(settings, 'GEMINI_API_KEY', None)
     if not api_key:
@@ -354,6 +360,10 @@ def _ask_gemini_about_image(image_bytes, image_mime, user_message, file_name, se
             print(f"Gemini API Error {response.status_code}: {response.text[:500]}")
             return "I couldn't read that photo just now. Please try again in a moment."
         candidates = response.json().get('candidates') or []
+        # Gemini reports usage as usageMetadata rather than a `usage` block;
+        # record_tokens understands both shapes.
+        if user is not None:
+            record_tokens(user, response.json(), prompt_chars=len(question))
         if not candidates:
             return "I couldn't work out an answer for that photo. Could you rephrase the question?"
         parts_out = (candidates[0].get('content') or {}).get('parts') or []
@@ -511,7 +521,10 @@ class AskSAGEView(APIView):
                     return file_error
                 attachment_text = file_text or attachment_text
 
-        # 1. Figure out where to save this message
+        # 1. Figure out where to save this message. This runs before the charge
+        #    on purpose: a stale session id is a client bug, and charging for
+        #    the 404 would let that bug drain a student's whole day without ever
+        #    producing an answer.
         session = None
         if session_id and session_id != 0:
             try:
@@ -526,6 +539,14 @@ class AskSAGEView(APIView):
             # back to the filename rather than "...".
             seed = user_message or file_name or "New Conversation"
             session = ChatSession.objects.create(user=request.user, title=seed[:30] + "...")
+
+        # Charge the daily budget now that the request is known to be valid and
+        # resolvable, but still before the user turn is persisted -- otherwise an
+        # over-budget student is left with an orphaned message bubble and no
+        # reply. Raises 429, which the app turns into "try again tomorrow".
+        # chat_image costs double: the image is inlined into the prompt as
+        # base64, so the input side is far larger than a text turn's.
+        charge(request.user, 'chat_image' if image_bytes is not None else 'chat')
 
         # 2. Save the user turn. We store the text we were sent, not the
         #    extracted document: persisting the extraction would replay tens of
@@ -548,9 +569,12 @@ class AskSAGEView(APIView):
         if image_bytes is not None:
             ai_reply = _ask_gemini_about_image(
                 image_bytes, image_mime, user_message, file_name, session,
+                user=request.user,
             )
         else:
-            ai_reply = _ask_deepseek(attachment_text, user_message, session)
+            ai_reply = _ask_deepseek(
+                attachment_text, user_message, session, user=request.user,
+            )
 
         # 4. Save AI Response
         ChatMessage.objects.create(user=request.user, session=session, text=ai_reply, is_ai=True)
@@ -712,6 +736,10 @@ class GenerateQuizView(APIView):
         if not DEEPSEEK_API_KEY:
             return Response({"error": "DeepSeek API key not configured."}, status=500)
 
+        # Charged here, once the request is known to be well-formed and
+        # authorised, so a rejected request never costs the student anything.
+        charge(request.user, 'quiz')
+
         system_prompt = (
             "You are an expert educator. Create a quiz based on the provided content. "
             "You MUST return ONLY valid JSON. Do not include any introductory text or markdown code blocks. "
@@ -822,6 +850,9 @@ class GenerateQuizView(APIView):
                 return Response(
                     {"error": "AI returned an unexpected response shape."},
                     status=502)
+
+            # Token accounting only -- observability, not enforcement.
+            record_tokens(request.user, data, prompt_chars=len(user_prompt))
 
             # A 200 with an empty `choices` list used to escape as an
             # IndexError and was reported as a 500. The provider really does

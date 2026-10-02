@@ -478,3 +478,47 @@ class NodeProgress(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.node.title} ({'pass' if self.passed else 'fail'})"
+
+
+class AIUsage(models.Model):
+    """One row per user per day: what their AI budget was spent on.
+
+    The throttles in core/throttling.py bound bursts over minutes. This is the
+    daily budget, and it is measured in *points* rather than calls because a
+    call is not a unit of cost: one lesson generation asks for 12000 output
+    tokens plus the whole extracted document, while a chat turn asks for 2048
+    output plus twenty replayed turns. Counting both as "1" would let a single
+    request exhaust an entire day's allowance. See users/ai_usage.py for the
+    weights.
+
+    One row per (user, day) so the budget check is a single atomic UPDATE
+    rather than a read-then-write, which would race between the two gunicorn
+    workers and let a burst overshoot.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='ai_usage',
+    )
+    day = models.DateField()
+
+    # The currency the budget is enforced in. `calls` and the token counters
+    # are observability only: nothing rejects a request on them.
+    points = models.PositiveIntegerField(default=0)
+    calls = models.PositiveIntegerField(default=0)
+    prompt_tokens = models.PositiveIntegerField(default=0)
+    completion_tokens = models.PositiveIntegerField(default=0)
+    # Fallback estimate for providers that return no usage block. Kept
+    # separately from prompt_tokens so a guess is never mistaken for a count.
+    prompt_chars = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'day'], name='uniq_ai_usage_user_day',
+            ),
+        ]
+        ordering = ['-day']
+
+    def __str__(self):
+        return f"{self.user.username} {self.day}: {self.points}pts / {self.calls} calls"
+

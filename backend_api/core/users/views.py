@@ -9,10 +9,12 @@ from datetime import timedelta
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from rest_framework import status
+from django.core.cache import cache
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.exceptions import Throttled
 from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
 from ai_assistant.models import Quiz, QuizAttempt, QuizGroupShare
 from ai_assistant.quiz_package import build_quiz_package
@@ -36,6 +38,7 @@ from core.throttling import (
     AIRecommendThrottle,
     AITopicThrottle,
 )
+from .ai_usage import charge, record_tokens
 from .gamification import (
     record_quiz_completion,
     record_lesson_completion,
@@ -778,6 +781,31 @@ def _recommendations_are_stale(user):
     return timezone.now() - latest.created_at > timedelta(hours=24)
 
 
+def _claim_recs_attempt(user):
+    """Claim the right to auto-generate recommendations, or report it is taken.
+
+    `_recommendations_are_stale` compares against when the last card was
+    *stored*, which leaves a hole: a generation attempt that failed, or one
+    still in flight, leaves nothing stored and so looks stale forever. A
+    dashboard polled every 30s then re-attempts on every poll, and each attempt
+    is a real provider call.
+
+    The marker is a cache key rather than a column because it is a rate limit,
+    not history -- DatabaseCache is already the shared cross-worker store used
+    by the DRF throttles, so this needs no new table and no new deployment step.
+
+    cache.add rather than cache.set: add is a single atomic operation, so two
+    concurrent GETs produce exactly one winner. With set-then-check both would
+    observe a missing key and both would generate. The claim happens *before*
+    the provider call and is deliberately not released on failure, otherwise a
+    failing provider turns this back into an unbounded retry loop.
+    """
+    ttl = int(os.getenv('AI_RECS_GET_COOLDOWN_HOURS', '6')) * 3600
+    if ttl <= 0:
+        return True  # cooldown disabled
+    return cache.add(f'ai:recs:attempt:{user.id}', '1', timeout=ttl)
+
+
 def _build_student_progress_snapshot(user):
     """Gather learning-path progress + recent activity for the AI prompt."""
     lines = []
@@ -1016,6 +1044,10 @@ def _generate_recommendations(user):
         )
         api_response.raise_for_status()
         data = api_response.json()
+        # Token accounting only. Recommendations are cheap (3-4 short cards),
+        # but the prompt embeds the full progress snapshot, so the input side
+        # is worth watching.
+        record_tokens(user, data, prompt_chars=len(user_prompt))
         parsed = json.loads(data['choices'][0]['message']['content'])
         items = parsed.get('recommendations', [])[:4]
         if not items:
@@ -1078,13 +1110,34 @@ def user_recommendations(request, user_id):
         return Response({'error': 'You are not authorized to view this user.'}, status=status.HTTP_403_FORBIDDEN)
 
     # POST forces a fresh AI regeneration; GET auto-generates when empty/stale.
+    #
+    # Note the silent failure: a failed generation is swallowed here rather
+    # than returned, because this endpoint's real job is to read
+    # recommendations and auto-generation is a side effect of reading them. The
+    # UI also GETs-then-POSTs to escalate, so a provider error must not fail
+    # the read. The cooldown below is what stops that escalation from becoming
+    # an unbounded retry loop; see users/ai_usage.py and RECS_ATTEMPT_TTL.
     if request.method == 'POST' or _recommendations_are_stale(user):
-        try:
-            _generate_recommendations(user)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"[Recommendation Generation Critical Error] {e}")
+        # Auto-generation is the common path (a plain GET on an empty or stale
+        # dashboard), so it is rate limited by wall clock rather than by the
+        # daily budget. One deliberate refresh is worth one point; a dashboard
+        # that silently regenerated on every page view is worth as many as the
+        # user's browser decided to ask for. A cooldown claimed *before* the
+        # call also means concurrent GETs cannot all miss the marker and
+        # generate at once.
+        if request.method == 'POST' or _claim_recs_attempt(user):
+            charge(user, 'recommend')
+            try:
+                _generate_recommendations(user)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"[Recommendation Generation Critical Error] {e}")
+        else:
+            print(
+                f"[Recommendations] Auto-generation skipped for user {user_id}: "
+                "attempted recently, serving stored cards."
+            )
 
     recommendations = _daily_rotation(
         # select_related: the serializer dereferences rec.topic to check that
@@ -2781,6 +2834,13 @@ Each level must have:
 
         model_name = os.getenv('DEEPSEEK_GEN_MODEL', 'deepseek-v4-pro')
 
+        # Charged once the file has parsed and the key is present, so a
+        # malformed upload or an unconfigured server costs the student nothing.
+        # This is the most expensive route in the app (12000 output tokens plus
+        # the whole document), which is why it carries 12 points against a
+        # student's 50-point day.
+        charge(request.user, 'lesson')
+
         payload = {
             "model": model_name,
             # DeepSeek V4 thinks by default; that hidden reasoning pass burns
@@ -2819,6 +2879,9 @@ Each level must have:
 
         data = response.json()
         choice = data["choices"][0]
+        # Token accounting only. The lesson route is the one to watch when
+        # tuning the weights: it is the largest single prompt in the app.
+        record_tokens(request.user, data, prompt_chars=len(clean_text[:12000]))
         if choice.get("finish_reason") == "length":
             print("❌ DEEPSEEK RESPONSE TRUNCATED (finish_reason=length)")
             return Response(
@@ -2856,6 +2919,13 @@ Each level must have:
 
         return Response(lesson_data, status=status.HTTP_201_CREATED)
 
+    except Throttled:
+        # Must be re-raised, not swallowed. This is the catch-all below in
+        # disguise: the quota refusal raises Throttled, the bare `except
+        # Exception` caught it, and an exhausted student got "Internal server
+        # error" with a 500 instead of the 429 that tells them (and the mobile
+        # app) to stop and say when it resets.
+        raise
     except Exception as e:
         print(f"[generate_lesson error] {e}")
         return Response(
@@ -2873,6 +2943,10 @@ class GenerateTopicView(APIView):
     def post(self, request, course_id):
         try:
             return self._handle(request, course_id)
+        except Throttled:
+            # See the note on generate_lesson: the catch-all would otherwise
+            # turn an exhausted daily budget into a 500.
+            raise
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -3017,6 +3091,11 @@ A practice question must be answerable from its cited Learn block without requir
 
         model_name = os.getenv('DEEPSEEK_GEN_MODEL', 'deepseek-v4-pro')
 
+        # After the educator check and the file parse, before the provider call.
+        # 8 points: the cheapest of the three generation routes, but still the
+        # second most expensive after a full lesson.
+        charge(request.user, 'topic')
+
         # DeepSeek V4 thinks by default. That hidden reasoning pass eats the
         # token budget, adds tens of seconds of latency, and was the reason
         # generation ran past the gunicorn timeout. Disable it here, matching
@@ -3048,6 +3127,8 @@ A practice question must be answerable from its cited Learn block without requir
 
             data = response.json()
             choice = data['choices'][0]
+            # Token accounting only.
+            record_tokens(request.user, data, prompt_chars=len(clean_text[:12000]))
             # A truncated response would otherwise fail safe_json_parse and get
             # reported as the misleading "AI returned invalid structure".
             if choice.get('finish_reason') == 'length':

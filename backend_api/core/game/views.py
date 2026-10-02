@@ -14,6 +14,7 @@ from firebase_admin import firestore as fs
 from users.utils.file_parser import extract_text_from_file
 from users.gamification import award_xp, log_activity, record_game_finish
 from users.models import User
+from users.ai_usage import charge, record_tokens
 from core.throttling import AIGameThrottle
 from .models import OfflineGameResult
 
@@ -311,7 +312,14 @@ class CreateGameView(APIView):
             if not file_content:
                 return Response({'error': 'Could not extract text from file'}, status=400)
 
-            ai_data = self.process_content(file_content, question_count, question_type)
+            # Charged only on the branch that actually calls DeepSeek. Creating
+            # a room from an existing quiz, or deferring the choice to the
+            # lobby, costs no AI budget -- there is no provider call to pay for.
+            charge(request.user, 'game')
+
+            ai_data = self.process_content(
+                file_content, question_count, question_type, user=request.user,
+            )
             if not ai_data:
                 return Response({'error': 'AI failed to process content'}, status=500)
 
@@ -413,7 +421,12 @@ class CreateGameView(APIView):
 
         return Response(response_data)
 
-    def process_content(self, content, count, question_type='mcq'):
+    def process_content(self, content, count, question_type='mcq', user=None):
+        """Generate questions for uploaded content via DeepSeek.
+
+        `user` is used only to record token usage; it is optional so the many
+        existing tests that call this directly do not need a user.
+        """
         if question_type == 'identification':
             format_block = '''{
   "topic": "Concise Title",
@@ -463,7 +476,10 @@ Content:
                 },
                 timeout=20
             )
-            return json.loads(response.json()['choices'][0]['message']['content'])
+            data = response.json()
+            if user is not None:
+                record_tokens(user, data, prompt_chars=len(content[:10000]))
+            return json.loads(data['choices'][0]['message']['content'])
         except Exception as e:
             print(f'[AI Error] {e}')
             return None
