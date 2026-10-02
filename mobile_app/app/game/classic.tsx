@@ -7,6 +7,7 @@ import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { getToken } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
+import { RateLimitError, isRateLimitError, normalizeRetryAfter } from '@/services/aiLimits';
 import * as DocumentPicker from 'expo-document-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -199,11 +200,25 @@ export default function ClassicGameSetupScreen() {
           body: formData,
         });
         const data = await response.json();
+        if (response.status === 429) {
+          // Only this branch spends AI budget -- the server generates questions
+          // from the upload. Creating a room from an existing quiz above is not
+          // charged, so a 429 here is specifically the daily AI allowance.
+          throw new RateLimitError(
+            (Array.isArray(data.detail) ? data.detail.join(' ') : data.detail)
+              || "You've used today's AI allowance. It resets tomorrow.",
+            normalizeRetryAfter(response.headers.get('Retry-After')),
+          );
+        }
         if (!response.ok) throw new Error(data.error || 'Failed to create room');
         router.push({ pathname: '/game/lobby', params: { roomCode: data.roomCode, isHost: 'true', topic: data.topic, teamMode: data.teamMode ? 'true' : 'false' } });
       }
     } catch (error: any) {
-      Alert.alert('Error', error.message);
+      if (isRateLimitError(error)) {
+        Alert.alert('AI limit', error.message);
+      } else {
+        Alert.alert('Error', error.message);
+      }
     } finally {
       setLoading(false);
     }

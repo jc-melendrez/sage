@@ -2,6 +2,7 @@ import { API_BASE_URL } from '../config/api';
 import { getToken, refreshAccessToken, getCachedUserId } from './authService';
 import { getCachedResponse, setCachedResponse, setCacheUserId, parseCached } from './apiCache';
 import { cachePolicyFor, buildCacheKey } from './cachePolicy';
+import { RateLimitError, normalizeRetryAfter } from './aiLimits';
 
 export interface ApiRequestOptions extends RequestInit {
   /** Bypass the HTTP cache for this request (pull-to-refresh, writes that must be live). */
@@ -15,6 +16,31 @@ export interface ApiRequestOptions extends RequestInit {
    * read, which is what "show me the latest and remember it" means.
    */
   refresh?: boolean;
+}
+
+/**
+ * Turn a failed response into an Error, preserving 429 as a `RateLimitError`.
+ *
+ * The daily AI budget and the burst throttles both answer 429, and a screen
+ * has to react differently to those than to a 500: the budget needs a "try again
+ * later" message, the other needs a retry. Collapsing both into `new Error(msg)`
+ * here would lose the status code that distinguishes them.
+ *
+ * DRF's throttle handler puts the human-readable text in `detail`, but a plain
+ * DRF exception uses `detail` for a *list* of strings, so both shapes are
+ * flattened rather than only reading `.detail` as a string.
+ */
+async function errorFromResponse(response: Response): Promise<Error> {
+  const body = await response.json().catch(() => ({}));
+  const raw = body?.message || body?.error || body?.detail;
+  const message = Array.isArray(raw) ? raw.join(' ') : typeof raw === 'string' ? raw : '';
+
+  if (response.status === 429) {
+    const retryAfter = normalizeRetryAfter(response.headers.get('Retry-After'));
+    return new RateLimitError(message || 'AI limit reached. Please try again shortly.', retryAfter);
+  }
+
+  return new Error(message || `API error: ${response.status}`);
 }
 
 async function fetchJson<T>(url: string, options: RequestInit): Promise<T> {
@@ -41,10 +67,7 @@ async function fetchJson<T>(url: string, options: RequestInit): Promise<T> {
     }
   }
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.message || error.error || error.detail || `API error: ${response.status}`);
-  }
+  if (!response.ok) throw await errorFromResponse(response);
 
   // 204 No Content has no body, so parsing it would throw. The DELETE
   // endpoints in the task/activity API answer with it.
@@ -145,10 +168,7 @@ export async function apiUpload<T>(
     response = await doFetch(result.access);
   }
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.message || error.error || error.detail || `API error: ${response.status}`);
-  }
+  if (!response.ok) throw await errorFromResponse(response);
 
   // 204 No Content (deletes) has nothing to parse.
   if (response.status === 204) return undefined as T;

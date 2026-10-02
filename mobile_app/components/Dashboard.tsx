@@ -29,6 +29,7 @@ import NotificationSheet from './NotificationSheet';
 import { getCurrentUser } from '@/services/authService';
 import { useCurrentUser } from '@/contexts/UserContext';
 import { apiCall } from '@/services/apiClient';
+import { isRateLimitError } from '@/services/aiLimits';
 import { dailyCheckIn } from '@/services/gamificationService';
 import BottomSheet from './BottomSheet';
 
@@ -295,10 +296,13 @@ export default function Dashboard() {
         setBadges(await apiCall<Badge[]>(`/users/${realUserId}/badges/`, opts));
       }
 
-      let recs = await apiCall<Recommendation[]>(`/users/${realUserId}/recommendations/`, opts);
-      if (Array.isArray(recs) && recs.length === 0) {
-        recs = await refreshRecommendations(realUserId);
-      }
+      // A single GET. This used to escalate to a POST whenever the list came
+      // back empty, which meant every dashboard mount with no cards stored
+      // forced a provider call -- and because a failed generation stores
+      // nothing, "empty" stayed true forever, so every mount retried. The
+      // server now auto-generates on GET behind a cooldown marker, so the GET
+      // alone is enough and the escalation is no longer needed.
+      const recs = await apiCall<Recommendation[]>(`/users/${realUserId}/recommendations/`, opts);
       setRecommendations(recs);
       setActivities(await apiCall<Activity[]>(`/users/${realUserId}/activities/`, opts));
     } catch (err) {
@@ -354,25 +358,35 @@ export default function Dashboard() {
     setLesson(null);
   };
 
-  const refreshRecommendations = async (userId: number): Promise<Recommendation[]> => {
-    try {
-      const data = await apiCall<Recommendation[]>(`/users/${userId}/recommendations/`, {
-        method: 'POST',
-        body: JSON.stringify({}),
-      });
-      return Array.isArray(data) ? data : [];
-    } catch {
-      return [];
-    }
-  };
-
+  /**
+ * Explicit user-initiated refresh ("refresh recommendations").
+ *
+ * This is the one place a POST is correct: the user asked for fresh cards, so
+ * it bypasses the cooldown that throttles automatic generation. A 429 here is
+ * a real budget refusal, so it is reported rather than swallowed -- silently
+ * returning [] would look identical to "no recommendations yet".
+ */
   const handleRefreshRecommendations = async () => {
     if (refreshingRecs.current) return;
     refreshingRecs.current = true;
-    if (user?.id) {
-      setRecommendations(await refreshRecommendations(user.id));
+    try {
+      if (user?.id) {
+        const data = await apiCall<Recommendation[]>(`/users/${user.id}/recommendations/`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+          noCache: true,
+        });
+        setRecommendations(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      if (isRateLimitError(err)) {
+        Alert.alert('AI limit', err.message);
+      } else {
+        console.error('Error refreshing recommendations:', err);
+      }
+    } finally {
+      refreshingRecs.current = false;
     }
-    refreshingRecs.current = false;
   };
 
   const [isOpeningRecommendation, setIsOpeningRecommendation] = useState(false);

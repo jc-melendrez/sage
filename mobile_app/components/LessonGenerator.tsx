@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
+import { isRateLimitError, limitMessage, normalizeRetryAfter } from '@/services/aiLimits';
 import { colors } from '@/constants/theme';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -72,7 +73,19 @@ export default function LessonGenerator({ onCourseGenerated, onCancel }: LessonG
       const data = JSON.parse(rawText);
 
       if (!response.ok) {
-        Alert.alert('Error', data.error || 'Failed to generate lesson');
+        if (response.status === 429) {
+          // Lessons are the most expensive action in the app, so this is the
+          // refusal a student is most likely to hit. It needs its own wording
+          // ("later") rather than "Failed to generate", which invites a retry
+          // that would only be refused again.
+          Alert.alert(
+            'AI limit',
+            (Array.isArray(data.detail) ? data.detail.join(' ') : data.detail)
+              || limitMessage(normalizeRetryAfter(response.headers.get('Retry-After'))),
+          );
+        } else {
+          Alert.alert('Error', data.error || 'Failed to generate lesson');
+        }
         return;
       }
 
@@ -80,7 +93,11 @@ export default function LessonGenerator({ onCourseGenerated, onCancel }: LessonG
       onCourseGenerated(data);
     } catch (error) {
       console.error(error);
-      Alert.alert('Error', 'Failed to generate lesson');
+      if (isRateLimitError(error)) {
+        Alert.alert('AI limit', error.message);
+      } else {
+        Alert.alert('Error', 'Failed to generate lesson');
+      }
     } finally {
       setLoading(false);
     }

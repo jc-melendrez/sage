@@ -18,6 +18,7 @@ import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
 import { getMyCourses, createTopic, createNode, generateTopic, GenerateTopicResponse } from '@/services/courseService';
+import { isRateLimitError } from '@/services/aiLimits';
 import { NODE_TYPE_CONFIG } from '@/types/learning';
 
 type GeneratedNode = GenerateTopicResponse['nodes'][number];
@@ -95,7 +96,13 @@ export default function CreateLessonScreen() {
       setPreviewData(result);
       setPreviewVisible(true);
     } catch (err) {
-      Alert.alert('Generation failed', err instanceof Error ? err.message : 'AI could not generate content.');
+      // A 429 is a budget refusal, not a failure: "Generation failed" invites a
+      // retry that will be refused again until the window resets.
+      if (isRateLimitError(err)) {
+        Alert.alert('AI limit', err.message);
+      } else {
+        Alert.alert('Generation failed', err instanceof Error ? err.message : 'AI could not generate content.');
+      }
     } finally {
       setGenerating(false);
     }

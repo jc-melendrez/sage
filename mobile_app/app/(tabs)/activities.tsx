@@ -12,6 +12,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
 import { useRouter } from 'expo-router';
 import { getToken } from '@/services/authService';
+import { RateLimitError, isRateLimitError, normalizeRetryAfter } from '@/services/aiLimits';
 import { apiCall } from '@/services/apiClient';
 import { invalidateCachePrefix } from '@/services/apiCache';
 import { completeQuiz } from '@/services/gamificationService';
@@ -453,6 +454,16 @@ export default function ActivitiesScreen() {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
+        if (response.status === 429) {
+          // The daily AI budget or the per-hour quiz burst limit. Thrown as its
+          // own type so the catch below can say "later" instead of "Failed",
+          // which would have the educator retry into the same refusal.
+          throw new RateLimitError(
+            (Array.isArray(errorData.detail) ? errorData.detail.join(' ') : errorData.detail)
+              || 'Quiz limit reached. Please try again later.',
+            normalizeRetryAfter(response.headers.get('Retry-After')),
+          );
+        }
         // A gunicorn/Cloudflare timeout answers with HTML, not JSON, so
         // errorData is empty and the educator only saw "Failed to generate
         // quiz" with no way to tell a timeout from a rejected request.
@@ -474,7 +485,11 @@ export default function ActivitiesScreen() {
     } catch (err) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       console.error("Generation Error Details:", err);
-      Alert.alert("Generation Failed", err instanceof Error ? err.message : "Something went wrong.");
+      if (isRateLimitError(err)) {
+        Alert.alert("AI limit", err.message);
+      } else {
+        Alert.alert("Generation Failed", err instanceof Error ? err.message : "Something went wrong.");
+      }
     } finally {
       setIsGeneratingQuiz(false);
       setQuizGenerationStatus('');

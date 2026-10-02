@@ -1,8 +1,17 @@
 import { useState, useRef, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getToken } from '@/services/authService';
+import { getToken, getCachedUserId } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
+import {
+  AiAction,
+  RateLimitError,
+  cooldownRemaining,
+  isRateLimitError,
+  limitMessage,
+  normalizeRetryAfter,
+  noteRateLimit,
+} from '@/services/aiLimits';
 import { notify } from '@/services/notify';
 import {
   pickDocument,
@@ -534,6 +543,18 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
     // send did nothing at all.
     if ((!textToSend.trim() && !attachedFile) || isLoading || isTyping) return;
 
+    // Checked before anything is sent or optimistically rendered, so hitting a
+    // limit does not leave the user's message sitting in the transcript with no
+    // reply under it. isLoading/isTyping above already block the concurrent-send
+    // case; this covers the sequential one -- a user who runs out of allowance
+    // taps send on every new question and burns a round trip each time.
+    const chatAction: AiAction = attachedFile?.mimeType?.startsWith('image/') ? 'chat_image' : 'chat';
+    const wait = await cooldownRemaining(await getCachedUserId(), chatAction);
+    if (wait > 0) {
+      notify('AI limit', limitMessage(wait));
+      return;
+    }
+
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     resetUserScrolled();
 
@@ -594,6 +615,18 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
         })
       });
 
+      if (response.status === 429) {
+        // Raised rather than thrown as a plain Error so the handler below can
+        // tell a spent budget from a dead backend -- they need different
+        // messages and different recovery.
+        const body = await response.json().catch(() => ({}));
+        const detail = Array.isArray(body?.detail) ? body.detail.join(' ') : body?.detail;
+        throw new RateLimitError(
+          detail || limitMessage(normalizeRetryAfter(response.headers.get('Retry-After'))),
+          normalizeRetryAfter(response.headers.get('Retry-After')),
+        );
+      }
+
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(errorText);
@@ -630,13 +663,30 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
       }]);
 
     } catch (error) {
-      console.error("AI Chat Error:", error);
-      setMessages((prev) => [...prev, {
-        id: Date.now() + 1,
-        type: 'ai',
-        text: "Sorry, I couldn't reach the server. Make sure your Django backend is running the latest code!",
-        time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
-      }]);
+      // The optimistic user message is removed for a refusal but kept for a
+      // transport failure. A budget refusal is an answer -- the server decided
+      // not to answer -- so leaving the bubble there implies SAGE is still
+      // working on it. A dead backend is different: the user may well want to
+      // retry, and the bubble is their cue.
+      if (isRateLimitError(error)) {
+        setMessages((prev) => prev.filter((m) => m.id !== userMessage.id));
+        // Recorded against the action that actually hit the cap, so an
+        // exhausted image-chat budget does not also block plain chat.
+        await noteRateLimit(
+          await getCachedUserId(),
+          chatAction,
+          error.retryAfterSeconds,
+        );
+        notify('AI limit', error.message);
+      } else {
+        console.error("AI Chat Error:", error);
+        setMessages((prev) => [...prev, {
+          id: Date.now() + 1,
+          type: 'ai',
+          text: "Sorry, I couldn't reach the server. Make sure your Django backend is running the latest code!",
+          time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+        }]);
+      }
     } finally {
       setIsLoading(false);
       setIsTyping(false);

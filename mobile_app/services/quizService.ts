@@ -2,6 +2,7 @@ import { apiCall } from './apiClient';
 import { API_BASE_URL } from '../config/api';
 import { getToken } from './authService';
 import { invalidateCachePrefix } from './apiCache';
+import { RateLimitError, normalizeRetryAfter } from './aiLimits';
 
 export interface QuizQuestion {
   id: number;
@@ -222,6 +223,17 @@ export async function generateQuiz(input: GenerateQuizInput): Promise<Quiz> {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    // A 429 here is the daily AI budget (or the per-hour quiz burst limit),
+    // not a failure. Surfacing it as its own error type lets the sheet say
+    // "come back later" instead of "generation failed, please try again",
+    // which would have the user retrying into a wall.
+    if (response.status === 429) {
+      throw new RateLimitError(
+        (Array.isArray(data.detail) ? data.detail.join(' ') : data.detail)
+          || 'Quiz limit reached. Please try again later.',
+        normalizeRetryAfter(response.headers.get('Retry-After')),
+      );
+    }
     // A gunicorn/Cloudflare timeout answers with an HTML error page, not JSON,
     // so `data` arrives empty and `data.error` is undefined. Falling back to a
     // bare "Failed to generate quiz" hid the one thing that distinguishes a

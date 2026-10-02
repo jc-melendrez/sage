@@ -2,6 +2,7 @@ import { apiCall } from './apiClient';
 import { API_BASE_URL } from '../config/api';
 import { getToken } from './authService';
 import { invalidateCachePrefix } from './apiCache';
+import { RateLimitError, normalizeRetryAfter } from './aiLimits';
 import { CoursePathTopic, LearningNode, NodeCompleteResponse, NodeType, ContentJson, Topic } from '@/types/learning';
 
 /** After any course-content write, drop cached course paths/nodes so edits show immediately. */
@@ -277,6 +278,16 @@ export async function generateTopic(
   }
 
   if (!response.ok) {
+    // 429 is the daily AI budget (or the per-hour topic burst limit). It needs
+    // to be distinguishable from a failure, or the screen invites a retry that
+    // cannot succeed.
+    if (response.status === 429) {
+      throw new RateLimitError(
+        (Array.isArray(data.detail) ? data.detail.join(' ') : data.detail)
+          || 'Topic generation limit reached. Please try again later.',
+        normalizeRetryAfter(response.headers.get('Retry-After')),
+      );
+    }
     throw new Error(data.error || data.message || data.detail || `Generation failed (${response.status})`);
   }
   invalidateCourseContent();
