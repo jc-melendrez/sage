@@ -47,13 +47,15 @@ STREAK_REWARD_INTERVAL = 3
 # ── Team momentum ────────────────────────────────────────────────────────
 # In team mode the multiplier is a *cumulative ladder* driven by how many
 # answers the team has got right, not a resettable streak. A resettable
-# streak is meaningless in the multiplayer loop: every player races their own
-# shuffled question order on a private timer (see StartGameView), so a
-# teammate's wrong answer would wipe the multiplier at a moment the player
-# could not anticipate or plan around. The ladder is monotonic, so it is
-# something a team can actually strategise around ("we're one miss from
-# dropping off x1.6"), and the miss penalty below gives wrong answers teeth
-# without ever eliminating a team.
+# streak is meaningless in the multiplayer loop: the whole team plays ONE
+# shared question on ONE shared countdown (see StartGameView and
+# TeamPickView), so a single member's wrong answer would wipe the multiplier
+# for everyone at a moment they could not anticipate or plan around. The ladder
+# is monotonic, so it is something a team can actually strategise around
+# ("we're one miss from dropping off x1.6"), and the miss penalty below gives
+# wrong answers teeth without ever eliminating a team.
+# The run of consecutive correct answers is still tracked -- as `teamStreak` --
+# but only pays a bonus; it no longer sets the multiplier.
 TEAM_MOMENTUM_TIERS = (
     (20, 2.0),
     (15, 1.6),
@@ -122,7 +124,14 @@ def team_multiplier(team_correct):
 
 
 def demote_multiplier(current_multiplier):
-    """The rung one step below `current_multiplier`, floored at x1.0."""
+    """The rung one step below `current_multiplier`, floored at x1.0.
+
+    Kept for reference but no longer called. A wrong answer used to drop both
+    the player's and the team's momentum one rung, which punished a team for a
+    mistake made by whoever happened to be wrong. Momentum is now purely
+    cumulative: a miss still resets the run (`streak` / `teamStreak`, so the
+    streak bonus and the powerup cadence reset) but never touches `multiplier`.
+    """
     for threshold, multiplier in reversed(TEAM_MOMENTUM_TIERS):
         if current_multiplier > multiplier:
             return multiplier
@@ -135,6 +144,145 @@ def next_momentum_tier(team_correct):
         if team_correct < threshold:
             return threshold, multiplier
     return None
+
+
+# ── Streak bonus ─────────────────────────────────────────────────────────
+# A separate reward from the momentum ladder. Momentum is cumulative and so can
+# only ever climb, which means a team that got to x1.6 early sees no further
+# feedback for the rest of the game. This rewards the *immediate* run instead:
+# three in a row starts paying extra, and it is lost the moment the run breaks.
+#
+# Applied after the momentum multiplier and before any 2x, so the ordering is
+# momentum -> streak bonus -> powerups. A streak bonus therefore scales with
+# the rung the team has earned, which is what makes the two read as one ladder.
+STREAK_BONUS_TIERS = (
+    (7, 1.5),
+    (5, 1.25),
+    (3, 1.1),
+)
+
+# Every Nth question is worth double. Deterministic rather than random so the
+# same quiz always pays the same way -- a player who can see that question 10 is
+# the big one can plan for it, which is the entire point of pacing a quiz.
+DOUBLE_POINT_EVERY = 5
+
+# XP for one correct answer, shared by the solo and team paths. Named so the team
+# resolver cannot quietly pay a different amount from the solo endpoint for the
+# same correct answer.
+XP_PER_CORRECT = 10
+
+# Grace period before the server accepts an expired team question. Clients run
+# their own countdown off `teamStartedAt`, so they expire a few milliseconds
+# before the server would. Without the slack, the last member of every team gets
+# a spurious "that question is already settled" error on each round.
+EXPIRY_GRACE_SECONDS = 2.0
+
+
+def shared_question_elapsed(room_data, now=None):
+    """Seconds since the room's shared team question started.
+
+    Returns `None` when the room has no start stamp, which the callers treat as
+    "not expiring" -- an old room without the field must keep working rather than
+    refusing every forced pick.
+    """
+    started = (room_data or {}).get('teamStartedAt')
+    if not started:
+        return None
+    if hasattr(started, 'tzinfo'):  # a real Firestore Timestamp or a datetime
+        moment = started
+        if timezone.is_naive(moment):
+            moment = timezone.make_aware(moment)
+        seconds = ((now or timezone.now()) - moment).total_seconds()
+    else:
+        parsed = parse_datetime(str(started))
+        if parsed is None:
+            return None
+        if timezone.is_naive(parsed):
+            parsed = timezone.make_aware(parsed)
+        seconds = ((now or timezone.now()) - parsed).total_seconds()
+    return max(0.0, seconds)
+
+
+def shared_question_expired(room_data, time_limit, now=None):
+    """True once the room's shared countdown for this question has run out."""
+    elapsed = shared_question_elapsed(room_data, now)
+    if elapsed is None:
+        return False
+    return elapsed >= (time_limit + EXPIRY_GRACE_SECONDS)
+
+
+def streak_bonus_multiplier(streak):
+    """Points multiplier earned by the current run of correct answers."""
+    for threshold, multiplier in STREAK_BONUS_TIERS:
+        if streak >= threshold:
+            return multiplier
+    return 1.0
+
+
+def is_double_point_question(index):
+    """True when `index` is one of the doubled questions."""
+    return (index + 1) % DOUBLE_POINT_EVERY == 0
+
+
+def question_time_limit(question, room_data):
+    """Seconds allowed for one question.
+
+    A question may carry its own `timeLimit`, which is how a quiz can give a
+    numeric question thirty seconds and a definitions question ten. Rooms and
+    questions that predate per-question limits fall back to the room default,
+    so an old room keeps its original behaviour rather than reading a missing
+    field as zero and instantly expiring every question.
+    """
+    raw = (question or {}).get('timeLimit')
+    try:
+        limit = float(raw) if raw is not None else float(room_data.get('timePerQuestion') or 15)
+    except (TypeError, ValueError):
+        limit = 15.0
+    return max(1.0, limit)
+
+
+def tally_team_picks(picks):
+    """Resolve a set of private picks into one team answer.
+
+    `picks` maps player id to the choice they submitted (absent players are
+    simply not in the map, so an unanswered teammate cannot dilute the tally).
+
+    Returns `(winning_choice, agreed_count, distinct_pickers, is_tie)`.
+
+    The rule is plain majority: most-picked wins. A tie -- two choices with the
+    same count, which a 2-2 split among four produces -- has no majority at all,
+    so it is reported as a tie and the caller voids the question rather than
+    awarding it to whichever side happened to be listed first. That keeps the
+    result independent of iteration order, which a `max()` over a tally would
+    not be.
+    """
+    counts = {}
+    for choice in (picks or {}).values():
+        if not choice:
+            continue
+        counts[choice] = counts.get(choice, 0) + 1
+    if not counts:
+        return '', 0, 0, False
+    top = max(counts.values())
+    leaders = [choice for choice, count in counts.items() if count == top]
+    pickers = len([c for c in (picks or {}).values() if c])
+    if len(leaders) > 1:
+        return '', top, pickers, True
+    return leaders[0], top, pickers, False
+
+
+def agreement_rate(answers):
+    """How often a player picked with their team, as a percentage.
+
+    Reads the player's OWN answer log, where each entry carries `agreed`. Only
+    ever called with one player's log, so it cannot expose anybody else's picks.
+    A player who never answered has no rate rather than a misleading zero.
+    """
+    entries = [e for e in (answers or {}).values() if e]
+    if not entries:
+        return 0
+    agreed = len([e for e in entries if e.get('agreed')])
+    return round(agreed / len(entries) * 100)
 
 
 def team_capacity(room_data, player_count):
@@ -184,6 +332,7 @@ def serialize_team(team_id, data):
         'powerups': {k: (data.get('powerups') or {}).get(k, 0) for k in POWERUP_KEYS},
         'namedBy': data.get('namedBy'),
         'nameLocked': bool(data.get('nameLocked', False)),
+        'leaderId': team_leader_id(data),
     }
 
 
@@ -214,6 +363,54 @@ def _team_stats(team_data):
         'maxMultiplier': team_data.get('maxMultiplier', 1.0) or 1.0,
         'memberCount': len(team_data.get('memberIds', []) or []),
     }
+
+
+def team_leader_id(team_data):
+    """The team's leader: whoever was seated first.
+
+    Stored on the team document as `leaderId` and set the moment a player joins
+    a team with an empty leader, so two players joining in the same instant
+    cannot both claim it -- AssignTeamView writes it inside the same transaction
+    that appends the member id. Falls back to the first member for teams that
+    predate the field.
+    """
+    leader = (team_data or {}).get('leaderId')
+    if leader:
+        return str(leader)
+    members = (team_data or {}).get('memberIds') or []
+    return str(members[0]) if members else ''
+
+
+def _settled_team_members(room_ref, team_data):
+    """Per-member results for one team, with agreement instead of a score split.
+
+    Members now share one team score, so `contribution` (a percentage of the
+    team's points) would be identical for everyone and meaningless. What
+    actually distinguishes members is how often they voted with the team, which
+    is computed here from each player's own answer log. `mvpId` is the member
+    with the best rate and is computed server-side for the same reason the
+    per-question agreement count is: the client is never handed a peer's picks.
+    """
+    members = []
+    for p in room_ref.collection('players').stream():
+        data = p.to_dict() or {}
+        if str(data.get('teamId')) != str(team_data.get('__id') or ''):
+            continue
+        entries = data.get('answers') or {}
+        values = [v for v in entries.values() if isinstance(v, dict)]
+        members.append({
+            'userId': p.id,
+            'displayName': data.get('displayName', 'Player'),
+            'answeredCount': len(values),
+            'agreement': agreement_rate(entries),
+        })
+    best = max((m['agreement'] for m in members), default=0)
+    # Only a member who actually voted counts. A team where nobody answered has
+    # a best rate of zero, and crowning one of them would be meaningless.
+    mvp = next((m for m in members if m['answeredCount'] > 0 and m['agreement'] == best), None)
+    for member in members:
+        member['isMvp'] = bool(mvp and member['userId'] == mvp['userId'])
+    return members, (mvp['userId'] if mvp else None)
 
 
 def _active_members_by_team(room_ref):
@@ -257,39 +454,45 @@ def snapshot_team_results(room_ref, room_data):
     if not room_data.get('teamMode', False):
         return
     active = _active_members_by_team(room_ref)
-    teams = room_ref.collection('teams').stream()
-    results = [{
-        'teamId': t.id,
-        'name': d.get('name', f'Team {t.id}'),
-        'color': d.get('color'),
-        'score': d.get('score', 0),
-        # `score` stays the raw team total because that is what the player
-        # actually banked; `rankScore` is what the team is RANKED on, and it is
-        # the value the placement XP above was computed from. Both are
-        # persisted together so the results screen can never sort on a
-        # different number than the one that was paid out.
-        'rankScore': team_rank_value(d, active.get(str(t.id), 0)),
-        'activeMembers': active.get(str(t.id), 0),
-        'correctCount': d.get('correctCount', 0),
-        'answeredCount': d.get('answeredCount', 0),
-        **_team_stats(d),
-        # Per-member contribution, so the final screen can show "who did the
-        # work inside this team" without ever ranking players across teams.
-        'members': [{
-            'userId': p.id,
-            'displayName': (pd or {}).get('displayName', 'Player'),
-            'score': (pd or {}).get('score', 0),
-            'correctCount': (pd or {}).get('correctCount', 0),
-            'answeredCount': (pd or {}).get('answeredCount', 0),
-        } for p in room_ref.collection('players').stream()
-            for pd in [p.to_dict() or {}]
-            if str(pd.get('teamId')) == str(t.id)],
-    } for t in teams for d in [t.to_dict() or {}]]
-    for result in results:
-        total = sum(m['score'] for m in result['members']) or 1
-        for member in result['members']:
-            member['contribution'] = round(member['score'] / total * 100)
+    teams = list(room_ref.collection('teams').stream())
+    results = []
+    for t in teams:
+        d = t.to_dict() or {}
+        # `_settled_team_members` matches on teamId, so the team id has to be
+        # readable from the snapshot it is handed.
+        members, mvp_id = _settled_team_members(room_ref, {**d, '__id': t.id})
+        results.append({
+            'teamId': t.id,
+            'name': d.get('name', f'Team {t.id}'),
+            'color': d.get('color'),
+            'score': d.get('score', 0),
+            # `score` stays the raw team total because that is what the player
+            # actually banked; `rankScore` is what the team is RANKED on, and it is
+            # the value the placement XP above was computed from. Both are
+            # persisted together so the results screen can never sort on a
+            # different number than the one that was paid out.
+            'rankScore': team_rank_value(d, active.get(str(t.id), 0)),
+            'activeMembers': active.get(str(t.id), 0),
+            'correctCount': d.get('correctCount', 0),
+            'answeredCount': d.get('answeredCount', 0),
+            **_team_stats(d),
+            'leaderId': team_leader_id(d),
+            # The member who tracked the team best. Computed server-side so the
+            # client never holds a peer's picks to work it out itself.
+            'mvpId': mvp_id,
+            'members': members,
+        })
     results.sort(key=lambda r: r['rankScore'], reverse=True)
+    # The finishing position is persisted rather than left for each client to
+    # re-derive: ties have to share a place (1,2,2,4) or the podium and the XP
+    # that was just paid will not agree. Same competition ranking as
+    # `_award_placement_xp` uses, on the same number.
+    prev_score = prev_rank = None
+    for i, row in enumerate(results):
+        if row['rankScore'] != prev_score:
+            prev_rank = i + 1
+            prev_score = row['rankScore']
+        row['rank'] = prev_rank
     room_ref.update({'teamResults': results})
 
 
@@ -400,6 +603,11 @@ class CreateGameView(APIView):
         room_data = {
             'status': 'waiting',
             'hostId': request.user.id,
+            # The educator who created the room. `hostId` moves if they leave
+            # (HostClaimView) so the session stays manageable, but only the owner
+            # can settle it and pay out XP -- a handover is a custodian change,
+            # not a transfer of ownership.
+            'ownerId': request.user.id,
             'hostName': get_display_name(request.user),
             'hostIsStudent': request.user.role == 'student',
             'topic': topic,
@@ -414,6 +622,11 @@ class CreateGameView(APIView):
         if team_mode:
             room_data['teamMode'] = True
             room_data['teamCount'] = team_count
+            # Shared team-question state, seeded here as well as at start so a
+            # client that reads the room before START (the lobby does) sees a
+            # coherent index rather than a missing field.
+            room_data['teamQuestionIndex'] = 0
+            room_data['teamStartedAt'] = None
             if quiz_id:
                 # Lets StartGameView rebuild the questions for a lobby that was
                 # created without one.
@@ -445,6 +658,8 @@ class CreateGameView(APIView):
                     'powerups': empty_powerups(),
                     'namedBy': None,
                     'nameLocked': False,
+                    # Filled in by AssignTeamView for whoever joins first.
+                    'leaderId': None,
                 })
 
         player_data = {
@@ -810,11 +1025,18 @@ class StartGameView(APIView):
                 if tid]
             assignments.sort(key=lambda a: (a['teamId'], a['displayName']))
 
-        # Assign shuffled question order to each player
+        # Assign question order to each player.
+        #
+        # Team mode deliberately does NOT shuffle: teammates have to see the same
+        # question at the same time to vote on it, which is the entire mechanic.
+        # A private order would mean four members looking at four different
+        # questions and the "team answer" would be a comparison of questions
+        # nobody else was looking at.
         count = len(room_data.get('questions', []))
         for player in players:
             order = list(range(count))
-            random.shuffle(order)
+            if not team_mode:
+                random.shuffle(order)
             player.reference.update({'questionOrder': order})
 
         update_fields = {
@@ -824,6 +1046,12 @@ class StartGameView(APIView):
         if team_mode:
             update_fields['teamAssignments'] = assignments
             update_fields['maxTeamSize'] = team_capacity(room_data, len(players))
+            # Shared team-question state. The whole room is on question 0 from
+            # the same instant, and `teamStartedAt` is what every client derives
+            # its countdown from -- a per-player interval would drift and let one
+            # member submit after the team had already moved on.
+            update_fields['teamQuestionIndex'] = 0
+            update_fields['teamStartedAt'] = fs.SERVER_TIMESTAMP
         room_ref.update(update_fields)
 
         return Response({
@@ -885,6 +1113,19 @@ class AnswerQuestionView(APIView):
             team_mode = bool(room.get('teamMode', False))
 
             player_data = player_ref.get().to_dict() or {}
+
+            if room.get('teamMode', False):
+                # Team mode has its own endpoint. It used to share this one,
+                # which is how a "team game" ended up being four independent
+                # answers summed into a team score: each member had a private
+                # question order and a private timer, so there was never a
+                # moment where teammates agreed on anything. Routing it through
+                # /game/teams/pick/ also means a member cannot score the team by
+                # calling the old endpoint directly.
+                return Response({
+                    'error': 'Team mode uses the team pick endpoint',
+                    'useTeamPick': True,
+                }, status=409)
 
             # Spectators watch; they do not compete. Rejected here, before any
             # powerup is charged and before the transaction opens, so a
@@ -978,8 +1219,10 @@ class AnswerQuestionView(APIView):
                 powerups_spent = {}
                 if hint_charge:
                     powerups_spent['powerups.hint'] = fs.Increment(-1)
-                if use_shield:
-                    powerups_spent['powerups.shield'] = fs.Increment(-1)
+                # The shield is NOT charged here. It is charged in the wrong-answer
+                # branch below, where it is actually spent -- it used to be debited
+                # on every answer, so arming it and answering correctly threw the
+                # charge away and still reset nothing.
 
                 # One consistent view of the team for the whole transaction.
                 # Read up front because the boost check has to happen before
@@ -1043,6 +1286,25 @@ class AnswerQuestionView(APIView):
                         if multiplier != 1.0:
                             earned_points = int(round(earned_points * multiplier))
 
+                    # Streak bonus on top of the momentum rung. This is the
+                    # immediate-run reward that momentum cannot provide: the
+                    # ladder only ever climbs, so without this a player who
+                    # reached x1.4 early got no further feedback all game.
+                    #
+                    # Read off the streak this answer *completes*, not the one
+                    # before it, so the third answer in a run is the first that
+                    # pays -- the same rung the team path awards, otherwise
+                    # classic and team play would disagree by one answer.
+                    prior_streak = data.get('streak', 0) or 0
+                    bonus = streak_bonus_multiplier(prior_streak + 1)
+                    if bonus != 1.0:
+                        earned_points = int(round(earned_points * bonus))
+
+                    # Every 5th question pays double, so the quiz has a rhythm
+                    # the player can anticipate.
+                    if is_double_point_question(question_index):
+                        earned_points *= 2
+
                     # Apply 2x Multiplier
                     if use_double:
                         earned_points *= 2
@@ -1066,8 +1328,8 @@ class AnswerQuestionView(APIView):
                             powerups_spent[f'powerups.{key}'] = fs.Increment(-1)
 
                     # Powerup Reward Logic
-                    current_streak = data.get('streak', 0)
-                    new_streak = current_streak + 1
+                    current_streak = prior_streak
+                    new_streak = prior_streak + 1
 
                     # Guaranteed reward on every 3rd consecutive correct
                     # answer — the streak itself is the reward, there is no
@@ -1108,8 +1370,11 @@ class AnswerQuestionView(APIView):
                     updates = {
                         'answeredCount': fs.Increment(1),
                     }
-                    # Shield protects streak
-                    if not use_shield:
+                    # Shield protects the streak -- and is only paid for here,
+                    # where it actually did something.
+                    if use_shield:
+                        powerups_spent['powerups.shield'] = fs.Increment(-1)
+                    else:
                         updates['streak'] = 0
 
                 # Merge result cache into a single atomic player update
@@ -1130,22 +1395,29 @@ class AnswerQuestionView(APIView):
                     if is_correct:
                         prior_streak = data.get('streak', 0) or 0
                         prior_correct = data.get('correctCount', 0) or 0
+                        prior_best = data.get('bestStreak', 0) or 0
                         # Store the rung just EARNED, not the rung that scored
                         # this answer. A team stores `team_multiplier(new)` while
                         # scoring with `team_multiplier(prior)`, so the flame the
                         # player is shown is always the tier they have reached,
                         # and the boost lands on the NEXT answer.
                         final_updates['multiplier'] = momentum_multiplier(prior_correct + 1)
-                        final_updates['bestStreak'] = max(
-                            data.get('bestStreak', 0) or 0, prior_streak + 1)
-                    elif not use_shield:
-                        # A miss costs one rung, mirroring how a team miss
-                        # demotes the team. Soft by design: the next correct
-                        # answer restores the ladder from `correctCount`.
-                        final_updates['multiplier'] = demote_multiplier(
-                            data.get('multiplier', 1.0) or 1.0)
+                        final_updates['bestStreak'] = max(prior_best, prior_streak + 1)
+                    # No demotion on a miss. `streak` is reset above, which is
+                    # what the streak bonus and the powerup cadence read; the
+                    # momentum ladder itself is cumulative and stays put.
 
                 final_updates['answeredQuestions'] = fs.ArrayUnion([question_index])
+
+                # `streak` drives both the streak bonus on the NEXT answer and
+                # the powerup reward cadence, so it is read here rather than
+                # taken from the increment. A shielded miss leaves the run alone
+                # -- that is the entire point of a shield -- so this cannot
+                # unconditionally zero it the way the plain miss branch does.
+                final_updates['streak'] = (
+                    (data.get('streak', 0) or 0) + 1 if is_correct
+                    else ((data.get('streak', 0) or 0) if use_shield else 0)
+                )
 
                 # Per-question answer log, written as a dot path so each
                 # question merges one key instead of rewriting the whole map.
@@ -1207,11 +1479,12 @@ class AnswerQuestionView(APIView):
                             team_now.get('bestStreak', 0) or 0, new_streak)
                     else:
                         if not use_shield:
-                            # A miss breaks the team flame and drops the team
-                            # one rung of the momentum ladder. Soft by design:
-                            # recoverable, never elimination.
+                            # A miss breaks the team flame so the streak bonus
+                            # and the powerup cadence reset. It does NOT touch
+                            # `multiplier`: the ladder is cumulative now, and a
+                            # drop was punishing the whole team for one member's
+                            # miss on a question the others had not reached yet.
                             team_updates['teamStreak'] = 0
-                            team_updates['multiplier'] = demote_multiplier(prior_multiplier)
                     transaction.update(team_ref, team_updates)
 
                 # Perform the single atomic update
@@ -1256,13 +1529,30 @@ class AnswerQuestionView(APIView):
             return Response({'error': f'Failed to process answer: {str(e)}'}, status=500)
 
 class FinishGameView(APIView):
+    """Vote "I'm done", and settle the room.
+
+    Two distinct actions share one endpoint, split by an explicit flag:
+
+      * a player POSTs with no `confirm` -- they are recorded as finished and
+        told how many others are still going. This does NOT settle anything.
+      * the host POSTs with `confirm: true` -- only then is the room closed,
+        placement XP paid and team results snapshotted.
+
+    Previously the host settled the room instantly on their own tap, which meant
+    one educator tapping "end session" mid-game skipped every remaining question
+    for everyone; and because the view had no membership check at all, a
+    spectator's automatic finish call could settle the room on their behalf.
+    Only the host settles now, and only explicitly.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         try:
-            room_code = request.data.get('roomCode')
+            room_code = (request.data.get('roomCode') or '').upper()
             if not room_code:
                 return Response({'error': 'roomCode is required'}, status=400)
+            confirm = str(request.data.get('confirm', 'false')).lower() == 'true'
+            force_settle = str(request.data.get('force', 'false')).lower() == 'true'
 
             db = get_firestore()
             room_ref = db.collection('gameRooms').document(room_code)
@@ -1273,81 +1563,139 @@ class FinishGameView(APIView):
 
             room_data = room_doc.to_dict() or {}
             player_ref = room_ref.collection('players').document(str(request.user.id))
+            player_doc = player_ref.get()
             team_mode = bool(room_data.get('teamMode', False))
+
+            if not player_doc.exists:
+                return Response({'error': 'You are not in this room'}, status=403)
+
+            uid = str(request.user.id)
+            host_id = str(room_data.get('hostId'))
+            # Settlement is the owner's call, not the custodian's. Rooms created
+            # before `ownerId` existed fall back to the live host, so an old
+            # session is not left with nobody able to end it.
+            owner_id = str(room_data.get('ownerId') or room_data.get('hostId'))
+
+            if confirm:
+                if uid != owner_id:
+                    # Deliberately compares against ownerId, not hostId: a
+                    # student promoted by HostClaimView to keep the room
+                    # manageable must not also gain the power to end the game
+                    # and pay out everyone's XP.
+                    return Response({
+                        'error': 'Only the room owner can end the game',
+                        'hostId': room_data.get('hostId'),
+                        'ownerId': room_data.get('ownerId') or room_data.get('hostId'),
+                    }, status=403)
+                if room_data.get('status') != 'active':
+                    return Response({'error': 'This game is not running'}, status=400)
+
+                # Wait for the players. The old flow settled on the host's tap
+                # alone, which meant one educator ending the session while a team
+                # was mid-question cost them the rest of the quiz with nothing
+                # said. `force` is the deliberate escape hatch for a session that
+                # is genuinely broken.
+                status = self._progress(room_ref, room_data, uid)
+                if not status['allFinished'] and not force_settle:
+                    return Response({
+                        'error': 'Some players are still answering',
+                        **status,
+                        'canSettle': True,
+                    }, status=409)
+
+                return Response({
+                    'message': 'Game ended',
+                    'allFinished': True,
+                    # True when the owner cut the session short with players
+                    # still on a question, so the client can say so rather than
+                    # implying everybody finished.
+                    'endedEarly': not status['allFinished'],
+                    **self._settle(room_ref, room_code, room_data),
+                })
+
+            # A vote. Spectators do not get one: they never competed, so they
+            # cannot be part of "everyone has finished", and letting them vote
+            # let a room be held open (or closed) by somebody who was only
+            # watching.
+            if team_mode and not (player_doc.to_dict() or {}).get('teamId'):
+                return Response({'error': 'Spectators do not finish the game'}, status=403)
 
             player_ref.update({'isFinished': True})
 
             room_data = room_ref.get().to_dict() or {}
-            host_id = str(room_data.get('hostId'))
-
-            def clear_reactions():
-                """Drop the ephemeral cheer subcollection on finish.
-
-                Reactions are only ever read as a rolling few-second window,
-                but nothing else prunes them, so a long game would otherwise
-                leave a subcollection growing for every question.
-                """
-                try:
-                    for doc in room_ref.collection('reactions').list_documents():
-                        doc.delete()
-                except Exception as e:  # never fail a finished game over this
-                    print(f'[FinishGame] reaction cleanup failed: {e}')
-
-            def settle():
-                """Close the room out, pay everyone once, snapshot teams."""
-                room_ref.update({
-                    'status': 'finished',
-                    'finishedAt': fs.SERVER_TIMESTAMP,
-                })
-                self._award_placement_xp(room_ref, room_code, team_mode)
-                snapshot_team_results(room_ref, room_data)
-                clear_reactions()
-                return self._rank_of_caller(room_ref, room_data, team_mode)
-
-            if str(request.user.id) == host_id:
-                # Host can end the session at any time. This used to return
-                # early without paying anyone, so "End Session Now" silently
-                # skipped the whole XP award.
-                return Response({
-                    'message': 'Marked as finished',
-                    'allFinished': True,
-                    **settle(),
-                })
-
-            # Check if all *participating* players are finished.
-            #
-            # Spectators are deliberately not waited on. They cannot answer
-            # (AnswerQuestionView rejects them), so requiring their
-            # `isFinished` meant a single watcher could hold the whole room
-            # open forever and nobody would ever be paid their placement XP.
-            # Classic mode is untouched: it has no teamId, so the spectator
-            # branch never triggers and every non-host still has to finish.
-            def _counts_as_done(p):
-                data = p.to_dict() or {}
-                if p.id == host_id:
-                    return True
-                if team_mode and not data.get('teamId'):
-                    return True
-                return bool(data.get('isFinished', False))
-
-            players = room_ref.collection('players').stream()
-            all_finished = all(_counts_as_done(p) for p in players)
-
-            # Only award placement XP on the transition to finished (once per room)
-            already_finished = room_data.get('status') == 'finished'
-            if all_finished and not already_finished:
-                caller = settle()
-            else:
-                caller = self._rank_of_caller(room_ref, room_data, team_mode)
+            status = self._progress(room_ref, room_data, uid)
 
             return Response({
                 'message': 'Marked as finished',
-                'allFinished': all_finished,
-                **caller,
+                'allFinished': status['allFinished'],
+                'remaining': status['remaining'],
+                'finishedCount': status['finishedCount'],
+                'participantCount': status['participantCount'],
+                # True once every participant has voted, so the client can
+                # switch the host's button from "waiting" to "End for everyone".
+                'readyToSettle': status['allFinished'],
+                'canSettle': uid == owner_id,
             })
         except Exception as e:
             print(f'[FinishGame Error] {e}')
             return Response({'error': 'Failed to finish game'}, status=500)
+
+    @staticmethod
+    def _participants(room_ref, room_data, host_id):
+        """(player snapshots, ids counted for "everyone is done").
+
+        Spectators are excluded. They cannot answer, so waiting on their vote
+        let one watcher hold the room open forever and nobody get paid; letting
+        them count as finished let a room settle while a competitor was still
+        playing. The host is always counted -- they run the room.
+        """
+        out = []
+        for p in room_ref.collection('players').stream():
+            data = p.to_dict() or {}
+            if room_data.get('teamMode', False) and not data.get('teamId'):
+                continue
+            out.append((p.id, data))
+        return out
+
+    def _progress(self, room_ref, room_data, caller_id):
+        host_id = str(room_data.get('hostId'))
+        participants = self._participants(room_ref, room_data, host_id)
+        finished = [
+            pid for pid, data in participants
+            if pid == host_id or bool(data.get('isFinished', False))
+        ]
+        return {
+            'allFinished': len(finished) >= len(participants),
+            'remaining': max(0, len(participants) - len(finished)),
+            'finishedCount': len(finished),
+            'participantCount': len(participants),
+        }
+
+    def _settle(self, room_ref, room_code, room_data):
+        """Close the room out, pay everyone once, snapshot teams."""
+        team_mode = bool(room_data.get('teamMode', False))
+
+        def clear_reactions():
+            """Drop the ephemeral cheer subcollection on finish.
+
+            Reactions are only ever read as a rolling few-second window,
+            but nothing else prunes them, so a long game would otherwise
+            leave a subcollection growing for every question.
+            """
+            try:
+                for doc in room_ref.collection('reactions').list_documents():
+                    doc.delete()
+            except Exception as e:  # never fail a finished game over this
+                print(f'[FinishGame] reaction cleanup failed: {e}')
+
+        room_ref.update({
+            'status': 'finished',
+            'finishedAt': fs.SERVER_TIMESTAMP,
+        })
+        self._award_placement_xp(room_ref, room_code, team_mode)
+        snapshot_team_results(room_ref, room_data)
+        clear_reactions()
+        return self._rank_of_caller(room_ref, room_data, team_mode)
 
     def _rank_of_caller(self, room_ref, room_data, team_mode):
         """The finishing player's placement.
@@ -1642,11 +1990,21 @@ class AssignTeamView(APIView):
             if old_ref is not None:
                 transaction.get(old_ref)
             if team_ref is not None:
-                transaction.get(team_ref)
+                # Read through the document reference, NOT
+                # transaction.get(team_ref) -- the latter yields a lazy
+                # generator of snapshots, which has no `.to_dict()` and is the
+                # exact trap documented in AnswerQuestionView.
+                current_team = team_ref.get(transaction=transaction).to_dict() or {}
                 transaction.update(team_ref, {
                     'memberIds': fs.ArrayUnion([uid]),
                     'memberCount': fs.Increment(1),
                 })
+                # First member in becomes the team's leader. Written only when
+                # the team has no leader yet, so two players joining in the same
+                # instant cannot both claim it -- and so a later joiner can never
+                # take the role over from the player who named the team.
+                if not current_team.get('leaderId'):
+                    transaction.update(team_ref, {'leaderId': uid})
             if old_ref is not None:
                 transaction.update(old_ref, {
                     'memberIds': fs.ArrayRemove([uid]),
@@ -1841,13 +2199,15 @@ class RenameTeamView(APIView):
 
         uid = str(request.user.id)
         is_host = str(room_data.get('hostId')) == uid
-        # Locked names survive a room restart: once a class has committed to
-        # "The Brainy Bunch", a later joiner must not be able to rename it.
-        already_named = team_data.get('nameLocked', False)
-        if not is_host and already_named:
-            return Response({'error': 'Your team has already picked a name'}, status=403)
-        if not is_host and uid not in [str(m) for m in (team_data.get('memberIds') or [])]:
+        is_member = uid in [str(m) for m in (team_data.get('memberIds') or [])]
+        if not is_host and not is_member:
             return Response({'error': 'Join the team before naming it'}, status=403)
+        # Only the team's own leader may rename it, and only their own team.
+        # This used to be "the host, or any member who got there first", which
+        # meant one member of a four-person team could rename it for everybody
+        # -- and the name then locked, so the rest of the team never got a say.
+        if not is_host and team_leader_id(team_data) != uid:
+            return Response({'error': 'Only your team leader can rename the team'}, status=403)
         if room_data.get('status') != 'waiting':
             return Response({'error': 'Teams are locked once the game starts'}, status=400)
 
@@ -1878,6 +2238,511 @@ def _require_waiting_host(room_ref, room_data, request):
         raise _Rejected({'error': 'Only the host can do that'}, 403)
     if room_data.get('status') != 'waiting':
         raise _Rejected({'error': 'Teams are locked once the game starts'}, 400)
+
+
+class TeamPickView(APIView):
+    """Record one member's private pick, and resolve the question by majority.
+
+    Replaces the old per-player team answer. Members of a team used to answer
+    independently on private timers and their scores were summed, which made a
+    "team game" nothing more than four solo games with a shared leaderboard --
+    there was no moment where teammates had to agree on anything. Here every
+    member sees the same question at the same time, picks privately, and the
+    most-picked answer becomes the team's single answer.
+
+    Two ways a question closes:
+      * every member has picked (`picked >= expected`), or
+      * the shared deadline has passed. The client says `force: true` when its
+        countdown runs out, but the server decides whether it really has, from
+        the room's own `teamStartedAt` and its own clock.
+
+    A tie has no majority, so the question is void: nobody scores, and the
+    explanation is still revealed so the team can learn from it.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        raw_index = request.data.get('questionIndex')
+        if not room_code or raw_index is None:
+            return Response({'error': 'roomCode and questionIndex are required'}, status=400)
+        try:
+            question_index = int(raw_index)
+        except (TypeError, ValueError):
+            return Response({'error': 'questionIndex must be a number'}, status=400)
+
+        answer = request.data.get('answer') or ''
+        try:
+            time_taken = float(request.data.get('timeTaken', 15))
+        except (TypeError, ValueError):
+            time_taken = 15.0
+        use_double = str(request.data.get('useDoublePoints', 'false')).lower() == 'true'
+        use_shield = str(request.data.get('useShield', 'false')).lower() == 'true'
+        use_hint = str(request.data.get('useHint', 'false')).lower() == 'true'
+        force = str(request.data.get('force', 'false')).lower() == 'true'
+
+        try:
+            room_ref, room_data = _room_and_teams(room_code)
+        except _Rejected as rejected:
+            return Response(rejected.payload, status=rejected.status)
+        if room_data.get('status') != 'active':
+            return Response({'error': 'Game is not in progress'}, status=400)
+
+        questions = room_data.get('questions') or []
+        if question_index < 0 or question_index >= len(questions):
+            return Response({'error': 'Invalid question index'}, status=400)
+
+        player_ref = room_ref.collection('players').document(str(request.user.id))
+        player_data = player_ref.get().to_dict() or {}
+        if not player_data:
+            return Response({'error': 'You are not in this room'}, status=400)
+        if player_data.get('isFinished'):
+            return Response({'error': 'You have already finished'}, status=400)
+        team_id = player_data.get('teamId')
+        if not team_id:
+            return Response({'error': 'Spectators cannot answer', 'spectator': True}, status=403)
+
+        team_ref = room_ref.collection('teams').document(str(team_id))
+        team_data = team_ref.get().to_dict() or {}
+        members = [str(m) for m in (team_data.get('memberIds') or [])]
+        if str(request.user.id) not in members:
+            return Response({'error': 'Join a team before answering'}, status=403)
+
+        time_per_q = question_time_limit(questions[question_index], room_data)
+        time_taken = min(max(time_taken, 0.0), time_per_q)
+
+        # A client claiming its timer expired only gets to close the question
+        # once the room's shared countdown really has. Accepting the client's
+        # word let a member end the round the instant they picked, before a
+        # teammate had even read the question.
+        expired = force and shared_question_expired(room_data, time_per_q)
+        if force and not expired:
+            return Response({
+                'error': 'Time is still on the clock',
+                'pending': True,
+                'secondsLeft': max(
+                    0.0,
+                    time_per_q + EXPIRY_GRACE_SECONDS
+                    - (shared_question_elapsed(room_data) or 0.0),
+                ),
+            }, status=400)
+
+        db = get_firestore()
+        settled = _resolve_team_question(
+            db, room_ref, team_ref, questions, question_index, time_per_q,
+            player_id=str(request.user.id),
+            answer=answer, time_taken=time_taken, expired=expired,
+            use_double=use_double, use_shield=use_shield, use_hint=use_hint,
+        )
+        if settled.get('_error'):
+            return Response(settled, status=settled.get('_status', 400))
+        if settled.get('pending'):
+            return Response(settled)
+
+        # Every member earned the answer XP, not just whoever happened to submit
+        # last. Awarding it in the transaction is impossible -- it is a Django
+        # write -- so it is best-effort here and never blocks the response: the
+        # Firestore score is the source of truth and it is already committed.
+        xp = settled.get('xpAwarded') or 0
+        if xp:
+            for uid in members:
+                try:
+                    award_xp(User.objects.get(id=int(uid)), xp, source='game_answer')
+                except Exception as exc:  # noqa: BLE001 - never fail a scored answer
+                    print(f'[TeamPick XP Award Error] user {uid}: {exc}')
+
+        return Response(settled)
+
+
+def _resolve_team_question(db, room_ref, team_ref, questions, question_index, time_per_q,
+                           player_id, answer, time_taken, expired,
+                           use_double=False, use_shield=False, use_hint=False):
+    """Tally one team's picks and, if the question closed, score it once.
+
+    Returns the resolved payload (identical for every member, so nobody can see
+    a teammate's pick), or `_error` for a rejected request.
+
+    Everything happens in one transaction: the pick is recorded, the tally is
+    read, and the score and reveal are written together. Two members tapping in
+    the same instant therefore cannot both read a pre-tally state and score the
+    question twice.
+
+    `expired` is computed by the caller from the room's shared `teamStartedAt`
+    and the server clock. It is never taken from the request: a client that
+    declared its own timer expired could close the question early and lock in
+    whatever tally it liked.
+
+    The tally itself lives in the server-only `_server` subcollection, NOT on the
+    team document. `firestore.rules` lets any authenticated user read a team's
+    document (the app needs it for the roster, powerups and reveals), so a
+    `picks` map of player id to answer sitting there was readable by every client
+    in the game -- which is exactly what private picking is supposed to prevent.
+    The team document only ever carries `pickCount`, a bare number, so the quorum
+    strip can be shared without sharing the votes.
+    """
+    team_id = team_ref.id
+    picks_ref = room_ref.collection('_server').document(f'teamPicks_{team_id}')
+
+    @fs.transactional
+    def run(transaction):
+        room = room_ref.get(transaction=transaction).to_dict() or {}
+        team = team_ref.get(transaction=transaction).to_dict() or {}
+        server_picks = picks_ref.get(transaction=transaction).to_dict() or {}
+        members = [str(m) for m in (team.get('memberIds') or [])]
+        if not members:
+            return {'_error': 'Your team has no members', '_status': 400}
+        if player_id not in members:
+            return {'_error': 'Join a team before answering', '_status': 403}
+
+        # The room owns the shared question. Without this a client could post a
+        # pick for any index it liked -- scoring a question the team never saw,
+        # or skipping straight to a doubled one.
+        current_index = int(room.get('teamQuestionIndex') or 0)
+        if question_index != current_index:
+            return {
+                '_error': 'That is not the current question',
+                '_status': 409,
+                'questionIndex': current_index,
+            }
+
+        resolved_idx = list(team.get('resolvedQuestions') or [])
+        if question_index in resolved_idx:
+            return {'_error': 'That question is already settled', '_status': 409}
+
+        # A stale tally from a previous question must never leak into this one.
+        # `questionIndex` is written alongside `picks`, so a team that skipped a
+        # question starts this one empty instead of inheriting old votes.
+        picks = dict(server_picks.get('picks') or {}) if server_picks.get('questionIndex') == question_index else {}
+        # A player's own pick is idempotent: a retried submission overwrites
+        # their entry rather than adding a second one, so a flaky connection
+        # cannot make someone look like two voters.
+        picks[player_id] = answer
+        pickers = len([p for p in picks.values() if p])
+
+        # Everyone picked, or the deadline closed it.
+        if pickers < len(members) and not expired:
+            # `set`, not `update`: this document does not exist until a team
+            # picks for the first time, and the full tally is in hand here.
+            transaction.set(picks_ref, {'questionIndex': question_index, 'picks': picks})
+            # The count is safe to publish: it is how the shared quorum strip
+            # knows to say "3 of 4 in" without saying anything about what was
+            # picked. The votes themselves stay in `_server`.
+            transaction.update(team_ref, {'pickCount': pickers})
+            return {
+                'pending': True,
+                'questionIndex': question_index,
+                'picked': pickers,
+                'expected': len(members),
+                # Never the caller's own teammates, only the count.
+                'awaiting': len(members) - pickers,
+            }
+
+        choice, agreed, distinct, tie = tally_team_picks(picks)
+        question = questions[question_index]
+        correct_answer = question.get('correctAnswer', '')
+        q_type = question.get('type', 'mcq')
+        # A tie voids the question: there is no majority, so awarding it to
+        # either side would make the result depend on dict ordering.
+        is_correct = (not tie) and (
+            choice.strip().lower() == correct_answer.strip().lower()
+            if q_type == 'identification' else choice == correct_answer
+        )
+
+        pool = dict(team.get('powerups') or {})
+        # Same rule as the solo endpoint: a self-asserted flag is only honoured
+        # when the pool can actually pay for it. Local names on purpose --
+        # assigning to the parameters would make this closure read them as
+        # unbound locals, which is what UnboundLocalError means here.
+        spent_double = bool(use_double) and (pool.get('doublePoints', 0) or 0) > 0
+        spent_shield = bool(use_shield) and (pool.get('shield', 0) or 0) > 0
+        spent_hint = bool(use_hint) and (pool.get('hint', 0) or 0) > 0
+        # A boost bought through BoostTeammateView already paid for itself when
+        # it was purchased, so it is not charged again here -- it only has to be
+        # applied, and then cleared, so it cannot carry to the next question.
+        boosted = bool(team.get('boostTarget')) and team.get('boostQuestion') == question_index
+
+        spent = {}
+        if spent_hint:
+            spent['powerups.hint'] = fs.Increment(-1)
+
+        base_points = 0
+        speed_bonus = 0
+        earned_points = 0
+        powerup_earned = None
+        multiplier = 1.0
+        team_updates = {'answeredCount': fs.Increment(1)}
+
+        if is_correct:
+            base_score = int(1000 * (1 - (time_taken / time_per_q) * 0.5))
+            earned_points = max(base_score, 500)
+            base_points = earned_points
+            speed_bonus = earned_points - 500
+
+            prior_correct = team.get('teamCorrect', 0) or 0
+            multiplier = team_multiplier(prior_correct)
+
+            # 1. momentum ladder (cumulative), 2. streak bonus (the current
+            # run), 3. the doubled questions. In that order so the quiz's
+            # big questions are worth the most and nothing compounds past x4.
+            earned_points = int(round(earned_points * multiplier))
+            new_streak = (team.get('teamStreak', 0) or 0) + 1
+            bonus = streak_bonus_multiplier(new_streak)
+            if bonus != 1.0:
+                earned_points = int(round(earned_points * bonus))
+            if is_double_point_question(question_index):
+                earned_points *= 2
+            if spent_double:
+                earned_points *= 2
+                spent['powerups.doublePoints'] = fs.Increment(-1)
+            if boosted:
+                # 2x is the cap for one question: a doubled question has already
+                # doubled, so the boost is honoured in place of it rather than
+                # compounding the same question to 4x.
+                if not (spent_double or is_double_point_question(question_index)):
+                    earned_points *= 2
+
+            next_multiplier = team_multiplier(prior_correct + 1)
+            team_updates.update({
+                'score': fs.Increment(earned_points),
+                'correctCount': fs.Increment(1),
+                'teamCorrect': prior_correct + 1,
+                'multiplier': next_multiplier,
+                'maxMultiplier': max(team.get('maxMultiplier', 1.0) or 1.0, next_multiplier),
+                'teamStreak': new_streak,
+                'bestStreak': max(team.get('bestStreak', 0) or 0, new_streak),
+            })
+
+            # Guaranteed reward every 3rd consecutive correct team answer, never
+            # on the last question because the game ends immediately after.
+            if (question_index < len(questions) - 1
+                    and new_streak >= STREAK_REWARD_INTERVAL
+                    and new_streak % STREAK_REWARD_INTERVAL == 0):
+                owned = team.get('powerups') or {}
+                lowest = min((owned.get(k, 0) or 0) for k in POWERUP_KEYS)
+                candidates = [k for k in POWERUP_KEYS if (owned.get(k, 0) or 0) == lowest]
+                ptype = candidates[rng.randrange(len(candidates))]
+                team_updates[f'powerups.{ptype}'] = fs.Increment(1)
+                powerup_earned = ptype
+        else:
+            # A miss breaks the run (so the streak bonus and the powerup cadence
+            # reset) but never touches `multiplier`: momentum is a cumulative
+            # ladder now, see demote_multiplier.
+            if spent_shield:
+                # A shield keeps the flame alive rather than extending it. It is
+                # charged HERE, in the miss branch, because that is the only
+                # situation where it does anything. Charging it before the
+                # branch meant a shield armed for safety was thrown away on the
+                # next correct answer, and the `use_shield` check inside the
+                # correct branch was dead code.
+                spent['powerups.shield'] = fs.Increment(-1)
+            else:
+                team_updates['teamStreak'] = 0
+
+        team_updates.update(spent)
+        team_updates['resolvedQuestions'] = fs.ArrayUnion([question_index])
+        team_updates['pickCount'] = 0
+        # A team document written by an older build may still carry the old
+        # client-readable tally. Drop it rather than leaving it readable.
+        team_updates['picks'] = fs.DELETE_FIELD
+        if boosted:
+            # Cleared whatever the outcome: the boost was bought and paid for,
+            # so it must not carry over to the next question -- including when
+            # the team got this one wrong.
+            team_updates['boostTarget'] = fs.DELETE_FIELD
+            team_updates['boostQuestion'] = fs.DELETE_FIELD
+            team_updates['boostedBy'] = fs.DELETE_FIELD
+
+        # The reveal every member reads. `agreed` is a count only -- who voted
+        # what stays on the server, so the results screen cannot be used to work
+        # out how a specific teammate answered.
+        team_updates[f'reveals.q{question_index}'] = {
+            'index': question_index,
+            'answer': choice,
+            'correctAnswer': correct_answer,
+            'correct': bool(is_correct),
+            'void': bool(tie),
+            'agreed': agreed,
+            'pickers': distinct,
+            'expected': len(members),
+            'points': int(earned_points),
+            'multiplier': multiplier,
+            'basePoints': base_points,
+            'speedBonus': speed_bonus,
+            'doublePoint': is_double_point_question(question_index),
+        }
+        transaction.update(team_ref, team_updates)
+        # The tally has been folded into the reveal and the answer log, so it is
+        # no longer needed. Clearing it here means a stale set of votes can never
+        # be tallied again, even if the room index were somehow rewound.
+        transaction.set(picks_ref, {'questionIndex': question_index, 'picks': {}})
+
+        # Per-member answer log. Every member gets the SAME team outcome and the
+        # SAME score -- that is what "the team answers once" means -- so a
+        # member's own total always equals their team's. Only two things differ
+        # per member: the pick they made and whether it matched the team, which
+        # is everything the agreement stat and the MVP need.
+        for uid in members:
+            member_ref = room_ref.collection('players').document(uid)
+            own_pick = (picks.get(uid) or '')[:200]
+            member_updates = {
+                'answeredCount': fs.Increment(1),
+                'answeredQuestions': fs.ArrayUnion([question_index]),
+                # Shared, so the member row on the leaderboard and the team
+                # score can never drift apart.
+                'score': fs.Increment(earned_points),
+                f'answers.q{question_index}': {
+                    'correct': bool(is_correct),
+                    'points': int(earned_points) if is_correct else 0,
+                    # The viewer's own pick only. Nobody can read a teammate's
+                    # out of their own document.
+                    'picked': own_pick,
+                    # A voided question has no team answer to agree with, so it
+                    # counts as agreeing rather than punishing a split twice.
+                    'agreed': True if tie else bool(own_pick and own_pick == choice),
+                    'agreedCount': agreed,
+                    'pickers': distinct,
+                },
+            }
+            if is_correct:
+                member_updates['correctCount'] = fs.Increment(1)
+                member_updates['streak'] = new_streak
+                member_updates['bestStreak'] = max(team.get('bestStreak', 0) or 0, new_streak)
+            elif not spent_shield:
+                member_updates['streak'] = 0
+            transaction.update(member_ref, member_updates)
+
+        return {
+            'pending': False,
+            'questionIndex': question_index,
+            'correct': bool(is_correct),
+            'correctAnswer': correct_answer,
+            'answer': choice,
+            'void': bool(tie),
+            'agreed': agreed,
+            'pickers': distinct,
+            'pointsAwarded': int(earned_points),
+            'multiplier': multiplier,
+            'basePoints': base_points,
+            'speedBonus': speed_bonus,
+            'doublePoint': is_double_point_question(question_index),
+            'powerupEarned': powerup_earned,
+            # Everyone played the same question, so every member earned the same
+            # answer XP the solo endpoint pays. The caller awards it to all of
+            # them; paying only the last member to submit would reward being slow.
+            'xpAwarded': XP_PER_CORRECT if is_correct else 0,
+        }
+
+    return run(db.transaction())
+
+
+class TeamAdvanceView(APIView):
+    """Move the whole room to the next shared question.
+
+    The room owns `teamQuestionIndex`, so advancing is a single authoritative
+    write rather than every client deciding for itself when the round is over.
+    That matters because the index is what `TeamPickView` validates against: a
+    client that advanced its own screen while the room stayed put would get its
+    next pick rejected as "not the current question".
+
+    Picks and reveals are per team, so each team's pending tally is cleared
+    here -- otherwise a question nobody answered would inherit the previous
+    question's votes.
+
+    Who may advance: any member of the room, because the shared countdown is
+    client-driven and the host's device may not even be on the question screen.
+    But the ROOM may only move once the question everyone is looking at is
+    actually over -- every team has answered it, or the room's own deadline has
+    passed. Without that, any player could skip the shared question for everyone
+    else by calling this the instant they joined.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        if not room_code:
+            return Response({'error': 'roomCode is required'}, status=400)
+        raw_index = request.data.get('questionIndex')
+        try:
+            target_index = int(raw_index)
+        except (TypeError, ValueError):
+            return Response({'error': 'questionIndex must be a number'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+        room_data = room.to_dict() or {}
+        if room_data.get('status') != 'active':
+            return Response({'error': 'Game is not in progress'}, status=400)
+        if not room_data.get('teamMode'):
+            return Response({'error': 'This room is not a team game'}, status=400)
+
+        player_data = room_ref.collection('players').document(str(request.user.id)).get().to_dict() or {}
+        if not player_data:
+            return Response({'error': 'You are not in this room'}, status=403)
+        caller_team_id = player_data.get('teamId')
+        if not caller_team_id:
+            return Response({'error': 'Spectators cannot advance the game', 'spectator': True},
+                            status=403)
+
+        current_index = int(room_data.get('teamQuestionIndex') or 0)
+        if target_index != current_index + 1:
+            # Deliberately a hard rule: the index moves exactly one step at a
+            # time, so a client cannot skip a doubled question or rewind the
+            # room to re-answer something it already lost.
+            return Response({
+                'error': 'Cannot skip a question',
+                'questionIndex': current_index,
+            }, status=409)
+        questions = room_data.get('questions') or []
+        if target_index >= len(questions):
+            return Response({'error': 'That was the last question'}, status=400)
+
+        # The rule is ROOM-wide, not caller-wide. The index is shared, so letting
+        # one team move it the moment that team is done would pull every other
+        # team off the question before they had answered it. The room may move
+        # once every team has answered, or once the shared deadline has passed.
+        team_refs = list(room_ref.collection('teams').stream())
+        waiting_teams = 0
+        for team in team_refs:
+            data = team.to_dict() or {}
+            if not data.get('memberIds'):
+                continue
+            if current_index not in list(data.get('resolvedQuestions') or []):
+                waiting_teams += 1
+        time_limit = question_time_limit(questions[current_index], room_data)
+        if waiting_teams and not shared_question_expired(room_data, time_limit):
+            return Response({
+                'error': 'The question is still open',
+                'questionIndex': current_index,
+                'secondsLeft': max(
+                    0.0,
+                    time_limit + EXPIRY_GRACE_SECONDS - (shared_question_elapsed(room_data) or 0.0),
+                ),
+                'waitingTeams': waiting_teams,
+            }, status=409)
+
+        for team in team_refs:
+            # Only the shared count lives on the team document now; the votes
+            # themselves are in `_server`. Both have to be cleared together, or a
+            # question nobody answered would inherit the previous one's tally.
+            team.reference.update({'pickCount': 0})
+            room_ref.collection('_server').document(
+                f"teamPicks_{team.id}").set({'questionIndex': current_index, 'picks': {}})
+        room_ref.update({
+            'teamQuestionIndex': target_index,
+            # Every countdown restarts from this write, so one late client cannot
+            # arrive at the next question with less time than the rest.
+            'teamStartedAt': fs.SERVER_TIMESTAMP,
+        })
+        return Response({
+            'questionIndex': target_index,
+            'questionCount': len(questions),
+            'timeLimit': question_time_limit(questions[target_index], room_data),
+            'doublePoint': is_double_point_question(target_index),
+            'teamsCleared': len(team_refs),
+        })
 
 
 class AutoAssignTeamsView(APIView):
@@ -2037,12 +2902,18 @@ class HostClaimView(APIView):
 
 
 class BoostTeammateView(APIView):
-    """Spend a shared 2x on a specific teammate's next answer.
+    """Spend a shared 2x on a named teammate's side of the next team question.
 
     The team already shares a pool, but 'somebody should use this' is not a
     decision players can make without a target. Naming a teammate turns the
     pool from a passive resource into something the team has to negotiate
     about mid-quiz, which is most of what makes the mode feel shared.
+
+    The 2x is charged here, when the boost is bought, and applied by
+    `_resolve_team_question` when that question is scored. It used to be derived
+    from the target's own shuffled `questionOrder`, which no longer means
+    anything now that the whole room answers one shared question: teammates do
+    not have private question positions any more, only one shared index.
     """
     permission_classes = [IsAuthenticated]
 
@@ -2074,7 +2945,7 @@ class BoostTeammateView(APIView):
         if str(target.get('teamId') or '') != str(caller_team):
             return Response({'error': 'You can only boost a teammate'}, status=403)
         if target_id == uid:
-            return Response({'error': 'Use a powerup on yourself instead'}, status=400)
+            return Response({'error': 'Name a teammate, not yourself'}, status=400)
         if target.get('isFinished'):
             return Response({'error': 'That player has already finished'}, status=400)
 
@@ -2083,32 +2954,55 @@ class BoostTeammateView(APIView):
         if (pool.get('doublePoints', 0) or 0) <= 0:
             return Response({'error': 'No 2x left in the team pool'}, status=400)
 
-        # The boosted answer is the target's first unanswered question in
-        # their own shuffled order. That is derivable from the player doc the
-        # request already has to read, so the client never has to publish a
-        # "current question" marker that could drift out of sync.
-        order = list(target.get('questionOrder') or [])
-        answered = set(target.get('answeredQuestions') or [])
-        next_question = next((q for q in order if q not in answered), None)
-        if next_question is None:
-            return Response({'error': 'That player has no questions left'}, status=400)
+        questions = room_data.get('questions') or []
 
-        team_ref.update({
-            'powerups.doublePoints': fs.Increment(-1),
-            'boostTarget': target_id,
-            'boostQuestion': next_question,
-            'boostedBy': uid,
-        })
+        # Absolute values, not increments, read inside the same transaction, so
+        # two members boosting at once cannot both drive the count below zero or
+        # silently overwrite each other's marker. Previously this was a bare
+        # update outside any transaction: the second boost replaced the first
+        # one's target and its charge was still spent.
+        @fs.transactional
+        def boost(transaction):
+            room = room_ref.get(transaction=transaction).to_dict() or {}
+            team = team_ref.get(transaction=transaction).to_dict() or {}
+            pool = dict(team.get('powerups') or {})
+            remaining = pool.get('doublePoints', 0) or 0
+            if remaining <= 0:
+                return None
+            # The team's first shared question it has not settled yet. Derived
+            # from state the transaction already has to read, so no client has to
+            # publish a "current question" marker that could drift out of sync.
+            current = int(room.get('teamQuestionIndex') or 0)
+            settled = set(team.get('resolvedQuestions') or [])
+            q = next((i for i in range(current, len(questions)) if i not in settled), None)
+            if q is None:
+                return None
+            transaction.update(team_ref, {
+                'powerups.doublePoints': remaining - 1,
+                'boostTarget': target_id,
+                'boostQuestion': q,
+                'boostedBy': uid,
+            })
+            return q
+
+        boosted_question = boost(db.transaction())
+        if boosted_question is None:
+            return Response({'error': 'No 2x left in the team pool'}, status=400)
         return Response({
             'message': 'Boost sent',
             'teamId': str(caller_team),
             'boostTarget': target_id,
-            'boostQuestion': next_question,
+            'boostQuestion': boosted_question,
+            'shared': True,
         })
 
 
 class FreezeTimerView(APIView):
     """Spend a freeze to stop the caller's own clock on the current question.
+
+    Solo play only. Team mode has a single shared countdown, so pausing one
+    member's screen would desync them from the team, and the charge is refused
+    there instead.
 
     Every other powerup is settled by the answer endpoint, but a freeze has
     to take effect *before* the answer exists, so it needs its own call. It
@@ -2147,11 +3041,18 @@ class FreezeTimerView(APIView):
             return Response({'error': 'You have already finished'}, status=400)
 
         team_mode = bool(room_data.get('teamMode', False))
+        if team_mode:
+            # The whole mechanic a freeze used to provide -- pausing a clock --
+            # is now handled by the shared team timer, which everyone sees. A
+            # charge spent here would freeze one member's screen while the rest
+            # of the team watched their own countdown run out, so it is refused
+            # outright rather than silently doing nothing.
+            return Response({
+                'error': 'Freezes are not available in team mode',
+                'teamTimer': True,
+            }, status=400)
         caller_team = player.get('teamId')
-        if team_mode and not caller_team:
-            return Response({'error': 'Join a team before using a freeze'}, status=400)
-        # Team mode charges the shared pool; solo play charges the player.
-        pool_ref = room_ref.collection('teams').document(str(caller_team)) if team_mode else player_ref
+        pool_ref = player_ref
 
         @fs.transactional
         def charge(transaction):
@@ -2159,17 +3060,30 @@ class FreezeTimerView(APIView):
             # yields snapshots lazily, so it must be read through the document
             # reference, not off the transaction.
             before = pool_ref.get(transaction=transaction).to_dict() or {}
+            # A freeze on a question that is already answered is worth nothing:
+            # the timer is already stopped because there is nothing left to
+            # answer. The client used to allow it because its guard checked
+            # `selected` (null) rather than whether an answer existed, so a
+            # tap after the timeout spent a charge for no effect.
+            answered = before.get('answeredQuestions') or []
+            if question_index in answered:
+                return None
+            # One freeze per question. The timer is already stopped by the first
+            # one, so a second tap bought nothing and still took a charge.
+            if before.get('frozenQuestion') == question_index:
+                return None
             powerups = before.get('powerups') or {}
             remaining = powerups.get('freeze', 0) or 0
             if remaining <= 0:
                 return None
             # Written as an absolute value rather than an increment so a
             # simultaneous second freeze cannot take the count below zero.
-            transaction.update(pool_ref, {'powerups.freeze': remaining - 1})
-            if team_mode:
-                # The marker keeps the charge personal: a teammate's freeze
-                # does not carry over to the next player who taps Freeze.
-                transaction.update(player_ref, {'frozenQuestion': question_index})
+            # `frozenQuestion` records which question was frozen so a client that
+            # reloads mid-question can tell whether its clock is stopped.
+            transaction.update(pool_ref, {
+                'powerups.freeze': remaining - 1,
+                'frozenQuestion': question_index,
+            })
             return True
 
         if charge(db.transaction()) is not True:

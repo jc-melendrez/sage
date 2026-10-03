@@ -18,9 +18,11 @@ google.cloud.firestore, which requires the transaction object to expose
 
 Transforms are resolved eagerly on write: ``Increment`` adds to the existing
 value, ``ArrayUnion`` appends non-duplicate members, ``ArrayRemove`` drops
-them, ``SERVER_TIMESTAMP`` becomes a sentinel object, and ``DELETE_FIELD``
+them, ``SERVER_TIMESTAMP`` becomes a real UTC timestamp, and ``DELETE_FIELD``
 removes the key outright.
 """
+
+from datetime import datetime, timezone as _timezone
 
 from google.cloud.firestore_v1 import transforms as fs_transforms
 
@@ -124,7 +126,13 @@ class FakeStore:
             removals = set(value.values)
             return [item for item in (existing or []) if item not in removals]
         if value is fs_transforms.SERVER_TIMESTAMP:
-            return value
+            # Resolved to a real timestamp, the way Firestore does on commit.
+            # Keeping the raw sentinel object instead would silently disable
+            # every elapsed-time check in views.py under test: code that reads
+            # `teamStartedAt` as a time would see an unparseable object and
+            # decide nothing had expired, so a guard under test could never
+            # actually fail.
+            return datetime.now(_timezone.utc)
         return value
 
 

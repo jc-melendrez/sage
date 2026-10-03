@@ -27,11 +27,17 @@ export const REACTION_EMOJIS = ['🔥', '👏', '🤯', '😢', '💪'] as const
 /**
  * One recorded answer.
  *
- * Keyed by the CANONICAL index into the room's `questions` array. Every player
- * gets a different shuffled `questionOrder`, but the index they submit is the
- * shared index into the room's question list, so answers to the same question
- * can be compared across the whole room even though nobody saw them in the
- * same order.
+ * Keyed by the CANONICAL index into the room's `questions` array.
+ *
+ * In classic, solo, offline and LAN play every player gets a different shuffled
+ * `questionOrder`, but the index recorded is the shared index into the room's
+ * question list, so answers to the same question can be compared across the
+ * whole room even though nobody saw them in the same order.
+ *
+ * Team mode is the exception: the room owns ONE `teamQuestionIndex` and shows
+ * everyone the same question, so a team member's log entry describes the team's
+ * single outcome -- the same `correct` and `points` for every member -- and only
+ * `picked` (their own vote) and `agreed` differ.
  */
 export interface AnswerLogEntry {
   correct: boolean;
@@ -41,6 +47,16 @@ export interface AnswerLogEntry {
    * only -- the summary deliberately does not expose a peer's picks.
    */
   picked: string;
+  /**
+   * Team mode only: did this member's own pick match the team's answer? A
+   * voided (tied) question counts as agreeing, because there was no team answer
+   * to disagree with. Absent on classic play, where agreement is meaningless.
+   */
+  agreed?: boolean;
+  /** Team mode only: how many members backed the team's answer. */
+  agreedCount?: number;
+  /** Team mode only: how many distinct answers were on the table. */
+  pickers?: number;
 }
 
 /**
@@ -143,6 +159,44 @@ export interface TeamEntry {
   accuracy?: number;
   maxMultiplier?: number;
   members?: TeamMember[];
+  /**
+   * How many members have picked for the CURRENT shared question.
+   *
+   * This is a bare number on purpose. The team document is readable by every
+   * signed-in user (`firestore.rules`), so the picks themselves live in the
+   * server-only `_server` collection and never appear here -- a member can see
+   * that their team is 3-of-4 in without being able to see who has or has not
+   * answered, let alone what anyone chose. Zero once the question is scored.
+   */
+  pickCount?: number;
+  /**
+   * What the team settled on, per question index, once it is resolved.
+   *
+   * Every member reads the same reveal, so a member who picked early learns the
+   * result from here instead of waiting on a response that only ever goes back
+   * to whoever happened to submit last.
+   */
+  reveals?: Record<string, TeamReveal>;
+}
+
+export interface TeamReveal {
+  index: number;
+  /** The answer the team's plurality settled on, empty when the vote tied. */
+  answer: string;
+  correctAnswer: string;
+  correct: boolean;
+  /** A tie has no majority: nobody scores, and the answer is shown anyway. */
+  void: boolean;
+  /** How many members backed the winning answer. Never who they were. */
+  agreed: number;
+  /** Distinct answers that were actually offered. */
+  pickers: number;
+  expected: number;
+  points: number;
+  multiplier: number;
+  basePoints: number;
+  speedBonus: number;
+  doublePoint: boolean;
 }
 
 export interface TeamAssignment {

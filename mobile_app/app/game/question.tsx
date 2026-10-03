@@ -39,7 +39,7 @@ import { Ionicons } from '@expo/vector-icons';
 import TeamMomentumHUD from '@/components/game/TeamMomentumHUD';
 import { answerLogFromOutcomes } from '@/services/gameBreakdown';
 import ReactionBar from '@/components/game/ReactionBar';
-import { formatMultiplier, sameTeamId, activeMembersByTeam, teamRankValue, type PowerupKey, type TeamEntry } from '@/types/game';
+import { formatMultiplier, sameTeamId, activeMembersByTeam, teamRankValue, type PowerupKey, type TeamEntry, type PlayerAnswerLog } from '@/types/game';
 import { pfpSource } from '@/constants/pfps';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -79,6 +79,38 @@ const FONTS = {
 /* ── helper: pull the letter chip out of "A. Paris" ── */
 const letterOf = (c: string) => c.charAt(0);
 const textOf = (c: string) => c;
+
+/**
+ * A Firestore timestamp as epoch milliseconds, tolerating the shapes the value
+ * arrives in: a Timestamp, a millisecond number, an ISO string, or nothing at
+ * all on a room written before the field existed.
+ */
+function timestampMillis(value: any): number | null {
+  if (value == null) return null;
+  if (typeof value === 'number') return value;
+  if (typeof value.toMillis === 'function') return value.toMillis();
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  if (value.seconds != null) return value.seconds * 1000;
+  return null;
+}
+
+/**
+ * Seconds a shared team question allows.
+ *
+ * Mirrors `question_time_limit` on the server: a question may carry its own
+ * `timeLimit`, and the room's `timePerQuestion` is the fallback. Reading it the
+ * same way here means the countdown on this screen matches the one the server
+ * enforces when a member claims the clock has run out.
+ */
+function sharedTimeLimit(roomData: any, index: number): number {
+  const own = roomData?.questions?.[index]?.timeLimit;
+  if (typeof own === 'number' && own > 0) return own;
+  const fallback = roomData?.timePerQuestion;
+  return typeof fallback === 'number' && fallback > 0 ? fallback : 15;
+}
 
 /* ═══════════════════════════════════════════════════════════════
    StandingsRow — restyled to match the HTML drawer
@@ -178,6 +210,19 @@ export default function QuestionScreen() {
     multiplier?: number;
     /** What the player chose; '' on timeout. */
     picked?: string;
+    /* ── team mode ── */
+    /** The team's single answer, from the shared reveal. */
+    teamAnswer?: string;
+    /** How many members backed the team's answer. A count, never a list of names. */
+    agreed?: number;
+    /** Whether THIS member's own pick matched the team's answer. A voided
+     * (tied) question counts as agreeing: there was no team answer to disagree
+     * with, and punishing it twice would be wrong. */
+    iAgreed?: boolean;
+    /** Members who submitted a pick, of those expected. */
+    pickers?: number;
+    /** The team split and nobody answered for it, so it scored nothing. */
+    voided?: boolean;
   } | null>(null);
   const [typedAnswer, setTypedAnswer] = useState('');
   const [boxChars, setBoxChars] = useState<string[]>([]);
@@ -221,6 +266,34 @@ const [freezeBusy, setFreezeBusy] = useState(false);
   const [showTeamReveal, setShowTeamReveal] = useState(false);
   const [waitTimer, setWaitTimer] = useState(0);
   const [engineError, setEngineError] = useState<string | null>(null);
+  /* ── team mode: the ROOM owns the shared question ──
+   * One index, one deadline, one answer per team. These come off the room
+   * document rather than being tracked locally, because a team that is looking
+   * at two different questions is not playing a team game. */
+  const [teamIndex, setTeamIndex] = useState(0);
+  /** `teamStartedAt` as epoch ms; null until the room writes it. */
+  const [teamStartedAt, setTeamStartedAt] = useState<number | null>(null);
+  /** Seconds the shared question allows, from the question's own timeLimit. */
+  const [teamTimeLimit, setTeamTimeLimit] = useState(15);
+  /** Picks submitted so far / expected. Seeded from this member's own pending
+   * response, then kept live from the team's published `pickCount`. */
+  const [teamPickCount, setTeamPickCount] = useState<{ picked: number; expected: number } | null>(null);
+  /** This member's own answer log, so "did I agree with my team?" can be shown
+   * for a question that resolved without this client making the last pick. */
+  const [ownAnswers, setOwnAnswers] = useState<PlayerAnswerLog>({});
+  /** The room's creator. Only they can settle the game and pay placement XP;
+   * `hostId` can move to a student who is merely running the room. */
+  const [roomOwnerId, setRoomOwnerId] = useState<string | null>(null);
+  /** Latches once a forced pick has been sent for this question. */
+  const teamForceSentRef = useRef(false);
+  /** Latest submit/pick closure for the clock interval, which must not capture
+   * a stale render's state. */
+  const teamPickRef = useRef<(answer: string, force: boolean) => void>(() => {});
+  /** Mirrors of `selected`/`pendingAnswer` for the forced pick at time-out.
+   * A ref, not state, because the clock reads it from an interval closure that
+   * would otherwise be re-created on every keystroke. */
+  const selectedRef = useRef<string | null>(null);
+  const pendingAnswerRef = useRef<string | null>(null);
   // A spectator is a player in a team game who has no team assigned. The server
   // rejects their POST /game/answer/ with 403 and ignores them in settlement, so
   // the UI must not offer them an answer path in the first place.
@@ -228,6 +301,17 @@ const [freezeBusy, setFreezeBusy] = useState(false);
   // Declared up here rather than beside `myTeam` because the auto-advance effect
   // needs it in its dependency array, which is evaluated during render.
   const spectator = isSpectating || (!!teamMode && !myTeamId);
+
+  /**
+   * The order this screen walks through.
+   *
+   * Classic mode gives every player their own shuffled order, so it reads the
+   * player's document. Team mode gives the WHOLE ROOM one question at a time,
+   * and the room's index is the only index that means anything -- a per-player
+   * order here would put teammates on different questions, which is the thing
+   * team mode exists to stop.
+   */
+  const effectiveOrder = teamMode ? questions.map((_, i) => i) : questionOrder;
 
   // ✨ UPDATED: RNAnimated refs
   const standingsAnim = useRef(new RNAnimated.Value(0)).current;
@@ -518,7 +602,8 @@ const [freezeBusy, setFreezeBusy] = useState(false);
       return;
     }
 
-    /* ── single room listener: boots the game + navigates when the host ends it ── */
+    /* ── single room listener: boots the game, tracks the shared team question,
+           and navigates when the host ends it ── */
     const roomUnsub = firestore()
       .collection('gameRooms').doc(roomCode)
       .onSnapshot(snap => {
@@ -534,7 +619,18 @@ const [freezeBusy, setFreezeBusy] = useState(false);
           const assignments = data.teamAssignments || null;
           setTeamAssignments(assignments);
           setShowTeamReveal(!!(data.teamMode && data.status === 'active' && assignments));
-        } else if (data.status === 'finished' && claimNav()) {
+        }
+        // The shared question state is re-read on EVERY snapshot, not just at
+        // boot: the host advances the room, and a member who is behind has to
+        // catch up to the question everyone else is actually answering.
+        if (data.teamMode) {
+          const index = data.teamQuestionIndex ?? 0;
+          setTeamIndex(index);
+          setTeamTimeLimit(sharedTimeLimit(data, index));
+          setTeamStartedAt(timestampMillis(data.teamStartedAt));
+          setRoomOwnerId(String(data.ownerId ?? data.hostId ?? ''));
+        }
+        if (data.status === 'finished' && claimNav()) {
           setRoomStatus('finished');
           router.replace({ pathname: '/game/final', params: { roomCode } });
         }
@@ -566,6 +662,10 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         if (mine) {
           setMyCorrectCount(mine.data().correctCount ?? 0);
           setMyMultiplier(mine.data().multiplier ?? 1.0);
+          // Our own answer log. In a team game this is where "did I agree with
+          // my team?" comes from: the server writes each member's own pick and
+          // whether it matched, and nobody else's.
+          setOwnAnswers(mine.data().answers ?? {});
         }
         pendingStandingsRef.current = snap.docs
           .map(d => ({
@@ -718,7 +818,61 @@ const [freezeBusy, setFreezeBusy] = useState(false);
   }, [showRoulette, rouletteTarget]);
 
   useEffect(() => {
-    if (questions.length === 0 || showTeamReveal) return;
+    // Team mode is driven by the ROOM's clock, not a local one: every member
+    // counts down to the same `teamStartedAt`, so a member who joins late cannot
+    // be handed extra time and a member whose phone slept does not stall
+    // anyone else. The local interval below deliberately skips team play.
+    if (!teamMode || questions.length === 0 || showTeamReveal) return;
+    if (teamStartedAt == null) return;
+    startTimeRef.current = teamStartedAt;
+
+    const tick = () => {
+      const elapsed = (Date.now() - teamStartedAt) / 1000;
+      const left = Math.max(0, Math.ceil(teamTimeLimit - elapsed));
+      setTimeLeft(left);
+      if (left <= 0 && !teamForceSentRef.current) {
+        // The shared clock is the server's to enforce: this claims expiry, and
+        // the server decides from its own clock whether the round really is
+        // over. If it is not, the pending pick stays pending.
+        //
+        // Resend the LOCKED pick, never a blank one: a forced submit overwrites
+        // this member's slot in the tally, so a blank here would erase a choice
+        // they already made and under-count the quorum. Blank is only correct
+        // for someone who never chose anything.
+        teamForceSentRef.current = true;
+        teamPickRef.current(selectedRef.current ?? pendingAnswerRef.current ?? '', true);
+      }
+    };
+    tick();
+    timerRef.current = setInterval(tick, 500);
+    return () => clearInterval(timerRef.current);
+  }, [teamMode, teamStartedAt, teamTimeLimit, teamIndex, questions.length, showTeamReveal]);
+
+  // A new shared question resets everything the last one left behind.
+  useEffect(() => {
+    if (!teamMode) return;
+    teamForceSentRef.current = false;
+    setCurrentIndex(teamIndex);
+    selectedRef.current = null;
+    pendingAnswerRef.current = null;
+    setSelected(null);
+    setPendingAnswer(null);
+    setResult(null);
+    setTeamPickCount({ picked: 0, expected: 0 });
+    setTypedAnswer('');
+    setBoxChars([]);
+    setIsFrozen(false);
+    setShowStandings(false);
+    standingsAnim.setValue(0);
+    setActivePowerups({ hint: false, doublePoints: false, shield: false });
+    setHintedChoices([]);
+    setShowRoulette(false);
+    setRouletteTarget(null);
+    setRoulettePhase('idle');
+  }, [teamMode, teamIndex]);
+
+  useEffect(() => {
+    if (questions.length === 0 || showTeamReveal || teamMode) return;
     startTimeRef.current = Date.now();
     setTimeLeft(timePerQuestion);
     timerBarAnim.setValue(1);
@@ -729,17 +883,21 @@ const [freezeBusy, setFreezeBusy] = useState(false);
       });
     }, 1000);
     return () => clearInterval(timerRef.current);
-  }, [currentIndex, questions, showTeamReveal]);
+  }, [currentIndex, questions, showTeamReveal, teamMode]);
 
   useEffect(() => {
-    const target = isFrozen ? (timePerQuestion > 0 ? timeLeft / timePerQuestion : 0) : (timePerQuestion > 0 ? timeLeft / timePerQuestion : 0);
+    // In team play the shared countdown runs against the ROOM's limit for this
+    // question, not the room-wide default, so the bar drains the same length of
+    // time the server will.
+    const limit = teamMode ? teamTimeLimit : timePerQuestion;
+    const target = limit > 0 ? timeLeft / limit : 0;
     // ✨ UPDATED: RNAnimated
     RNAnimated.timing(timerBarAnim, {
       toValue: target,
       duration: 900,
       useNativeDriver: false,
     }).start();
-  }, [timeLeft, isFrozen]);
+  }, [timeLeft, isFrozen, teamMode, teamTimeLimit, timePerQuestion]);
 
   useEffect(() => {
     if (question?.type === 'identification') {
@@ -787,7 +945,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
     // effect re-runs and the countdown resumes.
     if (showRoulette) { setAutoCountdown(0); return; }
 
-    const isLast = currentIndex + 1 >= questionOrder.length;
+    const isLast = currentIndex + 1 >= effectiveOrder.length;
     // The 2s default is the "you already answered this" skip. A spectator has
     // nothing to answer, so they get a real read of the question instead.
     const total = spectator ? 5 : (isLast ? 3 : 2);
@@ -875,7 +1033,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
     }
   };
 
-const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : null;
+  const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : null;
   // Rank by average per active member, matching the server. A teammate who has
   // not answered yet must not push their team up the table.
   //
@@ -894,6 +1052,46 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
   // personal one. One source of truth for both the buttons and their guards,
   // so a teammate's award cannot leave this player tapping a dead button.
   const pool = (teamMode && myTeam ? myTeam.powerups : powerups) ?? powerups;
+
+  /* ── team mode: the shared quorum count and the team's reveal ──
+   *
+   * Two things arrive here that a member cannot get from their own pick
+   * response, because that response only ever goes back to whoever submitted
+   * last:
+   *
+   *  1. `pickCount`, a bare number on the team document. Every member watches
+   *     it, so the "3 of 4 in" strip is live for the whole team rather than
+   *     frozen at whatever the submitter's response said. It carries no ids and
+   *     no choices -- the picks live in the server-only collection, so nobody
+   *     can work out who is holding the room up.
+   *  2. `reveals.q{n}`, the team's single resolved answer. Without it a member
+   *     who picked early and then waited had no way to learn the outcome: their
+   *     pending request had already been answered, and the only thing left to
+   *     them was the next question arriving.
+   */
+  useEffect(() => {
+    if (!teamMode || !myTeam) return;
+    const expected = myTeam.memberCount || myTeam.memberIds?.length || 0;
+    setTeamPickCount({ picked: myTeam.pickCount ?? 0, expected });
+
+    const reveal = myTeam.reveals?.[`q${teamIndex}`] ?? null;
+    if (!reveal) return;
+    // Only ever fill a gap: the member who submitted last already has the exact
+    // payload from their own response, including the powerup award.
+    setResult(prev => prev ?? {
+      correct: reveal.correct,
+      correctAnswer: reveal.correctAnswer,
+      points: reveal.points,
+      speedBonus: reveal.speedBonus,
+      multiplier: reveal.multiplier,
+      picked: ownAnswers?.[`q${teamIndex}`]?.picked ?? selectedRef.current ?? '',
+      teamAnswer: reveal.answer,
+      agreed: reveal.agreed,
+      iAgreed: ownAnswers?.[`q${teamIndex}`]?.agreed ?? false,
+      pickers: reveal.pickers,
+      voided: reveal.void,
+    });
+  }, [teamMode, myTeam, teamIndex, ownAnswers]);
   // Classic has no team document to hang the momentum HUD on, so synthesize one
   // from the player's own stats. Feeding TeamMomentumHUD the same shape it
   // already renders for a team is what makes the solo ladder read identically
@@ -938,7 +1136,7 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
       if (!game || !game.consumePowerup('hint')) return;
       setPowerups({ ...game.powerups });
       setActivePowerups(p => ({ ...p, hint: true }));
-      const q = questions[questionOrder[currentIndex]];
+      const q = questions[effectiveOrder[currentIndex]];
       if (q?.type === 'mcq' && q.choices) {
         const wrong = q.choices.filter((c: string) => c !== q.correctAnswer);
         const shuffled = wrong.sort(() => Math.random() - 0.5);
@@ -947,7 +1145,7 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
       return;
     }
     setActivePowerups(p => ({ ...p, hint: true }));
-    const q = questions[questionOrder[currentIndex]];
+    const q = questions[effectiveOrder[currentIndex]];
     if (q?.type === 'mcq' && q.choices) {
       const wrong = q.choices.filter((c: string) => c !== q.correctAnswer);
       const shuffled = wrong.sort(() => Math.random() - 0.5);
@@ -1007,14 +1205,197 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
     }
   };
 
+  /**
+   * Lock (or clear) this member's pick, keeping the timer-visible refs in step.
+   *
+   * `selected`/`pendingAnswer` alone are not enough: the shared clock runs from
+   * an interval that closes over an old render, and a forced submit has to know
+   * what this member actually chose rather than what some earlier render saw.
+   */
+  const lockPick = (next: string | null) => {
+    selectedRef.current = next;
+    setSelected(next);
+  };
+
+  /**
+   * Record this member's private pick, and read back either "still waiting" or
+   * the team's single resolved answer.
+   *
+   * Everything about the outcome is decided server-side: the tally, the score,
+   * the reveal and even whether the clock really expired. A pending response
+   * means the pick is locked in and a teammate has not answered yet -- the
+   * screen must NOT show a result, because there is not one yet, and must not
+   * show what anyone picked, because that is private.
+   */
+  const submitTeamPick = async (answer: string, force: boolean) => {
+    if (isOffline || isLan || spectator) return;
+    try {
+      const token = await getToken();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(`${API_BASE_URL}/game/teams/pick/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          roomCode,
+          questionIndex: teamIndex,
+          answer,
+          // Time is measured from the ROOM's start stamp, not from when this
+          // screen happened to mount, so a late joiner cannot claim a fast
+          // answer they did not make.
+          timeTaken: teamStartedAt != null ? (Date.now() - teamStartedAt) / 1000 : teamTimeLimit,
+          force: force ? 'true' : 'false',
+          useHint: activePowerups.hint ? 'true' : 'false',
+          useDoublePoints: activePowerups.doublePoints ? 'true' : 'false',
+          useShield: activePowerups.shield ? 'true' : 'false',
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        if (res.status === 403 && /team|spectator/i.test(data.error || '')) {
+          setIsSpectating(true);
+          lockPick(null);
+          pendingAnswerRef.current = null;
+          setPendingAnswer(null);
+          return;
+        }
+        // "Time is still on the clock": our countdown and the server's disagreed
+        // (a slow request, a clock skew). Nothing was charged and the pick stays
+        // valid, so just keep waiting -- the next tick tries again.
+        if (res.status === 400 && data.pending) {
+          // Allow another forced attempt: the server simply says the round has
+          // not closed yet, and the next tick of a still-running clock may.
+          teamForceSentRef.current = false;
+          return;
+        }
+        // Stale question: the room moved on without us. The room listener pulls
+        // us onto the current one, and the local card is reset by that effect.
+        if (res.status === 409) {
+          setError(null);
+          lockPick(null);
+          pendingAnswerRef.current = null;
+          setPendingAnswer(null);
+          setTeamPickCount(null);
+          setResult(null);
+          return;
+        }
+        throw new Error(data.error || `Server error ${res.status}`);
+      }
+
+      if (data.pending) {
+        // Locked in, waiting on the rest of the team. No result, no reveal.
+        setTeamPickCount({ picked: data.picked ?? 0, expected: data.expected ?? 0 });
+        setError(null);
+        return;
+      }
+
+      setTeamPickCount(null);
+      setResult({
+        correct: !!data.correct,
+        correctAnswer: data.correctAnswer,
+        points: data.pointsAwarded ?? 0,
+        speedBonus: data.speedBonus ?? 0,
+        multiplier: data.multiplier ?? 1.0,
+        picked: answer,
+        teamAnswer: data.answer ?? '',
+        agreed: data.agreed ?? 0,
+        iAgreed: data.void ? true : !!answer && answer === (data.answer ?? ''),
+        pickers: data.pickers ?? 0,
+        voided: !!data.void,
+      });
+      if (data.powerupEarned) {
+        setShowRoulette(true);
+        setRouletteTarget(data.powerupEarned);
+      }
+    } catch (e: any) {
+      console.error(e);
+      const msg = e.name === 'AbortError'
+        ? 'Server timed out. Check your connection and try again.'
+        : e.message || 'Network error. Check your connection.';
+      // A pick that never reached the server must not look like a scored one.
+      // It can be re-sent: the server treats a member's own pick as idempotent.
+      setError(msg);
+      lockPick(null);
+      pendingAnswerRef.current = answer || null;
+      setPendingAnswer(answer || null);
+      teamForceSentRef.current = false;
+    }
+  };
+  teamPickRef.current = (answer, force) => { void submitTeamPick(answer, force); };
+
+  /**
+   * Move the room on to the next shared question.
+   *
+   * The room owns the index, so this is a request rather than a local
+   * increment: advancing only this screen is what used to leave a member
+   * answering a question nobody else could see. The server refuses the step
+   * while the current question is still open, so a member cannot skip it for
+   * everyone else.
+   */
+  const advanceTeamQuestion = async () => {
+    if (isOffline || isLan) return;
+    try {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/game/teams/advance/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ roomCode, questionIndex: teamIndex + 1 }),
+      });
+      await res.json().catch(() => ({}));
+      // Every outcome here is fine: 200 moved the room, 409 means somebody else
+      // already did (or the round is still open, and the next attempt will
+      // land). The room listener is what actually moves this screen.
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * End of a team game.
+   *
+   * Everyone votes that they are done; only the room OWNER actually settles it.
+   * Navigation is left to the room listener, which fires when the server has
+   * really closed the room -- a member who votes must not be dropped onto a
+   * results screen for a game that is still running.
+   */
+  const finishTeamGame = async () => {
+    try {
+      const token = await getToken();
+      const isOwner = roomOwnerId != null && String(roomOwnerId) === String(userId);
+      await fetch(`${API_BASE_URL}/game/finish/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ roomCode, confirm: isOwner ? 'true' : 'false' }),
+      });
+    } catch {
+      // Never strand the player on a dead card; the host can still end it.
+    }
+  };
+
   const handleAnswer = async (answer: string | null) => {
     if (selected || spectator) return;
+    if (teamMode) {
+      // Team play submits a private PICK, not an answer: the team has one
+      // answer and the server tallies it. Nothing here decides the outcome.
+      clearInterval(timerRef.current);
+      lockPick(answer || '');
+      pendingAnswerRef.current = answer;
+      setPendingAnswer(answer);
+      setError(null);
+      await submitTeamPick(answer || '', false);
+      return;
+    }
     clearInterval(timerRef.current);
-    setSelected(answer || '');
+    lockPick(answer || '');
+    pendingAnswerRef.current = answer;
     setPendingAnswer(answer);
     setError(null);
     const timeTaken = (Date.now() - startTimeRef.current) / 1000;
-    const actualIndex = questionOrder[currentIndex];
+    const actualIndex = effectiveOrder[currentIndex];
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game) return;
@@ -1086,6 +1467,8 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
         // another 403.
         if (res.status === 403 && /team/i.test(err.error || '')) {
           setIsSpectating(true);
+          selectedRef.current = null;
+          pendingAnswerRef.current = null;
           setSelected(null);
           setPendingAnswer(null);
           setError(null);
@@ -1138,7 +1521,17 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
   };
 
   const handleNext = async () => {
-    if (currentIndex + 1 >= questionOrder.length) {
+    if (teamMode && !isOffline && !isLan) {
+      if (teamIndex + 1 >= questions.length) {
+        await finishTeamGame();
+        return;
+      }
+      // The room owns the index: ask it to move, and let the room listener pull
+      // this screen onto whatever question the team is actually on.
+      await advanceTeamQuestion();
+      return;
+    }
+    if (currentIndex + 1 >= effectiveOrder.length) {
       if (isLan) {
         finalizeLanGameRef.current();
         return;
@@ -1249,6 +1642,16 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
   const visibleChoices = question.type === 'mcq'
     ? question.choices.filter((c: string) => !hintedChoices.includes(c))
     : [];
+  // In team play the room owns the question order, so "last" is a fact about the
+  // room's index rather than about this screen's own shuffle.
+  const isLastQuestion = (teamMode ? teamIndex : currentIndex) + 1 >= (effectiveOrder.length || questions.length);
+  // Only the room's OWNER can settle a team game; everyone else is voting that
+  // they are done. Saying so on the button stops a member from tapping "Finish"
+  // and expecting the game to end.
+  const isRoomOwner = roomOwnerId != null && String(roomOwnerId) === String(userId);
+  const nextLabel = teamMode
+    ? (isLastQuestion ? (isRoomOwner ? 'End game 🏁' : 'Done — waiting for host') : 'Next →')
+    : (isLastQuestion ? 'Finish 🏁' : 'Next →');
 
   /* ═══════════════════════════════════════════════════════════
      RENDER
@@ -1267,7 +1670,7 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
           <Text style={styles.progressText}>
             <Text style={styles.progressCurrent}>{currentIndex + 1}</Text>
             {' / '}
-            {questionOrder.length}
+            {effectiveOrder.length || questions.length}
           </Text>
           {myTeam && (
             <View style={[styles.teamPill, { borderColor: myTeam.color + '66', backgroundColor: myTeam.color + '14' }]}>
@@ -1399,11 +1802,38 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
           <Text style={styles.questionText}>{question.question}</Text>
         </RNAnimated.View>
 
-        {/* ── PROCESSING (optimistic — shown while answer is in flight) ── */}
+        {/* ── IN FLIGHT (optimistic) ── */}
         {selected && !result && !error && (
           <View style={styles.processingStrip}>
-            <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
-            <Text style={styles.processingText}>Checking answer...</Text>
+            {teamMode ? (
+              <>
+                {/* Not "Checking answer...": there is no answer to check yet. The
+                    pick is locked in and the team is deciding. The count comes
+                    from the team's published `pickCount`, so it is live for
+                    everyone rather than frozen at what the submitter saw -- and
+                    it is a bare number, so nobody can tell WHO is still out. */}
+                <Text style={styles.processingText}>
+                  {teamPickCount && teamPickCount.expected > 0 && teamPickCount.picked >= teamPickCount.expected
+                    ? "Locked in \u00b7 deciding your team's answer..."
+                    : `Locked in \u00b7 ${teamPickCount?.picked ?? 1} of ${teamPickCount?.expected ?? '\u2013'} picked`}
+                </Text>
+                {!!teamPickCount?.expected && (
+                  <View style={styles.quorumDots}>
+                    {Array.from({ length: teamPickCount.expected }).map((_, i) => (
+                      <View
+                        key={i}
+                        style={[styles.quorumDot, i < teamPickCount.picked && styles.quorumDotOn]}
+                      />
+                    ))}
+                  </View>
+                )}
+              </>
+            ) : (
+              <>
+                <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
+                <Text style={styles.processingText}>Checking answer...</Text>
+              </>
+            )}
           </View>
         )}
 
@@ -1422,11 +1852,17 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
           >
             <View style={styles.resultStripMain}>
               <Text style={styles.resultStripLabel}>
-                {result.correct
-                  ? `✅ Correct!${result.multiplier && result.multiplier > 1 ? `  🔥 ${formatMultiplier(result.multiplier)}` : ''}`
-                  : (result.picked
-                      ? `✗ You picked: ${result.picked}`
-                      : `✗ Time's up — Answer: ${result.correctAnswer}`)}
+                {teamMode
+                  ? (result.voided
+                      ? "\U0001f91d Split vote \u2014 no majority, so it scored nothing"
+                      : result.correct
+                        ? `\u2705 Team correct!${result.multiplier && result.multiplier > 1 ? `  \U0001f525 ${formatMultiplier(result.multiplier)}` : ''}`
+                        : `\u2717 Team answered: ${result.teamAnswer || "\u2014"}`)
+                  : (result.correct
+                      ? `✅ Correct!${result.multiplier && result.multiplier > 1 ? `  \U0001f525 ${formatMultiplier(result.multiplier)}` : ''}`
+                      : (result.picked
+                          ? `✗ You picked: ${result.picked}`
+                          : `✗ Time's up — Answer: ${result.correctAnswer}`))}
               </Text>
               {/* Speed shown as its own line: a single "+840" hides the fact
                   that part of it was earned by being quick, which is the
@@ -1440,6 +1876,25 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
                 <Text style={styles.resultAnswerLine}>Answer: {result.correctAnswer}</Text>
               )}
             </View>
+            {/* Team mode: what the TEAM picked, and whether this member was part
+                of it. Sits outside the label row so the strip stays two clean
+                lines. Never who disagreed -- only this member's own position,
+                which they already know. */}
+            {teamMode && !result.voided && !!result.teamAnswer && (
+              <Text style={styles.teamAgreementLine}>
+                Team picked: {result.teamAnswer}
+                {typeof result.agreed === 'number' ? `  \u00b7  ${result.agreed} agreed` : ''}
+              </Text>
+            )}
+            {teamMode && !result.voided && result.iAgreed != null && (
+              <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
+                {result.iAgreed
+                  ? 'You agreed with your team'
+                  : (result.picked
+                      ? 'You went against your team'
+                      : 'You did not pick before time ran out')}
+              </Text>
+            )}
             {!result.correct && question.explanation ? (
               <Text style={styles.resultExplanation}>{question.explanation}</Text>
             ) : null}
@@ -1567,16 +2022,16 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
             <TouchableOpacity
               style={[
                 styles.nextBtn,
-                currentIndex + 1 >= questionOrder.length ? styles.nextBtnFinish : styles.nextBtnAccent,
+                isLastQuestion ? styles.nextBtnFinish : styles.nextBtnAccent,
               ]}
               onPress={() => { if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; } handleNext(); }}
               activeOpacity={0.8}
             >
               <Text style={[
                 styles.nextBtnText,
-                currentIndex + 1 >= questionOrder.length ? styles.nextBtnTextFinish : styles.nextBtnTextAccent,
+                isLastQuestion ? styles.nextBtnTextFinish : styles.nextBtnTextAccent,
               ]}>
-                {currentIndex + 1 >= questionOrder.length ? 'Finish 🏁' : 'Next →'}
+                {nextLabel}
               </Text>
               {autoCountdown > 0 && (
                 <Text style={styles.nextBtnCountdown}>{autoCountdown}s</Text>
@@ -1640,7 +2095,11 @@ const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : 
       {/* ── POWERUP BAR (pinned bottom) ── */}
 {!spectator && !selected && !result && hasPoolPowerups && (
           <View style={styles.powerupBar}>
-          {pool.freeze > 0 && (
+          {/* Freeze is solo-only. There is no per-player timer in a team game to
+              stop -- one shared countdown belongs to everybody -- and the server
+              answers a team freeze with 400 `teamTimer: true`. Offering a button
+              that is guaranteed to fail is worse than not offering it. */}
+          {pool.freeze > 0 && !teamMode && (
             <TouchableOpacity
               style={[styles.puBtn, isFrozen && styles.puBtnFreezeActive]}
               onPress={handleFreeze}
@@ -2030,6 +2489,22 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.bold,
     color: '#C4B5FD',
   },
+  /* Team quorum: one dot per member, filled as their pick lands. Dots rather
+     than avatars on purpose -- the count is public, the identities are not. */
+  quorumDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  quorumDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(196,181,253,0.25)',
+  },
+  quorumDotOn: {
+    backgroundColor: '#34D399',
+  },
 
   /* ── result strip ── */
   resultStrip: {
@@ -2052,6 +2527,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: FONTS.bold,
     color: '#34D399',
+  },
+  /* The team's own pick and where this member stood on it. */
+  teamAgreementLine: {
+    marginTop: 8,
+    fontSize: 12,
+    fontFamily: FONTS.medium,
+    color: COLORS.textSecondary,
+  },
+  /* Brighter than the line above it: whether you backed your team is the whole
+     point of the mechanic and should not read as fine print. */
+  teamOwnLine: {
+    fontFamily: FONTS.bold,
+    color: '#C4B5FD',
   },
   resultExplanation: {
     marginTop: 8,
