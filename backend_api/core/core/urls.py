@@ -34,12 +34,30 @@ def healthz(request):
     Knowing the deployed SHA is what tells "the fix isn't deployed yet" apart
     from "the fix is deployed and still broken", which is otherwise only
     answerable by reading Render's deploy log.
+
+    The cache table is reported for the same reason. `django_cache` is created
+    by `createcachetable` rather than by a migration, and every request writes
+    a throttle counter, so a database without that table is invisible here
+    until it takes the API down. This is a plain Django view and so bypasses
+    DRF throttling entirely, which means it keeps answering precisely when the
+    API cannot serve anything at all.
     """
-    return JsonResponse({
+    from django.core.cache import cache
+
+    body = {
         'status': 'ok',
         'commit': DEPLOY_COMMIT,
         'branch': DEPLOY_BRANCH,
-    })
+    }
+    try:
+        table_present, degraded = cache.health()
+        body['cache_table'] = table_present
+        body['cache_degraded'] = degraded
+    except AttributeError:
+        # A cache backend without a health() helper: nothing to report, and
+        # not worth failing the liveness probe over.
+        pass
+    return JsonResponse(body)
 
 
 urlpatterns = [

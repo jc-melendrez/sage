@@ -60,6 +60,41 @@ function GoogleLogo() {
   );
 }
 
+/**
+ * Firebase Auth rejects with its raw SDK error rather than an Error, and the
+ * `message` on those is a debug string ("[auth/invalid-credential] ...").
+ * Wrong credentials is the most common login failure by a wide margin, so it
+ * gets a sentence a person can act on.
+ */
+const FIREBASE_ERRORS: Record<string, string> = {
+  'auth/invalid-credential': 'Incorrect email or password.',
+  'auth/invalid-email': 'That does not look like an email address.',
+  'auth/user-not-found': 'No account exists for that email.',
+  'auth/user-disabled': 'This account has been disabled.',
+  'auth/too-many-requests': 'Too many attempts. Please wait a moment and try again.',
+  'auth/network-request-failed': 'Could not reach the server. Check your connection.',
+  'auth/weak-password': 'Please choose a stronger password.',
+  'auth/email-already-in-use': 'An account already exists for that email.',
+};
+
+/**
+ * The message to show for anything a login attempt throws.
+ *
+ * Read from the caught value rather than the `error` state on purpose: the
+ * catch blocks call clearError() before awaiting, so the closure they were
+ * created in still holds the *previous* attempt's error and would report the
+ * wrong failure (or a stale one) every time.
+ */
+function messageFor(err: unknown, fallback: string): string {
+  if (typeof err === 'string' && err) return err;
+  if (err && typeof err === 'object') {
+    const { code, message } = err as { code?: string; message?: string };
+    if (code && FIREBASE_ERRORS[code]) return FIREBASE_ERRORS[code];
+    if (message) return message;
+  }
+  return fallback;
+}
+
 export default function LoginScreen() {
   const [isSignUp, setIsSignUp] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -99,8 +134,11 @@ export default function LoginScreen() {
       } else {
         router.replace(roleHomePath(response.user));
       }
-    } catch {
-      Alert.alert('Login Failed', error || 'Please check your credentials');
+    } catch (err) {
+      // Use the caught error, not `error` from this render: clearError() above
+      // schedules a state update, so the closure still holds the previous
+      // value and would show the message from the last attempt (or nothing).
+      Alert.alert('Login Failed', messageFor(err, 'Please check your credentials'));
     }
   };
 
@@ -128,8 +166,8 @@ export default function LoginScreen() {
       } else {
         router.replace(roleHomePath(response.user));
       }
-    } catch {
-      Alert.alert('Sign Up Failed', error || 'Please try again');
+    } catch (err) {
+      Alert.alert('Sign Up Failed', messageFor(err, 'Please try again'));
     }
   };
 
@@ -146,8 +184,8 @@ export default function LoginScreen() {
       clearError();
       const response = await verifyOtp(challengeToken, otpCode);
       router.replace(roleHomePath(response.user));
-    } catch {
-      Alert.alert('Verification Failed', error || 'Please try again');
+    } catch (err) {
+      Alert.alert('Verification Failed', messageFor(err, 'Please try again'));
     }
   };
 
@@ -158,7 +196,7 @@ export default function LoginScreen() {
       router.replace(roleHomePath(response.user));
     } catch (err) {
       // Cancelled sign-ins are silent; real errors get shown
-      const message = err instanceof Error ? err.message : 'Google sign-in failed';
+      const message = messageFor(err, 'Google sign-in failed');
       if (!message.includes('cancelled')) {
         Alert.alert('Google Sign-In Failed', message);
       }

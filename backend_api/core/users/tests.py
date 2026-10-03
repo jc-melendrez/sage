@@ -16,6 +16,7 @@ from rest_framework.test import APITestCase, APIClient
 
 from .models import Activity, Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, Recommendation, TaskSubmission, Topic, User
 from .serializers import RecommendationSerializer, BadgeSerializer
+from .authentication import SAGERefreshToken
 from . import gamification
 from . import views as users_views
 from ai_assistant.models import Quiz, QuizGroupShare
@@ -815,6 +816,51 @@ class FirebaseLoginOtpTests(APITestCase):
             format='json',
         )
         self.assertEqual(res.status_code, 400)
+
+
+class TokenRefreshMissingUserTests(APITestCase):
+    """A refresh token whose user row is gone must be a 401, not a 500.
+
+    simplejwt's TokenRefreshSerializer looks the user up with an unguarded
+    `objects.get` and TokenViewBase only catches TokenError, so a token minted
+    before the account was deleted -- or before a database rebuild dropped the
+    row -- leaves as an unhandled DoesNotExist.
+
+    The status matters more than the exception. The mobile client reads any 5xx
+    as "the backend is still waking up", keeps the dead token and retries, so
+    the user ends up neither signed in nor signed out with every subsequent
+    request failing the same way. A 401 is something it already knows how to
+    answer, by signing out.
+    """
+
+    def test_refresh_for_a_deleted_user_is_401(self):
+        user = User.objects.create_user(
+            username='refresh-then-deleted', password='pass12345', role='student',
+        )
+        refresh = SAGERefreshToken.for_user(user)
+        User.objects.filter(pk=user.pk).delete()
+
+        response = self.client.post(
+            reverse('token_refresh'), {'refresh': str(refresh)}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 401, response.content)
+        self.assertIn('detail', response.data)
+
+    def test_refresh_for_a_live_user_still_works(self):
+        """The 401 has to be specific to the missing row, not a blanket change
+        to how refresh behaves."""
+        user = User.objects.create_user(
+            username='refresh-still-here', password='pass12345', role='student',
+        )
+        refresh = SAGERefreshToken.for_user(user)
+
+        response = self.client.post(
+            reverse('token_refresh'), {'refresh': str(refresh)}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIn('access', response.data)
 
 
 class FirebaseSignupRoleTests(APITestCase):

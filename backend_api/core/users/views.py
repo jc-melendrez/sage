@@ -7,6 +7,7 @@ import requests
 import re
 from datetime import timedelta
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status
 from django.core.cache import cache
@@ -138,23 +139,47 @@ class FirebaseLoginView(APIView):
             if requested_role not in ('student', 'educator'):
                 requested_role = 'student'
 
-            # Ensure username is unique; if taken, append a random string from the UID
-            if User.objects.filter(username=username).exists():
-                username = f"{username}_{firebase_uid[:6]}"
+            # Ensure username is unique. Loop rather than trying one suffix:
+            # a single `_{uid[:6]}` attempt can itself collide, and the
+            # IntegrityError that follows is an unhelpful 500 for what is only
+            # a name clash.
+            base_username = username
+            attempt = 0
+            while User.objects.filter(username=username).exists():
+                attempt += 1
+                username = f"{base_username}_{firebase_uid[:6]}_{attempt}"
 
-            user = User.objects.create_user(
-                username=username,
-                email=email,
-                firebase_uid=firebase_uid,
-                first_name=first_name,
-                last_name=last_name,
-                role=requested_role,
-                password=None # Password is managed by Firebase now
-            )
-            # Persist the role as a Firebase custom claim so it survives DB resets
-            set_role_claim(firebase_uid, requested_role)
-            # Sync the new user to Firestore immediately
-            sync_user_to_firestore(user)
+            try:
+                # In its own atomic block so a failed insert rolls back to a
+                # savepoint. Without it the connection is left needing a
+                # rollback, and the lookup below raises
+                # TransactionManagementError instead of finding the row.
+                with transaction.atomic():
+                    user = User.objects.create_user(
+                        username=username,
+                        email=email,
+                        firebase_uid=firebase_uid,
+                        first_name=first_name,
+                        last_name=last_name,
+                        role=requested_role,
+                        password=None # Password is managed by Firebase now
+                    )
+            except IntegrityError:
+                # Lost the race against a concurrent request for the same
+                # account -- a double-tapped login, or the retry the app sends
+                # after a previous attempt died further down the response path.
+                # The row we wanted exists, so use it instead of 500ing.
+                user = User.objects.filter(firebase_uid=firebase_uid).first()
+                if user is None:
+                    return Response(
+                        {"error": "Could not create your account. Please try again."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+            else:
+                # Persist the role as a Firebase custom claim so it survives DB resets
+                set_role_claim(firebase_uid, requested_role)
+                # Sync the new user to Firestore immediately
+                sync_user_to_firestore(user)
 
         # 3. Email/password sign-ins require an emailed OTP before a JWT is
         #    issued (2FA-style). Google sign-ins skip OTP — Google has already
