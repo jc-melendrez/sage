@@ -190,6 +190,28 @@ function extractErrorMessage(error: any, fallback: string): string {
 }
 
 /**
+ * Build the Error for a non-2xx auth response, carrying the HTTP status.
+ *
+ * The status is worth keeping because the backend's 500 handler returns one
+ * fixed sentence for every unhandled exception
+ * (`core.urls.json_500`), so "Internal server error. Please try again." is
+ * identical whether the database is missing a table or a view is broken.
+ * Prefixing the code costs the user nothing and is the difference between a
+ * reportable bug and a mystery. It also goes to the device log, which is the
+ * only signal available when the message shown on screen is generic.
+ */
+async function authFailure(response: Response, fallback: string): Promise<Error> {
+  const body = await safeJson(response);
+  const detail = extractErrorMessage(body, '');
+  if (response.status >= 500) {
+    console.warn(`[auth] ${response.status} from ${response.url}`, body);
+  }
+  return new Error(
+    detail ? `(${response.status}) ${detail}` : `Server error (${response.status}). ${fallback}`
+  );
+}
+
+/**
  * Login: Firebase Auth → Django JWT (possibly via emailed OTP).
  *
  * Email/password logins return an OtpChallengeResponse (no tokens yet).
@@ -207,8 +229,7 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
   });
 
   if (!response.ok) {
-    const error = await safeJson(response);
-    throw new Error(extractErrorMessage(error, 'Login failed.'));
+    throw await authFailure(response, 'Please try again.');
   }
 
   const data = await response.json();
@@ -232,8 +253,7 @@ export async function verifyOtp(challengeToken: string, otp: string): Promise<Au
   });
 
   if (!response.ok) {
-    const error = await safeJson(response);
-    throw new Error(extractErrorMessage(error, 'Verification failed.'));
+    throw await authFailure(response, 'Please request a new code and try again.');
   }
 
   const data = await response.json();
@@ -256,8 +276,7 @@ export async function loginWithGoogle(): Promise<AuthResponse> {
   });
 
   if (!response.ok) {
-    const error = await safeJson(response);
-    throw new Error(extractErrorMessage(error, 'Google sign-in failed.'));
+    throw await authFailure(response, 'Please try again.');
   }
 
   const data = await response.json();
@@ -287,8 +306,7 @@ export async function register(credentials: RegisterCredentials): Promise<AuthRe
   });
 
   if (!response.ok) {
-    const error = await safeJson(response);
-    throw new Error(extractErrorMessage(error, 'Registration failed.'));
+    throw await authFailure(response, 'Please try again.');
   }
 
   const data = await response.json();
@@ -328,8 +346,7 @@ async function loadCurrentUser() {
     }
   }
   if (!response.ok) {
-    const error = await safeJson(response);
-    throw new Error(extractErrorMessage(error, 'Failed to fetch user profile'));
+    throw await authFailure(response, 'Please try again.');
   }
   return await response.json();
 }
@@ -407,8 +424,7 @@ export async function updateProfile(fields: {
     }
   }
   if (!response.ok) {
-    const error = await safeJson(response);
-    throw new Error(extractErrorMessage(error, 'Failed to update profile'));
+    throw await authFailure(response, 'Please try again.');
   }
   const updated = await response.json();
   const url = `${API_BASE_URL}/users/me/`;

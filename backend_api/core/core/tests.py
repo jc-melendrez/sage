@@ -4,9 +4,12 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.core.cache import cache
+from django.core.cache.backends.db import DatabaseCache
+from django.core.cache.backends.locmem import LocMemCache
 from django.db import transaction
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import get_resolver, path, reverse
+from django.utils.module_loading import import_string
 from rest_framework.test import APIClient
 
 from core.throttling import (
@@ -68,11 +71,12 @@ class JsonErrorHandlerWiringTests(SimpleTestCase):
 
 # --- AI endpoint throttling -------------------------------------------------
 
-# The throttles count in Django's cache. The production cache is a
-# DatabaseCache, whose table is created by `manage.py createcachetable` rather
-# than by a migration, so it does not exist inside the test database. LocMem
-# keeps the behavioural tests fast and isolated; a separate test below pins the
-# production backend so the switch cannot silently regress.
+# The throttles count in Django's cache. The production cache stores its
+# counters in a `django_cache` table that `manage.py createcachetable` creates
+# and no migration does, so that table does not exist inside the test database.
+# LocMem keeps the behavioural tests fast and isolated; separate tests below pin
+# the production backend, its fallback, and the deploy step that creates the
+# table, so none of that can silently regress.
 TEST_CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
@@ -259,20 +263,159 @@ class ThrottleCacheBackendTests(SimpleTestCase):
     its own counter, the enforced limit was roughly double the configured rate,
     and every deploy reset it. A plain settings typo here would silently put
     that back, so it is worth a test.
+
+    The assertion is a subclass check rather than an exact path because the
+    production backend wraps DatabaseCache in a fallback: it still stores
+    counters in the database, but degrades to an in-process cache instead of
+    raising when the `django_cache` table is absent. Pinning the literal
+    backend string would have locked that safety net out.
     """
 
     def test_throttle_counters_are_shared_across_workers(self):
-        self.assertEqual(
-            settings.CACHES['default']['BACKEND'],
-            'django.core.cache.backends.db.DatabaseCache',
+        backend = import_string(settings.CACHES['default']['BACKEND'])
+        self.assertTrue(
+            issubclass(backend, DatabaseCache),
+            f'{settings.CACHES["default"]["BACKEND"]} is not a DatabaseCache, '
+            'so throttle counters go back to being per-process',
         )
+
+    def test_backend_degrades_instead_of_raising(self):
+        """The regression this whole mechanism exists for.
+
+        `django_cache` is created by `createcachetable`, not by a migration, so
+        a deployed database missing that table turns the first throttle write
+        into an unhandled ProgrammingError -- every endpoint, login included,
+        returning 500. The backend has to serve from a fallback instead.
+        """
+        backend = import_string(settings.CACHES['default']['BACKEND'])
+        self.assertTrue(hasattr(backend, 'health'))
+        self.assertFalse(issubclass(backend, LocMemCache))
 
     def test_release_step_creates_the_cache_table(self):
         """DatabaseCache's table is created by createcachetable, not by a
-        migration, so the Procfile release step is the only thing standing
-        between a deploy and a backend that raises on its first cache write."""
+        migration. Both Procfile commands run it: `release` on a clean deploy
+        and `web` on every boot, so a skipped or failed release phase cannot
+        leave the backend with no table. The `web` line is the one that has to
+        hold, because it is what actually starts gunicorn."""
         procfile = settings.BASE_DIR / 'Procfile'
         with open(procfile, encoding='utf-8') as handle:
-            self.assertIn('createcachetable', handle.read())
+            lines = handle.read().splitlines()
+        commands = {line.split(':', 1)[0].strip(): line for line in lines if ':' in line}
+        for command in ('release', 'web'):
+            self.assertIn(
+                command, commands,
+                f'Procfile has no {command!r} command: {lines}',
+            )
+            self.assertIn(
+                'createcachetable', commands[command],
+                f'The {command!r} command must create the cache table: {commands[command]}',
+            )
+
+
+class CacheFallbackTests(TestCase):
+    """A missing `django_cache` table must not become a 500.
+
+    Reproduces the production outage by pointing the backend at a table that
+    was never created, which is exactly what a database that missed
+    `manage.py createcachetable` looks like.
+    """
+
+    CACHES = {
+        'default': {
+            'BACKEND': 'core.cache.ResilientDatabaseCache',
+            'LOCATION': 'table_that_was_never_created',
+        },
+    }
+
+    def setUp(self):
+        # The latch is process-wide by design (see core/cache.py), so a sibling
+        # test that already degraded would silently satisfy the assertions below
+        # and stop proving that the request path degrades on its own.
+        from core.cache import reset_latch
+
+        reset_latch()
+        self.addCleanup(reset_latch)
+
+    @override_settings(CACHES=CACHES)
+    def test_missing_table_still_serves_reads_and_writes(self):
+        with override_settings(CACHES=self.CACHES):
+            # A fresh cache object per test. Degradation is latched per table
+            # process-wide, and setUp clears it, so the state under test is
+            # genuinely produced by the calls below.
+            from django.core.cache import caches
+            caches.close_all()
+            backend = caches['default']
+            self.addCleanup(caches.close_all)
+
+            self.assertFalse(backend.health()[0])
+
+            # Every one of these raised before the fallback existed.
+            backend.set('k', 'v', 60)
+            self.assertEqual(backend.get('k'), 'v')
+            self.assertTrue(backend.has_key('k'))
+            self.assertEqual(backend.get_many(['k']), {'k': 'v'})
+            self.assertTrue(backend.add('k2', 'v2', 60))
+            self.assertTrue(backend.touch('k2', 60))
+            backend.delete('k2')
+            self.assertFalse(backend.has_key('k2'))
+            backend.delete_many(['k'])
+
+            self.assertTrue(backend.degraded)
+            self.assertIn('table_that_was_never_created', backend._degraded_reason)
+
+    @override_settings(CACHES=CACHES)
+    def test_a_request_is_not_a_500_when_the_table_is_missing(self):
+        """The end that actually matters: the throttle writes on every
+        request, so this is the path that took the whole API down."""
+        with override_settings(CACHES=self.CACHES):
+            from django.core.cache import caches
+            caches.close_all()
+            self.addCleanup(caches.close_all)
+            backend = caches['default']
+
+            user = User.objects.create_user(
+                username='fallback-student', password='pass12345', role='student',
+            )
+            client = APIClient()
+            client.force_authenticate(user=user)
+            response = client.patch(
+                reverse('current_user_profile'),
+                {'first_name': 'Still', 'last_name': 'Works'},
+                format='json',
+            )
+            self.assertEqual(response.status_code, 200, response.content)
+            self.assertEqual(response.data['first_name'], 'Still')
+            # The request itself is what trips the fallback, so assert the state
+            # moved rather than trusting a latch some earlier call left behind.
+            self.assertTrue(backend.degraded)
+
+    @override_settings(CACHES=CACHES)
+    def test_degradation_is_shared_by_every_instance_in_the_process(self):
+        """Django hands each thread its own cache instance.
+
+        If the latch were per-instance, a threaded server would answer the
+        health check from a pristine instance and report `cache_degraded:
+        false` while requests were actively being served from the fallback --
+        which is exactly the confusion this guards against.
+        """
+        with override_settings(CACHES=self.CACHES):
+            from django.core.cache import caches
+            from core.cache import ResilientDatabaseCache
+
+            caches.close_all()
+            self.addCleanup(caches.close_all)
+
+            writer = caches['default']
+            self.assertFalse(writer.degraded)
+            writer.set('k', 'v', 60)
+            self.assertTrue(writer.degraded)
+
+            # A second instance, as a second thread would get.
+            reader = ResilientDatabaseCache(
+                'table_that_was_never_created', {}
+            )
+            self.assertTrue(reader.degraded)
+            # Same fallback, so counters written on one are visible on the other.
+            self.assertEqual(reader.get('k'), 'v')
 
 

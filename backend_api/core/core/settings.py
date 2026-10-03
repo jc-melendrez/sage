@@ -173,6 +173,14 @@ SIMPLE_JWT = {
     # Embed role / token_version in our JWTs
     'TOKEN_OBTAIN_SERIALIZER': 'users.authentication.SAGETokenObtainPairSerializer',
 
+    # simplejwt refreshes with an unguarded `User.objects.get`, so a refresh
+    # token whose user row is gone (a rebuilt database, a deleted account)
+    # raises DoesNotExist and renders as a 500. The client treats a 5xx as
+    # "the backend is waking up" and retries forever while holding the dead
+    # token, so a 401 that logs the user out is the whole difference between
+    # recoverable and stuck. See users.authentication.SAGETokenRefreshSerializer.
+    'TOKEN_REFRESH_SERIALIZER': 'users.authentication.SAGETokenRefreshSerializer',
+
     # Pin the JWT signing key to the Django SECRET_KEY
     'SIGNING_KEY': SECRET_KEY,
 }
@@ -232,11 +240,14 @@ if os.environ.get('EMAIL_BACKEND'):
 # is shared across workers and survives restarts, and it is the same Postgres
 # (or SQLite locally) we already run on -- no new infrastructure.
 #
-# The table is created by `manage.py createcachetable`, which the Procfile
-# release step now runs; see Procfile.
+# The table is created by `manage.py createcachetable`, which both Procfile
+# commands run; see Procfile. Because no migration creates it, a database that
+# never got that command turns every request into a 500 the moment a throttle
+# writes its first counter, so core.cache.ResilientDatabaseCache degrades to an
+# in-process cache instead of failing the request.
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'BACKEND': 'core.cache.ResilientDatabaseCache',
         'LOCATION': 'django_cache',
         'OPTIONS': {
             # Throttle keys are one per (scope, user) pair, so the default 300
