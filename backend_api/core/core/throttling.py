@@ -18,7 +18,7 @@ and hardcoding ``scope`` on each class attaches identically to function-based
 views (``generate_lesson``, ``user_recommendations``) and class-based views.
 """
 
-from rest_framework.throttling import UserRateThrottle
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
 
 class _ScopedUserThrottle(UserRateThrottle):
@@ -89,3 +89,29 @@ class OtpThrottle(_ScopedUserThrottle):
     """
 
     scope = 'otp'
+
+
+class TvLeaderboardThrottle(AnonRateThrottle):
+    """GET /api/game/rooms/<code>/leaderboard/ -- the TV display.
+
+    Different from every throttle above in two ways. The room leaderboard is
+    the one endpoint that is deliberately unauthenticated -- a browser on a
+    classroom TV has no session, and the room code is the only credential --
+    so this subclasses ``AnonRateThrottle`` (IP-keyed) rather than
+    ``UserRateThrottle``, which raises outright on an anonymous request.
+
+    And the load is deliberate rather than abusive: the page re-polls every two
+    seconds for the length of a session, so one display spends ~1800 requests
+    an hour. The default ``anon`` rate is 100/day, which the first display
+    exhausts in about three minutes, after which the screen sits there showing
+    429s for the rest of the class. The rate is sized for a handful of displays
+    sharing one classroom NAT rather than for one, and is overridable with
+    TV_THROTTLE because the number of screens per room is a local decision.
+
+    Being IP-keyed is also what bounds enumeration: the rate caps how many
+    distinct room codes one host can guess per hour, which is the property that
+    matters now that the endpoint is public. Keying on the room code instead
+    would hand every guess its own bucket and remove that bound entirely.
+    """
+
+    scope = 'tv'

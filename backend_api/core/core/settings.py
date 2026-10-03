@@ -286,6 +286,12 @@ REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
     'ai_topic': os.environ.get('AI_THROTTLE_TOPIC', '10/hour'),
     'ai_recommend': os.environ.get('AI_THROTTLE_RECOMMEND', '5/hour'),
     'ai_game': os.environ.get('AI_THROTTLE_GAME', '10/hour'),
+    # The TV display polls the room leaderboard every 2s for a whole session,
+    # which is ~1800 requests/hour per screen and far above the anon budget.
+    # Unauthenticated, so it needs its own bucket rather than the user rate;
+    # see core.throttling.TvLeaderboardThrottle. Sized for several displays
+    # sharing one classroom NAT -- raise or lower with TV_THROTTLE.
+    'tv': os.environ.get('TV_THROTTLE', '18000/hour'),
 }
 
 # --- AI daily budget (users/ai_usage.py) ---

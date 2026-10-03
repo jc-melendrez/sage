@@ -851,6 +851,14 @@ export default function TvLeaderboard({ mode = 'live' }: { mode?: 'live' | 'demo
         setError('Room not found');
         return;
       }
+      // A 429 here is this room's own bucket running out, not a broken server.
+      // It is the one failure a teacher can actually act on, so it says so
+      // rather than showing the raw status a screen will sit on for the rest
+      // of the lesson.
+      if (res.status === 429) {
+        setError('Too many displays on this room — close the other TV tabs');
+        return;
+      }
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = (await res.json()) as RoomData;
       applySnapshot(data);
