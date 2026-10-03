@@ -1314,6 +1314,12 @@ const lobbyTokenRef = useRef(0);
         {/* Header / Avatar Section */}
         <View style={[styles.header, { paddingTop: insets.top + 20 }]}>
             
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ width: '100%' }}
+              style={{ width: '100%' }}
+            >
             <View style={styles.avatarRow}>
                 {/* Host Avatar (Active) */}
                 <View style={styles.avatarContainer}>
@@ -1379,6 +1385,7 @@ const lobbyTokenRef = useRef(0);
                     </View>
                 ))}
             </View>
+            </ScrollView>
         </View>
 
         {/* Main Content Card */}
