@@ -4,7 +4,7 @@ import string
 import json
 import requests
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.conf import settings
 from django.utils import timezone
@@ -15,7 +15,7 @@ from users.utils.file_parser import extract_text_from_file
 from users.gamification import award_xp, log_activity, record_game_finish
 from users.models import User
 from users.ai_usage import charge, record_tokens
-from core.throttling import AIGameThrottle
+from core.throttling import AIGameThrottle, TvLeaderboardThrottle
 from .models import OfflineGameResult
 
 
@@ -1838,7 +1838,23 @@ class FinishGameView(APIView):
 
 
 class RoomLeaderboardView(APIView):
-    permission_classes = [IsAuthenticated]
+    """Live scores for the TV display, addressed by room code alone.
+
+    Deliberately unauthenticated, as it was when the TV screens were first
+    added: the display is a browser on a classroom television with no session
+    and no SecureStore, so the six-character room code is the only credential
+    it can present. Requiring a JWT here is what left the TV page stuck on a
+    raw "Request failed (401)" for every poll.
+
+    What that costs is bounded by the code space (36^6) and by
+    TvLeaderboardThrottle capping guesses per IP per hour. What it cannot leak
+    is the thing that actually matters in a quiz -- this returns names,
+    avatars, scores and streaks, and the questions and their answer key live
+    under gameRooms/_server, which the client is denied outright by
+    firestore.rules. The educator hosting is already dropped from the roster.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [TvLeaderboardThrottle]
 
     def get(self, request, room_code):
         room_code = room_code.upper()

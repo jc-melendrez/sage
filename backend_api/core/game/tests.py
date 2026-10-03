@@ -5,7 +5,9 @@ from unittest.mock import patch
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.test import APIClient
+
 
 from users.models import Activity, User
 from ai_assistant.models import Quiz, QuizQuestion
@@ -3006,3 +3008,94 @@ class QuestionExplanationTests(TestCase):
         questions = self.create_with_quiz(quiz)
         self.assertEqual(questions[0]['type'], 'identification')
         self.assertEqual(questions[0]['explanation'], 'British English uses "colour".')
+
+
+class TvLeaderboardTests(TestCase):
+    """The TV display authenticates with nothing but the room code.
+
+    This endpoint was quietly switched to IsAuthenticated while the browser page
+    kept sending a bare fetch, so every poll on every classroom television has
+    been failing 401 since. It is public again, deliberately -- these tests are
+    what stops that from drifting a third time, and they also pin the throttle
+    bucket that the unauthenticated version depends on to stay up.
+    """
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='tvhost', password='pass')
+        self.p1 = User.objects.create_user(username='tvp1', password='pass')
+        self.p2 = User.objects.create_user(username='tvp2', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.url = reverse('room-leaderboard', args=['TV001'])
+        self.room_ref = self.store.collection('gameRooms').document('TV001')
+        self.room_ref.set({
+            'status': 'active', 'hostId': self.host.id, 'hostName': 'Teacher',
+            'topic': 'Water Cycle', 'questionCount': 10, 'timePerQuestion': 15,
+        })
+        for i, u in enumerate((self.p1, self.p2), start=1):
+            self.room_ref.collection('players').document(str(u.id)).set({
+                'displayName': u.username, 'score': i * 100, 'answeredCount': i,
+                'correctCount': i, 'streak': i, 'teamId': None,
+            })
+
+    def get_without_credentials(self):
+        """No force_authenticate -- this is the browser-on-a-TV case."""
+        return self.client.get(self.url)
+
+    def test_the_room_code_alone_is_enough(self):
+        resp = self.get_without_credentials()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['roomCode'], 'TV001')
+        self.assertEqual([p['displayName'] for p in resp.data['players']], ['tvp2', 'tvp1'])
+
+    def test_the_payload_carries_no_questions_and_no_answer_key(self):
+        # The one thing a public endpoint must never hand out. The quiz content
+        # lives on the room document itself, so this asserts the view selects
+        # fields rather than echoing the room.
+        resp = self.get_without_credentials()
+        self.assertNotIn('questions', resp.data)
+        self.assertNotIn('correctAnswer', resp.data)
+        self.assertNotIn('answerKey', str(resp.data))
+
+    def test_an_unknown_room_is_a_404_not_an_empty_leaderboard(self):
+        # Otherwise a mistyped code renders a plausible-looking all-zero board.
+        resp = self.client.get(reverse('room-leaderboard', args=['NOPE9']))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_the_tv_bucket_replaces_the_anon_budget(self):
+        # Reachable only because the view overrides throttle_classes: at the
+        # default anon rate of 100/day the first display exhausts it in about
+        # three minutes of 2s polling, and the screen then 429s for the rest of
+        # the lesson.
+        from game.views import RoomLeaderboardView
+        from core.throttling import TvLeaderboardThrottle
+
+        self.assertEqual(RoomLeaderboardView.permission_classes, [AllowAny])
+        self.assertEqual(RoomLeaderboardView.throttle_classes, [TvLeaderboardThrottle])
+        self.assertEqual(TvLeaderboardThrottle.scope, 'tv')
+
+    def test_the_configured_rate_outlasts_a_full_session_of_polling(self):
+        from django.conf import settings
+
+        from core.throttling import TvLeaderboardThrottle
+
+        # 18000/hour against 1800/hour per display leaves room for ten screens
+        # sharing one classroom NAT. Asserted so a well-meaning trim of the
+        # default back to a few hundred cannot silently break the TV again.
+        num, _, period = settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'][TvLeaderboardThrottle.scope].partition('/')
+        self.assertEqual(period, 'hour')
+        self.assertGreaterEqual(int(num), 1800 * 10)
+
+    def test_a_display_survives_past_the_old_anon_ceiling(self):
+        # The concrete failure this endpoint had: at the default anon rate of
+        # 100/day, request 101 returned 429 and the television sat on an error
+        # for the rest of the lesson. Polling 150 times is ~5 minutes of real
+        # 2s polling, and every one of them has to come back 200.
+        for _ in range(150):
+            resp = self.get_without_credentials()
+            self.assertEqual(resp.status_code, 200)
