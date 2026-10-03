@@ -18,9 +18,17 @@
  * `Keyboard.addListener` tracker that was the only one that actually worked.
  *
  * The fix has two halves, and both are required:
- *   1. `softwareKeyboardLayoutMode: 'pan'` in app.config.js, so the manifest
- *      stops asking for an `adjustResize` that edge-to-edge silently voids.
- *   2. This component, which is the only thing that moves the layout.
+ *   1. `softwareKeyboardLayoutMode: 'adjustNothing'` in app.config.js, so the
+ *      system never pans or resizes the window for the keyboard.
+ *   2. This component, which is then the only thing that moves the layout.
+ *
+ * The two halves have to agree on who is responsible for the offset. The
+ * manifest used to say 'pan', which asks Android to translate the window up to
+ * reveal the focused input -- on top of the padding applied below. The two
+ * compounded, so on every focus the content was pushed past the top of the
+ * keyboard and left a blank strip above it. Anything that renders an input
+ * therefore has to sit inside this component: with `adjustNothing` there is no
+ * OS fallback revealing a field that nothing else has padded.
  *
  * The offset is driven by a Reanimated shared value so the movement happens on
  * the UI thread. Going through `useState` instead would re-render the whole
@@ -77,6 +85,13 @@ export function KeyboardSafeView({
     if (Platform.OS !== 'android') return;
 
     const show = Keyboard.addListener('keyboardDidShow', (e) => {
+      if (__DEV__) {
+        // The single most useful number when a padded screen looks wrong. If
+        // this is not the real keyboard height then every screen is off by
+        // this much, and `adb shell dumpsys input_method` reports the same
+        // number to compare against.
+        console.log(`[KeyboardSafeView] keyboard height ${e.endCoordinates.height}px`);
+      }
       keyboardHeight.value = withTiming(e.endCoordinates.height, {
         duration: KEYBOARD_ANIM_MS,
       });

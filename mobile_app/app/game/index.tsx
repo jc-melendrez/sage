@@ -131,6 +131,10 @@ export default function GameCenterScreen() {
   // teamId, so scroll it into view and pulse it. Mirrors the lobby screen.
   const [highlightTeamId, setHighlightTeamId] = useState<string | null>(null);
   const teamScrollRef = useRef<ScrollView>(null);
+  // The mode-config list is a different ScrollView from the preset list, and
+  // the custom team-count field is the last thing in it -- so that field is the
+  // one that has to be scrolled back into view when it takes focus.
+  const modesScrollRef = useRef<ScrollView>(null);
   // Rendered next to the team columns instead of only in a toast: the previous
   // Alert-only reporting is why this reached "reproducible nowhere".
   const [addTeamError, setAddTeamError] = useState<string | null>(null);
@@ -1528,8 +1532,10 @@ const lobbyTokenRef = useRef(0);
                 )}
             </ScrollView>
             ) : (
+            <KeyboardSafeView style={styles.modesScroll}>
             <ScrollView 
-                style={styles.modesScroll} 
+                ref={modesScrollRef}
+                style={styles.modesFill} 
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={{ paddingBottom: 100 }}
                 refreshControl={
@@ -1625,6 +1631,7 @@ const lobbyTokenRef = useRef(0);
                         <TextInput
                             style={styles.teamCountInputText}
                             value={teamCountDraft}
+                            onFocus={() => modesScrollRef.current?.scrollToEnd({ animated: true })}
                             onChangeText={(t) => {
                                 const cleaned = t.replace(/[^0-9]/g, '').slice(0, 2);
                                 setTeamCountDraft(cleaned);
@@ -1640,6 +1647,7 @@ const lobbyTokenRef = useRef(0);
                 </View>
                 )}
             </ScrollView>
+            </KeyboardSafeView>
             )}
         </View>
 
@@ -2028,11 +2036,14 @@ const styles = StyleSheet.create({
   },
 
   // Modes List
-  modesScroll: {
+modesScroll: {
     flex: 1,
     paddingHorizontal: 12,
     paddingTop: 12,
   },
+  // The keyboard-safe wrapper around the mode list owns `modesScroll`'s padding
+  // now, so the scroll view inside it only has to fill what is left.
+  modesFill: { flex: 1 },
   modeCard: {
     flexDirection: 'row',
     backgroundColor: COLORS.surfaceDim,

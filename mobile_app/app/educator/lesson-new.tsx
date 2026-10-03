@@ -14,6 +14,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { pickDocument, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import { FilterChip, EmptyState } from '@/components/educator/EducatorPrimitives';
@@ -162,7 +163,7 @@ export default function CreateLessonScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <KeyboardSafeView style={styles.container}>
       <EducatorHeader title="New Lesson" subtitle="Generate a topic with AI" showBack />
 
       <ScrollView
@@ -321,7 +322,7 @@ export default function CreateLessonScreen() {
           </View>
         </View>
       </Modal>
-    </View>
+    </KeyboardSafeView>
   );
 }
 

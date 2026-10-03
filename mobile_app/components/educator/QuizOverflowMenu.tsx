@@ -11,6 +11,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 import { API_BASE_URL } from '@/config/api';
 import { getToken } from '@/services/authService';
@@ -275,7 +276,7 @@ export function QuizOverflowMenu({ quiz, anchor, onClose, onPreview, onEdit, onC
         transparent
         onRequestClose={() => setRenameTarget(null)}
       >
-        <View style={styles.renameOverlay}>
+        <KeyboardSafeView style={styles.renameOverlay}>
           <View style={styles.renameCard}>
             <Text style={styles.renameTitle}>Rename Quiz</Text>
             <TextInput
@@ -299,7 +300,7 @@ export function QuizOverflowMenu({ quiz, anchor, onClose, onPreview, onEdit, onC
               </TouchableOpacity>
             </View>
           </View>
-        </View>
+        </KeyboardSafeView>
       </Modal>
 
       {/* Share */}

@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import {
-  View,
   Text,
   TextInput,
   Pressable,
@@ -8,6 +7,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 
 const COLORS = {
   bg: '#0f0c29',
@@ -56,7 +56,7 @@ export default function TvLandingScreen() {
       end={{ x: 0, y: 1 }}
       style={styles.root}
     >
-      <View style={styles.center}>
+      <KeyboardSafeView style={styles.center}>
         <Text style={styles.kicker}>SAGE · LIVE</Text>
         <Text style={styles.title}>TV LEADERBOARD</Text>
         <Text style={styles.sub}>
@@ -94,7 +94,7 @@ export default function TvLandingScreen() {
         <Text style={styles.foot}>
           Start a game in the app, then share its code here
         </Text>
-      </View>
+      </KeyboardSafeView>
     </LinearGradient>
   );
 }

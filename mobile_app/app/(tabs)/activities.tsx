@@ -1440,7 +1440,7 @@ export default function ActivitiesScreen() {
         transparent={true}
         onRequestClose={() => { setRenameQuizId(null); setRenameTitle(''); }}
       >
-        <View style={styles.renameModalOverlay}>
+        <KeyboardSafeView style={styles.renameModalOverlay}>
           <View style={styles.renameModalContent}>
             <Text style={styles.renameModalTitle}>Rename Quiz</Text>
             <TextInput
@@ -1460,7 +1460,7 @@ export default function ActivitiesScreen() {
               </TouchableOpacity>
             </View>
           </View>
-        </View>
+        </KeyboardSafeView>
       </Modal>
 
       {/* FAB — contextual per tab (not on Courses; students join instead of creating) */}

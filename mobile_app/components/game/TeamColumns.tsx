@@ -4,6 +4,7 @@ import {
   ActivityIndicator, Image, ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { pfpSource } from '@/constants/pfps';
 import {
   sameTeamId, joinedAtMillis, type PlayerEntry, type TeamEntry,
@@ -435,7 +436,7 @@ export default function TeamColumns({
 
       {/* ── rename modal ── */}
       <Modal visible={!!renaming} transparent animationType="fade" onRequestClose={() => setRenaming(null)}>
-        <View style={styles.backdrop}>
+        <KeyboardSafeView style={styles.backdrop}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Name your team</Text>
             <Text style={styles.modalSub} numberOfLines={1}>
@@ -465,7 +466,7 @@ export default function TeamColumns({
               </TouchableOpacity>
             </View>
           </View>
-        </View>
+        </KeyboardSafeView>
       </Modal>
     </>
   );

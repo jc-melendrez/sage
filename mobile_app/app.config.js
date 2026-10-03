@@ -84,14 +84,28 @@ module.exports = {
         monochromeImage: "./assets/images/android-icon-monochrome.png"
       },
       edgeToEdgeEnabled: true,
-      // 'resize' is the default and is wrong next to edge-to-edge: edge-to-edge
-      // calls WindowCompat.setDecorFitsSystemWindows(window, false), which stops
-      // Android resizing the window for the keyboard, so adjustResize silently
-      // does nothing. 'pan' makes Android match iOS -- the keyboard floats over
-      // the content and KeyboardSafeView owns the offset. Without this the
-      // window resize and the view's own padding fight each other and the
-      // layout jumps twice on every focus.
-      softwareKeyboardLayoutMode: 'pan',
+      // 'adjustNothing' means the system never moves or resizes the window: the
+      // keyboard purely overlays the content and KeyboardSafeView is the single
+      // thing that moves the layout. That is the whole design -- see
+      // components/KeyboardSafeView.tsx.
+      //
+      // This was 'pan', which is the opposite of what it looks like.
+      // adjustPan makes Android translate the window up to reveal the focused
+      // input, and KeyboardSafeView *also* pads by the full keyboard height.
+      // The two compound, so on every focus the content overshot the keyboard
+      // and left a blank strip above it.
+      //
+      // Not 'resize' either: edge-to-edge calls
+      // WindowCompat.setDecorFitsSystemWindows(window, false), which stops the
+      // resize, so 'resize' is only an implicit 'nothing' -- and it would start
+      // double-applying again the moment edge-to-edge is turned off.
+      //
+      // Expo types this field as 'resize' | 'pan' only, but @expo/config-plugins
+      // writes unmapped values through verbatim (`MAPPING[value] ?? value` in
+      // android/WindowSoftInputMode.js), so 'adjustNothing' reaches the
+      // manifest as-is. That pass-through is undocumented, so it is worth
+      // re-checking android/app/src/main/AndroidManifest.xml after a prebuild.
+      softwareKeyboardLayoutMode: 'adjustNothing',
       predictiveBackGestureEnabled: false,
       package: "com.sage.learning",
       googleServicesFile: androidGoogleServices.relativePath

@@ -14,6 +14,7 @@ import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import * as Network from 'expo-network';
 import * as Clipboard from 'expo-clipboard';
 import { LanHostServer, makeOrder } from '@/services/lanHost';
@@ -248,7 +249,7 @@ const [hostAvatar, setHostAvatar] = useState('');
   };
 
   return (
-    <View style={styles.container}>
+    <KeyboardSafeView style={styles.container}>
       <LinearGradient colors={['#0f0c29', '#302b63', '#24243e']} style={styles.background}>
         <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: insets.top + 24 }]} keyboardShouldPersistTaps="handled">
           <TouchableOpacity style={styles.backBtn} onPress={leave} activeOpacity={0.7}>
@@ -436,7 +437,7 @@ const [hostAvatar, setHostAvatar] = useState('');
           )}
         </ScrollView>
       </LinearGradient>
-    </View>
+    </KeyboardSafeView>
   );
 }
 
