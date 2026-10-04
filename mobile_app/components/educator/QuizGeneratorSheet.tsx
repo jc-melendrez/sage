@@ -22,7 +22,7 @@ import { generateQuiz, parseDeadlineInput } from '@/services/quizService';
 import { getMyCourses } from '@/services/courseService';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
 
-const QUESTION_TYPE_OPTIONS = ['Multiple Choice', 'True/False', 'Short Answer', 'Fill-in-the-Blank'];
+const QUESTION_TYPE_OPTIONS = ['Multiple Choice', 'True/False', 'Identification', 'Fill-in-the-Blank'];
 
 type Props = {
   visible: boolean;

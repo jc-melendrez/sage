@@ -30,24 +30,39 @@ const SPECTATOR_KEY = '__spectator__';
  */
 const POST_TIMEOUT_MS = 45000;
 
+/**
+ * The Play tab's palette, reused verbatim so the lobby reads as the same app
+ * rather than a separate dark room the student has to re-learn.
+ *
+ * The page is the purple gradient with white cards on it. That split is why the
+ * text tokens are DARK: everything except the header sits on a white card, and
+ * only the header sits on the gradient. Header-only text therefore names white
+ * explicitly rather than leaning on `textPrimary`.
+ */
 const COLORS = {
-  bg: '#0f0c29',
-  bgSecondary: '#1a1640',
-  surface: '#1e1b4b',
-  surfaceLight: '#2d2a5e',
-  cardBg: '#232052',
+  bg: '#7C3AED',
+  bgSecondary: '#6D28D9',
+  surface: '#FFFFFF',
+  surfaceLight: '#F3F4F6',
+  cardBg: '#F9FAFB',
   purpleDeep: '#4C1D95',
+  purpleDark: '#6D28D9',
   purplePrimary: '#7C3AED',
   purpleVibrant: '#8B5CF6',
   purpleLight: '#A78BFA',
+  purplePale: '#C4B5FD',
   accent: '#22D3EE',
   success: '#10B981',
   warning: '#F59E0B',
   danger: '#EF4444',
-  textPrimary: '#FFFFFF',
-  textSecondary: '#CBD5E1',
-  textMuted: '#94A3B8',
-  cardBorder: 'rgba(127, 119, 221, 0.3)',
+  textPrimary: '#1F2937',
+  textSecondary: '#6B7280',
+  textMuted: '#9CA3AF',
+  cardBorder: 'rgba(76, 29, 149, 0.12)',
+  /** Text and icons that sit on the gradient itself, not on a card. */
+  onGradient: '#FFFFFF',
+  /** Dark ink for a saturated fill (the cyan START button). */
+  onAccent: '#1F2937',
 };
 
 const FONTS = {
@@ -58,6 +73,14 @@ const FONTS = {
   medium: 'Montserrat-Medium',
   regular: 'Montserrat-Regular',
 };
+
+/**
+ * How long players get to sit down in teams before the host auto-assigns.
+ * Must match `OpenTeamPickView.PICK_SECONDS`: the client derives its countdown
+ * from the server's `pickStartedAt` and this length, so a mismatch here shows
+ * a wrong number and fires the auto-start at the wrong moment.
+ */
+const PICK_WINDOW_SECONDS = 30;
 
 export default function LobbyScreen() {
   const router = useRouter();
@@ -123,8 +146,12 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
   const [showCountdown, setShowCountdown] = useState(false);
   const [countdownValue, setCountdownValue] = useState(3);
   const countdownAnim = useRef(new Animated.Value(1)).current;
+  /** Team pick countdown (group mode). When it hits 0, auto-assign and start. */
+  const [teamPickCountdown, setTeamPickCountdown] = useState<number | null>(null);
+  /** Server-stamped instant the pick window opened. See `openPickWindow`. */
+  const [pickStartedAt, setPickStartedAt] = useState<any>(null);
+  const hasAutoStartedRef = useRef(false);
 
-  /* ── original effects (UNCHANGED) ── */
   useEffect(() => {
     getCurrentUser().then(u => setCurrentUserId(u?.id));
   }, []);
@@ -195,6 +222,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
           setRoomQuestionCount(d?.questionCount ?? 0);
           setRoomTeamCount(d?.teamCount ?? null);
           setQuizPending(!!d?.quizPending);
+          if (d?.pickStartedAt) setPickStartedAt(d.pickStartedAt);
           if (d?.status === 'active') {
             startJoinerCountdown();
           }
@@ -309,6 +337,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
       hostId != null && currentUserId != null
       && String(hostId) === String(currentUserId);
   }, [hostId, currentUserId]);
+  /* team pick timer */
 
   /**
    * Ask the server to hand the room over when its host is no longer in it.
@@ -406,6 +435,11 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
 
   const startGame = async (allowUnassigned: boolean) => {
     setLoading(true);
+    // Close the pick window before starting. Otherwise the countdown keeps
+    // ticking, and if the host's start request is slower than the remaining
+    // seconds the timer fires a second /start/ behind it.
+    hasAutoStartedRef.current = true;
+    setTeamPickCountdown(0);
     try {
       const token = await getToken();
       const res = await fetch(`${API_BASE_URL}/game/start/`, {
@@ -473,6 +507,78 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
       setAutoAssigning(false);
     }
   };
+
+  /**
+   * Ask the server to stamp the start of the team-pick window.
+   *
+   * The host opens this once people have had a chance to join. It waits for at
+   * least two players because a countdown that begins while the host is alone
+   * would expire and auto-start a one-player game before anyone could join.
+   */
+  const openPickWindow = async () => {
+    try {
+      await post('teams/open-pick/', { roomCode });
+      hasAutoStartedRef.current = false;
+      // Deliberately does not set pickStartedAt from a local clock. The room
+      // listener picks up the server's `pickStartedAt` within a snapshot or
+      // two, and counting from our own `Date.now()` would reintroduce exactly
+      // the per-device drift this replaced.
+    } catch (e: any) {
+      Alert.alert('Could not open team selection', e?.message || 'Try again');
+    }
+  };
+
+  /* Open the pick window by itself once enough people are actually here.
+   * Armed by the room creation flow, which used to start the game instantly and
+   * so had no window to open. Waiting for a second player is the whole point:
+   * a countdown that began while the host was alone would expire and start a
+   * one-player game before anyone had a chance to join.
+   */
+  useEffect(() => {
+    if (!isHostUser || roomStatus !== 'waiting' || quizPending) return;
+    if (pickStartedAt) return;
+    if (players.length < 2) return;
+    openPickWindow();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHostUser, roomStatus, quizPending, pickStartedAt, players.length]);
+
+  /* ── team pick countdown (group mode only) ──
+   * Counts down from the room's server-stamped `pickStartedAt`, not from when
+   * this screen mounted. A local `setTimeout(30_000)` meant the window only
+   * started once the host happened to be looking at the lobby, and every
+   * device held a different deadline. When it closes, the host auto-assigns
+   * whatever nobody claimed and starts -- the host can still do both by hand at
+   * any time before then.
+   *
+   * Declared after doAutoAssign/startGame on purpose: an effect that names them
+   * above their `const` captures undefined in its dependency array.
+   */
+  useEffect(() => {
+    if (teamMode !== true || !pickStartedAt || roomStatus !== 'waiting') return;
+
+    const openedMs = pickStartedAt?.toMillis ? pickStartedAt.toMillis() : Number(pickStartedAt);
+    if (!openedMs || Number.isNaN(openedMs)) return;
+
+    const tick = () => {
+      const elapsed = (Date.now() - openedMs) / 1000;
+      const remaining = Math.max(0, PICK_WINDOW_SECONDS - elapsed);
+      setTeamPickCountdown(Math.ceil(remaining));
+      if (remaining > 0) return;
+
+      clearInterval(timer);
+      if (hasAutoStartedRef.current) return;
+      hasAutoStartedRef.current = true;
+      // Only the host can act on this: both endpoints below reject anyone else,
+      // and a joiner trying would only raise a spurious alert.
+      if (!isHostUser) return;
+      doAutoAssign().then(() => startGame(true));
+    };
+
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamMode, pickStartedAt, roomStatus]);
 
   /* ── host quiz selection (custom lobby) ── */
   const openQuizPicker = async () => {
@@ -700,12 +806,12 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
 
   return (
     <LinearGradient
-      colors={[COLORS.bg, COLORS.bgSecondary]}
+      colors={[COLORS.purpleDeep, COLORS.purpleDark, COLORS.bg]}
       start={{ x: 0, y: 0 }}
       end={{ x: 0, y: 1 }}
       style={styles.container}
     >
-      <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
+      <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} />
 
       <ScrollView ref={scrollRef} contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         {/* ── header ── */}
@@ -722,7 +828,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
               style={styles.backBtn}
               accessibilityLabel="Back to Play"
             >
-              <Ionicons name="arrow-back" size={18} color={COLORS.textSecondary} />
+              <Ionicons name="arrow-back" size={18} color={COLORS.onGradient} />
             </TouchableOpacity>
             <Text style={styles.kicker}>LOBBY</Text>
             <Text style={styles.title} numberOfLines={1}>{topic || 'Quiz Battle'}</Text>
@@ -769,11 +875,11 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
           {!isLAN && (
             <View style={styles.codeActions}>
               <TouchableOpacity style={styles.codeAction} onPress={copyInvite}>
-                <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={15} color={COLORS.accent} />
+                <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={15} color={COLORS.purpleDark} />
                 <Text style={styles.codeActionText}>{copied ? 'Copied' : 'Copy code'}</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.codeAction} onPress={shareInvite}>
-                <Ionicons name="share-social-outline" size={15} color={COLORS.purpleLight} />
+                <Ionicons name="share-social-outline" size={15} color={COLORS.purpleVibrant} />
                 <Text style={styles.codeActionText}>Share invite</Text>
               </TouchableOpacity>
             </View>
@@ -1033,6 +1139,24 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
               <Text style={styles.hostHint}>Pick a quiz before you start</Text>
             )}
 
+            {/* Team pick countdown for group mode. Shown while the room is still waiting,
+                which is the only state the pick window exists in -- the old
+                `active` gate could never be true while teams were still being
+                chosen, so this banner was unreachable. */}
+            {teamMode === true && roomStatus === 'waiting' && !quizPending && (
+              <View style={styles.teamPickCountdown}>
+                <Text style={styles.teamPickCountdownText}>
+                  {teamPickCountdown != null && teamPickCountdown > 0 ?
+                    `Team selection ends in ${teamPickCountdown}s` :
+                    teamPickCountdown === 0 ? 'Starting the game' :
+                    'Tap a team to claim a seat, or wait for the host to deal you in'}
+                  {teamPickCountdown != null && teamPickCountdown > 0 && (
+                    <Text style={styles.teamPickCountdownTimer}>or host can start now</Text>
+                  )}
+                </Text>
+              </View>
+            )}
+
             {/* Auto-assign is its own action, below START, and never starts the
                 game. It only appears once there is a quiz to start, because
                 before that there is no game to be ready for.
@@ -1156,27 +1280,31 @@ const styles = StyleSheet.create({
   backBtn: { marginBottom: 6, alignSelf: 'flex-start' },
   kicker: {
     fontSize: 11, fontFamily: FONTS.extraBold, letterSpacing: 2.5,
-    color: COLORS.accent, marginBottom: 4,
+    color: COLORS.purplePale, marginBottom: 4,
   },
-  title: { fontSize: 26, fontFamily: FONTS.black, color: COLORS.textPrimary, letterSpacing: -0.5 },
+  // The only title-style text that sits on the gradient instead of a card, so
+  // it names the on-gradient ink rather than the card ink.
+  title: { fontSize: 26, fontFamily: FONTS.black, color: COLORS.onGradient, letterSpacing: -0.5 },
   countPill: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: 'rgba(34,211,238,0.1)', borderWidth: 1, borderColor: 'rgba(34,211,238,0.25)',
+    backgroundColor: 'rgba(255,255,255,0.16)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.28)',
     borderRadius: 14, paddingHorizontal: 12, paddingVertical: 7, marginTop: 2,
   },
-  countPillText: { fontSize: 14, fontFamily: FONTS.extraBold, color: COLORS.accent },
+  countPillText: { fontSize: 14, fontFamily: FONTS.extraBold, color: COLORS.onGradient },
 
   /* ── room code card ── */
   codeCard: {
     backgroundColor: COLORS.cardBg, borderRadius: 24, padding: 22,
     borderWidth: 1, borderColor: COLORS.cardBorder,
     position: 'relative', overflow: 'hidden', marginBottom: 26,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.45, shadowRadius: 24, elevation: 14,
+    // Lighter than the dark theme's: a heavy black shadow on a white card reads
+    // as a smudge rather than depth.
+    shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18, shadowRadius: 20, elevation: 6,
   },
   cardEdge: {
     position: 'absolute', top: 0, left: 0, right: 0, height: 3,
-    backgroundColor: 'rgba(255,255,255,0.4)',
+    backgroundColor: COLORS.purpleVibrant,
     borderTopLeftRadius: 24, borderTopRightRadius: 24,
   },
   codeTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
@@ -1193,14 +1321,14 @@ const styles = StyleSheet.create({
   codeChips: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 18 },
   codeChip: {
     width: 46, height: 58, borderRadius: 14,
-    borderWidth: 2, borderColor: 'rgba(34,211,238,0.35)',
+    borderWidth: 2, borderColor: 'rgba(124,58,237,0.30)',
     backgroundColor: COLORS.surface,
     justifyContent: 'center', alignItems: 'center',
-    shadowColor: 'rgba(34,211,238,0.2)', shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.5, shadowRadius: 6, elevation: 3,
+    shadowColor: COLORS.purpleDeep, shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.15, shadowRadius: 6, elevation: 3,
   },
-  codeChipText: { fontSize: 26, fontFamily: FONTS.black, color: COLORS.textPrimary },
-  codeHint: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, textAlign: 'center', lineHeight: 17 },
+  codeChipText: { fontSize: 26, fontFamily: FONTS.black, color: COLORS.purpleDeep },
+  codeHint: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textSecondary, textAlign: 'center', lineHeight: 17 },
 
   /* -- invite actions -- */
   codeActions: {
@@ -1209,11 +1337,11 @@ const styles = StyleSheet.create({
   codeAction: {
     flexDirection: 'row', alignItems: 'center', gap: 7,
     paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12,
-    backgroundColor: 'rgba(34, 211, 238, 0.10)',
-    borderWidth: 1, borderColor: 'rgba(34, 211, 238, 0.28)',
+    backgroundColor: 'rgba(124, 58, 237, 0.06)',
+    borderWidth: 1, borderColor: 'rgba(124, 58, 237, 0.18)',
   },
   codeActionText: {
-    fontSize: 13, fontFamily: FONTS.semiBold, color: COLORS.textPrimary,
+    fontSize: 13, fontFamily: FONTS.semiBold, color: COLORS.purpleDark,
   },
 
   /* -- quiz selection card -- */
@@ -1299,13 +1427,13 @@ const styles = StyleSheet.create({
   teamScoreLabel: { fontSize: 9, fontFamily: FONTS.extraBold, letterSpacing: 1, color: COLORS.textMuted, marginTop: 2 },
   joinChip: {
     backgroundColor: 'rgba(34,211,238,0.12)', borderRadius: 8,
-    borderWidth: 1, borderColor: 'rgba(34,211,238,0.35)',
+    borderWidth: 1, borderColor: 'rgba(8,145,178,0.35)',
     paddingHorizontal: 10, paddingVertical: 5,
   },
-  joinChipYou: { backgroundColor: 'rgba(16,185,129,0.15)', borderColor: 'rgba(16,185,129,0.4)' },
-  joinChipFull: { backgroundColor: 'rgba(148,163,184,0.1)', borderColor: 'rgba(148,163,184,0.25)' },
-  joinChipText: { fontSize: 11, fontFamily: FONTS.bold, color: COLORS.accent },
-  joinChipTextYou: { color: '#34D399' },
+  joinChipYou: { backgroundColor: 'rgba(16,185,129,0.15)', borderColor: 'rgba(5,150,105,0.4)' },
+  joinChipFull: { backgroundColor: 'rgba(107,114,128,0.08)', borderColor: 'rgba(107,114,128,0.25)' },
+  joinChipText: { fontSize: 11, fontFamily: FONTS.bold, color: '#0E7490' },
+  joinChipTextYou: { color: '#047857' },
   playerSubRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   playerTeamDot: { width: 8, height: 8, borderRadius: 4 },
 
@@ -1331,13 +1459,13 @@ const styles = StyleSheet.create({
   playerCard: {
     flexDirection: 'row', alignItems: 'center', gap: 14,
     backgroundColor: COLORS.cardBg, borderRadius: 18, padding: 14,
-    borderWidth: 1, borderColor: 'rgba(127,119,221,0.18)',
+    borderWidth: 1, borderColor: COLORS.cardBorder,
     marginBottom: 10, position: 'relative', overflow: 'hidden',
   },
-  playerCardYou: { borderColor: 'rgba(34,211,238,0.4)' },
+  playerCardYou: { borderColor: 'rgba(124,58,237,0.45)' },
   playerCardEdge: {
     position: 'absolute', top: 0, left: 0, right: 0, height: 2,
-    backgroundColor: 'rgba(34,211,238,0.5)',
+    backgroundColor: COLORS.purpleVibrant,
   },
   avatar: {
     width: 46, height: 46, borderRadius: 23,
@@ -1346,7 +1474,7 @@ const styles = StyleSheet.create({
   },
   avatarYou: { backgroundColor: COLORS.accent },
   avatarText: { fontSize: 18, fontFamily: FONTS.black, color: '#fff' },
-  avatarTextYou: { color: COLORS.bg },
+  avatarTextYou: { color: COLORS.purpleDeep },
   avatarImage: {
     width: 46, height: 46, borderRadius: 23,
   },
@@ -1354,10 +1482,10 @@ const styles = StyleSheet.create({
   playerNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 2 },
   playerName: { fontSize: 16, fontFamily: FONTS.bold, color: COLORS.textPrimary, flexShrink: 1 },
   youPill: {
-    backgroundColor: 'rgba(34,211,238,0.15)', borderRadius: 6,
+    backgroundColor: 'rgba(124,58,237,0.10)', borderRadius: 6,
     paddingHorizontal: 7, paddingVertical: 2,
   },
-  youPillText: { fontSize: 9, fontFamily: FONTS.extraBold, letterSpacing: 1, color: COLORS.accent },
+  youPillText: { fontSize: 9, fontFamily: FONTS.extraBold, letterSpacing: 1, color: COLORS.purpleDark },
   playerSub: { fontSize: 12, fontFamily: FONTS.medium, color: COLORS.textMuted },
   crown: { fontSize: 18 },
   readyDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.success },
@@ -1365,12 +1493,12 @@ const styles = StyleSheet.create({
   ghostSeat: {
     flexDirection: 'row', alignItems: 'center', gap: 14,
     borderRadius: 18, padding: 14, marginBottom: 10,
-    borderWidth: 1.5, borderColor: 'rgba(127,119,221,0.15)',
+    borderWidth: 1.5, borderColor: 'rgba(124,58,237,0.22)',
     borderStyle: 'dashed',
   },
   ghostAvatar: {
     width: 46, height: 46, borderRadius: 23,
-    backgroundColor: 'rgba(127,119,221,0.08)',
+    backgroundColor: 'rgba(124,58,237,0.07)',
     justifyContent: 'center', alignItems: 'center',
   },
   ghostText: { fontSize: 14, fontFamily: FONTS.medium, color: COLORS.textMuted },
@@ -1381,8 +1509,11 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: Platform.OS === 'ios' ? 28 : 24,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(127,119,221,0.12)',
-    backgroundColor: 'rgba(15,12,41,0.6)',
+    borderTopColor: COLORS.cardBorder,
+    // Opaque white rather than the old translucent dark: this bar floats over
+    // the cards above it, and a see-through bar made the host actions unreadable
+    // wherever a card scrolled underneath.
+    backgroundColor: COLORS.surface,
   },
   startWrap: {
     borderRadius: 16, overflow: 'hidden',
@@ -1391,9 +1522,11 @@ const styles = StyleSheet.create({
   },
   startInner: { paddingVertical: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center' },
   startInnerDisabled: { paddingVertical: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', backgroundColor: COLORS.surfaceLight },
-  startText: { color: COLORS.bg, fontSize: 16, fontFamily: FONTS.extraBold, letterSpacing: 0.3 },
+  // Dark ink on the saturated cyan fill, not `bg`: the fill is the accent, and
+  // white on cyan is the classic unreadable pairing.
+  startText: { color: COLORS.onAccent, fontSize: 16, fontFamily: FONTS.extraBold, letterSpacing: 0.3 },
   startTextDisabled: { color: COLORS.textMuted, fontSize: 14, fontFamily: FONTS.extraBold, letterSpacing: 0.2, textAlign: 'center' },
-  startCount: { color: 'rgba(15,12,41,0.7)', fontSize: 14, fontFamily: FONTS.bold },
+  startCount: { color: 'rgba(31,41,55,0.70)', fontSize: 14, fontFamily: FONTS.bold },
   // START and AUTO-ASSIGN stack in one column: starting and assigning are two
   // decisions, and the host has to be able to make them in either order.
   hostActions: { gap: 8 },
@@ -1404,8 +1537,8 @@ const styles = StyleSheet.create({
   autoAssign: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     paddingVertical: 13, borderRadius: 12,
-    borderWidth: 1, borderColor: 'rgba(148,163,184,0.32)',
-    backgroundColor: 'rgba(148,163,184,0.10)',
+    borderWidth: 1, borderColor: 'rgba(107,114,128,0.30)',
+    backgroundColor: 'rgba(107,114,128,0.06)',
   },
   autoAssignText: { fontSize: 14, fontFamily: FONTS.bold, color: COLORS.textSecondary },
   autoAssignDone: {
@@ -1420,8 +1553,8 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(148,163,184,0.35)',
-    backgroundColor: 'rgba(148,163,184,0.10)',
+    borderColor: 'rgba(107,114,128,0.25)',
+    backgroundColor: 'rgba(107,114,128,0.06)',
   },
   spectatorNoteText: {
     fontSize: 12,
@@ -1432,10 +1565,33 @@ const styles = StyleSheet.create({
   waitBar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
     backgroundColor: COLORS.surface, borderRadius: 16, paddingVertical: 16,
-    borderWidth: 1, borderColor: 'rgba(127,119,221,0.18)',
+    borderWidth: 1, borderColor: COLORS.cardBorder,
   },
   waitBarDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.warning },
   waitBarText: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.textSecondary },
+  // The pick countdown sits on the gradient rather than on a card, so it keeps
+  // a dark fill and light text. On a white card it would read as a disabled
+  // button next to the live controls it is counting down to.
+  teamPickCountdown: {
+    backgroundColor: 'rgba(76, 29, 149, 0.85)',
+    borderRadius: 16,
+    padding: 14,
+    marginVertical: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(196, 181, 253, 0.35)',
+  },
+  teamPickCountdownText: {
+    color: '#C4B5FD',
+    fontSize: 14,
+    fontFamily: FONTS.medium,
+    marginBottom: 4,
+  },
+  teamPickCountdownTimer: {
+    color: '#A5F3FC',
+    fontSize: 12,
+    fontFamily: FONTS.medium,
+    marginLeft: 8,
+  },
   countdownOverlay: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     backgroundColor: 'rgba(15,12,41,0.95)',

@@ -5,8 +5,34 @@ const POWERUP_KEYS: PowerupKey[] = ['freeze', 'hint', 'doublePoints', 'shield'];
 /** A powerup is guaranteed on every Nth consecutive correct answer. */
 export const STREAK_REWARD_INTERVAL = 3;
 
+/**
+ * Question types the player types out rather than picking. Both are graded the
+ * same way, so both use the same rule. Mirrors `TYPED_QUESTION_TYPES` in
+ * `backend_api/core/game/views.py`.
+ */
+export const TYPED_QUESTION_TYPES = ['identification', 'fill_in_blank'] as const;
+
+/**
+ * Compare a typed answer to the expected one.
+ *
+ * Lenient about capitalisation and stray or doubled whitespace -- the things a
+ * phone keyboard changes on its own -- and strict about everything else. A
+ * misspelling is wrong: the question asked for a term, and quietly accepting
+ * "photosynthosis" would teach the student nothing. Deliberately no fuzzy
+ * matching or edit distance.
+ *
+ * Must stay behaviourally identical to `answer_matches` in the backend, or an
+ * offline game would mark answers differently from the same answers played
+ * online.
+ */
+export function answerMatches(given: unknown, expected: unknown): boolean {
+  if (given == null || expected == null) return false;
+  const norm = (value: unknown) => String(value).trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+  return norm(given) === norm(expected);
+}
+
 export interface GameQuestion {
-  type: 'mcq' | 'identification';
+  type: 'mcq' | 'identification' | 'fill_in_blank';
   question: string;
   choices?: string[];
   correctAnswer: string;
@@ -42,8 +68,6 @@ export interface AnswerOutcome {
   picked: string;
   /** Portion of `pointsAwarded` earned by answering fast, above the 500 floor. */
   speedBonus: number;
-  /** The momentum rung that was applied to this answer. */
-  multiplier: number;
 }
 
 const LETTERS = ['A', 'B', 'C', 'D'];
@@ -57,7 +81,7 @@ export function buildQuestions(quiz: QuizPayload): GameQuestion[] {
       const choices = opts.map((opt, i) => `${LETTERS[i]}. ${opt}`);
       let correctIdx = -1;
       opts.forEach((opt, i) => {
-        if (String(opt).trim().toLowerCase() === String(q.correct_answer).trim().toLowerCase()) {
+        if (answerMatches(opt, q.correct_answer)) {
           correctIdx = i;
         }
       });
@@ -69,8 +93,13 @@ export function buildQuestions(quiz: QuizPayload): GameQuestion[] {
         explanation: q.explanation ?? null,
       });
     } else {
+      // Same rule as the backend's `build_questions_from_quiz`: a quiz-level
+      // type picks the label, and the absence of options only tells us it is a
+      // typed question.
       out.push({
-        type: 'identification',
+        type: (quiz.quiz_type || '').trim().toLowerCase() === 'fill-in-the-blank'
+          ? 'fill_in_blank'
+          : 'identification',
         question: q.question_text,
         correctAnswer: String(q.correct_answer || ''),
         explanation: q.explanation ?? null,
@@ -104,33 +133,13 @@ export interface OfflineGameOptions {
 }
 
 /**
- * Momentum ladder, mirroring TEAM_MOMENTUM_TIERS in
- * backend_api/core/game/views.py so an offline run climbs the same rungs as an
- * online classic game.
+ * Momentum ladder: removed.
+ *
+ * The cumulative multiplier is gone from the backend too (see the note in
+ * `backend_api/core/game/views.py`). Do not reintroduce a scoring term driven
+ * by "how many right so far" -- it compounds with the streak bonus and the
+ * doubled questions, so one strong start used to carry a run to the end.
  */
-export const MOMENTUM_TIERS: { at: number; multiplier: number }[] = [
-  { at: 0, multiplier: 1.0 },
-  { at: 5, multiplier: 1.2 },
-  { at: 10, multiplier: 1.4 },
-  { at: 15, multiplier: 1.6 },
-  { at: 20, multiplier: 2.0 },
-];
-
-export function momentumFor(correctCount: number): number {
-  let multiplier = 1.0;
-  for (const tier of MOMENTUM_TIERS) {
-    if (correctCount >= tier.at) multiplier = tier.multiplier;
-  }
-  return multiplier;
-}
-
-function demoteMomentum(current: number): number {
-  let floor = 1.0;
-  for (const tier of MOMENTUM_TIERS) {
-    if (tier.multiplier < current) floor = Math.max(floor, tier.multiplier);
-  }
-  return floor;
-}
 
 export class OfflineGame {
   readonly quizId: number;
@@ -146,8 +155,6 @@ export class OfflineGame {
   correctCount = 0;
   answeredCount = 0;
   bestStreak = 0;
-  /** Rung just earned; a miss drops it one step. Display value only. */
-  multiplier = 1.0;
   private lastResults: Record<number, AnswerOutcome> = {};
 
   constructor(quiz: QuizPayload, timePerQuestion: number, opts: OfflineGameOptions = {}) {
@@ -187,13 +194,9 @@ export class OfflineGame {
     const question = this.questions[questionIndex];
     if (!question) throw new Error('Invalid question index');
 
-    const isCorrect = question.type === 'identification'
-      ? answer.trim().toLowerCase() === question.correctAnswer.trim().toLowerCase()
+    const isCorrect = (TYPED_QUESTION_TYPES as readonly string[]).includes(question.type)
+      ? answerMatches(answer, question.correctAnswer)
       : answer === question.correctAnswer;
-
-    // Read before the increment: the rung that scores THIS answer is the one
-    // reached by the answers before it, exactly as the server does it.
-    const priorCorrect = this.correctCount;
 
     this.answeredCount += 1;
 
@@ -203,16 +206,10 @@ export class OfflineGame {
       // answers would have earned online.
       const basePoints = Math.max(Math.floor(1000 * (1 - (timeTaken / this.timePerQuestion) * 0.5)), 500);
       const speedBonus = basePoints - 500;
-      const momentum = momentumFor(priorCorrect);
-      const boosted = Math.round(basePoints * momentum);
-      const earned = flags.useDoublePoints ? boosted * 2 : boosted;
+      const earned = flags.useDoublePoints ? basePoints * 2 : basePoints;
       const newStreak = this.streak + 1;
       this.streak = newStreak;
       this.bestStreak = Math.max(this.bestStreak, newStreak);
-      // Store the rung just reached, so the flame the player sees leads the
-      // boost by one answer. A miss drops it a step; the next correct answer
-      // restores it from correctCount.
-      this.multiplier = momentumFor(this.correctCount);
       this.score += earned;
 
       let powerupEarned: PowerupKey | null = null;
@@ -232,7 +229,6 @@ export class OfflineGame {
         newStreak,
         picked: answer,
         speedBonus,
-        multiplier: momentum,
       };
       this.lastResults[questionIndex] = outcome;
       return outcome;
@@ -240,7 +236,6 @@ export class OfflineGame {
 
     if (!flags.useShield) {
       this.streak = 0;
-      this.multiplier = demoteMomentum(this.multiplier);
     }
     const outcome: AnswerOutcome = {
       correct: false,
@@ -250,7 +245,6 @@ export class OfflineGame {
       newStreak: this.streak,
       picked: answer,
       speedBonus: 0,
-      multiplier: 1.0,
     };
     this.lastResults[questionIndex] = outcome;
     return outcome;

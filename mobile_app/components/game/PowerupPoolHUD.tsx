@@ -1,9 +1,6 @@
 import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import {
-  formatMultiplier, nextMomentumTier,
-  type PowerupKey, type PowerupPool, type TeamEntry,
-} from '@/types/game';
+import { type PowerupKey, type PowerupPool, type TeamEntry } from '@/types/game';
 
 const COLORS = {
   surface: '#1e1b4b',
@@ -17,8 +14,6 @@ const COLORS = {
 const FONTS = {
   extraBold: 'Montserrat-ExtraBold',
   bold: 'Montserrat-Bold',
-  semiBold: 'Montserrat-SemiBold',
-  medium: 'Montserrat-Medium',
 };
 
 export const POWERUP_META: Record<PowerupKey, { label: string; icon: keyof typeof Ionicons.glyphMap; tint: string }> = {
@@ -38,55 +33,18 @@ interface Props {
 }
 
 /**
- * The team momentum bar plus the shared powerup pool.
+ * The powerup pool, shown above the question.
  *
- * The multiplier is the main read: it is the reason a wrong answer now costs
- * the whole team, so it needs to be visible at a glance from across a table
- * rather than buried in a scoreboard. The pool sits next to it because
- * "stacked on a team powerup" is a decision the player makes mid-question.
+ * This used to be the momentum bar with the pool tucked underneath it. The
+ * multiplier is gone -- it compounded with the streak bonus and the doubled
+ * questions, so a team that got hot early kept scoring well past the point it
+ * stopped knowing the material (see the note in `types/game.ts`). What is left
+ * is the pool, which is still worth showing plainly: arming a powerup is a
+ * decision made mid-question, not a reward for having done well so far.
  */
-export default function TeamMomentumHUD({ team, pool, active, shared }: Props) {
-  const multiplier = team.multiplier ?? 1;
-  const next = nextMomentumTier(team.teamCorrect ?? 0);
-  const toNext = next ? Math.max(0, next.at - (team.teamCorrect ?? 0)) : 0;
-
-  // Higher multiplier should feel better, so the bar brightens with the tier.
-  const hot = multiplier >= 1.6;
-
+export default function PowerupPoolHUD({ team, pool, active, shared }: Props) {
   return (
     <View style={[styles.wrap, { borderColor: team.color + '55', backgroundColor: team.color + '14' }]}>
-      <View style={styles.topRow}>
-        <View style={[styles.nameWrap, { borderColor: team.color }]}>
-          <View style={[styles.dot, { backgroundColor: team.color }]} />
-          <Text style={[styles.name, { color: team.color }]} numberOfLines={1}>{team.name}</Text>
-        </View>
-
-        <View style={[styles.mult, hot && styles.multHot]}>
-          <Text style={[styles.multText, hot && styles.multTextHot]}>
-            {formatMultiplier(multiplier)}
-          </Text>
-        </View>
-      </View>
-
-      {/* momentum progress toward the next tier */}
-      <View style={styles.momentumRow}>
-        <View style={styles.momentumTrack}>
-          <View
-            style={[
-              styles.momentumFill,
-              {
-                backgroundColor: team.color,
-                width: `${Math.round((multiplier / 2) * 100)}%`,
-              },
-            ]}
-          />
-        </View>
-        <Text style={styles.momentumText}>
-          {hot ? '🔥 MAX MOMENTUM' : toNext > 0 ? `${toNext} more → ${formatMultiplier(next!.multiplier)}` : 'MAX'}
-        </Text>
-      </View>
-
-      {/* shared pool */}
       <View style={styles.poolRow}>
         <View style={styles.poolLabel}>
           <Ionicons name={shared ? 'people' : 'person'} size={10} color={COLORS.textMuted} />
@@ -123,30 +81,6 @@ export default function TeamMomentumHUD({ team, pool, active, shared }: Props) {
 
 const styles = StyleSheet.create({
   wrap: { borderWidth: 1, borderRadius: 14, padding: 10, gap: 8 },
-  topRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  nameWrap: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    flex: 1, borderLeftWidth: 3, paddingLeft: 8,
-  },
-  dot: { width: 6, height: 6, borderRadius: 3 },
-  name: { fontSize: 13, fontFamily: FONTS.extraBold, flexShrink: 1 },
-
-  mult: {
-    paddingHorizontal: 10, paddingVertical: 3,
-    borderRadius: 8, backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-  multHot: { backgroundColor: 'rgba(249,115,22,0.22)' },
-  multText: { fontSize: 15, fontFamily: FONTS.extraBold, color: COLORS.textPrimary },
-  multTextHot: { color: '#FDBA74' },
-
-  momentumRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  momentumTrack: {
-    flex: 1, height: 4, borderRadius: 2,
-    backgroundColor: 'rgba(255,255,255,0.10)', overflow: 'hidden',
-  },
-  momentumFill: { height: 4, borderRadius: 2 },
-  momentumText: { fontSize: 9, fontFamily: FONTS.bold, color: COLORS.textMuted },
-
   poolRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   poolLabel: { flexDirection: 'row', alignItems: 'center', gap: 3 },
   poolLabelText: { fontSize: 8, fontFamily: FONTS.extraBold, color: COLORS.textMuted, letterSpacing: 0.5 },

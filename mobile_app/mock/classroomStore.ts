@@ -9,7 +9,7 @@
  * restart. Swap these functions for API calls when the backend exists.
  */
 
-export type QuizQuestionType = 'Multiple Choice' | 'True/False' | 'Short Answer' | 'Fill-in-the-Blank';
+export type QuizQuestionType = 'Multiple Choice' | 'True/False' | 'Identification' | 'Fill-in-the-Blank';
 
 export interface MockQuizQuestion {
   id: number;

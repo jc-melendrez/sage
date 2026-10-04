@@ -44,25 +44,14 @@ TEAM_COLORS = [
 POWERUP_KEYS = ('freeze', 'hint', 'doublePoints', 'shield')
 STREAK_REWARD_INTERVAL = 3
 
-# ── Team momentum ────────────────────────────────────────────────────────
-# In team mode the multiplier is a *cumulative ladder* driven by how many
-# answers the team has got right, not a resettable streak. A resettable
-# streak is meaningless in the multiplayer loop: the whole team plays ONE
-# shared question on ONE shared countdown (see StartGameView and
-# TeamPickView), so a single member's wrong answer would wipe the multiplier
-# for everyone at a moment they could not anticipate or plan around. The ladder
-# is monotonic, so it is something a team can actually strategise around
-# ("we're one miss from dropping off x1.6"), and the miss penalty below gives
-# wrong answers teeth without ever eliminating a team.
-# The run of consecutive correct answers is still tracked -- as `teamStreak` --
-# but only pays a bonus; it no longer sets the multiplier.
-TEAM_MOMENTUM_TIERS = (
-    (20, 2.0),
-    (15, 1.6),
-    (10, 1.4),
-    (5, 1.2),
-    (0, 1.0),
-)
+# ── Team momentum: removed ───────────────────────────────────────────────
+# The cumulative multiplier ladder (x1 -> x1.2 -> x1.4 -> x1.6 -> x2.0) is gone.
+# It compounded with the streak bonus and double points, so one strong start
+# carried a team through the rest of the quiz regardless of how it went after,
+# and the only counter was a total miss. What is left -- streak bonus, speed
+# decay, double points, powerups -- all scales from the answer in front of you
+# rather than from the total so far. Nothing here should reintroduce a term
+# driven by a running "how many right so far" count.
 
 # Emoji reactions available during a game. Kept server-side so the client
 # cannot write arbitrary values into the reactions subcollection.
@@ -102,59 +91,11 @@ def team_color(team_id):
     return TEAM_COLORS[max(0, index) % len(TEAM_COLORS)]
 
 
-def momentum_multiplier(correct_count):
-    """Momentum rung for `correct_count` right answers.
-
-    Deliberately shared by both modes. Team mode feeds it the team's running
-    `teamCorrect`; classic mode feeds it the player's own `correctCount`. Both
-    therefore climb the identical ladder (x1 -> x1.2 -> x1.4 -> x1.6 -> x2.0), so
-    a solo player gets the same sense of escalation that playing together pays
-    for. Previously the tiers were team-only, which left classic play a flat
-    line: every correct answer was worth the same base points forever.
-    """
-    for threshold, multiplier in TEAM_MOMENTUM_TIERS:
-        if correct_count >= threshold:
-            return multiplier
-    return 1.0
-
-
-def team_multiplier(team_correct):
-    """Momentum multiplier for a team that has answered `team_correct` right."""
-    return momentum_multiplier(team_correct)
-
-
-def demote_multiplier(current_multiplier):
-    """The rung one step below `current_multiplier`, floored at x1.0.
-
-    Kept for reference but no longer called. A wrong answer used to drop both
-    the player's and the team's momentum one rung, which punished a team for a
-    mistake made by whoever happened to be wrong. Momentum is now purely
-    cumulative: a miss still resets the run (`streak` / `teamStreak`, so the
-    streak bonus and the powerup cadence reset) but never touches `multiplier`.
-    """
-    for threshold, multiplier in reversed(TEAM_MOMENTUM_TIERS):
-        if current_multiplier > multiplier:
-            return multiplier
-    return 1.0
-
-
-def next_momentum_tier(team_correct):
-    """(points_to_next_tier, multiplier_of_next_tier) or None at the cap."""
-    for threshold, multiplier in reversed(TEAM_MOMENTUM_TIERS):
-        if team_correct < threshold:
-            return threshold, multiplier
-    return None
-
-
 # ── Streak bonus ─────────────────────────────────────────────────────────
-# A separate reward from the momentum ladder. Momentum is cumulative and so can
-# only ever climb, which means a team that got to x1.6 early sees no further
-# feedback for the rest of the game. This rewards the *immediate* run instead:
-# three in a row starts paying extra, and it is lost the moment the run breaks.
+# Rewards the immediate run instead of the total so far: three in a row starts
+# paying extra, and it is lost the moment the run breaks.
 #
-# Applied after the momentum multiplier and before any 2x, so the ordering is
-# momentum -> streak bonus -> powerups. A streak bonus therefore scales with
-# the rung the team has earned, which is what makes the two read as one ladder.
+# Applied before any 2x, so the ordering is now streak bonus -> powerups.
 STREAK_BONUS_TIERS = (
     (7, 1.5),
     (5, 1.25),
@@ -241,11 +182,68 @@ def question_time_limit(question, room_data):
     return max(1.0, limit)
 
 
+def pick_answer(pick):
+    """The answer out of a stored pick, whichever shape it has.
+
+    A pick is `{answer, timeTaken}` so the team can be scored on how fast the
+    *group* voted. Rooms that were mid-round when this changed still hold bare
+    answer strings, so a string is read as an answer with no recorded time.
+    """
+    if isinstance(pick, dict):
+        return pick.get('answer') or ''
+    return pick or ''
+
+
+def pick_time(pick):
+    """The time a pick was submitted, or None when it was not recorded.
+
+    Missing times are excluded from the median rather than defaulted to the
+    clock limit: assuming the slowest possible time for someone who simply has
+    an older pick would drag a team's speed bonus down for a data gap.
+    """
+    if isinstance(pick, dict):
+        value = pick.get('timeTaken')
+    else:
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    # A client-reported time outside the question length is either a clock skew
+    # or someone poking at the endpoint. It is not trustworthy enough to award a
+    # speed bonus on.
+    return value if 0 <= value <= 60 else None
+
+
+def median_pick_time(picks):
+    """The team's representative answer time: the median of what was recorded.
+
+    The speed bonus used to come from whoever submitted last, which handed the
+    whole team a real incentive to hold back so a teammate's slow tap decided
+    the payout -- and made the result depend on Firestore write order. The
+    median is unmovable: no single member, fast or slow, can shift it.
+
+    Returns None when no pick recorded a usable time, so the caller can fall
+    back to the last submitter's time rather than inventing one.
+    """
+    times = sorted(t for t in (pick_time(p) for p in (picks or {}).values()) if t is not None)
+    if not times:
+        return None
+    mid = len(times) // 2
+    if len(times) % 2:
+        return times[mid]
+    # Even count: the mean of the two middle values. Still an average of real
+    # observations, so an outlier on either side moves it by half as much.
+    return (times[mid - 1] + times[mid]) / 2
+
+
 def tally_team_picks(picks):
     """Resolve a set of private picks into one team answer.
 
     `picks` maps player id to the choice they submitted (absent players are
     simply not in the map, so an unanswered teammate cannot dilute the tally).
+    Values may be answer strings or `{answer, timeTaken}` objects; both are
+    read through `pick_answer`.
 
     Returns `(winning_choice, agreed_count, distinct_pickers, is_tie)`.
 
@@ -257,7 +255,8 @@ def tally_team_picks(picks):
     not be.
     """
     counts = {}
-    for choice in (picks or {}).values():
+    for pick in (picks or {}).values():
+        choice = pick_answer(pick)
         if not choice:
             continue
         counts[choice] = counts.get(choice, 0) + 1
@@ -265,7 +264,7 @@ def tally_team_picks(picks):
         return '', 0, 0, False
     top = max(counts.values())
     leaders = [choice for choice, count in counts.items() if count == top]
-    pickers = len([c for c in (picks or {}).values() if c])
+    pickers = len([c for c in (picks or {}).values() if pick_answer(c)])
     if len(leaders) > 1:
         return '', top, pickers, True
     return leaders[0], top, pickers, False
@@ -325,7 +324,6 @@ def serialize_team(team_id, data):
         'answeredCount': data.get('answeredCount', 0),
         'memberIds': data.get('memberIds', []) or [],
         'memberCount': len(data.get('memberIds', []) or []),
-        'multiplier': data.get('multiplier', 1.0) or 1.0,
         'teamCorrect': data.get('teamCorrect', 0) or 0,
         'teamStreak': data.get('teamStreak', 0) or 0,
         'bestStreak': data.get('bestStreak', 0) or 0,
@@ -354,13 +352,12 @@ def empty_powerups():
 
 
 def _team_stats(team_data):
-    """Accuracy / best-streak / peak-multiplier for a team document."""
+    """Accuracy / best-streak / roster size for a team document."""
     correct = team_data.get('correctCount', 0) or 0
     answered = team_data.get('answeredCount', 0) or 0
     return {
         'accuracy': round(correct / answered * 100) if answered else 0,
         'bestStreak': team_data.get('bestStreak', 0) or 0,
-        'maxMultiplier': team_data.get('maxMultiplier', 1.0) or 1.0,
         'memberCount': len(team_data.get('memberIds', []) or []),
     }
 
@@ -382,14 +379,20 @@ def team_leader_id(team_data):
 
 
 def _settled_team_members(room_ref, team_data):
-    """Per-member results for one team, with agreement instead of a score split.
+    """Per-member results for one team.
 
-    Members now share one team score, so `contribution` (a percentage of the
-    team's points) would be identical for everyone and meaningless. What
-    actually distinguishes members is how often they voted with the team, which
-    is computed here from each player's own answer log. `mvpId` is the member
-    with the best rate and is computed server-side for the same reason the
+    Members share one team score, so `contribution` (a percentage of the team's
+    points) would be identical for everyone and meaningless. What actually
+    distinguishes members is how often they voted with the team, which is
+    computed here from each player's own answer log. `mvpId` is the member with
+    the best rate and is computed server-side for the same reason the
     per-question agreement count is: the client is never handed a peer's picks.
+
+    `correctCount`, `score`, `bestStreak` and `earlyFinisher` are read straight
+    off each player document because they are already written during play. They
+    were missing here while the results screen read them, so every member row
+    rendered 0 -- which read as "this team contributed nothing" rather than as a
+    missing field.
     """
     members = []
     for p in room_ref.collection('players').stream():
@@ -398,11 +401,23 @@ def _settled_team_members(room_ref, team_data):
             continue
         entries = data.get('answers') or {}
         values = [v for v in entries.values() if isinstance(v, dict)]
+        correct = len([v for v in values if v.get('correct')])
+        answered = len(values)
         members.append({
             'userId': p.id,
             'displayName': data.get('displayName', 'Player'),
-            'answeredCount': len(values),
+            'avatar': data.get('avatar') or None,
+            'answeredCount': answered,
+            'correctCount': correct,
+            'score': data.get('score', 0) or 0,
+            'bestStreak': data.get('bestStreak', 0) or 0,
+            'accuracy': round(correct / answered * 100) if answered else 0,
             'agreement': agreement_rate(entries),
+            # Submitted at least once, and did so before the team closed the
+            # last question -- the individual effort signal the results screen
+            # shows. `isFinished` alone cannot distinguish "raced the clock"
+            # from "waited for everyone else".
+            'earlyFinisher': bool(data.get('isFinished')) and answered > 0,
         })
     best = max((m['agreement'] for m in members), default=0)
     # Only a member who actually voted counts. A team where nobody answered has
@@ -496,6 +511,49 @@ def snapshot_team_results(room_ref, room_data):
     room_ref.update({'teamResults': results})
 
 
+#: Question types graded leniently -- the player types the answer instead of
+#: picking one. Both are the same kind of free-text response, so both use the
+#: same rule.
+TYPED_QUESTION_TYPES = frozenset({'identification', 'fill_in_blank'})
+
+
+def normalise_question_type(raw):
+    """Collapse every spelling of a question type to one canonical value.
+
+    Callers disagree about how to spell these: the AI generator posts display
+    labels ('Identification', 'Fill-in-the-Blank'), the upload screen posts
+    short ids ('sa', 'mc', 'tf'), and older rooms carry the runtime type. They
+    used to be compared with `== 'identification'`, so every variant except that
+    one exact string fell through to the multiple-choice prompt -- which is how
+    an upload asking for typed answers quietly got four options per question.
+    """
+    value = str(raw or '').strip().casefold()
+    if value in ('sa', 'short answer', 'short_answer', 'identification', 'identify'):
+        return 'identification'
+    if value in ('fib', 'fill in the blank', 'fill-in-the-blank', 'fill_in_blank', 'fillblank'):
+        return 'fill_in_blank'
+    if value in ('tf', 'true/false', 'true false', 'truefalse', 'boolean'):
+        return 'true_false'
+    return 'mcq'
+
+
+def answer_matches(given, expected):
+    """Compare a typed answer to the expected one.
+
+    Lenient about the things a phone keyboard changes on its own -- capitalisation
+    and stray or doubled whitespace -- and strict about everything else. A
+    misspelling is wrong: the question asked for a term, and quietly accepting
+    "photosynthosis" would teach the student nothing. So there is deliberately
+    no edit distance or fuzzy matching here.
+
+    `casefold` rather than `lower` so accented answers ("Beyoncé") compare
+    correctly against their uppercase form.
+    """
+    if given is None or expected is None:
+        return False
+    return ' '.join(str(given).split()).casefold() == ' '.join(str(expected).split()).casefold()
+
+
 def build_questions_from_quiz(quiz):
     """Serialise a Quiz's questions into the shape a game room stores.
 
@@ -525,8 +583,19 @@ def build_questions_from_quiz(quiz):
                 'explanation': explanation,
             })
         else:
+            # A free-text question. Which of the two typed types it is comes from
+            # the quiz, not from the absence of options: "has no options" is a
+            # property of this particular question, and an identification
+            # question that happened to be stored option-less would otherwise be
+            # indistinguishable from a fill-in-the-blank. Both grade the same
+            # way, so this only affects how the question is labelled.
+            typed_type = (
+                'fill_in_blank'
+                if (quiz.quiz_type or '').strip().casefold() in ('fill-in-the-blank', 'fill in the blank')
+                else 'identification'
+            )
             questions.append({
-                'type': 'identification',
+                'type': typed_type,
                 'question': q.question_text,
                 'correctAnswer': q.correct_answer,
                 'explanation': explanation,
@@ -648,13 +717,11 @@ class CreateGameView(APIView):
                     'memberIds': [],
                     'memberCount': 0,
                     'maxSize': DEFAULT_TEAM_MAX_SIZE,
-                    # Team-mode momentum state. Correct counts are team-wide so
-                    # a member's answer lifts the whole team up the ladder.
+                    # Team-wide correct count and the current/best run. The run
+                    # drives the streak bonus and the powerup cadence.
                     'teamCorrect': 0,
                     'teamStreak': 0,
                     'bestStreak': 0,
-                    'multiplier': 1.0,
-                    'maxMultiplier': 1.0,
                     'powerups': empty_powerups(),
                     'namedBy': None,
                     'nameLocked': False,
@@ -699,20 +766,20 @@ class CreateGameView(APIView):
 
         return Response(response_data)
 
-    def process_content(self, content, count, question_type='mcq', user=None):
+def process_content(self, content, count, question_type='mcq', user=None):
         """Generate questions for uploaded content via DeepSeek.
 
         `user` is used only to record token usage; it is optional so the many
         existing tests that call this directly do not need a user.
         """
-        if question_type == 'identification':
+        if normalise_question_type(question_type) in TYPED_QUESTION_TYPES:
             format_block = '''{
   "topic": "Concise Title",
   "questions": [
     {
       "type": "identification",
       "question": "...",
-      "correctAnswer": "short answer"
+      "correctAnswer": "the term being asked for"
     }
   ]
 }'''
@@ -1096,16 +1163,15 @@ class AnswerQuestionView(APIView):
             # timeTaken is client-reported, so it cannot be trusted for either
             # scoring or bounds. Clamping into [0, timePerQuestion] makes the
             # documented 500-1000 range real; without it a negative value
-            # inflates the score without limit and the team momentum
-            # multiplier would compound that.
+            # inflates the score without limit.
             time_taken = min(max(time_taken, 0.0), float(time_per_q))
 
             correct_answer = questions[question_index]['correctAnswer']
             q_type = questions[question_index].get('type', 'mcq')
             
             # Determine correctness
-            if q_type == 'identification':
-                is_correct = answer.strip().lower() == correct_answer.strip().lower()
+            if q_type in TYPED_QUESTION_TYPES:
+                is_correct = answer_matches(answer, correct_answer)
             else:
                 is_correct = answer == correct_answer
 
@@ -1196,7 +1262,8 @@ class AnswerQuestionView(APIView):
                         'correctAnswer': cached.get('correctAnswer', ''),
                         'pointsAwarded': cached.get('pointsAwarded', 0),
                         'powerupEarned': None, # Don't re-award powerups
-                        'multiplier': cached.get('multiplier', 1.0),
+                        'basePoints': cached.get('basePoints', 0),
+                        'speedBonus': cached.get('speedBonus', 0),
                         'scored': False,
                     }
 
@@ -1213,7 +1280,6 @@ class AnswerQuestionView(APIView):
                 # reward earned in that branch survives into the team update
                 # further down.
                 team_updates = {}
-                multiplier = 1.0
                 # Where the spend lands: the team pool in team mode, the
                 # player's own pool otherwise.
                 powerups_spent = {}
@@ -1259,42 +1325,11 @@ class AnswerQuestionView(APIView):
                     base_points = earned_points
                     speed_bonus = earned_points - 500
 
-                    if team_ref is not None:
-                        # Team momentum: the multiplier the whole team has
-                        # earned so far applies to this answer. It is the
-                        # single biggest reason to play as a team — a team
-                        # that grinds correct answers together scores far more
-                        # per question than four players soloing.
-                        #
-                        # Read the multiplier from the transactional team
-                        # state, not the pre-transaction read: two teammates
-                        # answering in the same instant must not both be
-                        # scored against the same stale `teamCorrect`, or the
-                        # second answer silently loses the tier it just earned.
-                        team_correct = (team_now.get('teamCorrect', 0) or 0)
-                        multiplier = team_multiplier(team_correct)
-                        earned_points = int(round(earned_points * multiplier))
-                    else:
-                        # Classic mode momentum: the same ladder team mode
-                        # climbs, driven by this player's own correct answers.
-                        # This is what makes solo play escalate instead of
-                        # sitting on a flat line, and it reads `data` -- the
-                        # transactional player snapshot -- for exactly the
-                        # same stale-state reason as the team branch above.
-                        solo_correct = data.get('correctCount', 0) or 0
-                        multiplier = momentum_multiplier(solo_correct)
-                        if multiplier != 1.0:
-                            earned_points = int(round(earned_points * multiplier))
-
-                    # Streak bonus on top of the momentum rung. This is the
-                    # immediate-run reward that momentum cannot provide: the
-                    # ladder only ever climbs, so without this a player who
-                    # reached x1.4 early got no further feedback all game.
+                    # Streak bonus, applied on top of the speed-decayed base points.
                     #
                     # Read off the streak this answer *completes*, not the one
                     # before it, so the third answer in a run is the first that
-                    # pays -- the same rung the team path awards, otherwise
-                    # classic and team play would disagree by one answer.
+                    # pays.
                     prior_streak = data.get('streak', 0) or 0
                     bonus = streak_bonus_multiplier(prior_streak + 1)
                     if bonus != 1.0:
@@ -1386,26 +1421,12 @@ class AnswerQuestionView(APIView):
                     final_updates.update(powerups_spent)
                     powerups_spent = {}
 
-                    # Persist the personal momentum rung and the best streak.
-                    # `_public_player` has always read `multiplier` and
-                    # `bestStreak` off the player document, but nothing ever
-                    # wrote them for a solo player -- the fields sat at their
-                    # initial 1.0/0 for a whole game, which is exactly why
-                    # classic mode had no flame to show or climb.
+                    # Persist the best streak, which `_public_player` reads
+                    # off the player document.
                     if is_correct:
                         prior_streak = data.get('streak', 0) or 0
-                        prior_correct = data.get('correctCount', 0) or 0
                         prior_best = data.get('bestStreak', 0) or 0
-                        # Store the rung just EARNED, not the rung that scored
-                        # this answer. A team stores `team_multiplier(new)` while
-                        # scoring with `team_multiplier(prior)`, so the flame the
-                        # player is shown is always the tier they have reached,
-                        # and the boost lands on the NEXT answer.
-                        final_updates['multiplier'] = momentum_multiplier(prior_correct + 1)
                         final_updates['bestStreak'] = max(prior_best, prior_streak + 1)
-                    # No demotion on a miss. `streak` is reset above, which is
-                    # what the streak bonus and the powerup cadence read; the
-                    # momentum ladder itself is cumulative and stays put.
 
                 final_updates['answeredQuestions'] = fs.ArrayUnion([question_index])
 
@@ -1437,7 +1458,6 @@ class AnswerQuestionView(APIView):
                     'correct': is_correct,
                     'correctAnswer': correct_answer,
                     'pointsAwarded': earned_points,
-                    'multiplier': multiplier if is_correct else 1.0,
                     'basePoints': base_points,
                     'speedBonus': speed_bonus,
                 }
@@ -1449,15 +1469,14 @@ class AnswerQuestionView(APIView):
                 #    double-counting on retries.
                 if team_ref is not None:
                     # Read the team inside the transaction so the running
-                    # maxima and the demotion below are computed from a
-                    # consistent view, not the pre-transaction read.
+                    # maxima are computed from a consistent view, not the
+                    # pre-transaction read.
                     team_updates['answeredCount'] = fs.Increment(1)
                     team_updates.update(powerups_spent)
                     powerups_spent = {}
 
                     prior_correct = team_now.get('teamCorrect', 0) or 0
                     prior_streak = team_now.get('teamStreak', 0) or 0
-                    prior_multiplier = team_now.get('multiplier', 1.0) or 1.0
 
                     if is_correct:
                         score_increment = updates.get('score')
@@ -1466,24 +1485,15 @@ class AnswerQuestionView(APIView):
                         team_updates['correctCount'] = fs.Increment(1)
 
                         new_correct = prior_correct + 1
-                        next_multiplier = team_multiplier(new_correct)
                         new_streak = prior_streak + 1
                         team_updates['teamCorrect'] = new_correct
-                        team_updates['multiplier'] = next_multiplier
-                        team_updates['maxMultiplier'] = max(
-                            team_now.get('maxMultiplier', 1.0) or 1.0, next_multiplier)
-                        # A shield spends itself keeping the team flame alive;
-                        # a correct answer otherwise pushes it up.
                         team_updates['teamStreak'] = new_streak
                         team_updates['bestStreak'] = max(
                             team_now.get('bestStreak', 0) or 0, new_streak)
                     else:
                         if not use_shield:
-                            # A miss breaks the team flame so the streak bonus
-                            # and the powerup cadence reset. It does NOT touch
-                            # `multiplier`: the ladder is cumulative now, and a
-                            # drop was punishing the whole team for one member's
-                            # miss on a question the others had not reached yet.
+                            # A miss breaks the run, so the streak bonus and the
+                            # powerup cadence reset for the next question.
                             team_updates['teamStreak'] = 0
                     transaction.update(team_ref, team_updates)
 
@@ -1495,7 +1505,6 @@ class AnswerQuestionView(APIView):
                     'correctAnswer': correct_answer,
                     'pointsAwarded': earned_points,
                     'powerupEarned': powerup_earned,
-                    'multiplier': multiplier if is_correct else 1.0,
                     'basePoints': base_points,
                     'speedBonus': speed_bonus,
                     'scored': True,
@@ -1513,7 +1522,6 @@ class AnswerQuestionView(APIView):
                 'correctAnswer': result['correctAnswer'],
                 'pointsAwarded': result['pointsAwarded'],
                 'powerupEarned': result['powerupEarned'],
-                'multiplier': result.get('multiplier', 1.0),
                 # Additive: lets the client show "+840 · 340 speed" instead of
                 # a single unexplained number.
                 'basePoints': result.get('basePoints', 0),
@@ -1793,6 +1801,7 @@ class FinishGameView(APIView):
         here is what made team mode still read as an individual game.
         """
         if team_mode:
+            room_data = room_ref.get().to_dict() or {}
             team_doc = {}
             for t in room_ref.collection('teams').stream():
                 data = t.to_dict() or {}
@@ -1811,6 +1820,43 @@ class FinishGameView(APIView):
             ranks = self._competition_ranks([rank_values[tid] for tid in ordered])
             team_rank = dict(zip(ordered, ranks))
 
+            # Read the players once: they are needed both to pay and to build
+            # the results snapshot stored on each player's activity row.
+            players = {}
+            for p in room_ref.collection('players').stream():
+                players[p.id] = p.to_dict() or {}
+
+            teams_snapshot = []
+            for tid, data in team_doc.items():
+                member_ids = [str(uid) for uid in (data.get('memberIds') or [])]
+                members = []
+                for uid in member_ids:
+                    pdata = players.get(uid)
+                    if pdata is None:
+                        continue
+                    members.append({
+                        'user_id': int(uid) if str(uid).isdigit() else uid,
+                        'name': pdata.get('displayName', 'Player'),
+                        'score': pdata.get('score', 0) or 0,
+                        'correct': pdata.get('correctCount', 0) or 0,
+                        'answered': pdata.get('answeredCount', 0) or 0,
+                    })
+                teams_snapshot.append({
+                    'id': tid,
+                    'name': data.get('name') or f'Team {tid}',
+                    'score': data.get('score', 0) or 0,
+                    'correct': data.get('teamCorrect', 0) or 0,
+                    'rank': team_rank.get(tid),
+                    'members': members,
+                })
+            teams_snapshot.sort(key=lambda t: (t['rank'] is None, t['rank']))
+            results = {
+                'mode': 'team',
+                'roomCode': room_code,
+                'questionCount': room_data.get('questionCount') or 0,
+                'teams': teams_snapshot,
+            }
+
             for p in room_ref.collection('players').stream():
                 data = p.to_dict() or {}
                 if not data.get('teamId'):
@@ -1819,22 +1865,220 @@ class FinishGameView(APIView):
                 if team_id not in team_rank:
                     continue
                 self._pay(user_id=p.id, rank=team_rank[team_id], room_code=room_code,
-                          label=f"#{team_rank[team_id]} with {team_doc[team_id].get('name') or f'Team {team_id}'}")
+                          label=f"#{team_rank[team_id]} with {team_doc[team_id].get('name') or f'Team {team_id}'}",
+                          results=results, team_id=team_id)
             return
 
-        standings = self._get_standings(room_ref, room_ref.get().to_dict() or {})
+        room_data = room_ref.get().to_dict() or {}
+        standings = self._get_standings(room_ref, room_data)
         ranks = self._competition_ranks([e['score'] for e in standings])
+        participants = []
         for entry, rank in zip(standings, ranks):
-            self._pay(user_id=entry['user_id'], rank=rank, room_code=room_code, label=f'#{rank}')
+            entry['rank'] = rank
+            participants.append(entry)
+        results = {
+            'mode': 'classic',
+            'roomCode': room_code,
+            'questionCount': room_data.get('questionCount') or 0,
+            'participants': participants,
+        }
+        for entry, rank in zip(standings, ranks):
+            self._pay(user_id=entry['user_id'], rank=rank, room_code=room_code, label=f'#{rank}',
+                      results=results)
 
-    def _pay(self, user_id, rank, room_code, label):
+    def _pay(self, user_id, rank, room_code, label, results=None, team_id=None):
         user = User.objects.filter(id=user_id).first()
         if not user:
             return
         try:
-            record_game_finish(user, rank, room_code=room_code, context=label)
+            payload = {}
+            if results:
+                payload['rank'] = rank
+                if team_id is not None:
+                    payload['teamId'] = str(team_id)
+                    mine = next((t for t in results.get('teams', []) if t['id'] == team_id), None)
+                    if mine:
+                        payload['teamName'] = mine['name']
+                        payload['score'] = mine['score']
+                        payload['correct'] = mine['correct']
+                # This member's own line in the snapshot, so the detail sheet
+                # can highlight their row without searching by name.
+                mine_entry = None
+                if results.get('mode') == 'classic':
+                    mine_entry = next(
+                        (p for p in results['participants'] if str(p['user_id']) == str(user_id)), None)
+                else:
+                    for t in results.get('teams', []):
+                        for m in t.get('members', []):
+                            if str(m.get('user_id')) == str(user_id):
+                                mine_entry = m
+                if mine_entry:
+                    if 'score' not in payload:
+                        payload['score'] = mine_entry.get('score', 0)
+                    payload.setdefault('correct', mine_entry.get('correct', 0))
+            record_game_finish(user, rank, room_code=room_code, context=label,
+                               results=results, payload=payload or None)
         except Exception as e:
             print(f'[FinishGame XP Award Error] user {user_id}: {e}')
+
+
+class RematchView(APIView):
+    """Host-only: reset a finished room back to the lobby, keeping everyone in it.
+
+    A rematch deliberately reuses the SAME room rather than creating a new one.
+    The room code is the thing students type, the thing the TV display is
+    polling, and the thing a late joiner has written down -- minting a new code
+    would break all three and turn "play again" into a re-admission exercise.
+
+    So the roster survives and only the *game* state is thrown away. Team
+    assignments are cleared rather than kept: the host may want different
+    teams for round two, and re-dealing is what START's own auto-assign already
+    knows how to do. Team NAMES survive, because a name a student typed is
+    worth keeping even when the seats under it are reshuffled.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = str(request.data.get('roomCode', '')).upper()
+        if not room_code:
+            return Response({'error': 'roomCode is required'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+
+        room_data = room.to_dict() or {}
+        if room_data.get('hostId') != request.user.id:
+            return Response({'error': 'Only the host can start a rematch'}, status=403)
+        if room_data.get('status') != 'finished':
+            return Response({'error': 'This game has not finished yet'}, status=400)
+
+        team_mode = bool(room_data.get('teamMode'))
+
+        # An optional new quiz for round two. Without it the room keeps the quiz
+        # it just played, so "Play again" is one tap for the common case of
+        # "same quiz, new scores".
+        quiz_id = request.data.get('quizId')
+        swap = {}
+        # Validate the replacement quiz BEFORE touching any Firestore state. The
+        # reset writes every player and team document, so doing it first would
+        # mean a rejected quiz (not found, empty, too short for the team count)
+        # leaves the room half-wiped: round one's scores gone, status still
+        # 'finished', and nothing on screen to explain why.
+        if quiz_id not in (None, ''):
+            from ai_assistant.models import Quiz
+            try:
+                quiz = Quiz.objects.get(id=quiz_id, user=request.user)
+            except (Quiz.DoesNotExist, ValueError, TypeError):
+                return Response({'error': 'Quiz not found'}, status=404)
+            questions = build_questions_from_quiz(quiz)
+            if not questions:
+                return Response({'error': 'That quiz has no questions yet'}, status=400)
+            if team_mode and len(questions) < (room_data.get('teamCount') or 2):
+                return Response({'error': 'Not enough questions for that many teams'}, status=400)
+            swap = {
+                'questions': questions,
+                'questionCount': len(questions),
+                'quizId': int(quiz.id),
+                'topic': quiz.title,
+            }
+
+        reset = _reset_room_for_rematch(room_ref, room_data)
+        reset.update(swap)
+        room_ref.update(reset)
+        return Response({
+            'roomCode': room_code,
+            'message': 'Rematch ready',
+            'teamMode': team_mode,
+            'retainedPlayers': reset.pop('retainedPlayers', 0),
+            **({'quizId': swap['quizId'], 'topic': swap['topic']} if swap else {}),
+        })
+
+
+def _reset_room_for_rematch(room_ref, room_data):
+    """The field-level reset for a finished room. Returns the room patch.
+
+    Split out from the view so the reset is one readable list rather than being
+    interleaved with the request handling.
+    """
+    team_mode = bool(room_data.get('teamMode'))
+
+    # Room-level game state. `teamResults` is dropped rather than zeroed: the
+    # final screen reads it to draw the podium, and an empty-but-present array
+    # would render an empty podium instead of waiting for the rematch to finish.
+    patch = {
+        'status': 'waiting',
+        'questions': list(room_data.get('questions') or []),
+        'questionCount': len(room_data.get('questions') or []),
+        'quizPending': False,
+        'teamResults': fs.DELETE_FIELD,
+        'startedAt': fs.DELETE_FIELD,
+        'finishedAt': fs.DELETE_FIELD,
+        'pickStartedAt': fs.DELETE_FIELD,
+        'teamAssignments': fs.DELETE_FIELD,
+    }
+    if team_mode:
+        patch['teamQuestionIndex'] = 0
+        # No shared clock until START writes one. Leaving the finished game's
+        # timestamp in place would make the lobby open a question instantly.
+        patch['teamStartedAt'] = None
+
+    # Per-player game state. `joinedAt` is refreshed too so the lobby's
+    # newest-first spectator list re-derives arrival order for this round
+    # instead of preserving who wandered in first an hour ago.
+    for player in room_ref.collection('players').stream():
+        player.reference.update({
+            'score': 0,
+            'correctCount': 0,
+            'answeredCount': 0,
+            'streak': 0,
+            'bestStreak': 0,
+            'answers': {},
+            'isFinished': False,
+            'isReady': True,
+            'questionOrder': [],
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+            'boostedTeammate': fs.DELETE_FIELD,
+            'frozenUntil': fs.DELETE_FIELD,
+            'joinedAt': fs.SERVER_TIMESTAMP,
+        })
+        if team_mode:
+            # DELETE_FIELD for the same reason AssignTeamView uses it: a missing
+            # field and a null one both read as "spectating", but keeping both
+            # representations alive lets them drift apart across rounds.
+            player.reference.update({'teamId': fs.DELETE_FIELD})
+
+    # Team state, minus the name. `memberIds` is emptied here rather than in
+    # START, so the lobby shows empty columns the students can re-pick into
+    # instead of a stale roster with nobody in it.
+    if team_mode:
+        for team in room_ref.collection('teams').stream():
+            team.reference.update({
+                'score': 0,
+                'correctCount': 0,
+                'answeredCount': 0,
+                'teamCorrect': 0,
+                'teamStreak': 0,
+                'bestStreak': 0,
+                'pickCount': 0,
+                'powerups': empty_powerups(),
+                'memberIds': [],
+                'memberCount': 0,
+                'leaderId': None,
+                'reveals': fs.DELETE_FIELD,
+            })
+
+        # The server-side pick tally. Left in place it would make round two
+        # inherit round one's votes on question 0.
+        for doc in room_ref.collection('_server').list_documents():
+            if doc.id.startswith('teamPicks_'):
+                doc.delete()
+
+    patch['retainedPlayers'] = len(list(room_ref.collection('players').list_documents()))
+    return patch
 
 
 class RoomLeaderboardView(APIView):
@@ -2157,8 +2401,6 @@ class AddTeamView(APIView):
                 'teamCorrect': 0,
                 'teamStreak': 0,
                 'bestStreak': 0,
-                'multiplier': 1.0,
-                'maxMultiplier': 1.0,
                 'powerups': empty_powerups(),
                 'namedBy': None,
                 'nameLocked': False,
@@ -2431,9 +2673,11 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
         picks = dict(server_picks.get('picks') or {}) if server_picks.get('questionIndex') == question_index else {}
         # A player's own pick is idempotent: a retried submission overwrites
         # their entry rather than adding a second one, so a flaky connection
-        # cannot make someone look like two voters.
-        picks[player_id] = answer
-        pickers = len([p for p in picks.values() if p])
+        # cannot make someone look like two voters. The time travels with the
+        # answer so the team can be scored on the group's median rather than on
+        # whoever happened to submit last.
+        picks[player_id] = {'answer': answer, 'timeTaken': time_taken}
+        pickers = len([p for p in picks.values() if pick_answer(p)])
 
         # Everyone picked, or the deadline closed it.
         if pickers < len(members) and not expired:
@@ -2454,14 +2698,21 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             }
 
         choice, agreed, distinct, tie = tally_team_picks(picks)
+        # The team's speed is the median of the recorded pick times, so no single
+        # member decides the payout for everyone. Falls back to this submitter's
+        # time only when the room holds picks with no times at all (a round that
+        # started before times were recorded).
+        team_time = median_pick_time(picks)
+        if team_time is None:
+            team_time = time_taken
         question = questions[question_index]
         correct_answer = question.get('correctAnswer', '')
         q_type = question.get('type', 'mcq')
         # A tie voids the question: there is no majority, so awarding it to
         # either side would make the result depend on dict ordering.
         is_correct = (not tie) and (
-            choice.strip().lower() == correct_answer.strip().lower()
-            if q_type == 'identification' else choice == correct_answer
+            answer_matches(choice, correct_answer)
+            if q_type in TYPED_QUESTION_TYPES else choice == correct_answer
         )
 
         pool = dict(team.get('powerups') or {})
@@ -2485,22 +2736,18 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
         speed_bonus = 0
         earned_points = 0
         powerup_earned = None
-        multiplier = 1.0
         team_updates = {'answeredCount': fs.Increment(1)}
 
         if is_correct:
-            base_score = int(1000 * (1 - (time_taken / time_per_q) * 0.5))
+            base_score = int(1000 * (1 - (team_time / time_per_q) * 0.5))
             earned_points = max(base_score, 500)
             base_points = earned_points
             speed_bonus = earned_points - 500
 
             prior_correct = team.get('teamCorrect', 0) or 0
-            multiplier = team_multiplier(prior_correct)
 
-            # 1. momentum ladder (cumulative), 2. streak bonus (the current
-            # run), 3. the doubled questions. In that order so the quiz's
-            # big questions are worth the most and nothing compounds past x4.
-            earned_points = int(round(earned_points * multiplier))
+            # Streak bonus (the current run), then the doubled questions. In that
+            # order so the quiz's big questions are worth the most.
             new_streak = (team.get('teamStreak', 0) or 0) + 1
             bonus = streak_bonus_multiplier(new_streak)
             if bonus != 1.0:
@@ -2517,13 +2764,10 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
                 if not (spent_double or is_double_point_question(question_index)):
                     earned_points *= 2
 
-            next_multiplier = team_multiplier(prior_correct + 1)
             team_updates.update({
                 'score': fs.Increment(earned_points),
                 'correctCount': fs.Increment(1),
                 'teamCorrect': prior_correct + 1,
-                'multiplier': next_multiplier,
-                'maxMultiplier': max(team.get('maxMultiplier', 1.0) or 1.0, next_multiplier),
                 'teamStreak': new_streak,
                 'bestStreak': max(team.get('bestStreak', 0) or 0, new_streak),
             })
@@ -2540,9 +2784,8 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
                 team_updates[f'powerups.{ptype}'] = fs.Increment(1)
                 powerup_earned = ptype
         else:
-            # A miss breaks the run (so the streak bonus and the powerup cadence
-            # reset) but never touches `multiplier`: momentum is a cumulative
-            # ladder now, see demote_multiplier.
+            # A miss breaks the run, so the streak bonus and the powerup
+            # cadence reset.
             if spent_shield:
                 # A shield keeps the flame alive rather than extending it. It is
                 # charged HERE, in the miss branch, because that is the only
@@ -2581,7 +2824,6 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             'pickers': distinct,
             'expected': len(members),
             'points': int(earned_points),
-            'multiplier': multiplier,
             'basePoints': base_points,
             'speedBonus': speed_bonus,
             'doublePoint': is_double_point_question(question_index),
@@ -2599,7 +2841,10 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
         # is everything the agreement stat and the MVP need.
         for uid in members:
             member_ref = room_ref.collection('players').document(uid)
-            own_pick = (picks.get(uid) or '')[:200]
+            # Read through pick_answer: a pick is an {answer, timeTaken} object
+            # now, but a bare string on a room that predates that. Slicing the
+            # raw value would put "{'answer': 'Lon" in the member's own log.
+            own_pick = pick_answer(picks.get(uid))[:200]
             member_updates = {
                 'answeredCount': fs.Increment(1),
                 'answeredQuestions': fs.ArrayUnion([question_index]),
@@ -2637,7 +2882,6 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             'agreed': agreed,
             'pickers': distinct,
             'pointsAwarded': int(earned_points),
-            'multiplier': multiplier,
             'basePoints': base_points,
             'speedBonus': speed_bonus,
             'doublePoint': is_double_point_question(question_index),
@@ -2843,6 +3087,52 @@ class AutoAssignTeamsView(APIView):
             'message': f'Dealt {len(shuffled)} players into {len(team_ids)} teams',
             'teams': final_teams,
             'sizes': {t: len(placement[t]) for t in team_ids},
+        })
+
+
+class OpenTeamPickView(APIView):
+    """Open the window in which players choose their own teams.
+
+    Team mode used to run straight from "I picked a quiz and a team count" into
+    a running game, so the team boxes existed for barely a frame and nobody ever
+    got to sit down. The room is created in `waiting` and the host opens this
+    window instead; when it closes, the host auto-assigns whatever is still
+    unseated and starts.
+
+    The deadline is stamped server-side rather than counted down on a client
+    timer, for two reasons: every device then counts the same window down from
+    one shared instant, and a host who backgrounds the app cannot stop it.
+    Clients derive their remaining seconds from this value and never own it.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    #: How long players get to pick teams before the host auto-assigns.
+    PICK_SECONDS = 30
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').strip().upper()
+        if not room_code:
+            return Response({'error': 'roomCode is required'}, status=400)
+        try:
+            room_ref, room_data = _room_and_teams(room_code)
+        except _Rejected as rejected:
+            return Response(rejected.payload, status=rejected.status)
+        try:
+            _require_waiting_host(room_ref, room_data, request)
+        except _Rejected as rejected:
+            return Response(rejected.payload, status=rejected.status)
+
+        # A deferred room has no quiz yet, so there is nothing to auto-assign
+        # into and starting would fail server-side with "choose a quiz". The
+        # countdown is for picking teams, not for skipping the quiz picker.
+        if room_data.get('quizPending'):
+            return Response({'error': 'Choose a quiz before opening team selection'}, status=400)
+
+        room_ref.update({'pickStartedAt': fs.SERVER_TIMESTAMP})
+        return Response({
+            'message': 'Team selection is open',
+            'pickSeconds': self.PICK_SECONDS,
         })
 
 
@@ -3187,7 +3477,21 @@ class OfflineResultsView(APIView):
                 title=(str(request.data.get('quizTitle') or '').strip() or 'Offline game'),
                 description=f"{record.correct_count}/{record.total_questions} correct · {record.score} pts",
                 xp=0,
-                payload={'route': '/game/classic'},
+                payload={
+                    'route': '/game/classic',
+                    'sessionKey': record.session_key,
+                    'results': {
+                        'mode': 'offline',
+                        'score': record.score,
+                        'correct': record.correct_count,
+                        'answered': record.answered_count,
+                        'total': record.total_questions,
+                        'timePerQuestion': record.time_per_question,
+                        'quizType': record.quiz_type,
+                    },
+                    'score': record.score,
+                    'correct': record.correct_count,
+                },
             )
 
         return Response({

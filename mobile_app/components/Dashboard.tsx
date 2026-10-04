@@ -23,6 +23,7 @@ import Animated, {
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import ActivityResultsView from '@/components/ActivityResultsView';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
 import NotificationSheet from './NotificationSheet';
@@ -102,6 +103,46 @@ interface Recommendation {
   /** Server-computed deep link, already carrying ?topicId= when known. */
   href?: string | null;
 }
+/** One player line in a settled room snapshot stored on an activity row. */
+interface ActivityResultMember {
+  user_id?: number | string;
+  name?: string;
+  score?: number;
+  correct?: number;
+  answered?: number;
+}
+
+/** One team line in a settled room snapshot. */
+interface ActivityResultTeam {
+  id?: string;
+  name?: string;
+  score?: number;
+  correct?: number;
+  rank?: number | null;
+  members?: ActivityResultMember[];
+}
+
+/**
+ * The settled snapshot the game endpoints attach to the activity row.
+ *
+ * Older rows were written before this existed and only carry `route`, so
+ * every field here is optional and the sheet falls back to the summary line
+ * when there is nothing structured to show.
+ */
+interface ActivityResults {
+  mode?: 'classic' | 'team' | 'offline';
+  roomCode?: string;
+  questionCount?: number;
+  participants?: ActivityResultMember[];
+  teams?: ActivityResultTeam[];
+  score?: number;
+  correct?: number;
+  answered?: number;
+  total?: number;
+  timePerQuestion?: number;
+  quizType?: string;
+}
+
 interface Activity {
   id: number;
   title: string;
@@ -110,7 +151,16 @@ interface Activity {
   kind?: string;
   xp_earned?: number;
   course_name?: string;
-  payload?: { route?: string } | null;
+  payload?: {
+    route?: string;
+    results?: ActivityResults;
+    rank?: number;
+    score?: number;
+    correct?: number;
+    teamId?: string;
+    teamName?: string;
+    sessionKey?: string;
+  } | null;
   created_at?: string;
 }
 
@@ -997,12 +1047,17 @@ export default function Dashboard() {
         subtitle={
           detailActivity?.created_at ? relativeTime(detailActivity.created_at) : undefined
         }
-        maxHeight="60%"
+        maxHeight="80%"
       >
         <View style={styles.sheetDetail}>
           <Text style={styles.sheetDetailText}>
             {detailActivity?.description || 'No further detail was recorded.'}
           </Text>
+          <ActivityResultsView
+            results={detailActivity?.payload?.results}
+            myUserId={user?.id}
+            myTeamId={detailActivity?.payload?.teamId}
+          />
           <View style={styles.sheetDetailMeta}>
             {detailActivity?.course_name ? (
               <Text style={styles.sheetDetailMetaText}>{detailActivity.course_name}</Text>

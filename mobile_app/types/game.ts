@@ -88,12 +88,6 @@ export interface PlayerEntry {
    * indexing straight into it.
    */
   answers?: PlayerAnswerLog;
-  /**
-   * Personal momentum rung, mirroring TEAM_MOMENTUM_TIERS. Classic mode only;
-   * team mode climbs the same ladder but the team document owns it. Stored as
-   * the tier just EARNED, so the boost lands on the following answer.
-   */
-  multiplier?: number;
   /** Longest run of consecutive correct answers. */
   bestStreak?: number;
   /**
@@ -115,8 +109,22 @@ export function joinedAtMillis(player: Pick<PlayerEntry, 'joinedAt'>): number {
 }
 
 export interface TeamMember extends PlayerEntry {
-  /** Share of the team's points this member banked, 0-100. */
-  contribution?: number;
+  /** Correct answers out of `answeredCount`, as a percentage. */
+  accuracy?: number;
+  /**
+   * How often this member voted with the team, 0-100.
+   *
+   * This replaced `contribution` (a share of the team's points), which became
+   * meaningless when members started sharing one team score -- every member
+   * would have shown the same number.
+   */
+  agreement?: number;
+  /** Best run of consecutive correct answers. */
+  bestStreak?: number;
+  /** Submitted before the team closed its last question. */
+  earlyFinisher?: boolean;
+  /** Highest agreement on the team. At most one per team. */
+  isMvp?: boolean;
 }
 
 export interface TeamEntry {
@@ -147,8 +155,6 @@ export interface TeamEntry {
   answeredCount: number;
   memberIds: string[];
   memberCount: number;
-  /** Team momentum: 1, 1.2, 1.4, 1.6 or 2. */
-  multiplier: number;
   teamCorrect: number;
   teamStreak: number;
   bestStreak: number;
@@ -157,7 +163,6 @@ export interface TeamEntry {
   nameLocked?: boolean;
   /** Present on the leaderboard and the final snapshot. */
   accuracy?: number;
-  maxMultiplier?: number;
   members?: TeamMember[];
   /**
    * How many members have picked for the CURRENT shared question.
@@ -223,7 +228,7 @@ export interface RoomData {
 }
 
 export interface GameQuestion {
-  type: 'mcq' | 'identification';
+  type: 'mcq' | 'identification' | 'fill_in_blank';
   question: string;
   choices?: string[];
   correctAnswer: string;
@@ -237,28 +242,14 @@ export interface GameQuestion {
 }
 
 /**
- * Momentum tiers, mirroring TEAM_MOMENTUM_TIERS in backend_api/core/game/views.py.
- * The client uses this only to draw the "next tier" hint; the server is the
- * authority on the actual multiplier.
+ * Momentum tiers: removed, along with `formatMultiplier` and
+ * `nextMomentumTier`.
+ *
+ * The ladder compounded with the streak bonus and the doubled questions, so a
+ * team that got hot early kept scoring well past the point it stopped knowing
+ * the material. Everything left in scoring scales from the answer in front of
+ * you. Do not reintroduce a term driven by a running "how many right so far".
  */
-export const MOMENTUM_TIERS: { at: number; multiplier: number }[] = [
-  { at: 0, multiplier: 1.0 },
-  { at: 5, multiplier: 1.2 },
-  { at: 10, multiplier: 1.4 },
-  { at: 15, multiplier: 1.6 },
-  { at: 20, multiplier: 2.0 },
-];
-
-export function nextMomentumTier(teamCorrect: number) {
-  for (const tier of MOMENTUM_TIERS) {
-    if (teamCorrect < tier.at) return tier;
-  }
-  return null;
-}
-
-export function formatMultiplier(multiplier: number): string {
-  return `×${multiplier % 1 === 0 ? multiplier : multiplier.toFixed(1)}`;
-}
 
 /** Ids cross the Firestore/JSON boundary as both strings and numbers. */
 /**

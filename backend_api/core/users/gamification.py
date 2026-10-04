@@ -319,13 +319,18 @@ def record_daily_checkin(user):
     }
 
 
-def record_game_finish(user, rank, room_code=None, context=None):
+def record_game_finish(user, rank, room_code=None, context=None, results=None, label=None, payload=None):
     """Award placement XP after a multiplayer game finishes.
 
     `context` is a human-readable placement label. In team mode the rank is
     the team's finishing position, so the activity feed says e.g.
     "#1 with The Brainy Bunch" rather than implying the student individually
     came first against every other student in the room.
+
+    `results` is the settled room snapshot (participants, scores, teams). It is
+    stored on the activity row so the Recent Activity detail sheet can render
+    the full result without a second Firestore round trip that may no longer
+    have a live room to read.
     """
     xp = GAME_PLACEMENT_XP.get(rank, GAME_DEFAULT_XP)
     result = award_xp(user, xp, source='game')
@@ -336,13 +341,19 @@ def record_game_finish(user, rank, room_code=None, context=None):
         if champ:
             badges.append(_badge_dicts([champ])[0])
 
+    activity_payload = {'route': '/games'}
+    if payload:
+        activity_payload.update(payload)
+    if results is not None:
+        activity_payload['results'] = results
+    placement = label or context or f'#{rank} in live game'
     log_activity(
         user,
         kind='game',
-        title=f"{context or f'#{rank} in live game'}" + (f" ({room_code})" if room_code else ""),
+        title=placement + (f" ({room_code})" if room_code else ""),
         description='Multiplayer game finished',
         xp=result['xp'],
-        payload={'route': '/games'},
+        payload=activity_payload,
     )
 
     return {

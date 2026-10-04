@@ -12,8 +12,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Clipboard from 'expo-clipboard';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { POWERUP_META } from '@/components/game/TeamMomentumHUD';
-import { formatMultiplier, POWERUP_KEYS } from '@/types/game';
+import { POWERUP_META } from '@/components/game/PowerupPoolHUD';
+import { POWERUP_KEYS } from '@/types/game';
 
 const COLORS = {
   bg: '#0f0c29',
@@ -138,11 +138,6 @@ function TeamRow({ team, index, memberCount }: { team: any; index: number; membe
         <View style={styles.leaderNameRow}>
           <View style={[styles.teamDot, { backgroundColor: team.color }]} />
           <Text style={styles.leaderName} numberOfLines={1}>{team.name}</Text>
-          <View style={[styles.teamMult, { borderColor: team.color + '77' }]}>
-            <Text style={[styles.teamMultText, { color: team.color }]}>
-              {formatMultiplier(team.multiplier ?? 1)}
-            </Text>
-          </View>
         </View>
         <Text style={styles.leaderMeta}>
           {memberCount} {memberCount === 1 ? 'member' : 'members'} · {team.answeredCount ?? 0} answers
@@ -267,11 +262,6 @@ function PresentTeamRow({ team, index, memberCount }: { team: any; index: number
       <View style={styles.presentRowBody}>
         <View style={styles.presentRowNameRow}>
           <Text style={styles.presentRowName} numberOfLines={1}>{team.name}</Text>
-          <View style={[styles.presentMult, { borderColor: team.color + '99', backgroundColor: team.color + '22' }]}>
-            <Text style={[styles.presentMultText, { color: team.color }]}>
-              {formatMultiplier(team.multiplier ?? 1)}
-            </Text>
-          </View>
         </View>
         <Text style={styles.presentRowMeta}>
           {memberCount} {memberCount === 1 ? 'member' : 'members'} · {team.answeredCount ?? 0} answers
@@ -1300,22 +1290,12 @@ const styles = StyleSheet.create({
   progressTrack: { height: 6, backgroundColor: 'rgba(139,92,246,0.18)', borderRadius: 3, overflow: 'hidden' },
   progressFill: { height: '100%', backgroundColor: COLORS.purpleVibrant, borderRadius: 3 },
   leaderScore: { fontSize: 17, fontFamily: FONTS.black, color: COLORS.textPrimary },
-  teamMult: {
-    paddingHorizontal: 7, paddingVertical: 1, borderRadius: 6,
-    borderWidth: 1, marginLeft: 6,
-  },
-  teamMultText: { fontSize: 11, fontFamily: FONTS.black },
   poolStrip: { flexDirection: 'row', alignItems: 'center', gap: 4, flexWrap: 'wrap' },
   poolChip: {
     flexDirection: 'row', alignItems: 'center', gap: 2,
     borderWidth: 1, borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1,
   },
   poolChipText: { fontSize: 9, fontFamily: FONTS.bold },
-  presentMult: {
-    paddingHorizontal: 9, paddingVertical: 2, borderRadius: 8,
-    borderWidth: 1.5, marginLeft: 10,
-  },
-  presentMultText: { fontSize: 15, fontFamily: FONTS.black },
   teamDot: { width: 10, height: 10, borderRadius: 5 },
   teamsBlock: { marginBottom: 4 },
   blockKicker: {

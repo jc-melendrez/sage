@@ -25,7 +25,7 @@ const ASSIGNMENTS: { id: string; title: string; quiz: string; due: string; submi
 const QUESTION_TYPES: { id: string; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { id: 'mc', label: 'Multiple Choice', icon: 'list' },
   { id: 'tf', label: 'True / False', icon: 'checkbox' },
-  { id: 'sa', label: 'Short Answer', icon: 'create' },
+  { id: 'sa', label: 'Identification', icon: 'create' },
 ];
 
 const DIFFICULTIES = ['Easy', 'Medium', 'Hard'];

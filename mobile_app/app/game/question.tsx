@@ -36,10 +36,11 @@ import type { LanMessage, LanPlayer } from '@/services/lanProtocol';
 import { API_BASE_URL } from '@/config/api';
 import TeamRevealOverlay from '@/components/TeamRevealOverlay';
 import { Ionicons } from '@expo/vector-icons';
-import TeamMomentumHUD from '@/components/game/TeamMomentumHUD';
+import PowerupPoolHUD from '@/components/game/PowerupPoolHUD';
+import StandingsTicker from '@/components/game/StandingsTicker';
 import { answerLogFromOutcomes } from '@/services/gameBreakdown';
 import ReactionBar from '@/components/game/ReactionBar';
-import { formatMultiplier, sameTeamId, activeMembersByTeam, teamRankValue, type PowerupKey, type TeamEntry, type PlayerAnswerLog } from '@/types/game';
+import { sameTeamId, activeMembersByTeam, teamRankValue, type PowerupKey, type TeamEntry, type PlayerAnswerLog } from '@/types/game';
 import { pfpSource } from '@/constants/pfps';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -206,8 +207,6 @@ export default function QuestionScreen() {
     points: number;
     /** Part of `points` earned by answering fast, above the 500 floor. */
     speedBonus?: number;
-    /** Momentum rung that was applied to this answer. */
-    multiplier?: number;
     /** What the player chose; '' on timeout. */
     picked?: string;
     /* ── team mode ── */
@@ -249,12 +248,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
   const [roomStatus, setRoomStatus] = useState('waiting');
   const [teamMode, setTeamMode] = useState(false);
   const [teams, setTeams] = useState<TeamEntry[]>([]);
-  const [myTeamId, setMyTeamId] = useState<string | null>(null);
-  // The rung the server last granted this player. Mirrors player.multiplier so
-  // classic gets the same "you're building a streak" read that teams get from
-  // TeamMomentumHUD.
-  const [myMultiplier, setMyMultiplier] = useState(1.0);
-  // Feeds the "N more to 1.4x" hint, same as the team's `teamCorrect`.
+const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const [myCorrectCount, setMyCorrectCount] = useState(0);
   // Latched once the server refuses an answer. The team-missing case is derived
   // from myTeamId instead, because it is known before the first tap.
@@ -564,7 +558,6 @@ const [freezeBusy, setFreezeBusy] = useState(false);
       setQuestionOrder(player.data()?.questionOrder || []);
       setMyTeamId(player.data()?.teamId ?? null);
       setMyCorrectCount(player.data()?.correctCount ?? 0);
-      setMyMultiplier(player.data()?.multiplier ?? 1.0);
       const pPowerups = player.data()?.powerups;
       if (pPowerups) setPowerups(pPowerups);
     };
@@ -655,13 +648,11 @@ const [freezeBusy, setFreezeBusy] = useState(false);
       .collection('gameRooms').doc(roomCode)
       .collection('players')
       .onSnapshot(snap => {
-        // Our own momentum lives on the player doc. Read it here rather than
-        // deriving it from the standings list, so the classic flame matches
-        // exactly what the server will use to score the next answer.
+        // Our own stats live on the player doc, read here rather than
+        // derived from the standings list.
         const mine = myDocIdRef.current ? snap.docs.find(d => d.id === myDocIdRef.current) : undefined;
         if (mine) {
           setMyCorrectCount(mine.data().correctCount ?? 0);
-          setMyMultiplier(mine.data().multiplier ?? 1.0);
           // Our own answer log. In a team game this is where "did I agree with
           // my team?" comes from: the server writes each member's own pick and
           // whether it matched, and nobody else's.
@@ -1092,22 +1083,21 @@ const [freezeBusy, setFreezeBusy] = useState(false);
       voided: reveal.void,
     });
   }, [teamMode, myTeam, teamIndex, ownAnswers]);
-  // Classic has no team document to hang the momentum HUD on, so synthesize one
-  // from the player's own stats. Feeding TeamMomentumHUD the same shape it
-  // already renders for a team is what makes the solo ladder read identically
-  // instead of looking like a different, flatter game.
-  const momentumTeam: TeamEntry | null = teamMode
+  // Classic has no team document to hang the pool HUD on, so synthesize one
+  // from the player's own stats. Feeding PowerupPoolHUD the same shape it
+  // already renders for a team is what makes the solo pool read identically
+  // instead of looking like a different game.
+  const poolTeam: TeamEntry | null = teamMode
     ? myTeam
     : {
         id: 'me',
-        name: 'Your momentum',
+        name: 'Your powerups',
         color: '#F59E0B',
         score: 0,
         correctCount: myCorrectCount,
         answeredCount: 0,
         memberIds: [],
         memberCount: 1,
-        multiplier: myMultiplier,
         teamCorrect: myCorrectCount,
         teamStreak: 0,
         bestStreak: 0,
@@ -1298,7 +1288,6 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         correctAnswer: data.correctAnswer,
         points: data.pointsAwarded ?? 0,
         speedBonus: data.speedBonus ?? 0,
-        multiplier: data.multiplier ?? 1.0,
         picked: answer,
         teamAnswer: data.answer ?? '',
         agreed: data.agreed ?? 0,
@@ -1409,11 +1398,9 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         correctAnswer: outcome.correctAnswer,
         points: outcome.pointsAwarded,
         speedBonus: outcome.speedBonus,
-        multiplier: outcome.multiplier,
         picked: outcome.picked,
       });
       setPowerups({ ...game.powerups });
-      setMyMultiplier(game.multiplier);
       setMyCorrectCount(game.correctCount);
       if (isOffline) {
         setStandings([{
@@ -1482,7 +1469,6 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         correctAnswer: data.correctAnswer,
         points: data.pointsAwarded ?? 0,
         speedBonus: data.speedBonus ?? 0,
-        multiplier: data.multiplier ?? 1.0,
         picked: answer || '',
       });
       if (data.powerupEarned) {
@@ -1722,13 +1708,28 @@ const [freezeBusy, setFreezeBusy] = useState(false);
         ]} />
       </View>
 
-      {/* ── MOMENTUM + POWERUP POOL (team doc, or the player's own in classic) ── */}
-      {momentumTeam && !spectator && !result && (
-        <TeamMomentumHUD
-          team={momentumTeam}
+      {/* ── POWERUP POOL (team doc, or the player's own in classic) ── */}
+      {poolTeam && !spectator && !result && (
+        <PowerupPoolHUD
+          team={poolTeam}
           pool={pool}
           active={activePowerups}
           shared={teamMode}
+        />
+      )}
+
+      {/* ── LIVE STANDINGS ──
+          Between the powerup pool and the banners: close enough to the question
+          to read at a glance, out of the way of the answer options. Hidden while
+          the reveal is up, so it never competes with the team result. */}
+      {!showTeamReveal && !result && (
+        <StandingsTicker
+          teams={teams}
+          players={standings}
+          teamMode={teamMode}
+          myUserId={userId != null ? String(userId) : null}
+          questionNumber={teamMode ? teamIndex : currentIndex}
+          questionCount={questions.length}
         />
       )}
 
@@ -1856,13 +1857,9 @@ const [freezeBusy, setFreezeBusy] = useState(false);
                   ? (result.voided
                       ? "\U0001f91d Split vote \u2014 no majority, so it scored nothing"
                       : result.correct
-                        ? `\u2705 Team correct!${result.multiplier && result.multiplier > 1 ? `  \U0001f525 ${formatMultiplier(result.multiplier)}` : ''}`
-                        : `\u2717 Team answered: ${result.teamAnswer || "\u2014"}`)
-                  : (result.correct
-                      ? `✅ Correct!${result.multiplier && result.multiplier > 1 ? `  \U0001f525 ${formatMultiplier(result.multiplier)}` : ''}`
-                      : (result.picked
-                          ? `✗ You picked: ${result.picked}`
-                          : `✗ Time's up — Answer: ${result.correctAnswer}`))}
+                        ? `✅ Team correct!`
+                        : `✗ Team answered: ${result.teamAnswer || "\u2014"}`)
+                  : (result.correct ? `✅ Correct!` : `✗ Incorrect`)}
               </Text>
               {/* Speed shown as its own line: a single "+840" hides the fact
                   that part of it was earned by being quick, which is the
@@ -1890,9 +1887,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
               <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
                 {result.iAgreed
                   ? 'You agreed with your team'
-                  : (result.picked
-                      ? 'You went against your team'
-                      : 'You did not pick before time ran out')}
+                  : 'You did not pick before time ran out'}
               </Text>
             )}
             {!result.correct && question.explanation ? (
@@ -2209,7 +2204,7 @@ const [freezeBusy, setFreezeBusy] = useState(false);
                             {isMyTeam && <Text style={styles.srYouTag}> (You)</Text>}
                           </Text>
                           <Text style={styles.srSub} numberOfLines={1}>
-                            {formatMultiplier(t.multiplier ?? 1)} · {t.teamCorrect ?? 0} correct · {t.memberCount ?? 0} players
+                            {t.teamCorrect ?? 0} correct · {t.memberCount ?? 0} players
                           </Text>
                         </View>
                         <View style={[styles.teamStandDot, { backgroundColor: t.color }]} />

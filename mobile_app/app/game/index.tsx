@@ -475,23 +475,27 @@ const lobbyTokenRef = useRef(0);
       }
     } else if (modeId === 'group') {
       setSelectedMode(modeId);
-      // Team mode owns its lobby on /game/lobby, which is where the host picks a
-      // quiz and shares the invite. Creating the room here as well left two
-      // competing lobbies: this screen had its own invite modal and inline team
-      // columns, so host and joiners could be looking at different room state.
-      if (isOffline || usingCachedQuizzes) {
-        // A LAN game has no server room and never reaches the custom lobby.
-        setActiveTab('custom');
-        if (roomCode && !joinedRoom) {
-          firestore()
-            .collection('gameRooms')
-            .doc(roomCode)
-            .update({ mode: 'group' })
-            .catch(() => {});
-        }
-        return;
+      setActiveTab('custom');
+      // Switching away from Teams must also drop the team room's leftovers, or
+      // the number-of-teams panel keeps rendering and START keeps aiming at a
+      // deferQuiz room. The lobby normally clears these on the way out; this
+      // covers a student who changes their mind without ever opening it.
+      if (roomMode === 'classic') {
+        lobbyTokenRef.current += 1;
+        setRoomCode(null);
+        setRoomMode(null);
+        setRoomHostId(null);
+        setRoomPlayers([]);
+        setTeams([]);
       }
-      startGroupLobby();
+      // Sync mode to room doc if host has an active room
+      if (roomCode && !joinedRoom) {
+        firestore()
+          .collection('gameRooms')
+          .doc(roomCode)
+          .update({ mode: 'group' })
+          .catch(() => {});
+      }
     } else if (modeId === 'flashcards') {
       router.push('/flashcards');
     } else {
@@ -676,12 +680,9 @@ const lobbyTokenRef = useRef(0);
         return;
       }
       console.log(`[game/index] START path: lan-broadcast (players=${host.playerCount})`);
-      if (!selectedQuiz) {
-        const quiz = requirePlaySelections();
-    if (!quiz) return;
-        return;
-      }
-      const count = buildQuestions(selectedQuiz).length;
+      const quiz = requirePlaySelections();
+      if (!quiz) return;
+      const count = buildQuestions(quiz).length;
       if (count === 0) {
         Alert.alert('Empty Quiz', 'That quiz has no valid questions.');
         return;
@@ -693,9 +694,9 @@ const lobbyTokenRef = useRef(0);
       } catch {}
       const time = parseInt(timePerQuestion, 10) || 15;
       const order = makeOrder(count);
-      host.setQuiz(selectedQuiz, order, time);
+      host.setQuiz(quiz, order, time);
       setLanHost(host);
-      lanGame.quiz = selectedQuiz;
+      lanGame.quiz = quiz;
       lanGame.order = order;
       lanGame.timePerQuestion = time;
       lanGame.playerName = hostName;
@@ -732,33 +733,39 @@ const lobbyTokenRef = useRef(0);
     /**
      * Create a room for `quiz` and start it.
      *
-     * Shared by "no room yet" and "stale group room" so both end up with a room
-     * that actually carries the quiz the student picked.
+     * The room is created with the quiz already attached (unlike the custom
+     * lobby's `deferQuiz` room), so the host can pick a quiz and press START
+     * from this screen in one go. Team rooms carry `teamCount` so the server
+     * builds the right number of teams.
      */
-    const createAndStartFor = async (quiz: Quiz) => {
+    const createRoomFor = async (quiz: Quiz, teamCountVal: number) => {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/game/create/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          quizId: quiz.id,
+          timePerQuestion: parseInt(timePerQuestion) || 15,
+          teamMode: selectedMode === 'group' ? 'true' : 'false',
+          autoAssignTeams: 'false',
+          ...(selectedMode === 'group' ? { teamCount: teamCountVal } : {}),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to create room');
+      setRoomCode(data.roomCode);
+      setRoomTopic(data.topic || quiz.title);
+      return data.roomCode as string;
+    };
+
+    const createAndStartFor = async (quiz: Quiz, teamCountVal: number) => {
       setIsCreatingRoom(true);
       try {
-        const token = await getToken();
-        const response = await fetch(`${API_BASE_URL}/game/create/`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            quizId: quiz.id,
-            timePerQuestion: parseInt(timePerQuestion) || 15,
-            teamMode: 'false',
-            autoAssignTeams: 'false',
-          }),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Failed to create room');
-        setRoomCode(data.roomCode);
-        setRoomTopic(data.topic || quiz.title);
-
-        // Proceed to start after creation
-        startGameSequence(data.roomCode);
+        const code = await createRoomFor(quiz, teamCountVal);
+        await startGameSequence(code);
       } catch (error: any) {
         Alert.alert("Error", error.message);
         setIsCreatingRoom(false);
@@ -766,37 +773,45 @@ const lobbyTokenRef = useRef(0);
     };
 
     if (!roomCode) {
-       // If no room exists, create one first silently
-       if (!selectedQuiz) {
-        const quiz = requirePlaySelections();
-    if (!quiz) return;
+      // If no room exists, create one first silently
+      const quiz = requirePlaySelections();
+      if (!quiz) return;
+
+      // For group mode, also require team count selection
+      if (selectedMode === 'group' && teamCount == null) {
+        Alert.alert('Almost There', 'Please choose the number of teams before starting a game.');
         return;
       }
 
-      await createAndStartFor(selectedQuiz);
-    } else if (roomMode === 'group') {
-      // A group room cannot be started from here: it has no quiz (it was
-      // created with deferQuiz) and its start button lives in the lobby. This
-      // used to fall through to startGameSequence and fail server-side with
-      // "choose a quiz" for a quiz the student had actually just picked.
-      //
-      // Discarding the group room lands the user on Classic, so the mode is set
-      // to 'classic' rather than nulled -- nulling it and then calling
-      // requirePlaySelections() re-raised the very "choose a game mode" alert
-      // this branch exists to avoid.
-      setRoomCode(null);
-      setRoomMode(null);
-      setRoomHostId(null);
-      setRoomPlayers([]);
-      setTeams([]);
-      setSelectedMode('classic');
-      if (!selectedQuiz) {
-        Alert.alert('Almost There', 'Please choose a quiz before starting a game.');
+      // Teams deliberately do NOT start here. Creating the room is only the
+      // first half; the host still has to put people on seats in the lobby, and
+      // that window closes on its own timer. Starting immediately meant the
+      // team boxes existed for a single frame and no one ever picked one.
+      if (selectedMode === 'group') {
+        setIsCreatingRoom(true);
+        try {
+          const code = await createRoomFor(quiz, teamCount);
+          router.push({
+            pathname: '/game/lobby',
+            params: { roomCode: code, isHost: 'true', topic: quiz.title, myId: String(currentUserId ?? '') },
+          } as any);
+        } catch (error: any) {
+          Alert.alert('Error', error.message);
+        } finally {
+          setIsCreatingRoom(false);
+        }
         return;
       }
-      createAndStartFor(selectedQuiz);
+
+      await createAndStartFor(quiz, teamCount);
+    } else if (selectedMode === 'group') {
+      // An existing group room still owes us the team-pick window.
+      router.push({
+        pathname: '/game/lobby',
+        params: { roomCode, isHost: 'true', topic: roomTopic, myId: String(currentUserId ?? '') },
+      } as any);
     } else {
-      // Room exists, just start
+      // Room already exists -- classic, so it can just be started.
       startGameSequence(roomCode);
     }
   };

@@ -111,7 +111,7 @@ export default function ActivitiesScreen() {
   const [quizInstructions, setQuizInstructions] = useState('');
   const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
   const [quizGenerationStatus, setQuizGenerationStatus] = useState('');
-  const questionTypeOptions = ['Multiple Choice', 'True/False', 'Short Answer', 'Fill-in-the-Blank'];
+  const questionTypeOptions = ['Multiple Choice', 'True/False', 'Identification', 'Fill-in-the-Blank'];
 
   // --- Own-quiz share / edit ---
   // This tab only ever lists the caller's own quizzes: the backend

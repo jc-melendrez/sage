@@ -1,6 +1,6 @@
 import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { formatMultiplier, type TeamEntry } from '@/types/game';
+import { type TeamEntry } from '@/types/game';
 
 const COLORS = {
   surface: '#1e1b4b',
@@ -67,30 +67,53 @@ export default function TeamResultCard({ team, rank, expanded, isMyTeam }: Props
 
       {/* ── stat strip ── */}
       <View style={styles.stats}>
-        <Stat icon="trophy" tint={COLORS.success} value={formatMultiplier(team.maxMultiplier ?? team.multiplier ?? 1)} label="Peak mult" />
         <Stat icon="checkmark-circle" tint="#34D399" value={`${accuracy}%`} label="Accuracy" />
         <Stat icon="flame" tint="#FDBA74" value={String(team.bestStreak ?? team.teamStreak ?? 0)} label="Best streak" />
         <Stat icon="checkmark-done" tint="#A78BFA" value={String(team.correctCount ?? team.teamCorrect ?? 0)} label="Correct" />
       </View>
 
-      {/* ── member contributions ── */}
+      {/* ── member breakdown ── */}
       {expanded && members.length > 0 && (
         <View style={styles.memberBlock}>
           {members.map(member => {
-            const share = member.contribution ?? 0;
+            // Agreement, not share of points: members share one team score, so
+            // a per-member point share would be identical for everyone.
+            const agree = Math.round(member.agreement ?? 0);
             return (
               <View key={member.id} style={styles.memberRow}>
-                <Text style={styles.memberName} numberOfLines={1}>{member.displayName}</Text>
-                <View style={styles.shareTrack}>
-                  <View
-                    style={[
-                      styles.shareFill,
-                      { width: `${Math.max(2, Math.min(100, share))}%`, backgroundColor: team.color },
-                    ]}
-                  />
+                <View style={styles.memberAvatarWrap}>
+                  <Text style={styles.memberAvatarText} numberOfLines={1}>
+                    {(member.displayName || '?').charAt(0).toUpperCase()}
+                  </Text>
+                  {member.isMvp && (
+                    <View style={styles.mvpBadge}>
+                      <Ionicons name="star" size={8} color="#0f0c29" />
+                    </View>
+                  )}
                 </View>
-                <Text style={styles.shareText}>{Math.round(share)}%</Text>
-                <Text style={styles.memberScore}>{(member.score ?? 0).toLocaleString()}</Text>
+
+                <View style={styles.memberMain}>
+                  <Text style={styles.memberName} numberOfLines={1}>
+                    {member.displayName}
+                    {member.earlyFinisher ? '  ⚡' : ''}
+                  </Text>
+                  <Text style={styles.memberMeta} numberOfLines={1}>
+                    {member.correctCount ?? 0}/{member.answeredCount ?? 0} right
+                    {member.bestStreak ? ` · best ${member.bestStreak}` : ''}
+                  </Text>
+                </View>
+
+                <View style={styles.agreeWrap}>
+                  <View style={styles.shareTrack}>
+                    <View
+                      style={[
+                        styles.shareFill,
+                        { width: `${Math.max(2, Math.min(100, agree))}%`, backgroundColor: team.color },
+                      ]}
+                    />
+                  </View>
+                  <Text style={styles.shareText}>{agree}%</Text>
+                </View>
               </View>
             );
           })}
@@ -138,16 +161,34 @@ const styles = StyleSheet.create({
   statLabel: { fontSize: 8, fontFamily: FONTS.medium, color: COLORS.textMuted },
 
   memberBlock: {
-    gap: 6, paddingTop: 8,
+    gap: 8, paddingTop: 8,
     borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.07)',
   },
   memberRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  memberName: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.textSecondary, width: 78 },
+  memberAvatarWrap: { width: 26, height: 26 },
+  memberAvatarText: {
+    width: 26, height: 26, borderRadius: 13,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    color: COLORS.textSecondary,
+    fontSize: 11, fontFamily: FONTS.bold,
+    textAlign: 'center', lineHeight: 26,
+    overflow: 'hidden',
+  },
+  mvpBadge: {
+    position: 'absolute', right: -2, bottom: -2,
+    width: 13, height: 13, borderRadius: 7,
+    backgroundColor: '#FDBA74',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1.5, borderColor: COLORS.surface,
+  },
+  memberMain: { flex: 1, minWidth: 0 },
+  memberName: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.textPrimary },
+  memberMeta: { fontSize: 9, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 1 },
+  agreeWrap: { flexDirection: 'row', alignItems: 'center', gap: 5, width: 74 },
   shareTrack: {
     flex: 1, height: 6, borderRadius: 3,
     backgroundColor: 'rgba(255,255,255,0.09)', overflow: 'hidden',
   },
   shareFill: { height: 6, borderRadius: 3 },
-  shareText: { fontSize: 10, fontFamily: FONTS.bold, color: COLORS.textMuted, width: 30, textAlign: 'right' },
-  memberScore: { fontSize: 11, fontFamily: FONTS.bold, color: COLORS.textSecondary, width: 42, textAlign: 'right' },
+  shareText: { fontSize: 10, fontFamily: FONTS.bold, color: COLORS.textMuted, width: 28, textAlign: 'right' },
 });

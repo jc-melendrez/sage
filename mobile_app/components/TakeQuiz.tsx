@@ -4,12 +4,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
+import { answerMatches } from '@/services/offlineEngine';
 
 // Define a basic interface for a quiz question
 interface QuizQuestion {
   id: number;
   question: string;
-  type: 'Multiple Choice' | 'True/False' | 'Short Answer' | 'Fill-in-the-Blank';
+  type: 'Multiple Choice' | 'True/False' | 'Identification' | 'Fill-in-the-Blank';
   options?: string[]; // For Multiple Choice
   correct_answer?: string; // For validation (optional for this template)
   /**
@@ -174,7 +175,7 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
             ))}
           </View>
         );
-      case 'Short Answer':
+      case 'Identification':
         return (
           <TextInput
             style={styles.shortAnswerInput}
@@ -224,10 +225,11 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
       const rawAnswer = userAnswers[index];
       const yourAnswer = normalise(rawAnswer);
       const correctAnswer = normalise(q.correct_answer);
-      // Case-insensitive trim comparison for text/short answer/multiple choice
-      const correct = yourAnswer.length > 0
+      // Lenient about case and whitespace, strict about spelling. Shared with the
+// game so a quiz and a game grade the same answer the same way.
+const correct = yourAnswer.length > 0
         && correctAnswer.length > 0
-        && yourAnswer.trim().toLowerCase() === correctAnswer.trim().toLowerCase();
+        && answerMatches(yourAnswer, correctAnswer);
       if (correct) correctCount++;
       return {
         question: q.question,

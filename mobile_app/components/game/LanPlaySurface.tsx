@@ -9,7 +9,11 @@ import {
   } from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
-import { GameQuestion, AnswerOutcome, PowerupKey } from '@/services/offlineEngine';
+import { GameQuestion, AnswerOutcome, PowerupKey, TYPED_QUESTION_TYPES } from '@/services/offlineEngine';
+
+/** True for the free-text question types, which are graded leniently. */
+const isTypedQuestion = (type: GameQuestion['type']) =>
+  (TYPED_QUESTION_TYPES as readonly string[]).includes(type);
 
 const COLORS = {
   bg: '#0f0c29',
@@ -116,7 +120,7 @@ export function LanPlaySurface({
   const submit = (value: string) => {
     if (answeredRef.current) return;
     answeredRef.current = true;
-    const clean = question.type === 'identification' ? value.trim() : value;
+    const clean = isTypedQuestion(question.type) ? value.trim() : value;
     setAnswer(clean);
     const res = onSubmit(clean, timeTaken);
     setOutcome(res);
@@ -233,7 +237,7 @@ export function LanPlaySurface({
           <Text style={styles.question}>{question.question}</Text>
           {hintShown && (
             <Text style={styles.hintLine}>
-              Tip: {question.type === 'identification' ? `starts with "${question.correctAnswer.trim().charAt(0).toUpperCase()}"` : 'one option is eliminated'}
+              Tip: {isTypedQuestion(question.type) ? `starts with "${question.correctAnswer.trim().charAt(0).toUpperCase()}"` : 'one option is eliminated'}
             </Text>
           )}
         </View>

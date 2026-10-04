@@ -12,7 +12,90 @@ from rest_framework.test import APIClient
 from users.models import Activity, User
 from ai_assistant.models import Quiz, QuizQuestion
 from game.test_firestore_fake import FakeFirestoreClient, FakeStoreError, FakeTransaction
-from game.views import TEAM_COLORS
+from game.views import (
+    TEAM_COLORS,
+    TYPED_QUESTION_TYPES,
+    answer_matches,
+    build_questions_from_quiz,
+    median_pick_time,
+    normalise_question_type,
+    pick_answer,
+    pick_time,
+    tally_team_picks,
+)
+
+
+class MedianTeamSpeedTests(TestCase):
+    """The team's speed bonus must come from the group, not the last submitter.
+
+    Scoring off whoever settled the question rewarded a member for making their
+    teammates wait, and made the payout depend on Firestore write order. These
+    cover the helper that decides the number, since that is what every call site
+    now reads.
+    """
+
+    def test_the_middle_pick_decides(self):
+        # One member racing and one member crawling must not swing the team: the
+        # middle observation is what they get.
+        picks = {
+            'a': {'answer': 'A. yes', 'timeTaken': 1.0},
+            'b': {'answer': 'A. yes', 'timeTaken': 4.0},
+            'c': {'answer': 'A. yes', 'timeTaken': 14.0},
+        }
+        self.assertEqual(median_pick_time(picks), 4.0)
+
+    def test_an_even_split_averages_the_two_middle_observations(self):
+        picks = {
+            'a': {'answer': 'A. yes', 'timeTaken': 2.0},
+            'b': {'answer': 'A. yes', 'timeTaken': 6.0},
+            'c': {'answer': 'A. yes', 'timeTaken': 10.0},
+            'd': {'answer': 'A. yes', 'timeTaken': 12.0},
+        }
+        self.assertEqual(median_pick_time(picks), 8.0)
+
+    def test_no_single_member_can_move_the_result(self):
+        # Same shape as the three-pick case with one member submitting instantly
+        # and one submitting at the wire. The team time is unchanged.
+        steady = {
+            'a': {'answer': 'A', 'timeTaken': 5.0},
+            'b': {'answer': 'A', 'timeTaken': 5.0},
+            'c': {'answer': 'A', 'timeTaken': 5.0},
+        }
+        gamed = dict(steady)
+        gamed['a'] = {'answer': 'A', 'timeTaken': 0.0}
+        gamed['c'] = {'answer': 'A', 'timeTaken': 30.0}
+        self.assertEqual(median_pick_time(steady), median_pick_time(gamed))
+
+    def test_legacy_string_picks_are_readable(self):
+        # A round already in flight when the shape changed holds bare answers.
+        self.assertEqual(pick_answer('A. yes'), 'A. yes')
+        self.assertEqual(pick_time('A. yes'), None)
+        self.assertIsNone(median_pick_time({'a': 'A', 'b': 'A'}))
+
+    def test_a_mixed_room_ignores_the_picks_with_no_time(self):
+        picks = {
+            'a': {'answer': 'A', 'timeTaken': 3.0},
+            'b': {'answer': 'A', 'timeTaken': 5.0},
+            'c': 'A',
+        }
+        # The un-timed pick is excluded rather than counted as the clock limit.
+        self.assertEqual(median_pick_time(picks), 4.0)
+
+    def test_absurd_and_unusable_times_are_rejected(self):
+        self.assertIsNone(pick_time({'answer': 'A', 'timeTaken': None}))
+        self.assertIsNone(pick_time({'answer': 'A', 'timeTaken': 'soon'}))
+        self.assertIsNone(pick_time({'answer': 'A', 'timeTaken': -3}))
+        self.assertIsNone(pick_time({'answer': 'A', 'timeTaken': 600}))
+        self.assertIsNone(median_pick_time({}))
+
+    def test_the_tally_reads_both_pick_shapes(self):
+        # The answer is what decides the vote; the time is irrelevant to it.
+        picks = {'a': {'answer': 'A. yes', 'timeTaken': 2.0}, 'b': 'A. yes'}
+        choice, agreed, pickers, tie = tally_team_picks(picks)
+        self.assertEqual(choice, 'A. yes')
+        self.assertEqual(agreed, 2)
+        self.assertEqual(pickers, 2)
+        self.assertFalse(tie)
 
 
 class TeamModeGameTests(TestCase):
@@ -120,9 +203,8 @@ class TeamModeGameTests(TestCase):
         self.assertEqual(by_id['1']['color'], '#22D3EE')
         self.assertEqual(by_id['2']['color'], '#10B981')
         self.assertEqual(by_id['3']['color'], '#F59E0B')
-        # Every team starts with an empty shared powerup pool and x1 momentum,
+        # Every team starts with an empty shared powerup pool,
         # not just a score.
-        self.assertEqual(by_id['1']['multiplier'], 1.0)
         self.assertEqual(by_id['1']['teamCorrect'], 0)
         self.assertEqual(by_id['1']['powerups'], {k: 0 for k in
                                                  ('freeze', 'hint', 'doublePoints', 'shield')})
@@ -556,14 +638,25 @@ class PowerupRewardTests(TestCase):
         self.assertEqual(self.player_doc(player_ref)['answeredCount'], interval)
 
 
-class TeamMomentumTests(TestCase):
-    """Team mode has to reward playing as a team, otherwise it is just an
-    individual race with coloured labels."""
+
+
+class MomentumRemovalTests(TestCase):
+    """The cumulative multiplier ladder is gone, and scoring does not notice.
+
+    Momentum compounded with the streak bonus and the doubled questions, so a
+    team that got hot early kept scoring well past the point it stopped knowing
+    the material. What must remain is a scoring formula that depends only on
+    the answer in front of you. These assert that directly rather than by
+    counting references, so a future "just bring back the small version" fails
+    here.
+    """
+
+    ROOM_CODE = 'NOMOM1'
+    POWERUP_KEYS = ('freeze', 'hint', 'doublePoints', 'shield')
 
     def setUp(self):
-        self.host = User.objects.create_user(username='host', password='pass')
-        self.a = User.objects.create_user(username='a', password='pass')
-        self.b = User.objects.create_user(username='b', password='pass')
+        self.host = User.objects.create_user(username='nhost', password='pass')
+        self.player = User.objects.create_user(username='nplayer', password='pass')
 
         self.store = FakeFirestoreClient()
         patcher = patch('game.views.get_firestore', return_value=self.store)
@@ -571,378 +664,82 @@ class TeamMomentumTests(TestCase):
         self.addCleanup(patcher.stop)
 
         self.client = APIClient()
-        self.room_ref = self.store.collection('gameRooms').document('MOOD1')
-        self.room_ref.set({
+        self.url = reverse('answer-question')
+
+    def seed_room(self, question_count=12, correct_count=0):
+        room_ref = self.store.collection('gameRooms').document(self.ROOM_CODE)
+        room_ref.set({
             'status': 'active',
             'hostId': self.host.id,
-            'ownerId': self.host.id,
-            'teamMode': True,
-            'teamCount': 2,
+            'teamMode': False,
             'timePerQuestion': 15,
-            # The shared clock. Backdated so `force: true` -- "my countdown hit
-            # zero, close the question" -- is genuinely expired by the server's
-            # clock rather than only by the test's say-so.
-            'teamQuestionIndex': 0,
-            'teamStartedAt': timezone.now() - timedelta(seconds=120),
             'questions': [
-                {'type': 'mcq', 'question': f'Q{i}', 'choices': ['A. yes', 'B. no'],
-                 'correctAnswer': 'A. yes'} for i in range(30)
+                {'type': 'mcq', 'question': f'Q{i}', 'choices': ['A. yes', 'B. no'], 'correctAnswer': 'A. yes'}
+                for i in range(question_count)
             ],
         })
-        teams = self.room_ref.collection('teams')
-        teams.document('1').set({
-            'name': 'Alphas', 'color': '#22D3EE', 'score': 0, 'correctCount': 0,
-            'answeredCount': 0, 'memberIds': [str(self.a.id), str(self.b.id)], 'memberCount': 2,
-            'teamCorrect': 0, 'teamStreak': 0, 'bestStreak': 0, 'multiplier': 1.0,
-            'maxMultiplier': 1.0,
-            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        player_ref = room_ref.collection('players').document(str(self.player.id))
+        player_ref.set({
+            'displayName': 'Player', 'score': 0, 'answeredCount': 0, 'streak': 0,
+            # A player already deep into a run, with no streak. The old ladder
+            # would have had this at x1.6 or higher.
+            'correctCount': correct_count,
+            'questionOrder': list(range(question_count)),
+            'isReady': True, 'isFinished': False,
+            'powerups': {k: 0 for k in self.POWERUP_KEYS},
         })
-        teams.document('2').set({
-            'name': 'Betas', 'color': '#10B981', 'score': 0, 'correctCount': 0,
-            'answeredCount': 0, 'memberIds': [], 'memberCount': 0,
-            'teamCorrect': 0, 'multiplier': 1.0,
-            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
-        })
-        for i, user in enumerate((self.a, self.b)):
-            self.room_ref.collection('players').document(str(user.id)).set({
-                'displayName': f'P{i}', 'score': 0, 'answeredCount': 0, 'correctCount': 0,
-                'streak': 0, 'questionOrder': list(range(30)), 'teamId': '1', 'isFinished': False,
-                'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
-            })
+        return player_ref
 
-    def team(self, team_id='1'):
-        return self.room_ref.collection('teams').document(team_id).get().to_dict()
-
-    def server_picks(self, team_id='1'):
-        """The private tally, which lives where clients cannot read it."""
-        return self.room_ref.collection('_server').document(f'teamPicks_{team_id}').get().to_dict()
-
-    def advance_to(self, index, expired=True):
-        """Move the room's shared question up to `index` through the endpoint.
-
-        The room owns `teamQuestionIndex` and `TeamPickView` rejects a pick for
-        any other index, so the tests have to drive it exactly the way a client
-        does instead of posting arbitrary indices.
-
-        `expired` backdates `teamStartedAt` afterwards. Advancing restarts the
-        shared countdown, so a `force: true` right after an advance is refused --
-        correctly. Tests that want the deadline behaviour say so.
-        """
-        self.client.force_authenticate(user=self.a)
-        while True:
-            current = int(self.room_ref.get().to_dict()['teamQuestionIndex'])
-            if current >= index:
-                break
-            resp = self.client.post(
-                reverse('team-advance'),
-                {'roomCode': 'MOOD1', 'questionIndex': current + 1}, format='json')
-            self.assertEqual(resp.status_code, 200, resp.data)
-        if expired:
-            self.room_ref.update(
-                {'teamStartedAt': timezone.now() - timedelta(seconds=120)})
-
-    def answer(self, index, user, answer='A. yes', expired=True, **extra):
-        self.advance_to(index, expired=expired)
-        self.client.force_authenticate(user=user)
-        payload = {'roomCode': 'MOOD1', 'questionIndex': index, 'answer': answer, 'timeTaken': '1'}
-        payload.update(extra)
-        return self.client.post(reverse('team-pick'), payload, format='json')
-
-    def answer_all(self, index, answers):
-        """Every member picks on question `index`; the last one resolves it."""
-        last = None
-        for i, (user, choice) in enumerate(answers):
-            last = self.answer(index, user, answer=choice, force='true' if i else 'false')
-        return last
-
-    def test_multiplier_lifts_the_team(self):
-        # Ten correct team answers puts the team on the x1.4 rung, and the
-        # NEXT answer is the one that is boosted.
-        for i in range(10):
-            self.assertEqual(self.answer(i, self.a, force='true').status_code, 200)
-        self.assertEqual(self.team()['multiplier'], 1.4)
-        self.assertEqual(self.team()['teamCorrect'], 10)
-
-        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
-        boosted = self.answer(10, self.b, force='true')
-        self.assertEqual(boosted.json()['multiplier'], 1.4)
-        # Momentum x1.4 first, then the streak bonus -- the 11th answer in a row
-        # is on the top x1.5 rung. Question 10 is not a doubled one.
-        self.assertEqual(boosted.json()['pointsAwarded'], round(round(base * 1.4) * 1.5))
-
-    def test_a_miss_breaks_the_flame_but_never_drops_the_ladder(self):
-        """Momentum is cumulative now.
-
-        It used to drop one rung on a miss, which punished the whole team for
-        one member's mistake -- in a mode where members were racing separate
-        private question orders, so the player who answered wrongly was not
-        even the player who felt the drop.
-        """
-        for i in range(5):
-            self.answer(i, self.a, force='true')
-        self.assertEqual(self.team()['multiplier'], 1.2)
-        self.assertEqual(self.team()['teamStreak'], 5)
-
-        self.answer(5, self.a, answer='B. no', force='true')
-        # The flame breaks (so the streak bonus and powerup cadence reset)...
-        self.assertEqual(self.team()['teamStreak'], 0)
-        # ...but the ladder holds.
-        self.assertEqual(self.team()['multiplier'], 1.2)
-        self.assertEqual(self.team()['teamCorrect'], 5)
-
-    def test_peak_multiplier_and_best_streak_are_remembered(self):
-        for i in range(5):
-            self.answer(i, self.a, force='true')
-        self.answer(5, self.a, answer='B. no', force='true')
-        for i in range(6, 11):
-            self.answer(i, self.a, force='true')
-        team = self.team()
-        self.assertEqual(team['maxMultiplier'], 1.4)
-        self.assertEqual(team['bestStreak'], 5)
-        self.assertEqual(team['multiplier'], 1.4)
-
-    def test_streak_bonus_rewards_the_current_run(self):
-        """Three correct in a row starts paying extra, and a miss resets it."""
-        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
-        # Question 0 answered wrong on purpose: it opens the run at zero.
-        self.assertFalse(self.answer(0, self.a, answer='B. no', force='true').json()['correct'])
-
-        first = self.answer(1, self.a, force='true').json()['pointsAwarded']
-        second = self.answer(2, self.a, force='true').json()['pointsAwarded']
-        self.assertEqual(first, base)
-        self.assertEqual(second, base)
-
-        # The third consecutive correct answer lands on the x1.1 streak rung.
-        third = self.answer(3, self.a, force='true').json()['pointsAwarded']
-        self.assertEqual(third, round(base * 1.1))
-
-        # A miss resets the run, so the next answer is back to flat.
-        self.answer(4, self.a, answer='B. no', force='true')
-        after = self.answer(5, self.a, force='true').json()['pointsAwarded']
-        self.assertEqual(after, base)
-
-    def test_streak_rewards_go_to_the_shared_pool(self):
-        for i in range(3):
-            resp = self.answer(i, self.a, force='true')
-        self.assertIsNotNone(resp.json()['powerupEarned'])
-        pool = self.team()['powerups']
-        self.assertEqual(sum(pool.values()), 1)
-        # A teammate's reward is spendable by the other member — this is the
-        # mechanic that forces them to talk.
-        self.assertEqual(
-            self.room_ref.collection('players').document(str(self.b.id)).get().to_dict()['powerups'],
-            {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
-        )
-
-    def test_double_points_spends_from_the_team_pool(self):
-        self.room_ref.collection('teams').document('1').update(
-            {'powerups.doublePoints': 1})
-        resp = self.answer(0, self.a, useDoublePoints='true', force='true')
-        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
-        self.assertEqual(resp.json()['pointsAwarded'], base * 2)
-        self.assertEqual(self.team()['powerups']['doublePoints'], 0)
-
-    def test_double_points_is_refused_when_the_pool_is_empty(self):
-        # The use-flags are client-supplied, so claiming a powerup the team
-        # does not own must be a no-op rather than free points.
-        resp = self.answer(0, self.a, useDoublePoints='true', force='true')
-        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
-        self.assertEqual(resp.json()['pointsAwarded'], base)
-        self.assertEqual(self.team()['powerups']['doublePoints'], 0)
-
-    def test_hint_is_charged_when_the_reveal_is_claimed(self):
-        self.room_ref.collection('teams').document('1').update({'powerups.hint': 1})
-        self.answer(0, self.a, useHint='true', force='true')
-        self.assertEqual(self.team()['powerups']['hint'], 0)
-
-    def test_a_shield_is_only_charged_on_a_miss(self):
-        """Arming it and answering correctly used to throw the charge away.
-
-        The charge was written before the correct/wrong branch, so the
-        `use_shield` guard inside the correct branch (which does nothing there)
-        was unreachable and every correct answer with a shield armed lost it.
-        """
-        self.room_ref.collection('teams').document('1').update({'powerups.shield': 1})
-        self.answer(0, self.a, useShield='true', force='true')
-        self.assertEqual(self.team()['powerups']['shield'], 1)
-
-        self.answer(1, self.a, answer='B. no', useShield='true', force='true')
-        self.assertEqual(self.team()['powerups']['shield'], 0)
-
-    def test_shield_saves_the_team_flame(self):
-        for i in range(3):
-            self.answer(i, self.a, force='true')
-        self.assertEqual(self.team()['teamStreak'], 3)
-        self.assertEqual(self.team()['multiplier'], 1.0)
-
-        self.room_ref.collection('teams').document('1').update({'powerups.shield': 1})
-        self.answer(3, self.a, answer='B. no', useShield='true', force='true')
-        team = self.team()
-        # A shield keeps the flame alive rather than extending it.
-        self.assertEqual(team['teamStreak'], 3)
-        self.assertEqual(team['correctCount'], 3)
-        self.assertEqual(team['powerups']['shield'], 0)
-
-    def test_an_unshielded_miss_breaks_the_flame_and_keeps_the_ladder(self):
-        for i in range(5):
-            self.answer(i, self.a, force='true')
-        self.assertEqual(self.team()['multiplier'], 1.2)
-        self.answer(5, self.a, answer='B. no', force='true')
-        team = self.team()
-        self.assertEqual(team['teamStreak'], 0)
-        self.assertEqual(team['multiplier'], 1.2)
-
-    def test_negative_time_taken_cannot_exceed_the_cap(self):
-        resp = self.answer(0, self.a, timeTaken='-1000', force='true')
-        # Without the clamp this scores ~34,000 points.
-        self.assertLessEqual(resp.json()['pointsAwarded'], 1000 * 4)
-        self.assertGreaterEqual(resp.json()['pointsAwarded'], 500)
-
-    def test_every_fifth_question_is_worth_double(self):
-        """Deterministic pacing, so the same quiz always pays the same way."""
-        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
-        plain = self.answer(0, self.a, force='true').json()
-        self.assertFalse(plain['doublePoint'])
-        self.assertEqual(plain['pointsAwarded'], base)
-
-        for i in range(1, 4):
-            self.answer(i, self.a, force='true')
-        doubled = self.answer(4, self.a, force='true').json()
-        self.assertTrue(doubled['doublePoint'])
-        # The fifth correct answer is on the x1.25 streak rung, and question 5
-        # (index 4) is the doubled one.
-        self.assertEqual(doubled['pointsAwarded'], round(base * 1.25) * 2)
-
-    def test_a_force_before_the_deadline_is_refused(self):
-        """`force` means "my countdown ran out", so the server checks its clock.
-
-        Without the check a member could end the round the instant they picked
-        and lock in a tally their teammates had not contributed to yet.
-        """
-        # A fresh clock: the room has only just moved to this question.
-        self.room_ref.update({'teamStartedAt': timezone.now()})
-        resp = self.answer(0, self.a, force='true', expired=False)
-        self.assertEqual(resp.status_code, 400)
-        self.assertGreater(resp.json()['secondsLeft'], 0)
-        # Still open: the pick was not recorded either.
-        self.assertEqual(self.team()['answeredCount'], 0)
-        self.assertEqual(self.room_ref.get().to_dict()['teamQuestionIndex'], 0)
-
-    def test_a_pick_for_another_question_is_refused(self):
-        """The room owns the index, so a client cannot score a skipped question."""
-        self.client.force_authenticate(user=self.a)
-        resp = self.client.post(reverse('team-pick'), {
-            'roomCode': 'MOOD1', 'questionIndex': 7, 'answer': 'A. yes',
+    def answer_once(self):
+        self.client.force_authenticate(user=self.player)
+        return self.client.post(self.url, {
+            'roomCode': self.ROOM_CODE,
+            'questionIndex': 0,
+            'answer': 'A. yes',
+            'timeTaken': '1',
         }, format='json')
-        self.assertEqual(resp.status_code, 409)
-        self.assertEqual(resp.json()['questionIndex'], 0)
 
-    def test_advancing_moves_the_room_and_clears_pending_picks(self):
-        a_picks = self.answer(0, self.a, force='false')
-        self.assertTrue(a_picks.json()['pending'])
-        # The tally moved to the server-only collection; the team document, which
-        # every client in the game can read, carries nothing but the count.
-        self.assertEqual(
-            self.server_picks()['picks'],
-            {str(self.a.id): 'A. yes'},
-        )
-        self.assertNotIn('picks', self.room_ref.collection('teams').document('1').get().to_dict())
-        self.advance_to(1)
-        self.assertEqual(self.room_ref.get().to_dict()['teamQuestionIndex'], 1)
-        self.assertEqual(self.server_picks()['picks'], {})
-        self.assertEqual(self.team()['pickCount'], 0)
-        # Question 0 was never resolved, so it never scored anything.
-        self.assertEqual(self.team().get('resolvedQuestions'), None)
-        self.assertEqual(self.team()['answeredCount'], 0)
-        self.assertEqual(
-            self.client.post(reverse('team-advance'), {
-                'roomCode': 'MOOD1', 'questionIndex': 5}, format='json').status_code,
-            409,
-        )
+    def test_a_correct_answer_is_worth_the_same_on_a_hot_player_as_a_cold_one(self):
+        cold = self.seed_room(correct_count=0)
+        cold_points = self.answer_once().json()['pointsAwarded']
 
-    def test_answers_are_rejected_outside_an_active_room(self):
-        self.room_ref.update({'status': 'waiting'})
-        resp = self.answer(0, self.a, force='true')
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(self.team()['answeredCount'], 0)
+        hot = self.seed_room(correct_count=19)
+        hot_points = self.answer_once().json()['pointsAwarded']
 
-    def test_a_resolved_question_cannot_be_resolved_again(self):
-        self.answer(0, self.a, force='true')
-        again = self.answer(0, self.b, force='true')
-        self.assertEqual(again.status_code, 409)
-        self.assertEqual(self.team()['answeredCount'], 1)
-        self.assertEqual(self.team()['correctCount'], 1)
+        # 19 correct answers would have been the top rung of the ladder.
+        self.assertEqual(cold_points, hot_points)
 
-    def test_a_retried_pick_does_not_drain_the_hint_pool(self):
-        """A hint is charged once, when the question resolves.
+    def test_the_response_reports_no_multiplier(self):
+        self.seed_room(correct_count=19)
+        body = self.answer_once().json()
+        self.assertNotIn('multiplier', body)
 
-        It used to be charged before the idempotency check, so a client with a
-        flaky connection could re-post the same pick and buy a fresh reveal
-        each time, emptying the team pool for free.
-        """
-        self.room_ref.collection('teams').document('1').update({'powerups.hint': 3})
-        # Still open -- one of two members has picked -- so nothing is charged.
-        self.assertTrue(self.answer(0, self.a, useHint='true').json()['pending'])
-        self.assertEqual(self.team()['powerups']['hint'], 3)
-
-        # Retrying the same open pick is free.
-        for _ in range(5):
-            self.assertTrue(self.answer(0, self.a, useHint='true').json()['pending'])
-        self.assertEqual(self.team()['powerups']['hint'], 3)
-
-        # The teammate picking resolves it: exactly one charge.
-        self.answer(0, self.b, useHint='true', force='true')
-        self.assertEqual(self.team()['powerups']['hint'], 2)
-
-        # And a later re-post of the settled question cannot charge again.
-        for _ in range(5):
-            self.assertEqual(self.answer(0, self.a, useHint='true', force='true').status_code, 409)
-        self.assertEqual(self.team()['powerups']['hint'], 2)
-
-    def test_boost_doubles_the_next_team_question(self):
-        """Teammates have no private question positions any more.
-
-        The boost used to land on "the target's first unanswered question in
-        their own shuffled order", which in a room that answers one shared
-        question pointed at an index nobody was looking at.
-        """
-        self.room_ref.collection('teams').document('1').update({'powerups.doublePoints': 1})
-        self.client.force_authenticate(user=self.a)
-        resp = self.client.post(
-            reverse('boost-teammate'),
-            {'roomCode': 'MOOD1', 'playerId': str(self.b.id)},
-            format='json')
+    def test_the_team_document_carries_no_multiplier_field(self):
+        room_ref = self.store.collection('gameRooms').document('TEAMNO1')
+        room_ref.set({
+            'status': 'waiting', 'hostId': self.host.id, 'teamMode': True,
+            'teamCount': 2, 'questionCount': 0, 'questions': [],
+        })
+        for tid in ('1', '2'):
+            room_ref.collection('teams').document(tid).set({
+                'name': f'Team {tid}', 'memberIds': [], 'memberCount': 0,
+            })
+        room_ref.collection('players').document(str(self.player.id)).set({
+            'displayName': 'Player', 'teamId': None,
+        })
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('auto-assign-teams'), {
+            'roomCode': 'TEAMNO1',
+        }, format='json')
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(self.team()['powerups']['doublePoints'], 0)
-        self.assertEqual(self.team()['boostTarget'], str(self.b.id))
-        self.assertEqual(self.team()['boostQuestion'], 0)
+        for team in resp.json()['teams']:
+            self.assertNotIn('multiplier', team)
 
-        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
-        answered = self.answer(0, self.b, force='true')
-        self.assertEqual(answered.json()['pointsAwarded'], base * 2)
-        self.assertIsNone(self.team().get('boostTarget'))
-        # One-shot: a later answer is back to normal.
-        self.assertEqual(self.answer(1, self.b, force='true').json()['pointsAwarded'], base)
-
-    def test_boost_cannot_be_aimed_at_an_opponent_or_self(self):
-        self.room_ref.collection('teams').document('1').update({'powerups.doublePoints': 3})
-        self.client.force_authenticate(user=self.a)
-        for target in (str(self.a.id), str(self.host.id)):
-            resp = self.client.post(
-                reverse('boost-teammate'),
-                {'roomCode': 'MOOD1', 'playerId': target},
-                format='json')
-            self.assertEqual(resp.status_code, 400 if target == str(self.a.id) else 403)
-        self.assertEqual(self.team()['powerups']['doublePoints'], 3)
-
-    def test_boost_is_refused_with_an_empty_pool(self):
-        self.client.force_authenticate(user=self.a)
-        resp = self.client.post(
-            reverse('boost-teammate'),
-            {'roomCode': 'MOOD1', 'playerId': str(self.b.id)},
-            format='json')
-        self.assertEqual(resp.status_code, 400)
-        self.assertIsNone(self.team().get('boostTarget'))
+    def test_the_module_no_longer_exports_the_ladder(self):
+        from game import views as game_views
+        self.assertFalse(hasattr(game_views, 'TEAM_MOMENTUM_TIERS'))
+        self.assertFalse(hasattr(game_views, 'momentum_multiplier'))
+        self.assertFalse(hasattr(game_views, 'team_multiplier'))
 
 
 class TeamLobbyTests(TestCase):
@@ -1389,6 +1186,19 @@ class TeamPlacementXpTests(TestCase):
         self.assertTrue(winner_row['isMvp'])
         self.assertEqual(results[0]['mvpId'], str(self.winner.id))
 
+        # The per-member numbers the results screen reads. These were missing
+        # while the client expected them, so every member row rendered 0 --
+        # which read as "this member contributed nothing" rather than as a field
+        # that had never been sent.
+        self.assertEqual(winner_row['correctCount'], results[0]['correctCount'])
+        self.assertGreater(winner_row['answeredCount'], 0)
+        self.assertEqual(winner_row['accuracy'], 100)
+        self.assertTrue(winner_row['isMvp'])
+        # `contribution` was removed from the payload and the client together:
+        # members share one team score, so a per-member point share is identical
+        # for everyone and tells nobody anything.
+        self.assertNotIn('contribution', winner_row)
+
     def test_settlement_waits_for_a_player_who_is_still_answering(self):
         self.room_ref.collection('players').document(str(self.loser.id)).update({'isFinished': False})
         resp = self.settle(confirm='true')
@@ -1402,6 +1212,185 @@ class TeamPlacementXpTests(TestCase):
         self.assertEqual(forced.status_code, 200, forced.data)
         self.assertTrue(forced.json()['endedEarly'])
         self.assertEqual(self.room_ref.get().to_dict()['status'], 'finished')
+
+
+class RematchTests(TestCase):
+    """A rematch reuses the room so the code students typed keeps working.
+
+    Everything asserted here is about the one property that makes it usable: the
+    roster survives and only game state is thrown away. A reset that also dropped
+    players, or that left round one's scores on the documents, would pass a naive
+    "status is waiting" check while being broken in the classroom.
+    """
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='rhost', password='pass')
+        self.a = User.objects.create_user(username='ra', password='pass')
+        self.b = User.objects.create_user(username='rb', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('RMT1')
+        self.room_ref.set({
+            'status': 'finished', 'hostId': self.host.id, 'ownerId': self.host.id,
+            'teamMode': True, 'teamCount': 2, 'topic': 't', 'questionCount': 2,
+            'questions': [
+                {'question': 'q0', 'type': 'mcq', 'options': ['a', 'b'], 'answer': 'a'},
+                {'question': 'q1', 'type': 'mcq', 'options': ['a', 'b'], 'answer': 'b'},
+            ],
+            'teamResults': [{'id': '1', 'name': 'Winners', 'score': 900}],
+            'finishedAt': 'yesterday', 'startedAt': 'earlier',
+            'teamAssignments': [{'id': str(self.a.id), 'teamId': '1'}],
+            'teamQuestionIndex': 1, 'teamStartedAt': 'earlier',
+            'pickStartedAt': 'earlier',
+        })
+        self.room_ref.collection('teams').document('1').set({
+            'name': 'Winners', 'color': '#22D3EE', 'score': 900,
+            'correctCount': 2, 'answeredCount': 2, 'teamCorrect': 2, 'teamStreak': 2,
+            'bestStreak': 2, 'pickCount': 1,
+            'memberIds': [str(self.a.id)], 'memberCount': 1, 'leaderId': str(self.a.id),
+            'powerups': {'freeze': 2, 'hint': 0, 'doublePoints': 1, 'shield': 0},
+            'reveals': {'0': {'answer': 'a', 'correct': True}},
+        })
+        self.room_ref.collection('teams').document('2').set({
+            'name': 'Chasers', 'color': '#10B981', 'score': 100,
+            'memberIds': [str(self.b.id)], 'memberCount': 1,
+        })
+        for user, score in ((self.a, 900), (self.b, 100), (self.host, 0)):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': score, 'correctCount': 3,
+                'answeredCount': 3, 'streak': 2, 'bestStreak': 3,
+                'isFinished': True, 'answers': {'q0': {'picked': 'a', 'correct': True}},
+                'questionOrder': [1, 0], 'teamId': '1',
+                'powerups': {'freeze': 3, 'hint': 1, 'doublePoints': 0, 'shield': 2},
+            })
+        # Round one's server-side vote tally. Left behind it would make question
+        # 0 of the rematch inherit question 0's picks.
+        self.room_ref.collection('_server').document('teamPicks_1').set({
+            'questionIndex': 0, 'picks': {str(self.a.id): 'a'},
+        })
+
+    def rematch(self, user=None, **extra):
+        self.client.force_authenticate(user=user or self.host)
+        return self.client.post(reverse('rematch'), {'roomCode': 'RMT1', **extra}, format='json')
+
+    def player(self, user):
+        return self.room_ref.collection('players').document(str(user.id)).get().to_dict()
+
+    def test_the_room_returns_to_the_lobby_keeping_its_code_and_roster(self):
+        resp = self.rematch()
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.json()['roomCode'], 'RMT1')
+
+        room = self.room_ref.get().to_dict()
+        self.assertEqual(room['status'], 'waiting')
+        self.assertEqual(room['topic'], 't')
+        # Everyone is still in the room -- this is the whole point of a rematch.
+        self.assertEqual(
+            sorted(p.id for p in self.room_ref.collection('players').list_documents()),
+            sorted(str(u.id) for u in (self.a, self.b, self.host)),
+        )
+
+    def test_round_one_scores_are_gone_from_every_player(self):
+        self.rematch()
+        for user in (self.a, self.b, self.host):
+            player = self.player(user)
+            self.assertEqual(player['score'], 0)
+            self.assertEqual(player['correctCount'], 0)
+            self.assertEqual(player['answeredCount'], 0)
+            self.assertEqual(player['streak'], 0)
+            self.assertEqual(player['bestStreak'], 0)
+            self.assertEqual(player['answers'], {})
+            self.assertFalse(player['isFinished'])
+            self.assertEqual(player['questionOrder'], [])
+            self.assertEqual(player['powerups'], {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0})
+            # Seats are released so the lobby shows empty columns to re-pick.
+            self.assertNotIn('teamId', player)
+
+    def test_team_scores_and_seats_reset_but_the_names_survive(self):
+        self.rematch()
+        team = self.room_ref.collection('teams').document('1').get().to_dict()
+        self.assertEqual(team['score'], 0)
+        self.assertEqual(team['correctCount'], 0)
+        self.assertEqual(team['answeredCount'], 0)
+        self.assertEqual(team['teamCorrect'], 0)
+        self.assertEqual(team['teamStreak'], 0)
+        self.assertEqual(team['bestStreak'], 0)
+        self.assertEqual(team['pickCount'], 0)
+        self.assertEqual(team['memberIds'], [])
+        self.assertEqual(team['memberCount'], 0)
+        self.assertIsNone(team['leaderId'])
+        # A name a student typed is worth keeping even when the seats move.
+        self.assertEqual(team['name'], 'Winners')
+        self.assertNotIn('reveals', team)
+
+    def test_the_stale_vote_tally_is_deleted(self):
+        self.rematch()
+        self.assertEqual(
+            [d.id for d in self.room_ref.collection('_server').list_documents()],
+            [],
+        )
+
+    def test_team_results_are_deleted_not_emptied(self):
+        # An empty-but-present array would render an empty podium on the final
+        # screen instead of the rematch's own results later.
+        self.rematch()
+        self.assertNotIn('teamResults', self.room_ref.get().to_dict())
+
+    def test_the_shared_clock_is_cleared_so_the_lobby_does_not_open_a_question(self):
+        self.rematch()
+        room = self.room_ref.get().to_dict()
+        self.assertEqual(room['teamQuestionIndex'], 0)
+        self.assertIsNone(room['teamStartedAt'])
+        self.assertNotIn('pickStartedAt', room)
+
+    def test_the_host_can_swap_the_quiz_for_round_two(self):
+        quiz = Quiz.objects.create(user=self.host, title='Round two')
+        for i in range(2):
+            QuizQuestion.objects.create(
+                quiz=quiz, question_text=f'r2 q{i}',
+                options=['a', 'b'], correct_answer='a',
+            )
+        resp = self.rematch(quizId=quiz.id)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        room = self.room_ref.get().to_dict()
+        self.assertEqual(room['topic'], 'Round two')
+        self.assertEqual(room['questionCount'], 2)
+
+    def test_a_replacement_quiz_too_short_for_the_team_count_is_refused(self):
+        # Same rule as creation and set-quiz: a team with no question sits out the
+        # whole round, so this must fail before it is written to the room.
+        quiz = Quiz.objects.create(user=self.host, title='Short')
+        QuizQuestion.objects.create(
+            quiz=quiz, question_text='only', options=['a', 'b'], correct_answer='a',
+        )
+        resp = self.rematch(quizId=quiz.id)
+        self.assertEqual(resp.status_code, 400)
+        # The room must not be half-reset by a rejected swap.
+        self.assertEqual(self.room_ref.get().to_dict()['status'], 'finished')
+
+    def test_a_participant_cannot_start_a_rematch(self):
+        resp = self.rematch(user=self.a)
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.room_ref.get().to_dict()['status'], 'finished')
+
+    def test_an_unfinished_game_cannot_be_rematched(self):
+        self.room_ref.update({'status': 'active'})
+        resp = self.rematch()
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.room_ref.get().to_dict()['status'], 'active')
+
+    def test_a_second_rematch_is_refused_once_the_room_is_already_waiting(self):
+        self.rematch()
+        resp = self.rematch()
+        # A double-tap is not an error worth surfacing to the host as a failure
+        # of the feature -- the room is already in the state they asked for.
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.room_ref.get().to_dict()['status'], 'waiting')
 
 
 class FreezePowerupTests(TestCase):
@@ -1944,7 +1933,6 @@ class SpectatorColumnAndAddTeamTests(TestCase):
         self.assertEqual(team['memberIds'], [])
         self.assertEqual(team['memberCount'], 0)
         self.assertEqual(team['score'], 0)
-        self.assertEqual(team['multiplier'], 1.0)
         self.assertEqual(team['powerups'], {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0})
 
     def test_adding_a_team_keeps_the_room_count_in_step_with_the_documents(self):
@@ -2157,137 +2145,6 @@ class SpectatorCannotCompeteTests(TestCase):
         self.assertEqual(resp.status_code, 200)
 
 
-class SoloMomentumTests(TestCase):
-    """Classic mode used to be a flat line: every correct answer was worth the
-    same base points, and `multiplier`/`bestStreak` were read off the player
-    document but never written to it."""
-
-    def setUp(self):
-        self.host = User.objects.create_user(username='shost2', password='pass')
-        self.solo = User.objects.create_user(username='ssolo', password='pass')
-
-        self.store = FakeFirestoreClient()
-        patcher = patch('game.views.get_firestore', return_value=self.store)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-        self.client = APIClient()
-        self.room_ref = self.store.collection('gameRooms').document('SOLO9')
-        self.room_ref.set({
-            'status': 'active', 'hostId': self.host.id, 'ownerId': self.host.id,
-            # Classic play: private question order, private timer, personal pool.
-            'teamMode': False,
-            'timePerQuestion': 15,
-            'questions': [
-                {'type': 'mcq', 'question': f'Q{i}', 'choices': ['A. yes', 'B. no'],
-                 'correctAnswer': 'A. yes'} for i in range(30)
-            ],
-        })
-        self.room_ref.collection('players').document(str(self.solo.id)).set({
-            'displayName': 'Solo', 'score': 0, 'answeredCount': 0, 'correctCount': 0,
-            'streak': 0, 'questionOrder': list(range(30)), 'teamId': None,
-            'isFinished': False, 'multiplier': 1.0, 'bestStreak': 0,
-            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
-        })
-
-    def player(self):
-        return self.room_ref.collection('players').document(str(self.solo.id)).get().to_dict()
-
-    def answer(self, index, answer='A. yes', **extra):
-        self.client.force_authenticate(user=self.solo)
-        payload = {'roomCode': 'SOLO9', 'questionIndex': index, 'answer': answer, 'timeTaken': '1'}
-        payload.update(extra)
-        return self.client.post(reverse('answer-question'), payload, format='json')
-
-    def test_the_ladder_applies_to_the_answer_after_the_fifth(self):
-        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
-        # The first two answers are unboosted: nothing has been earned yet and
-        # no streak bonus applies.
-        self.assertEqual(self.answer(0).json()['pointsAwarded'], base)
-        self.assertEqual(self.answer(1).json()['pointsAwarded'], base)
-
-        # The third is on the x1.1 streak rung. Question 3 (index 2) is not a
-        # doubled one, so this is momentum x1.0 plus the streak bonus.
-        third = self.answer(2).json()
-        self.assertEqual(third['pointsAwarded'], round(base * 1.1))
-        self.assertEqual(third['multiplier'], 1.0)
-
-        for i in (3, 4):
-            self.answer(i)
-
-        # The 6th answer is the first past the 5-correct threshold, exactly as
-        # with a team: the tier you earn applies to the NEXT answer. Question 6
-        # (index 5) is not doubled, so this is momentum x1.2 with a run of six
-        # -- the x1.25 rung.
-        sixth = self.answer(5).json()
-        self.assertEqual(sixth['pointsAwarded'], round(round(base * 1.2) * 1.25))
-        self.assertEqual(sixth['multiplier'], 1.2)
-
-    def test_the_multiplier_is_persisted_on_the_player_document(self):
-        for i in range(5):
-            self.answer(i)
-        self.assertEqual(self.player()['multiplier'], 1.2)
-
-    def test_best_streak_is_persisted_and_survives_a_miss(self):
-        for i in range(4):
-            self.answer(i)
-        self.assertEqual(self.player()['bestStreak'], 4)
-
-        self.answer(4, answer='B. no')
-        self.assertEqual(self.player()['streak'], 0)
-        self.assertEqual(self.player()['bestStreak'], 4)
-
-    def test_a_miss_breaks_the_streak_but_keeps_the_ladder(self):
-        """Momentum no longer demotes.
-
-        It used to drop a rung on every miss, so a player climbing to x1.4
-        could be knocked back to x1.0 by one bad question and had no way to plan
-        around it. The streak -- which drives the streak bonus and the powerup
-        cadence -- still resets, so a miss still costs something.
-        """
-        for i in range(5):
-            self.answer(i)
-        self.assertEqual(self.player()['multiplier'], 1.2)
-
-        self.answer(5, answer='B. no')
-        self.assertEqual(self.player()['streak'], 0)
-        self.assertEqual(self.player()['multiplier'], 1.2)
-
-        # correctCount is untouched by the miss, so the ladder carries on.
-        self.answer(6)
-        self.assertEqual(self.player()['multiplier'], 1.2)
-
-    def test_a_shield_holds_the_streak_on_a_miss(self):
-        for i in range(5):
-            self.answer(i)
-        # The shield has to actually be in the pool: `can_use` only honours the
-        # flag when the pool can pay for it, so an empty shield is a no-op.
-        self.room_ref.collection('players').document(str(self.solo.id)).update({
-            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 1},
-        })
-        self.answer(5, answer='B. no', useShield='true')
-        # The flame is preserved rather than broken, and the charge is spent.
-        self.assertEqual(self.player()['streak'], 5)
-        self.assertEqual(self.player()['powerups']['shield'], 0)
-
-    def test_the_speed_bonus_is_reported_separately_from_the_points(self):
-        base = max(int(1000 * (1 - (1 / 15) * 0.5)), 500)
-        body = self.answer(0).json()
-        self.assertEqual(body['basePoints'], base)
-        self.assertEqual(body['speedBonus'], base - 500)
-
-    def test_a_slow_answer_has_no_speed_bonus(self):
-        body = self.answer(0, timeTaken='15').json()
-        self.assertEqual(body['basePoints'], 500)
-        self.assertEqual(body['speedBonus'], 0)
-
-    def test_a_wrong_answer_reports_no_points_and_no_speed_bonus(self):
-        body = self.answer(0, answer='B. no').json()
-        self.assertFalse(body['correct'])
-        self.assertEqual(body['pointsAwarded'], 0)
-        self.assertEqual(body['speedBonus'], 0)
-
-
 class AnswerLogTests(TestCase):
     """The per-question log the results screen reads.
 
@@ -2376,6 +2233,72 @@ class AnswerLogTests(TestCase):
         self.pick(self.a, index, a_answer)
         return self.pick(self.b, index, b_answer, force=force)
 
+    def settle_speeds(self, index, a_time, b_time, answer='A. yes'):
+        """Both members pick the same answer at the given times (seconds).
+
+        Mirrors `settle`: the first pick goes in unforced and stays pending, the
+        second settles the question. Forcing both would resolve on the first,
+        because this fixture's shared clock is already past the limit.
+        """
+        for user, taken, force in ((self.a, a_time, False), (self.b, b_time, True)):
+            self.client.force_authenticate(user=user)
+            resp = self.client.post(reverse('team-pick'), {
+                'roomCode': 'LOG1', 'questionIndex': index, 'answer': answer,
+                'timeTaken': str(taken), 'force': 'true' if force else 'false',
+            }, format='json')
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_the_team_speed_is_the_median_not_the_last_submitter(self):
+        """Whoever settles the question must not decide the payout.
+
+        b submits last with a slow time. Before this, the team's speed bonus came
+        straight from that value, so b could hand the whole team fewer points by
+        dawdling -- and the award depended on who the transaction happened to
+        settle for.
+        """
+        self.settle_speeds(0, a_time=2.0, b_time=12.0)
+
+        time_per_q = self.room_ref.get().to_dict().get('timePerQuestion', 15)
+        # Median of (2, 12) is 7 -- b's 12 does not drag it, and a's 2 does not
+        # inflate it either.
+        expected = max(int(1000 * (1 - (7.0 / time_per_q) * 0.5)), 500)
+        reveal = self.team()['reveals']['q0']
+        self.assertEqual(reveal['speedBonus'], expected - 500)
+
+    def test_the_same_picks_score_identically_either_way_round(self):
+        """Order-independence, which is the property that actually matters."""
+        self.settle_speeds(0, a_time=3.0, b_time=9.0)
+        first = self.team()['reveals']['q0']['points']
+        self.advance_to(1)
+        # Same two observations, reversed submit order.
+        for user, taken, force in ((self.b, 9.0, False), (self.a, 3.0, True)):
+            self.client.force_authenticate(user=user)
+            self.client.post(reverse('team-pick'), {
+                'roomCode': 'LOG1', 'questionIndex': 1, 'answer': 'A. yes',
+                'timeTaken': str(taken), 'force': 'true' if force else 'false',
+            }, format='json')
+        self.assertEqual(self.team()['reveals']['q1']['points'], first)
+
+    def test_a_legacy_pick_without_a_time_still_scores(self):
+        """A room already mid-round when the pick shape changed must not break.
+
+        The stored pick is a bare answer string, as every pre-existing room has.
+        """
+        self.advance_to(0)
+        self.room_ref.collection('_server').document('teamPicks_1').set({
+            'questionIndex': 0,
+            'picks': {str(self.a.id): 'A. yes'},
+        })
+        self.client.force_authenticate(user=self.b)
+        resp = self.client.post(reverse('team-pick'), {
+            'roomCode': 'LOG1', 'questionIndex': 0, 'answer': 'A. yes',
+            'timeTaken': '4', 'force': 'false',
+        }, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(self.team()['reveals']['q0']['correct'])
+        # Only one time was recorded, so that observation is the team's time.
+        self.assertGreater(self.team()['reveals']['q0']['speedBonus'], 0)
+
     def test_each_answer_is_logged_under_the_canonical_question_index(self):
         self.settle(0, 'A. yes', 'A. yes')
         self.assertIn('q0', self.answers(self.a))
@@ -2442,9 +2365,8 @@ class TeamMajorityVoteTests(TestCase):
     """The mechanic itself: private picks, one majority answer, one shared score.
 
     These are the rules the whole team redesign rests on, so they are asserted
-    directly rather than through the momentum or the scoring suites: when a
-    question closes, what "the team's answer" means, and who is allowed to see
-    whose pick it was.
+    directly rather than through the scoring suite: when a question closes, what
+    "the team's answer" means, and who is allowed to see whose pick it was.
     """
 
     def setUp(self):
@@ -2576,10 +2498,15 @@ class TeamMajorityVoteTests(TestCase):
         self.assertEqual(team_doc['pickCount'], 2)
         self.assertNotIn('A. yes', json.dumps(team_doc))
         self.assertNotIn('B. no', json.dumps(team_doc))
-        # The server can still tally it.
+        # The server can still tally it. A pick carries the time alongside the
+        # answer so the team can be scored on its median rather than on whoever
+        # submitted last.
         self.assertEqual(
             self.server_picks()['picks'],
-            {str(self.members[0].id): 'A. yes', str(self.members[1].id): 'B. no'},
+            {
+                str(self.members[0].id): {'answer': 'A. yes', 'timeTaken': 1.0},
+                str(self.members[1].id): {'answer': 'B. no', 'timeTaken': 1.0},
+            },
         )
 
     def test_the_published_count_resets_once_the_question_closes(self):
@@ -3008,6 +2935,78 @@ class QuestionExplanationTests(TestCase):
         questions = self.create_with_quiz(quiz)
         self.assertEqual(questions[0]['type'], 'identification')
         self.assertEqual(questions[0]['explanation'], 'British English uses "colour".')
+
+
+class TypedAnswerGradingTests(TestCase):
+    """How a typed answer is compared to the expected one.
+
+    The rule is deliberately narrow: lenient about capitalisation and whitespace,
+    because the phone keyboard introduces both by itself, and strict about
+    spelling. These pin the strict half as much as the lenient half -- a grader
+    that silently accepted "photosynthosis" would be the worse bug.
+    """
+
+    def test_capitalisation_does_not_matter(self):
+        self.assertTrue(answer_matches('Mitochondria', 'mitochondria'))
+        self.assertTrue(answer_matches('mitochondria', 'MITOCHONDRIA'))
+
+    def test_surrounding_and_repeated_whitespace_does_not_matter(self):
+        self.assertTrue(answer_matches('  new   york  ', 'new york'))
+        self.assertTrue(answer_matches('new york', 'New York'))
+
+    def test_a_misspelling_is_still_wrong(self):
+        # The whole point of the change: forgiving case is not the same as
+        # forgiving a typo.
+        self.assertFalse(answer_matches('photosynthosis', 'photosynthesis'))
+        self.assertFalse(answer_matches('mitochondriaa', 'mitochondria'))
+
+    def test_different_words_are_wrong(self):
+        self.assertFalse(answer_matches('cytoplasm', 'mitochondria'))
+        self.assertFalse(answer_matches('', 'mitochondria'))
+
+    def test_none_is_wrong(self):
+        self.assertFalse(answer_matches(None, 'mitochondria'))
+        self.assertFalse(answer_matches('mitochondria', None))
+
+    def test_non_ascii_compares_in_its_own_case(self):
+        # `casefold` rather than `lower`; these differ, and lower() gets it wrong.
+        self.assertTrue(answer_matches('beyoncé', 'BEYONCÉ'))
+
+
+class QuestionTypeNormalisationTests(TestCase):
+    """Every spelling of a question type resolves to one canonical value.
+
+    The upload screen posts short ids while the AI generator posts display
+    labels, and they were compared with `== 'identification'`. Anything but that
+    one string took the multiple-choice branch, so an upload asking for typed
+    answers silently produced four options per question.
+    """
+
+    def test_short_ids_and_labels_both_resolve(self):
+        self.assertEqual(normalise_question_type('sa'), 'identification')
+        self.assertEqual(normalise_question_type('Short Answer'), 'identification')
+        self.assertEqual(normalise_question_type('Identification'), 'identification')
+        self.assertEqual(normalise_question_type('identification'), 'identification')
+
+    def test_fill_in_the_blank_is_its_own_typed_type(self):
+        self.assertEqual(normalise_question_type('Fill-in-the-Blank'), 'fill_in_blank')
+        self.assertEqual(normalise_question_type('fib'), 'fill_in_blank')
+
+    def test_unknown_and_empty_default_to_multiple_choice(self):
+        self.assertEqual(normalise_question_type(None), 'mcq')
+        self.assertEqual(normalise_question_type(''), 'mcq')
+        self.assertEqual(normalise_question_type('nonsense'), 'mcq')
+
+    def test_a_fill_in_the_blank_quiz_serialises_as_such(self):
+        host = User.objects.create_user(username='fibhost', password='pass')
+        quiz = Quiz.objects.create(user=host, title='Gaps', quiz_type='Fill-in-the-Blank')
+        QuizQuestion.objects.create(
+            quiz=quiz, question_text='Water is H2_', options=[], correct_answer='H2O',
+        )
+        questions = build_questions_from_quiz(quiz)
+        self.assertEqual(questions[0]['type'], 'fill_in_blank')
+        # Grading does not care which of the two it is.
+        self.assertIn(questions[0]['type'], TYPED_QUESTION_TYPES)
 
 
 class TvLeaderboardTests(TestCase):

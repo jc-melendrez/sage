@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, Animated, ScrollView } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { View, Text, FlatList, TouchableOpacity, StyleSheet, Animated, ScrollView, Alert, ActivityIndicator } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
-import { getCurrentUser } from '@/services/authService';
+import { getCurrentUser, getToken } from '@/services/authService';
 import { getLanFinalStandings, lanGame } from '@/services/lanSession';
+import { API_BASE_URL } from '@/config/api';
 import TeamResultCard from '@/components/game/TeamResultCard';
 import SessionSummary, { type TeamNameLookup } from '@/components/game/SessionSummary';
 import { getOfflineGameSession } from '@/services/offlineGameService';
@@ -57,6 +58,35 @@ export default function FinalScreen() {
   // already fetching the same documents.
   const [myUserId, setMyUserId] = useState<string | null>(null);
 
+  // Who is allowed to reset the room. Read from the live room document rather
+  // than from who created it on the client, because a host who left hands the
+  // room over (HostClaimView) and the new host has to see the button too.
+  const [isHost, setIsHost] = useState(false);
+  const [rematching, setRematching] = useState(false);
+
+  const startRematch = useCallback(async () => {
+    try {
+      const token = await getToken();
+      setRematching(true);
+      const res = await fetch(`${API_BASE_URL}/game/rematch/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ roomCode }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      // Back to the lobby with the SAME code -- that is the whole point of a
+      // rematch, so the students never have to re-enter anything. `isHost` is
+      // passed explicitly because the button is host-only, so the lobby can be
+      // relied on for its host controls immediately rather than after it
+      // re-derives that from Firestore.
+      router.replace(`/game/lobby?roomCode=${roomCode}&isHost=true`);
+    } catch (e: any) {
+      Alert.alert('Rematch failed', e?.message ?? 'Could not start the rematch');
+      setRematching(false);
+    }
+  }, [roomCode, router]);
+
   useEffect(() => {
     if (isOffline || isLan) return;
     let mounted = true;
@@ -103,6 +133,9 @@ export default function FinalScreen() {
         setTeamMode(!!data?.teamMode);
         setQuestions((data?.questions ?? []) as GameQuestion[]);
         setSettledRank(data?.teamResults ?? []);
+        if (myUserId && data?.hostId != null) {
+          setIsHost(String(data.hostId) === myUserId);
+        }
         // The server keys members by `userId`; the client expects `id`, so
         // normalise here rather than patching every consumer.
         const byTeam: Record<string, TeamMember[]> = {};
@@ -110,10 +143,15 @@ export default function FinalScreen() {
           byTeam[String(result.teamId)] = (result.members ?? []).map((m: any) => ({
             id: String(m.userId ?? m.id ?? m.displayName),
             displayName: m.displayName ?? 'Player',
+            avatar: m.avatar ?? undefined,
             score: m.score ?? 0,
             correctCount: m.correctCount ?? 0,
             answeredCount: m.answeredCount ?? 0,
-            contribution: m.contribution ?? 0,
+            accuracy: m.accuracy ?? 0,
+            agreement: m.agreement ?? 0,
+            bestStreak: m.bestStreak ?? 0,
+            isMvp: !!m.isMvp,
+            earlyFinisher: !!m.earlyFinisher,
           }));
         }
         setTeamResults(byTeam);
@@ -373,10 +411,20 @@ const breakdown = useMemo(() => buildBreakdown({
           scrollEnabled={false}
           renderItem={({ item, index }) => {
             const rank = showPodium ? index + 4 : index + 1;
+            const answered = item.answeredCount ?? 0;
+            const accuracy = answered > 0
+              ? Math.round(((item.correctCount ?? 0) / answered) * 100)
+              : 0;
             return (
               <View style={styles.row}>
                 <Text style={styles.medal}>{rank}.</Text>
-                <Text style={styles.name} numberOfLines={1}>{item.displayName}</Text>
+                <View style={styles.rowMain}>
+                  <Text style={styles.name} numberOfLines={1}>{item.displayName}</Text>
+                  <Text style={styles.rowMeta} numberOfLines={1}>
+                    {accuracy}% · {item.correctCount ?? 0}/{answered}
+                    {item.bestStreak ? ` · best ${item.bestStreak}` : ''}
+                  </Text>
+                </View>
                 <Text style={styles.score}>{item.score} pts</Text>
               </View>
             );
@@ -392,6 +440,20 @@ const breakdown = useMemo(() => buildBreakdown({
       <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(tabs)/games')}>
         <Text style={styles.btnText}>Back to Game Center</Text>
       </TouchableOpacity>
+
+      {/* Only the host, and only for a real room -- offline and LAN sessions have
+          no server-side room to reset. Everyone else just reads results. */}
+      {isHost && !isOffline && !isLan && (
+        <TouchableOpacity
+          style={[styles.btn, styles.rematchBtn, rematching && { opacity: 0.6 }]}
+          onPress={startRematch}
+          disabled={rematching}
+        >
+          {rematching
+            ? <ActivityIndicator color="#fff" />
+            : <Text style={styles.btnText}>Play Again</Text>}
+        </TouchableOpacity>
+      )}
     </ScrollView>
   );
 }
@@ -415,9 +477,12 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e1b4b', borderRadius: 12, padding: 14, marginBottom: 8 },
   medal: { fontSize: 20, marginRight: 12 },
   name: { color: '#fff', fontSize: 16, fontWeight: '600', flex: 1 },
+  rowMain: { flex: 1, minWidth: 0 },
+  rowMeta: { color: 'rgba(255,255,255,0.55)', fontSize: 11, marginTop: 2 },
   teamDot: { width: 10, height: 10, borderRadius: 5, marginRight: 10 },
   score: { color: '#7F77DD', fontWeight: 'bold', fontSize: 16 },
   btn: { backgroundColor: '#7F77DD', borderRadius: 12, padding: 16, alignItems: 'center', marginTop: 16 },
+  rematchBtn: { backgroundColor: '#10B981', marginTop: 10 },
   btnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
   podiumRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'center', marginBottom: 28, gap: 8 },
   podiumCol: { alignItems: 'center', width: 96 },

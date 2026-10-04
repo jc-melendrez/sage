@@ -10,14 +10,22 @@ import {
   sameTeamId, joinedAtMillis, type PlayerEntry, type TeamEntry,
 } from '@/types/game';
 
+/**
+ * Matches the lobby's light theme: white surfaces with dark ink. The team cards
+ * sit on the lobby's white card background, so a dark palette here would put
+ * dark panels inside a light screen.
+ */
 const COLORS = {
-  surface: '#1e1b4b',
-  surfaceLight: '#2d2a5e',
-  textPrimary: '#FFFFFF',
-  textSecondary: '#CBD5E1',
-  textMuted: '#94A3B8',
+  surface: '#FFFFFF',
+  surfaceLight: '#F3F4F6',
+  textPrimary: '#1F2937',
+  textSecondary: '#6B7280',
+  textMuted: '#9CA3AF',
   warning: '#F59E0B',
   success: '#10B981',
+  border: 'rgba(76, 29, 149, 0.12)',
+  /** Placeholder/seat fills, light enough to read as empty on white. */
+  hairline: 'rgba(76, 29, 149, 0.08)',
 };
 
 const FONTS = {
@@ -493,14 +501,14 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderRadius: 16,
     borderStyle: 'dashed',
-    borderColor: 'rgba(148,163,184,0.45)',
+    borderColor: 'rgba(107,114,128,0.35)',
     backgroundColor: COLORS.surface,
     paddingHorizontal: 12,
     paddingTop: 10,
     paddingBottom: 8,
     gap: 8,
   },
-  spectatorBarActive: { borderColor: COLORS.textSecondary, backgroundColor: 'rgba(148,163,184,0.10)' },
+  spectatorBarActive: { borderColor: COLORS.textSecondary, backgroundColor: 'rgba(107,114,128,0.08)' },
   spectatorBarHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   spectatorBarTitle: { flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 },
   spectatorBarLeave: { gap: 6 },
@@ -518,10 +526,10 @@ const styles = StyleSheet.create({
     paddingRight: 11,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: 'rgba(148,163,184,0.30)',
+    borderColor: 'rgba(107,114,128,0.28)',
     backgroundColor: COLORS.surfaceLight,
   },
-  spectatorChipYou: { borderColor: COLORS.textSecondary, backgroundColor: 'rgba(148,163,184,0.18)' },
+  spectatorChipYou: { borderColor: COLORS.textSecondary, backgroundColor: 'rgba(124,58,237,0.10)' },
   chipAvatar: { width: 24, height: 24, borderRadius: 12 },
   chipAvatarFallback: {
     width: 24,
@@ -543,13 +551,13 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     paddingHorizontal: 11,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: COLORS.hairline,
   },
   addTeamBtnDisabled: { opacity: 0.6 },
-  addTeamBtnText: { fontSize: 11, fontFamily: FONTS.extraBold, letterSpacing: 1, color: COLORS.textPrimary },
+  addTeamBtnText: { fontSize: 11, fontFamily: FONTS.extraBold, letterSpacing: 1, color: COLORS.textSecondary },
 
   vsRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
-  vsLine: { flex: 1, height: 1, backgroundColor: 'rgba(255,255,255,0.10)' },
+  vsLine: { flex: 1, height: 1, backgroundColor: COLORS.border },
   vsText: {
     fontSize: 11,
     fontFamily: FONTS.extraBold,
@@ -583,7 +591,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 7,
     paddingVertical: 6,
   },
-  memberYou: { backgroundColor: 'rgba(255,255,255,0.10)' },
+  memberYou: { backgroundColor: 'rgba(124,58,237,0.10)' },
   avatar: { width: 20, height: 20, borderRadius: 10 },
   avatarFallback: {
     width: 20, height: 20, borderRadius: 10,
@@ -599,13 +607,13 @@ const styles = StyleSheet.create({
   // A slot is one seat. Occupied seats render a member row instead.
   slot: {
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.09)',
+    borderColor: COLORS.border,
     borderStyle: 'dashed',
     borderRadius: 9,
     paddingVertical: 9,
     alignItems: 'center',
   },
-  slotJoinable: { borderColor: 'rgba(255,255,255,0.22)' },
+  slotJoinable: { borderColor: 'rgba(124,58,237,0.40)' },
   slotFull: { opacity: 0.45 },
   slotText: { fontSize: 10, fontFamily: FONTS.medium, color: COLORS.textMuted },
 
@@ -614,7 +622,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.06)',
+    borderTopColor: COLORS.border,
   },
   footerText: { fontSize: 11, fontFamily: FONTS.bold },
 
@@ -637,7 +645,7 @@ const styles = StyleSheet.create({
   modalActions: { flexDirection: 'row', gap: 10, marginTop: 8 },
   cancelBtn: {
     flex: 1, paddingVertical: 12, borderRadius: 12,
-    alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.06)',
+    alignItems: 'center', backgroundColor: COLORS.surfaceLight,
   },
   cancelText: { color: COLORS.textSecondary, fontFamily: FONTS.bold, fontSize: 14 },
   saveBtn: { flex: 1, paddingVertical: 12, borderRadius: 12, alignItems: 'center', backgroundColor: '#7C3AED' },
