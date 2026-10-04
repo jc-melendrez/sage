@@ -31,6 +31,9 @@ const POLICY_RULES: Array<{ matcher: RegExp; ttlSeconds: number }> = [
   // instantly on every visit and revalidates in the background. Groups are
   // invalidated explicitly after create/join/leave/update writes.
   { matcher: /\/api\/users\/groups\/mine\/?$/, ttlSeconds: 180 },
+  // Announcements — short SWR. The bell is an inbox, so a stale "0 new"
+  // count is worse than a short wait; invalidated on send anyway.
+  { matcher: /\/api\/users\/announcements\/?$/, ttlSeconds: 120 },
 ];
 
 // Truly volatile / user-scored data — never cache, even if it accidentally matches allowlist.

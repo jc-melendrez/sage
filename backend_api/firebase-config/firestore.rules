@@ -21,7 +21,14 @@ service cloud.firestore {
     match /studyGroups/{groupId} {
       allow read: if request.auth != null &&
                      request.auth.uid in resource.data.members;
-      allow create: if request.auth != null;
+      // Client-created groups are always plain, self-membership groups. A class
+      // chat is owned by the roster, so a client must not be able to mint a doc
+      // that claims `is_course_chat`/`course_id` and thereby present a
+      // hand-picked membership list as if the roster had approved it. Class
+      // chats are created server-side, which bypasses these rules anyway.
+      allow create: if request.auth != null &&
+                      !('is_course_chat' in request.resource.data) &&
+                      request.resource.data.members == [request.auth.uid];
       allow update, delete: if request.auth != null &&
                                request.auth.uid == resource.data.created_by;
 

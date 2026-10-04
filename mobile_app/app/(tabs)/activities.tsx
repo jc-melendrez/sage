@@ -33,9 +33,12 @@ interface StudyGroup {
   id: number;
   name: string;
   description: string;
+  /** Derived server-side from `members`; absent on very old group docs. */
   members_count: number;
   join_code: string;
   created_by: number;
+  /** Set on a course's class chat, whose membership comes from the roster. */
+  is_course_chat?: boolean;
 }
 
 interface Quiz {
@@ -904,7 +907,8 @@ export default function ActivitiesScreen() {
                     <Text style={styles.inboxName} numberOfLines={1}>{group.name}</Text>
                   </View>
                   <Text style={styles.inboxPreview} numberOfLines={1}>
-                    {group.members_count} {group.members_count === 1 ? 'member' : 'members'} • Tap to enter chat
+                    {group.members_count} {group.members_count === 1 ? 'member' : 'members'}
+                    {group.is_course_chat ? ' • Your class' : ' • Tap to enter chat'}
                   </Text>
                 </View>
               </TouchableOpacity>

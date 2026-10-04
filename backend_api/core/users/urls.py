@@ -44,6 +44,14 @@ urlpatterns = [
     path('courses/<int:course_id>/', views.CourseDetailView.as_view(), name='course_detail'),
     path('courses/<int:course_id>/add-student/', views.AddStudentToCourseView.as_view(), name='course_add_student'),
     path('courses/<int:course_id>/remove-student/', views.RemoveStudentFromCourseView.as_view(), name='course_remove_student'),
+    # GET = class chat status, POST = create (idempotent), DELETE = remove
+    path('courses/<int:course_id>/chat/', views.CourseChatView.as_view(), name='course_chat'),
+
+    # --- Announcements ---
+    # Single list endpoint: educators get what they sent, students get what
+    # was addressed to them, so the app has one screen per role.
+    path('announcements/', views.AnnouncementListView.as_view(), name='announcement_list'),
+    path('announcements/create/', views.AnnouncementCreateView.as_view(), name='announcement_create'),
 
     # --- Class Activities ---
     path('courses/<int:course_id>/activities/', views.CourseActivitiesView.as_view(), name='course_activities'),

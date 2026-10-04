@@ -104,11 +104,27 @@ def create_study_group(firebase_uid: str, name: str, description: str, join_code
         'join_code': join_code,
         'created_by': firebase_uid,
         'members': [firebase_uid],
+        # Derived, never read from `members` by the client: the group card in the
+        # app renders `members_count`, so it has to exist on write.
+        'members_count': 1,
         'privacy': 'open',          # 'open' = code joins instantly, 'private' = admin approval
         'join_requests': [],        # firebase uids waiting for admin approval
         'created_at': firestore.SERVER_TIMESTAMP,
     })
     return group_ref[1].id
+
+
+def _with_members_count(group: dict) -> dict:
+    """Backfill `members_count` on docs written before it was tracked.
+
+    Older group documents predate the field, and the app renders it directly.
+    Deriving it from `members` on read keeps those groups from displaying
+    "undefined members" without needing a migration over the collection.
+    """
+    if not group.get('members_count'):
+        members = group.get('members') or []
+        group['members_count'] = len(members)
+    return group
 
 
 def join_group_by_code(firebase_uid: str, join_code: str):
@@ -118,19 +134,22 @@ def join_group_by_code(firebase_uid: str, join_code: str):
         data = group.to_dict() or {}
         members = data.get('members') or []
         if firebase_uid in members:
-            return {'id': group.id, **data, 'status': 'joined'}
+            return _with_members_count({'id': group.id, **data, 'status': 'joined'})
         if data.get('privacy') == 'private':
             group.reference.update({'join_requests': firestore.ArrayUnion([firebase_uid])})
-            return {'id': group.id, **data, 'status': 'pending'}
-        group.reference.update({'members': firestore.ArrayUnion([firebase_uid])})
-        return {'id': group.id, **data, 'status': 'joined'}
+            return _with_members_count({'id': group.id, **data, 'status': 'pending'})
+        group.reference.update({
+            'members': firestore.ArrayUnion([firebase_uid]),
+            'members_count': len(members) + 1,
+        })
+        return _with_members_count({'id': group.id, **data, 'status': 'joined'})
     return None
 
 
 def get_user_groups(firebase_uid: str) -> list:
     db = get_db()
     docs = db.collection('studyGroups').where('members', 'array_contains', firebase_uid).stream()
-    return [{'id': d.id, **d.to_dict()} for d in docs]
+    return [_with_members_count({'id': d.id, **d.to_dict()}) for d in docs]
 
 
 def get_study_group(group_id: str) -> dict | None:
@@ -162,6 +181,125 @@ def leave_study_group(group_id: str, firebase_uid: str) -> bool:
         ref.delete()
     else:
         ref.update({'members': firestore.ArrayRemove([firebase_uid])})
+    return True
+
+
+# ── CLASS CHAT (a study group owned by a course) ───────────────────
+#
+# A class chat is a normal `studyGroups` document so it reuses the existing
+# chat screen, attachments, reactions and Firestore rules. What makes it
+# different is who decides membership: `firestore.rules` only lets a user read
+# a group (and its messages) when their uid is in `resource.data.members`, so
+# the class roster has to be mirrored into that array or students would be
+# locked out of their own class chat.
+#
+# The Django roster is the single source of truth and only ever flows one way
+# (Django -> Firestore). Students cannot add or remove themselves from a class
+# chat, so the two copies cannot disagree.
+
+def create_course_chat_group(educator_uid: str, course_id: int, course_name: str,
+                             member_uids: list) -> str:
+    """Create the class chat for a course and return its Firestore doc id.
+
+    `privacy` is 'private' on purpose: members come from the roster, not from
+    someone happening to know a join code, so the group is never advertised in
+    code-join lookups.
+    """
+    db = get_db()
+    members = [uid for uid in dict.fromkeys(member_uids) if uid]
+    group_ref = db.collection('studyGroups').add({
+        'name': f"{course_name} — Class Chat",
+        'description': 'Class discussion for this course.',
+        'join_code': generate_join_code(),
+        'created_by': educator_uid,
+        'members': members,
+        'privacy': 'private',
+        'join_requests': [],
+        'course_id': course_id,
+        'is_course_chat': True,
+        'created_at': firestore.SERVER_TIMESTAMP,
+    })
+    return group_ref[1].id
+
+
+def sync_course_chat_members(group_id: str, member_uids: list) -> bool:
+    """Make the group's member list exactly `member_uids`.
+
+    Replaces rather than adds, so removing a student from a course also revokes
+    their access to the class chat -- Firestore rules re-check `members` on
+    every read, which is what makes the removal actually take effect.
+    """
+    db = get_db()
+    ref = db.collection('studyGroups').document(group_id)
+    if not ref.get().exists:
+        return False
+    members = [uid for uid in dict.fromkeys(member_uids) if uid]
+    ref.update({
+        'members': members,
+        'members_count': len(members),
+    })
+    return True
+
+
+def add_group_members(group_id: str, uids: list) -> bool:
+    """Add uids to a group without disturbing the existing member list.
+
+    Used when a course gains a student, where a full replace would mean
+    re-reading and rewriting the whole roster just to append one uid.
+    """
+    new_uids = [uid for uid in dict.fromkeys(uids) if uid]
+    if not new_uids:
+        return False
+    db = get_db()
+    ref = db.collection('studyGroups').document(group_id)
+    doc = ref.get()
+    if not doc.exists:
+        return False
+    existing = set(doc.to_dict().get('members') or [])
+    additions = [uid for uid in new_uids if uid not in existing]
+    if not additions:
+        return True
+    ref.update({
+        'members': firestore.ArrayUnion(additions),
+        'members_count': len(existing) + len(additions),
+    })
+    return True
+
+
+def remove_group_member_uid(group_id: str, firebase_uid: str) -> bool:
+    """Drop one uid from a group and keep `members_count` in step."""
+    if not firebase_uid:
+        return False
+    db = get_db()
+    ref = db.collection('studyGroups').document(group_id)
+    doc = ref.get()
+    if not doc.exists:
+        return False
+    existing = doc.to_dict().get('members') or []
+    if firebase_uid not in existing:
+        return False
+    remaining = [uid for uid in existing if uid != firebase_uid]
+    ref.update({
+        'members': remaining,
+        'members_count': len(remaining),
+    })
+    return True
+
+
+def delete_course_chat_group(group_id: str) -> bool:
+    """Remove a course's class chat along with its messages.
+
+    Messages live in a subcollection, and Firestore does not cascade deletes,
+    so they have to be enumerated and removed explicitly.
+    """
+    db = get_db()
+    ref = db.collection('studyGroups').document(group_id)
+    if not ref.get().exists:
+        return False
+    messages = ref.collection('messages')
+    for doc in messages.stream():
+        doc.reference.delete()
+    ref.delete()
     return True
 
 

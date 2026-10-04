@@ -24,7 +24,7 @@ import { QuizOverflowButton, QuizOverflowMenu } from '@/components/educator/Quiz
 import { QuizEditorSheet } from '@/components/educator/QuizEditorSheet';
 import { QuizGeneratorSheet } from '@/components/educator/QuizGeneratorSheet';
 import { TopicOverflowButton, TopicOverflowMenu } from '@/components/educator/TopicOverflowMenu';
-import { getCoursePath, createTopic, updateTopic, deleteTopic, createNode, generateTopic, GenerateTopicResponse, getCourseLeaderboard, CourseLeaderboard, LeaderboardSort } from '@/services/courseService';
+import { getCoursePath, createTopic, updateTopic, deleteTopic, createNode, generateTopic, GenerateTopicResponse, getCourseLeaderboard, CourseLeaderboard, LeaderboardSort, getCourseClassChat, createCourseClassChat, deleteCourseClassChat, CourseClassChat } from '@/services/courseService';
 import { getQuizzes, Quiz } from '@/services/quizService';
 import { getCourseActivities, createActivity, deleteActivity, updateActivity, ClassActivity, ActivityKind } from '@/services/activityService';
 import { describeDue } from '@/services/dueDate';
@@ -148,6 +148,11 @@ export default function CourseDetailScreen() {
   const [previewData, setPreviewData] = useState<GenerateTopicResponse | null>(null);
   const [savingPreview, setSavingPreview] = useState(false);
 
+  // Class chat. Opt-in: nothing is created until the educator taps the button,
+  // so courses without a chat never leave an empty group lying around.
+  const [chat, setChat] = useState<CourseClassChat | null>(null);
+  const [chatBusy, setChatBusy] = useState(false);
+
   const loadTopics = useCallback(async () => {
     try {
       const data = await getCoursePath(cid);
@@ -199,12 +204,56 @@ export default function CourseDetailScreen() {
     }
   }, [cid, leaderboardSort]);
 
+  const loadChat = useCallback(async () => {
+    try {
+      setChat(await getCourseClassChat(cid));
+    } catch {
+      // non-fatal — the chat button just falls back to "not created yet"
+    }
+  }, [cid]);
+
+  const createChat = useCallback(async () => {
+    setChatBusy(true);
+    try {
+      setChat(await createCourseClassChat(cid));
+    } catch (err: any) {
+      Alert.alert('Could not create class chat', err?.message ?? 'Please try again.');
+    } finally {
+      setChatBusy(false);
+    }
+  }, [cid]);
+
+  const removeChat = useCallback(() => {
+    Alert.alert(
+      'Remove class chat?',
+      'The chat and all its messages will be deleted. Students keep their place on the roster and you can enable it again later.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            setChatBusy(true);
+            try {
+              setChat(await deleteCourseClassChat(cid));
+            } catch (err: any) {
+              Alert.alert('Could not remove class chat', err?.message ?? 'Please try again.');
+            } finally {
+              setChatBusy(false);
+            }
+          },
+        },
+      ],
+    );
+  }, [cid]);
+
   const loadAll = useCallback(() => {
     loadTopics();
     loadQuizzes();
     loadActivities();
     loadLeaderboard();
-  }, [loadTopics, loadQuizzes, loadActivities, loadLeaderboard]);
+    loadChat();
+  }, [loadTopics, loadQuizzes, loadActivities, loadLeaderboard, loadChat]);
 
   useFocusEffect(useCallback(() => { loadAll(); }, [loadAll]));
 
@@ -619,6 +668,56 @@ export default function CourseDetailScreen() {
               </TouchableOpacity>
             );
           })}
+        </View>
+
+        {/* Class chat sits above the section tabs: it's a place for the class to
+            talk, not course content, and it stays reachable from every tab. */}
+        <View style={styles.chatCard}>
+          <View style={styles.topicIconBg}>
+            <Ionicons name="chatbubbles" size={20} color={COLORS.purpleVibrant} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.topicName}>Class chat</Text>
+            {chat?.has_class_chat ? (
+              <Text style={styles.topicDesc}>
+                {chat.member_count} member{chat.member_count === 1 ? '' : 's'}
+                {chat.pending_members > 0
+                  ? ` · ${chat.pending_members} awaiting first sign-in`
+                  : ''}
+              </Text>
+            ) : (
+              <Text style={styles.topicDesc}>Give your class a shared space to discuss.</Text>
+            )}
+          </View>
+          {chat?.has_class_chat ? (
+            <>
+              <TouchableOpacity
+                style={styles.chatAction}
+                activeOpacity={0.7}
+                disabled={chatBusy}
+                onPress={() => router.push(`/chat/${chat.chat_group_id}`)}
+              >
+                <Text style={styles.chatActionText}>Open</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.chatMore}
+                activeOpacity={0.7}
+                disabled={chatBusy}
+                onPress={removeChat}
+              >
+                <Ionicons name="trash-outline" size={18} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </>
+          ) : (
+            <TouchableOpacity
+              style={styles.chatAction}
+              activeOpacity={0.7}
+              disabled={chatBusy}
+              onPress={createChat}
+            >
+              <Text style={styles.chatActionText}>{chatBusy ? 'Creating…' : 'Create'}</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         {section === 'topics' && (
@@ -1397,6 +1496,28 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     padding: 16,
   },
+  chatCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 16,
+  },
+  chatAction: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.purpleVibrant,
+  },
+  chatActionText: {
+    color: COLORS.bg,
+    fontFamily: FONTS.bold,
+    fontSize: 13,
+  },
+  chatMore: { padding: 6 },
   topicHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   topicIconBg: {
     width: 40,

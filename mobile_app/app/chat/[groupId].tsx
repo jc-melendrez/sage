@@ -39,6 +39,8 @@ interface StudyGroup {
   created_by: string;
   members?: string[];
   privacy?: string;
+  /** A course's class chat: membership follows the roster, not self-service. */
+  is_course_chat?: boolean;
 }
 
 // Normalized message shape: Firestore docs, REST responses, and optimistic
@@ -877,6 +879,16 @@ export default function GroupChatScreen() {
 
   const handleLeaveGroup = () => {
     if (!group) return;
+    // Class-chat membership is owned by the course roster, so leaving is done
+    // by leaving the course. Offering "Leave" here would silently lock the
+    // student out until the next roster sync put them back.
+    if (group.is_course_chat) {
+      Alert.alert(
+        'Class chat',
+        'This is your class\'s chat. Leave the course to stop receiving its messages.',
+      );
+      return;
+    }
     Alert.alert(
       'Leave Group',
       `Leave "${group.name}"? You can rejoin anytime with the invite code.`,

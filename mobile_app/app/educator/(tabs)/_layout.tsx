@@ -104,7 +104,6 @@ export default function EducatorTabLayout() {
       <Tabs.Screen name="leaderboard" options={{ href: null }} />
       <Tabs.Screen name="announcements" options={{ href: null }} />
       <Tabs.Screen name="ai-insights" options={{ href: null }} />
-      <Tabs.Screen name="study-groups" options={{ href: null }} />
       <Tabs.Screen name="student-progress" options={{ href: null }} />
       <Tabs.Screen name="analytics" options={{ href: null }} />
       <Tabs.Screen name="course-detail" options={{ href: null }} />

@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
+from .models import Badge, Recommendation, Session, Activity, Course, User, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment, Announcement
 from .gamification import describe_badge
 # --- Your Related Serializers (Unchanged, these are great!) ---
 from django.contrib.auth import get_user_model
@@ -149,15 +149,18 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 class CourseSerializer(serializers.ModelSerializer):
     educator = serializers.SerializerMethodField()
     student_count = serializers.SerializerMethodField()
-    study_group_id = serializers.IntegerField(read_only=True)
+    # Firestore doc id of the class chat, '' when the educator has not enabled
+    # one. `has_class_chat` saves the client from treating '' as a group id.
+    has_class_chat = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Course
         fields = [
             'id', 'name', 'description', 'join_code', 'educator',
-            'students', 'student_count', 'study_group_id', 'created_at',
+            'students', 'student_count', 'chat_group_id', 'has_class_chat',
+            'created_at',
         ]
-        read_only_fields = ['join_code', 'students', 'created_at']
+        read_only_fields = ['join_code', 'students', 'created_at', 'chat_group_id']
 
     def get_educator(self, obj):
         display_name = f"{obj.educator.first_name} {obj.educator.last_name}".strip()
@@ -208,6 +211,75 @@ class TaskSubmissionFileListSerializer(serializers.ModelSerializer):
             'id', 'file_name', 'file_mime', 'file_size', 'created_at',
         ]
         read_only_fields = fields
+
+
+class AnnouncementSerializer(serializers.ModelSerializer):
+    author = serializers.SerializerMethodField()
+    course_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Course.objects.all(),
+        many=True,
+        write_only=True,
+        required=False,
+        allow_empty=True,
+    )
+    courses = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    # Resolved on the server so the app never has to join course ids back to
+    # names, and so the history row renders from one response.
+    course_names = serializers.SerializerMethodField()
+    recipient_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Announcement
+        fields = [
+            'id',
+            'author',
+            'title',
+            'message',
+            'is_scheduled',
+            'scheduled_at',
+            'published_at',
+            'courses',
+            'course_names',
+            'recipient_count',
+            'course_ids',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'author', 'created_at', 'updated_at', 'published_at']
+
+    def get_course_names(self, obj):
+        return [course.name for course in obj.courses.all()]
+
+    def get_recipient_count(self, obj):
+        """Distinct students across every targeted course, so announcing to two
+        classes that share a student does not count them twice."""
+        students = set()
+        for course in obj.courses.all():
+            students.update(course.students.values_list('id', flat=True))
+        return len(students)
+
+    def get_author(self, obj):
+        user = obj.author
+        if not user:
+            return None
+        return {
+            'id': user.id,
+            'username': user.username,
+            'first_name': getattr(user, 'first_name', ''),
+            'last_name': getattr(user, 'last_name', ''),
+            'role': getattr(user, 'role', ''),
+        }
+
+    def create(self, validated_data):
+        course_ids = validated_data.pop('course_ids', [])
+        request = self.context.get('request')
+        user = request.user if request else None
+        if user is None:
+            raise serializers.ValidationError('Authentication required')
+        announcement = Announcement.objects.create(author=user, **validated_data)
+        if course_ids:
+            announcement.courses.set(course_ids)
+        return announcement
 
 
 class TaskSubmissionFileSerializer(serializers.ModelSerializer):

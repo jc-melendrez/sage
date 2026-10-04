@@ -38,12 +38,22 @@ export interface CourseSummary {
     display_name: string;
   };
   student_count: number;
-  study_group_id: number | null;
+  /** Firestore doc id of the class chat; '' when the educator hasn't enabled one. */
+  chat_group_id: string;
+  has_class_chat: boolean;
   created_at: string;
 }
 
 export interface CourseRoster extends CourseSummary {
   students: CourseStudent[];
+}
+
+export interface CourseClassChat {
+  chat_group_id: string;
+  has_class_chat: boolean;
+  /** Enrolled students who haven't signed in yet; added on their next login. */
+  pending_members: number;
+  member_count: number;
 }
 
 export type LeaderboardSort = 'points' | 'nodes' | 'streak';
@@ -98,6 +108,33 @@ export async function getEnrolledCourses(): Promise<CourseSummary[]> {
 
 export async function getCourse(courseId: number): Promise<CourseRoster> {
   return apiCall<CourseRoster>(`/users/courses/${courseId}/`);
+}
+
+/** Class chat status: whether one exists, and how many synced members it has. */
+export async function getCourseClassChat(courseId: number): Promise<CourseClassChat> {
+  return apiCall<CourseClassChat>(`/users/courses/${courseId}/chat/`);
+}
+
+/**
+ * Enable the course's class chat. Idempotent server-side: calling it when a
+ * chat already exists returns the same group rather than creating a second one,
+ * so a double-tap can't orphan the original group and its messages.
+ */
+export async function createCourseClassChat(courseId: number): Promise<CourseClassChat> {
+  const chat = await apiCall<CourseClassChat>(`/users/courses/${courseId}/chat/`, {
+    method: 'POST',
+  });
+  invalidateCourseContent();
+  return chat;
+}
+
+/** Remove the class chat and its messages. The course itself is untouched. */
+export async function deleteCourseClassChat(courseId: number): Promise<CourseClassChat> {
+  const chat = await apiCall<CourseClassChat>(`/users/courses/${courseId}/chat/`, {
+    method: 'DELETE',
+  });
+  invalidateCourseContent();
+  return chat;
 }
 
 export async function getCourseLeaderboard(

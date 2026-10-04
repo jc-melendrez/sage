@@ -202,13 +202,24 @@ class Course(models.Model):
     # The students enrolled in THIS course (per-course roster)
     students = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='enrolled_courses', blank=True)
 
-    # Optional link to a study group for chat/collaboration
-    study_group = models.OneToOneField(StudyGroup, on_delete=models.SET_NULL, null=True, blank=True, related_name='course')
+    # Firestore document id of this course's class chat, or '' when the
+    # educator has not enabled one.
+    #
+    # A string rather than a foreign key because study groups live in Firestore
+    # (see `core.firestore_service.create_study_group`), not in the Django
+    # `StudyGroup` table, which nothing writes to. The earlier
+    # `study_group = OneToOneField(StudyGroup)` could therefore never resolve:
+    # `CreateCourseView` looked the id up in an always-empty table and 404'd.
+    chat_group_id = models.CharField(max_length=128, blank=True, default='')
 
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"{self.name} ({self.join_code})"
+
+    @property
+    def has_class_chat(self):
+        return bool(self.chat_group_id)
 
 
 class CourseScore(models.Model):
@@ -367,6 +378,51 @@ class LessonProgress(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.course_id} L{self.level_id} ({'pass' if self.passed else 'fail'})"
+
+
+class Announcement(models.Model):
+    """
+    An educator's message to their students, addressed to one or more courses.
+
+    The audience is stored as M2M targets rather than a denormalised recipient
+    list so "who should see this" stays answerable from live rosters: drop a
+    student from a course and they immediately stop being an audience, and a
+    student who joins later starts seeing the history.
+
+    Study groups are deliberately not a target here. Groups live in Firestore
+    with string document ids (see `core.firestore_service.get_user_groups`)
+    and the Django `StudyGroup` table is essentially never populated, so an FK
+    to it would be a field that can never match anything. When group
+    announcements are wanted they need a Firestore id (or a synced group
+    table) and their own resolution path.
+    """
+
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='sent_announcements',
+    )
+    title = models.CharField(max_length=255, blank=True, default='')
+    message = models.TextField()
+
+    # A scheduled announcement is written now but withheld from students until
+    # `scheduled_at`. The read endpoint does the withholding, so no background
+    # job is needed to flip a flag.
+    is_scheduled = models.BooleanField(default=False)
+    scheduled_at = models.DateTimeField(null=True, blank=True)
+
+    courses = models.ManyToManyField('Course', blank=True, related_name='announcements')
+
+    published_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-published_at']
+
+    def __str__(self):
+        preview = self.title or self.message[:40]
+        return f"{self.author.username}: {preview}"
 
 
 class RoleChangeLog(models.Model):

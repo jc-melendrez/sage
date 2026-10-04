@@ -14,7 +14,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIClient
 
-from .models import Activity, Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, Recommendation, TaskSubmission, Topic, User
+from .models import Activity, Announcement, Badge, ClassActivity, Course, LearningNode, LessonProgress, LoginOtpChallenge, NodeProgress, Recommendation, TaskSubmission, Topic, User
 from .serializers import RecommendationSerializer, BadgeSerializer
 from .authentication import SAGERefreshToken
 from . import gamification
@@ -392,6 +392,281 @@ class CourseAPITests(APITestCase):
             user=self.student1, node=node).score, 100)
 
 
+class CourseClassChatTests(APITestCase):
+    """Class chat = a Firestore study group whose membership mirrors the roster."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='chat_teacher', password='pass123', role='educator',
+            firebase_uid='edu-uid',
+        )
+        self.student1 = User.objects.create_user(
+            username='chat_student1', password='pass123', role='student',
+            firebase_uid='stu-uid-1',
+        )
+        self.student2 = User.objects.create_user(
+            username='chat_student2', password='pass123', role='student',
+            firebase_uid='stu-uid-2',
+        )
+        # Never signed in, so it has no Firebase uid yet.
+        self.uidless = User.objects.create_user(
+            username='chat_student3', password='pass123', role='student',
+        )
+        self.course = Course.objects.create(name='Chemistry', educator=self.educator)
+        self.course.students.add(self.student1, self.uidless)
+
+    def _create_chat(self):
+        with patch.object(users_views, 'create_course_chat_group', return_value='group-1') as mock:
+            resp = self.client.post(reverse('course_chat', args=[self.course.id]))
+        return resp, mock
+
+    # --- creation ---
+
+    def test_educator_creates_class_chat_with_full_roster(self):
+        self.client.force_authenticate(user=self.educator)
+        resp, mock = self._create_chat()
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['chat_group_id'], 'group-1')
+        self.course.refresh_from_db()
+        self.assertEqual(self.course.chat_group_id, 'group-1')
+        # Roster members plus the educator; the uid-less student is skipped
+        # rather than written in as None.
+        self.assertEqual(
+            sorted(mock.call_args.kwargs['member_uids']),
+            ['edu-uid', 'stu-uid-1'],
+        )
+        self.assertEqual(resp.data['pending_members'], 1)
+
+    def test_create_is_idempotent_and_does_not_orphan_first_group(self):
+        self.client.force_authenticate(user=self.educator)
+        self._create_chat()
+
+        with patch.object(users_views, 'create_course_chat_group') as second:
+            resp = self.client.post(reverse('course_chat', args=[self.course.id]))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['chat_group_id'], 'group-1')
+        second.assert_not_called()
+
+    def test_educator_without_firebase_uid_gets_actionable_error(self):
+        self.educator.firebase_uid = None
+        self.educator.save(update_fields=['firebase_uid'])
+        self.client.force_authenticate(user=self.educator)
+
+        with patch.object(users_views, 'create_course_chat_group') as mock:
+            resp = self.client.post(reverse('course_chat', args=[self.course.id]))
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Sign out and sign in again', resp.data['error'])
+        mock.assert_not_called()
+
+    def test_student_cannot_create_class_chat(self):
+        self.client.force_authenticate(user=self.student1)
+        with patch.object(users_views, 'create_course_chat_group') as mock:
+            resp = self.client.post(reverse('course_chat', args=[self.course.id]))
+        self.assertEqual(resp.status_code, 403)
+        mock.assert_not_called()
+
+    def test_firestore_failure_does_not_persist_group_id(self):
+        self.client.force_authenticate(user=self.educator)
+        with patch.object(users_views, 'create_course_chat_group', side_effect=RuntimeError('down')):
+            resp = self.client.post(reverse('course_chat', args=[self.course.id]))
+
+        self.assertEqual(resp.status_code, 503)
+        self.course.refresh_from_db()
+        self.assertEqual(self.course.chat_group_id, '')
+
+    # --- reads ---
+
+    def test_enrolled_student_can_read_status(self):
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+        self.client.force_authenticate(user=self.student1)
+
+        resp = self.client.get(reverse('course_chat', args=[self.course.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['has_class_chat'])
+        self.assertEqual(resp.data['chat_group_id'], 'group-1')
+
+    def test_outsider_cannot_read_status(self):
+        outsider = User.objects.create_user(username='nosy', password='p', role='student')
+        self.client.force_authenticate(user=outsider)
+        resp = self.client.get(reverse('course_chat', args=[self.course.id]))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_status_without_chat_reports_none(self):
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(reverse('course_chat', args=[self.course.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data['has_class_chat'])
+        self.assertEqual(resp.data['chat_group_id'], '')
+
+    # --- roster sync ---
+
+    def test_join_course_syncs_chat_membership(self):
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+        self.client.force_authenticate(user=self.student2)
+
+        with patch.object(users_views, 'sync_course_chat_members') as sync:
+            resp = self.client.post(reverse('join_course'), {'join_code': self.course.join_code})
+
+        self.assertEqual(resp.status_code, 200)
+        sync.assert_called_once()
+        self.assertIn(self.student2, self.course.students.all())
+
+    def test_joining_without_chat_does_not_touch_firestore(self):
+        self.client.force_authenticate(user=self.student2)
+        with patch.object(users_views, 'sync_course_chat_members') as sync:
+            self.client.post(reverse('join_course'), {'join_code': self.course.join_code})
+        sync.assert_not_called()
+
+    def test_add_student_syncs_chat_membership(self):
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+        self.client.force_authenticate(user=self.educator)
+
+        with patch.object(users_views, 'add_group_members') as add:
+            resp = self.client.post(
+                reverse('course_add_student', args=[self.course.id]),
+                {'user_id': self.student2.id},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        add.assert_called_once_with('group-1', ['stu-uid-2'])
+
+    def test_remove_student_revokes_chat_membership(self):
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+        self.client.force_authenticate(user=self.educator)
+
+        with patch.object(users_views, 'remove_group_member_uid') as remove:
+            resp = self.client.post(
+                reverse('course_remove_student', args=[self.course.id]),
+                {'user_id': self.student1.id},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        remove.assert_called_once_with('group-1', 'stu-uid-1')
+        self.assertNotIn(self.student1, self.course.students.all())
+
+    def test_firestore_outage_does_not_block_enrollment(self):
+        """The roster is authoritative: a Firestore failure must not stop a
+        student being enrolled, or a dropped student staying enrolled."""
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+        self.client.force_authenticate(user=self.educator)
+
+        with patch.object(users_views, 'add_group_members', side_effect=RuntimeError('down')):
+            resp = self.client.post(
+                reverse('course_add_student', args=[self.course.id]),
+                {'user_id': self.student2.id},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(self.student2, self.course.students.all())
+
+    def test_backfill_grants_access_on_login(self):
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+
+        with patch.object(users_views, 'add_group_members') as add:
+            users_views._backfill_class_chat_access(self.uidless)
+
+        # uid-less student gained a uid; the sync now includes them.
+        self.uidless.firebase_uid = 'stu-uid-3'
+        self.uidless.save(update_fields=['firebase_uid'])
+        with patch.object(users_views, 'add_group_members') as add:
+            users_views._backfill_class_chat_access(self.uidless)
+        add.assert_called_once_with('group-1', ['stu-uid-3'])
+
+    def test_backfill_skips_users_without_uid(self):
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+        with patch.object(users_views, 'add_group_members') as add:
+            users_views._backfill_class_chat_access(self.uidless)
+        add.assert_not_called()
+
+    # --- deletion ---
+
+    def test_delete_clears_link_and_group(self):
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+        self.client.force_authenticate(user=self.educator)
+
+        with patch.object(users_views, 'delete_course_chat_group') as delete:
+            resp = self.client.delete(reverse('course_chat', args=[self.course.id]))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data['has_class_chat'])
+        delete.assert_called_once_with('group-1')
+        self.course.refresh_from_db()
+        self.assertEqual(self.course.chat_group_id, '')
+
+    def test_student_cannot_leave_class_chat(self):
+        """Leaving is a roster operation; a self-leave would be undone by the
+        next roster sync and silently lock the student out meanwhile."""
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+        self.client.force_authenticate(user=self.student1)
+
+        with patch.object(users_views, 'get_study_group', return_value={
+            'id': 'group-1', 'is_course_chat': True, 'members': ['stu-uid-1'],
+        }), patch.object(users_views, 'leave_study_group') as leave:
+            resp = self.client.post(reverse('group_leave', args=['group-1']))
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('class', resp.data['error'].lower())
+        leave.assert_not_called()
+
+    def test_student_can_leave_standalone_group(self):
+        self.client.force_authenticate(user=self.student1)
+        with patch.object(users_views, 'get_study_group', return_value={
+            'id': 'standalone', 'is_course_chat': False, 'members': ['stu-uid-1'],
+        }), patch.object(users_views, 'leave_study_group', return_value=True) as leave:
+            resp = self.client.post(reverse('group_leave', args=['standalone']))
+
+        self.assertEqual(resp.status_code, 200)
+        leave.assert_called_once_with('standalone', 'stu-uid-1')
+
+    def test_student_cannot_delete_class_chat(self):
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+        self.client.force_authenticate(user=self.student1)
+
+        with patch.object(users_views, 'delete_course_chat_group') as delete:
+            resp = self.client.delete(reverse('course_chat', args=[self.course.id]))
+
+        self.assertEqual(resp.status_code, 403)
+        delete.assert_not_called()
+
+    # --- serialization ---
+
+    def test_course_payload_exposes_chat_fields(self):
+        self.course.chat_group_id = 'group-1'
+        self.course.save(update_fields=['chat_group_id'])
+        self.client.force_authenticate(user=self.educator)
+
+        resp = self.client.get(reverse('course_detail', args=[self.course.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['chat_group_id'], 'group-1')
+        self.assertTrue(resp.data['has_class_chat'])
+        self.assertNotIn('study_group_id', resp.data)
+
+    def test_dead_study_group_id_input_is_ignored(self):
+        """The old CreateCourseView 404'd on `study_group_id` because it looked
+        the id up in the always-empty Django StudyGroup table."""
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.post(
+            reverse('create_course'),
+            {'name': 'Astronomy', 'study_group_id': 999},
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(Course.objects.get(name='Astronomy').chat_group_id, '')
+
+
 class GamificationServiceTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
@@ -528,8 +803,41 @@ class ActivityFeedTests(TestCase):
         activity = Activity.objects.get(user=self.user)
         self.assertEqual(activity.kind, 'game')
         self.assertEqual(activity.xp_earned, 100)
-        self.assertEqual(activity.payload, {'route': '/games'})
         self.assertIn('ABC123', activity.title)
+
+    def test_game_finish_payload_identifies_the_game(self):
+        # The row used to carry nothing but `{'route': '/games'}`, which made a
+        # settled game indistinguishable from any other entry in the feed. The
+        # room code and the placement are what let the history screen say which
+        # game this was and how it went.
+        gamification.record_game_finish(self.user, 2, room_code='ABC123')
+        payload = Activity.objects.get(user=self.user).payload
+        self.assertEqual(payload['route'], '/games')
+        self.assertEqual(payload['roomCode'], 'ABC123')
+        self.assertEqual(payload['rank'], 2)
+
+    def test_game_finish_merges_the_settlement_detail(self):
+        # The caller owns the detail: only the settlement code knows the mode,
+        # the score and the ranked field.
+        detail = {'mode': 'group', 'teamRank': 1, 'teamName': 'Red', 'score': 900}
+        gamification.record_game_finish(
+            self.user, 1, room_code='ABC123', context='#1 with Red', detail=detail)
+        activity = Activity.objects.get(user=self.user)
+        self.assertEqual(activity.payload['mode'], 'group')
+        self.assertEqual(activity.payload['teamRank'], 1)
+        self.assertEqual(activity.payload['score'], 900)
+        # `context` is the title label; it does not become the description.
+        self.assertEqual(activity.description, 'Multiplayer game finished')
+        self.assertIn('#1 with Red', activity.title)
+        # The caller's dict is not mutated -- it is reused across a whole field.
+        self.assertEqual(detail, {'mode': 'group', 'teamRank': 1, 'teamName': 'Red', 'score': 900})
+
+    def test_game_finish_detail_can_override_the_description(self):
+        gamification.record_game_finish(
+            self.user, 1, room_code='ABC123', context='#1',
+            detail={'description': '#1 of 3 · 300 pts'})
+        self.assertEqual(
+            Activity.objects.get(user=self.user).description, '#1 of 3 · 300 pts')
 
     def test_activity_endpoint_returns_newest_first_with_meta(self):
         gamification.record_quiz_completion(self.user, score=3, total=5)
@@ -3180,3 +3488,179 @@ class GenerateTopicViewTests(APITestCase):
             'Learn 1 — The Water Cycle and Evaporation'
         resp = self._post(json.dumps(topic))
         self.assertEqual(resp.status_code, 400)
+
+
+class AnnouncementAPITests(APITestCase):
+    """The educator bell -> compose -> student inbox path."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='ann_teacher', password='pass123', role='educator',
+        )
+        self.other_educator = User.objects.create_user(
+            username='ann_other', password='pass123', role='educator',
+        )
+        self.student = User.objects.create_user(
+            username='ann_student', password='pass123', role='student',
+        )
+        self.outsider = User.objects.create_user(
+            username='ann_outsider', password='pass123', role='student',
+        )
+        self.algebra = Course.objects.create(name='Algebra I', educator=self.educator)
+        self.algebra.students.add(self.student)
+        self.geometry = Course.objects.create(name='Geometry', educator=self.educator)
+        self.geometry.students.add(self.student)  # overlaps with Algebra I
+        self.foreign = Course.objects.create(name='Their Class', educator=self.other_educator)
+        self.foreign.students.add(self.outsider)
+
+    def _send(self, **payload):
+        body = {'message': 'Quiz moved to Friday'}
+        body.update(payload)
+        return self.client.post(reverse('announcement_create'), body, format='json')
+
+    # --- create ---
+
+    def test_educator_posts_to_own_class(self):
+        self.client.force_authenticate(self.educator)
+        resp = self._send(course_ids=[self.algebra.id])
+        self.assertEqual(resp.status_code, 201)
+        body = resp.json()
+        self.assertEqual(body['course_names'], ['Algebra I'])
+        self.assertEqual(body['recipient_count'], 1)
+        self.assertEqual(body['author']['username'], 'ann_teacher')
+        self.assertFalse(body['is_scheduled'])
+        self.assertEqual(Announcement.objects.count(), 1)
+
+    def test_recipient_count_deduplicates_across_classes(self):
+        """A student in both targeted classes is one recipient, not two."""
+        self.client.force_authenticate(self.educator)
+        resp = self._send(course_ids=[self.algebra.id, self.geometry.id])
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()['recipient_count'], 1)
+
+    def test_cannot_post_to_another_educators_class(self):
+        """The serializer's course queryset accepts any existing id, so the
+        ownership check has to live in the view."""
+        self.client.force_authenticate(self.educator)
+        resp = self._send(course_ids=[self.foreign.id])
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('do not teach', resp.json()['error'])
+        self.assertEqual(Announcement.objects.count(), 0)
+
+    def test_student_cannot_post(self):
+        self.client.force_authenticate(self.student)
+        self.assertEqual(self._send(course_ids=[self.algebra.id]).status_code, 403)
+        self.assertEqual(Announcement.objects.count(), 0)
+
+    def test_requires_a_audience(self):
+        self.client.force_authenticate(self.educator)
+        resp = self._send(course_ids=[])
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Announcement.objects.count(), 0)
+
+    def test_blank_message_rejected(self):
+        self.client.force_authenticate(self.educator)
+        self.assertEqual(self._send(message='   ', course_ids=[self.algebra.id]).status_code, 400)
+        self.assertEqual(Announcement.objects.count(), 0)
+
+    def test_non_numeric_course_id_rejected(self):
+        self.client.force_authenticate(self.educator)
+        resp = self._send(course_ids=['not-an-id'])
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Announcement.objects.count(), 0)
+
+    def test_anonymous_cannot_post(self):
+        self.client.force_authenticate(None)
+        self.assertEqual(self._send(course_ids=[self.algebra.id]).status_code, 401)
+
+    # --- delivery ---
+
+    def test_enrolled_student_receives_it(self):
+        self.client.force_authenticate(self.educator)
+        self._send(course_ids=[self.algebra.id])
+
+        self.client.force_authenticate(self.student)
+        rows = self.client.get(reverse('announcement_list')).json()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['message'], 'Quiz moved to Friday')
+        self.assertEqual(rows[0]['author']['username'], 'ann_teacher')
+
+    def test_student_receives_it_once_when_in_two_targeted_classes(self):
+        """Two matches on the M2M join must collapse to one row."""
+        self.client.force_authenticate(self.educator)
+        self._send(course_ids=[self.algebra.id, self.geometry.id])
+
+        self.client.force_authenticate(self.student)
+        self.assertEqual(len(self.client.get(reverse('announcement_list')).json()), 1)
+
+    def test_student_outside_the_audience_receives_nothing(self):
+        self.client.force_authenticate(self.educator)
+        self._send(course_ids=[self.algebra.id])
+
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(self.client.get(reverse('announcement_list')).json(), [])
+
+    def test_educator_sees_what_they_posted_not_what_others_did(self):
+        self.client.force_authenticate(self.other_educator)
+        self._send(course_ids=[self.foreign.id])
+
+        self.client.force_authenticate(self.educator)
+        self.assertEqual(self.client.get(reverse('announcement_list')).json(), [])
+
+    def test_anonymous_cannot_list(self):
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(reverse('announcement_list')).status_code, 401)
+
+    # --- scheduling ---
+
+    def test_future_schedule_withheld_from_students(self):
+        when = timezone.now() + timedelta(days=2)
+        self.client.force_authenticate(self.educator)
+        resp = self._send(
+            course_ids=[self.algebra.id],
+            is_scheduled=True,
+            scheduled_at=when.isoformat(),
+        )
+        self.assertEqual(resp.status_code, 201)
+
+        self.client.force_authenticate(self.student)
+        self.assertEqual(self.client.get(reverse('announcement_list')).json(), [])
+
+    def test_author_still_sees_own_future_schedule(self):
+        """Otherwise the "Scheduled for ..." row has nothing to render from."""
+        when = timezone.now() + timedelta(days=2)
+        self.client.force_authenticate(self.educator)
+        self._send(course_ids=[self.algebra.id], is_scheduled=True, scheduled_at=when.isoformat())
+
+        rows = self.client.get(reverse('announcement_list')).json()
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]['is_scheduled'])
+        self.assertIsNotNone(rows[0]['scheduled_at'])
+
+    def test_schedule_without_a_date_rejected(self):
+        self.client.force_authenticate(self.educator)
+        resp = self._send(course_ids=[self.algebra.id], is_scheduled=True)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Announcement.objects.count(), 0)
+
+    def test_past_schedule_is_already_delivered(self):
+        when = timezone.now() - timedelta(hours=1)
+        self.client.force_authenticate(self.educator)
+        self._send(course_ids=[self.algebra.id], is_scheduled=True, scheduled_at=when.isoformat())
+
+        self.client.force_authenticate(self.student)
+        self.assertEqual(len(self.client.get(reverse('announcement_list')).json()), 1)
+
+    def test_scheduled_publish_time_tracks_the_schedule(self):
+        when = timezone.now() + timedelta(days=1)
+        self.client.force_authenticate(self.educator)
+        self._send(course_ids=[self.algebra.id], is_scheduled=True, scheduled_at=when.isoformat())
+        announcement = Announcement.objects.get()
+        # published_at is what the history list sorts by, so a queued post has to
+        # sort by when it will go out rather than when it was typed.
+        self.assertAlmostEqual(
+            announcement.published_at.timestamp(),
+            when.timestamp(),
+            delta=5,
+        )

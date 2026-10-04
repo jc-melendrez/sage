@@ -16,11 +16,11 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import Throttled
-from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment
+from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment, Announcement
 from ai_assistant.models import Quiz, QuizAttempt, QuizGroupShare
 from ai_assistant.quiz_package import build_quiz_package
 from rest_framework.permissions import IsAuthenticated
-from .serializers import UserProfileSerializer
+from .serializers import UserProfileSerializer, AnnouncementSerializer
 from core.firebase import get_firestore
 # Re-exported rather than redefined: several generators need these, and the
 # private copies that used to live here let the quiz generator drift onto a
@@ -60,15 +60,19 @@ from .serializers import (
     TaskSubmissionFileSerializer, TaskSubmissionFileListSerializer,
     ClassActivityAttachmentSerializer, ClassActivityAttachmentListSerializer,
 )
-from .permissions import IsSuperadmin
+from .permissions import IsSuperadmin, IsEducator, IsStudent
 from .utils.file_parser import extract_text_from_file, UnsupportedDocumentFormat
 from rest_framework.decorators import api_view, permission_classes, parser_classes, throttle_classes
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework_simplejwt.tokens import RefreshToken  # noqa: F401 (kept for imports elsewhere)
 from .authentication import SAGERefreshToken
 from core.firebase import verify_firebase_token, create_firebase_user, set_role_claim, get_role_claim
+import logging
 from .models import User
 from .otp import create_otp_challenge, otp_matches
+
+logger = logging.getLogger(__name__)
+
 from core.firestore_service import (
     get_user_profile, get_badges,
     create_study_group, join_group_by_code, get_user_groups,
@@ -77,6 +81,8 @@ from core.firestore_service import (
     send_message, get_messages, generate_join_code,
     toggle_reaction, ALLOWED_REACTIONS,
     upload_group_attachment, ATTACHMENT_MAX_SIZE,
+    create_course_chat_group, sync_course_chat_members,
+    add_group_members, remove_group_member_uid, delete_course_chat_group,
 )
 from core.s3 import presign_s3_url, attachment_key_prefix
 
@@ -205,9 +211,15 @@ class FirebaseLoginView(APIView):
             # })
             pass # Skip the OTP challenge entirely
 
+# 3.5 A user may have been enrolled in a course (or created by an admin)
+        # before they ever signed in, so they are in the class chat's Django
+        # roster without a Firebase uid in its Firestore `members` array. Now
+        # that the uid is known, grant access so Firestore rules let them in.
+        _backfill_class_chat_access(user)
+
         # 4. Issue a Django JWT for the rest of the app to use
-        #    SAGERefreshToken embeds role/token_version claims required by
-        #    TokenVersionAuthentication — plain RefreshToken would 401.
+        # SAGERefreshToken embeds role/token_version claims required by
+        # TokenVersionAuthentication — plain RefreshToken would 401.
         refresh = SAGERefreshToken.for_user(user)
         return Response(self._auth_payload(user, refresh))
 
@@ -1631,6 +1643,17 @@ class GroupLeaveView(APIView):
     def post(self, request, group_id):
         if not request.user.firebase_uid:
             return Response({"error": "Account has no linked Firebase profile"}, status=400)
+
+        # Class chats are owned by the course roster. Letting a member leave
+        # would silently drop them out of Firestore until the next roster sync
+        # put them back, so the roster has to be edited instead.
+        group = get_study_group(group_id)
+        if group and group.get('is_course_chat'):
+            return Response(
+                {"error": "This is your class's chat. Leave the course to stop receiving its messages."},
+                status=400,
+            )
+
         if not leave_study_group(group_id, request.user.firebase_uid):
             return Response({"error": "Group not found"}, status=404)
         return Response({"message": "Left the group."})
@@ -1685,6 +1708,173 @@ class GroupJoinRequestView(APIView):
 
 # ---------- COURSES: each course has its own set of students ----------
 
+def _course_member_uids(course):
+    """Firebase uids of the educator plus every enrolled student.
+
+    Students who have never logged in have no `firebase_uid` yet. They are
+    skipped here and picked up by a later sync once they sign in, rather than
+    silently landing in the chat as `None`.
+    """
+    uids = [course.educator.firebase_uid] if course.educator.firebase_uid else []
+    uids.extend(
+        uid for uid in course.students.values_list('firebase_uid', flat=True) if uid
+    )
+    return uids
+
+
+def _students_missing_firebase_uid(course):
+    """Enrolled students with no Firebase account yet (pending sync)."""
+    return course.students.filter(firebase_uid__isnull=True).count()
+
+
+def _backfill_class_chat_access(user):
+    """Give a freshly logged-in user access to their existing class chats.
+
+    Class-chat membership is stored as Firebase uids, but a Django user can be
+    enrolled (or created by an admin) before they have ever signed in, leaving
+    them in a class chat's roster but missing from its `members` array --
+    which Firestore rules read to decide who can open the chat. Adding the uid
+    at login closes that gap without the educator having to re-sync.
+
+    Best-effort: a Firestore failure must not block sign-in.
+    """
+    if not user.firebase_uid:
+        return
+
+    if user.is_student:
+        courses = Course.objects.filter(students=user).exclude(chat_group_id='')
+    elif user.is_educator:
+        courses = Course.objects.filter(educator=user).exclude(chat_group_id='')
+    else:
+        return
+
+    for course in courses:
+        try:
+            add_group_members(course.chat_group_id, [user.firebase_uid])
+        except Exception as exc:
+            logger.warning(
+                "Class chat backfill failed for user %s in course %s: %s",
+                user.id, course.id, exc,
+            )
+
+
+def _sync_course_chat_roster(course):
+    """Mirror the Django roster into the course's Firestore group.
+
+    Best-effort on purpose: the roster is the source of truth and a Firestore
+    outage must not stop students being enrolled or unenrolled. A failed sync
+    leaves the group stale, so it is logged and repaired by the next sync or
+    the student's next login backfill.
+    """
+    if not course.chat_group_id:
+        return False
+    try:
+        return sync_course_chat_members(course.chat_group_id, _course_member_uids(course))
+    except Exception as exc:
+        logger.warning(
+            "Class chat roster sync failed for course %s (group %s): %s",
+            course.id, course.chat_group_id, exc,
+        )
+        return False
+
+
+class CourseChatView(APIView):
+    """Read, create and remove a course's class chat.
+
+    Membership is derived from the course roster rather than self-service, so
+    `chat_group_id` on the course is the only link the app needs: the chat
+    screen is reached by id and Firestore rules do the per-user check.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _get_course(self, request, course_id):
+        try:
+            return Course.objects.get(id=course_id), None
+        except Course.DoesNotExist:
+            return None, Response({"error": "Course not found"}, status=404)
+
+    def _can_access(self, request, course):
+        if request.user == course.educator:
+            return True
+        return course.students.filter(id=request.user.id).exists()
+
+    def _payload(self, course):
+        return {
+            'chat_group_id': course.chat_group_id,
+            'has_class_chat': course.has_class_chat,
+            # Students with no Firebase account yet; they are added on login.
+            'pending_members': _students_missing_firebase_uid(course),
+            'member_count': len(_course_member_uids(course)),
+        }
+
+    def get(self, request, course_id):
+        course, error = self._get_course(request, course_id)
+        if error:
+            return error
+        if not self._can_access(request, course):
+            return Response({"error": "You are not a member of this course"}, status=403)
+
+        # Treat a read as a chance to repair drift (e.g. a student enrolled
+        # while Firestore was down, or one who has logged in since).
+        if course.chat_group_id:
+            _sync_course_chat_roster(course)
+        return Response(self._payload(course))
+
+    def post(self, request, course_id):
+        course, error = self._get_course(request, course_id)
+        if error:
+            return error
+        if request.user != course.educator:
+            return Response({"error": "Only the course educator can create the class chat"}, status=403)
+
+        # Idempotent: tapping "Create class chat" twice must not orphan the
+        # first group (and its messages) behind a replaced id.
+        if course.chat_group_id:
+            _sync_course_chat_roster(course)
+            return Response(self._payload(course))
+
+        if not request.user.firebase_uid:
+            return Response(
+                {"error": "No Firebase account linked yet. Sign out and sign in again to enable the class chat."},
+                status=400,
+            )
+
+        try:
+            group_id = create_course_chat_group(
+                educator_uid=request.user.firebase_uid,
+                course_id=course.id,
+                course_name=course.name,
+                member_uids=_course_member_uids(course),
+            )
+        except Exception as exc:
+            logger.error("Class chat creation failed for course %s: %s", course.id, exc)
+            return Response({"error": "Could not create the class chat. Try again."}, status=503)
+
+        course.chat_group_id = group_id
+        course.save(update_fields=['chat_group_id'])
+        return Response(self._payload(course), status=201)
+
+    def delete(self, request, course_id):
+        course, error = self._get_course(request, course_id)
+        if error:
+            return error
+        if request.user != course.educator:
+            return Response({"error": "Only the course educator can remove the class chat"}, status=403)
+
+        group_id = course.chat_group_id
+        course.chat_group_id = ''
+        course.save(update_fields=['chat_group_id'])
+
+        if group_id:
+            try:
+                delete_course_chat_group(group_id)
+            except Exception as exc:
+                logger.error("Class chat deletion failed for course %s: %s", course.id, exc)
+
+        return Response(self._payload(course))
+
+
 class CreateCourseView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1697,20 +1887,11 @@ class CreateCourseView(APIView):
             return Response({"error": "Course name is required"}, status=400)
 
         description = request.data.get('description', '')
-        study_group_id = request.data.get('study_group_id')
-
-        study_group = None
-        if study_group_id:
-            try:
-                study_group = StudyGroup.objects.get(id=study_group_id, created_by=request.user)
-            except StudyGroup.DoesNotExist:
-                return Response({"error": "Study group not found"}, status=404)
 
         course = Course.objects.create(
             name=name,
             description=description,
             educator=request.user,
-            study_group=study_group,
         )
         return Response(CourseSerializer(course).data, status=201)
 
@@ -1743,6 +1924,7 @@ class JoinCourseView(APIView):
 
         if request.user != course.educator and not course.students.filter(id=request.user.id).exists():
             course.students.add(request.user)
+            _sync_course_chat_roster(course)
 
         return Response(CourseRosterSerializer(course).data)
 
@@ -1786,6 +1968,15 @@ class AddStudentToCourseView(APIView):
 
         if not course.students.filter(id=student.id).exists():
             course.students.add(student)
+            # Adding to the roster is what grants class-chat access, so the
+            # Firestore group has to learn about it right away.
+            if course.chat_group_id and student.firebase_uid:
+                try:
+                    add_group_members(course.chat_group_id, [student.firebase_uid])
+                except Exception as exc:
+                    logger.warning(
+                        "Class chat add-member failed for course %s: %s", course.id, exc
+                    )
 
         return Response(CourseRosterSerializer(course).data)
 
@@ -1805,7 +1996,23 @@ class RemoveStudentFromCourseView(APIView):
         if not user_id:
             return Response({"error": "user_id is required"}, status=400)
 
+        # Read the uid before dropping the student: afterwards there is no
+        # roster row left to look it up from.
+        removed_uid = User.objects.filter(id=user_id).values_list(
+            'firebase_uid', flat=True
+        ).first()
+
         course.students.remove(user_id)
+
+        # Revoke chat access too. Firestore rules re-check membership on every
+        # read, so removing the uid is what actually locks them out.
+        if course.chat_group_id and removed_uid:
+            try:
+                remove_group_member_uid(course.chat_group_id, removed_uid)
+            except Exception as exc:
+                logger.warning(
+                    "Class chat remove-member failed for course %s: %s", course.id, exc
+                )
 
         return Response(CourseRosterSerializer(course).data)
 
@@ -2639,6 +2846,131 @@ def apply_role_change(actor, target_user, new_role):
         to_role=new_role,
     )
     return True
+
+
+# --- Announcements (educator broadcasts to their classes) ---
+
+class AnnouncementCreateView(APIView):
+    """
+    Educator posts an announcement to one or more of the classes they teach.
+
+    Course ownership is enforced here rather than trusted from the client: the
+    serializer's PrimaryKeyRelatedField queryset accepts any existing course id,
+    which would otherwise let an educator address someone else's roster.
+    """
+
+    permission_classes = [IsEducator]
+
+    def post(self, request):
+        owned_course_ids = set(
+            Course.objects.filter(educator=request.user).values_list('id', flat=True)
+        )
+
+        requested_courses = request.data.get('course_ids') or []
+        if not isinstance(requested_courses, (list, tuple)):
+            return Response(
+                {'error': 'course_ids must be a list of class ids.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            requested_courses = [int(cid) for cid in requested_courses]
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'course_ids must be a list of class ids.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not requested_courses:
+            return Response(
+                {'error': 'Choose at least one class to send this to.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        foreign = sorted(set(requested_courses) - owned_course_ids)
+        if foreign:
+            return Response(
+                {'error': f'You do not teach class(es): {foreign}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        message = (request.data.get('message') or '').strip()
+        if not message:
+            return Response(
+                {'error': 'Write something before sending.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        is_scheduled = bool(request.data.get('is_scheduled'))
+        scheduled_at = request.data.get('scheduled_at') or None
+        if is_scheduled and not scheduled_at:
+            return Response(
+                {'error': 'A scheduled announcement needs a date and time.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = AnnouncementSerializer(data={
+            'title': (request.data.get('title') or '').strip(),
+            'message': message,
+            'is_scheduled': is_scheduled,
+            'scheduled_at': scheduled_at,
+            'course_ids': requested_courses,
+        }, context={'request': request})
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        announcement = serializer.save()
+        if is_scheduled:
+            # Nothing reaches students until the scheduled moment, which the list
+            # endpoint below enforces, so scheduling needs no background job.
+            announcement.published_at = announcement.scheduled_at
+            announcement.save(update_fields=['published_at'])
+            announcement.refresh_from_db()
+
+        return Response(
+            AnnouncementSerializer(announcement).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AnnouncementListView(APIView):
+    """
+    One endpoint for both audiences: an educator sees what they posted, a student
+    sees what was addressed to them. Single endpoint so each role has exactly one
+    screen to render.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        now = timezone.now()
+        base = Announcement.objects.prefetch_related('courses', 'author')
+
+        if user.role == 'student':
+            queryset = base.filter(courses__students=user).distinct()
+        elif user.role == 'educator':
+            queryset = base.filter(author=user)
+        else:
+            queryset = base
+
+        # A scheduled announcement is withheld from students until its scheduled
+        # moment passes. The author still sees it so the "Scheduled for ..." row
+        # renders on the compose screen's history.
+        visible = [
+            announcement
+            for announcement in queryset
+            if not (
+                announcement.is_scheduled
+                and announcement.scheduled_at
+                and announcement.scheduled_at > now
+                and announcement.author_id != user.id
+            )
+        ]
+
+        return Response(
+            AnnouncementSerializer(visible, many=True).data,
+            status=status.HTTP_200_OK,
+        )
 
 
 # --- Superadmin views (global scope) ---
