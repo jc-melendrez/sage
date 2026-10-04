@@ -212,16 +212,29 @@ export default function CourseDetailScreen() {
     }
   }, [cid]);
 
-  const createChat = useCallback(async () => {
+  // New courses get a chat at creation time, so this create path mainly covers
+  // courses that predate it and ones whose chat was skipped because Firestore
+  // was unreachable at the time.
+  const createChat = useCallback(async (): Promise<string | null> => {
     setChatBusy(true);
     try {
-      setChat(await createCourseClassChat(cid));
+      const created = await createCourseClassChat(cid);
+      setChat(created);
+      return created.chat_group_id;
     } catch (err: any) {
       Alert.alert('Could not create class chat', err?.message ?? 'Please try again.');
+      return null;
     } finally {
       setChatBusy(false);
     }
   }, [cid]);
+
+  /** Header icon tap: open the existing chat, or create it on the way in. */
+  const openClassChat = useCallback(async () => {
+    if (chatBusy) return;
+    const groupId = chat?.has_class_chat ? chat.chat_group_id : await createChat();
+    if (groupId) router.push(`/chat/${groupId}`);
+  }, [chat, chatBusy, createChat, router]);
 
   const removeChat = useCallback(() => {
     Alert.alert(
@@ -646,6 +659,15 @@ export default function CourseDetailScreen() {
           else if (section === 'activities') setActVisible(true);
           else if (section === 'topics') openAddTopic();
         }}
+        secondaryRightIcon="chatbubbles-outline"
+        secondaryRightLabel="Class chat"
+        secondaryRightHint={
+          chat?.has_class_chat
+            ? 'Opens the class chat. Long-press to remove it.'
+            : 'Creates and opens the class chat. Long-press to remove it.'
+        }
+        onSecondaryRightPress={openClassChat}
+        onSecondaryRightLongPress={chat?.has_class_chat ? removeChat : undefined}
       />
 
       <ScrollView
@@ -668,56 +690,6 @@ export default function CourseDetailScreen() {
               </TouchableOpacity>
             );
           })}
-        </View>
-
-        {/* Class chat sits above the section tabs: it's a place for the class to
-            talk, not course content, and it stays reachable from every tab. */}
-        <View style={styles.chatCard}>
-          <View style={styles.topicIconBg}>
-            <Ionicons name="chatbubbles" size={20} color={COLORS.purpleVibrant} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.topicName}>Class chat</Text>
-            {chat?.has_class_chat ? (
-              <Text style={styles.topicDesc}>
-                {chat.member_count} member{chat.member_count === 1 ? '' : 's'}
-                {chat.pending_members > 0
-                  ? ` · ${chat.pending_members} awaiting first sign-in`
-                  : ''}
-              </Text>
-            ) : (
-              <Text style={styles.topicDesc}>Give your class a shared space to discuss.</Text>
-            )}
-          </View>
-          {chat?.has_class_chat ? (
-            <>
-              <TouchableOpacity
-                style={styles.chatAction}
-                activeOpacity={0.7}
-                disabled={chatBusy}
-                onPress={() => router.push(`/chat/${chat.chat_group_id}`)}
-              >
-                <Text style={styles.chatActionText}>Open</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.chatMore}
-                activeOpacity={0.7}
-                disabled={chatBusy}
-                onPress={removeChat}
-              >
-                <Ionicons name="trash-outline" size={18} color={COLORS.textMuted} />
-              </TouchableOpacity>
-            </>
-          ) : (
-            <TouchableOpacity
-              style={styles.chatAction}
-              activeOpacity={0.7}
-              disabled={chatBusy}
-              onPress={createChat}
-            >
-              <Text style={styles.chatActionText}>{chatBusy ? 'Creating…' : 'Create'}</Text>
-            </TouchableOpacity>
-          )}
         </View>
 
         {section === 'topics' && (
@@ -1496,28 +1468,6 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     padding: 16,
   },
-  chatCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: COLORS.surface,
-    borderRadius: RADIUS.lg,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 16,
-  },
-  chatAction: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: RADIUS.md,
-    backgroundColor: COLORS.purpleVibrant,
-  },
-  chatActionText: {
-    color: COLORS.bg,
-    fontFamily: FONTS.bold,
-    fontSize: 13,
-  },
-  chatMore: { padding: 6 },
   topicHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   topicIconBg: {
     width: 40,

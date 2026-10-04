@@ -659,12 +659,104 @@ class CourseClassChatTests(APITestCase):
         """The old CreateCourseView 404'd on `study_group_id` because it looked
         the id up in the always-empty Django StudyGroup table."""
         self.client.force_authenticate(user=self.educator)
-        resp = self.client.post(
-            reverse('create_course'),
-            {'name': 'Astronomy', 'study_group_id': 999},
-        )
+        with patch.object(users_views, 'create_course_chat_group', return_value='g-auto') as mock:
+            resp = self.client.post(
+                reverse('create_course'),
+                {'name': 'Astronomy', 'study_group_id': 999},
+            )
+
         self.assertEqual(resp.status_code, 201)
-        self.assertEqual(Course.objects.get(name='Astronomy').chat_group_id, '')
+        # The id comes from the auto-created chat, never from the input.
+        self.assertEqual(Course.objects.get(name='Astronomy').chat_group_id, 'g-auto')
+        self.assertEqual(mock.call_args.kwargs['course_id'], Course.objects.get(name='Astronomy').id)
+
+
+class CourseAutoCreateChatTests(APITestCase):
+    """A new course gets its class chat up front, so nobody has to switch it on."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.educator = User.objects.create_user(
+            username='auto_teacher', password='pass123', role='educator',
+            firebase_uid='auto-edu-uid',
+        )
+        self.client.force_authenticate(user=self.educator)
+
+    def _create(self, name='Geometry'):
+        return self.client.post(reverse('create_course'), {'name': name})
+
+    def test_new_course_comes_with_a_class_chat(self):
+        with patch.object(users_views, 'create_course_chat_group', return_value='g-new') as mock:
+            resp = self._create()
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['chat_group_id'], 'g-new')
+        self.assertTrue(resp.data['has_class_chat'])
+
+        course = Course.objects.get(name='Geometry')
+        self.assertEqual(course.chat_group_id, 'g-new')
+        # A brand new course has no students yet, so the educator is the only
+        # member.
+        self.assertEqual(mock.call_args.kwargs['member_uids'], ['auto-edu-uid'])
+        self.assertEqual(mock.call_args.kwargs['course_name'], 'Geometry')
+
+    def test_firestore_failure_still_creates_the_course(self):
+        """A chat is a convenience. Losing it must not cost the educator the
+        course they just created."""
+        with patch.object(users_views, 'create_course_chat_group', side_effect=RuntimeError('down')):
+            resp = self._create()
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['chat_group_id'], '')
+        self.assertFalse(resp.data['has_class_chat'])
+        self.assertTrue(Course.objects.filter(name='Geometry').exists())
+
+    def test_educator_without_firebase_uid_skips_chat_silently(self):
+        self.educator.firebase_uid = None
+        self.educator.save(update_fields=['firebase_uid'])
+
+        with patch.object(users_views, 'create_course_chat_group') as mock:
+            resp = self._create()
+
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['chat_group_id'], '')
+        mock.assert_not_called()
+
+    def test_existing_chat_is_never_replaced(self):
+        """`_ensure_course_chat` is also reached from the idempotent tap path;
+        it must not mint a second group over a live one."""
+        course = Course.objects.create(
+            name='Legacy', educator=self.educator, chat_group_id='g-existing',
+        )
+        with patch.object(users_views, 'create_course_chat_group') as mock:
+            self.assertEqual(users_views._ensure_course_chat(course), 'g-existing')
+        mock.assert_not_called()
+
+    def test_ensure_helper_persists_the_group_id(self):
+        course = Course.objects.create(name='Direct', educator=self.educator)
+        with patch.object(users_views, 'create_course_chat_group', return_value='g-direct'):
+            self.assertEqual(users_views._ensure_course_chat(course), 'g-direct')
+        course.refresh_from_db()
+        self.assertEqual(course.chat_group_id, 'g-direct')
+
+    def test_students_join_the_chat_created_with_the_course(self):
+        """The group is made before anyone enrols, so the roster has to flow in
+        afterwards or the class would start with an empty chat."""
+        with patch.object(users_views, 'create_course_chat_group', return_value='g-flow'):
+            self._create()
+        course = Course.objects.get(name='Geometry')
+
+        student = User.objects.create_user(
+            username='late_joiner', password='p', role='student', firebase_uid='late-uid',
+        )
+        self.client.force_authenticate(user=student)
+        # Joining a course re-syncs the whole roster, unlike the educator's
+        # add-student action which just appends the one uid.
+        with patch.object(users_views, 'sync_course_chat_members') as sync:
+            self.client.post(reverse('join_course'), {'join_code': course.join_code})
+
+        sync.assert_called_once_with('g-flow', ['auto-edu-uid', 'late-uid'])
+        self.assertIn(student, course.students.all())
 
 
 class GamificationServiceTests(TestCase):

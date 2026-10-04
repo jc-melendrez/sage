@@ -28,6 +28,20 @@ interface EducatorHeaderProps {
   compact?: boolean;
   rightIcon?: keyof typeof Ionicons.glyphMap;
   onRightPress?: () => void;
+  /**
+   * A second icon rendered immediately left of `rightIcon`, sharing its button
+   * style. `children` can't fill this slot because it renders below the row
+   * rather than inside it, so a header that needs two actions beside each other
+   * needs this instead. Pass `onSecondaryRightLongPress` to make the icon a
+   * long-press-only action (React Native suppresses `onPress` once a long press
+   * fires, so tap and hold can't both trigger).
+   */
+  secondaryRightIcon?: keyof typeof Ionicons.glyphMap;
+  onSecondaryRightPress?: () => void;
+  onSecondaryRightLongPress?: () => void;
+  /** Spoken by screen readers in place of the icon name. */
+  secondaryRightLabel?: string;
+  secondaryRightHint?: string;
   /** Initials for a small avatar button rendered on the right. */
   avatar?: string;
   /** Resolved profile picture for that avatar, e.g. pfpSource(user.avatar). */
@@ -49,6 +63,11 @@ export function EducatorHeader({
   compact = false,
   rightIcon,
   onRightPress,
+  secondaryRightIcon,
+  onSecondaryRightPress,
+  onSecondaryRightLongPress,
+  secondaryRightLabel,
+  secondaryRightHint,
   avatar,
   avatarImage,
   onAvatarPress,
@@ -101,6 +120,20 @@ style={[styles.header, { paddingTop: insets.top + (compact ? 12 : 16) }]}
               accessibilityLabel="Notifications"
             >
               <Ionicons name="notifications-outline" size={20} color="white" />
+            </TouchableOpacity>
+          )}
+          {secondaryRightIcon && (
+            <TouchableOpacity
+              style={[styles.iconBtn, styles.rightIconBtn]}
+              onPress={onSecondaryRightPress}
+              onLongPress={onSecondaryRightLongPress}
+              accessibilityRole="button"
+              accessibilityLabel={
+                secondaryRightLabel ?? secondaryRightIcon.replace(/-outline$/, '').replace(/-/g, ' ')
+              }
+              accessibilityHint={secondaryRightHint}
+            >
+              <Ionicons name={secondaryRightIcon} size={20} color="white" />
             </TouchableOpacity>
           )}
           {rightIcon && (

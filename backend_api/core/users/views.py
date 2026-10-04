@@ -1727,6 +1727,45 @@ def _students_missing_firebase_uid(course):
     return course.students.filter(firebase_uid__isnull=True).count()
 
 
+def _ensure_course_chat(course):
+    """Create the Firestore group for a course and persist its id.
+
+    Returns the group id, or None when one can't be created. Never raises:
+    callers decide how loudly to fail. `CreateCourseView` treats None as "carry
+    on without a chat" so a Firestore outage can't block course creation, while
+    `CourseChatView` turns None into a 503 because the educator explicitly asked
+    for a chat and would otherwise get a silently inert button.
+    """
+    if course.chat_group_id:
+        # Already linked. Re-syncing here would be a pointless write on every
+        # idempotent re-tap; drift is repaired by the GET and roster paths.
+        return course.chat_group_id
+
+    if not course.educator.firebase_uid:
+        # Nothing to grant access to: without the educator's uid the group
+        # would be one they can never open. Left for the lazy create on tap.
+        logger.warning(
+            "Skipped class chat for course %s: educator %s has no firebase_uid",
+            course.id, course.educator_id,
+        )
+        return None
+
+    try:
+        group_id = create_course_chat_group(
+            educator_uid=course.educator.firebase_uid,
+            course_id=course.id,
+            course_name=course.name,
+            member_uids=_course_member_uids(course),
+        )
+    except Exception as exc:
+        logger.error("Class chat creation failed for course %s: %s", course.id, exc)
+        return None
+
+    course.chat_group_id = group_id
+    course.save(update_fields=['chat_group_id'])
+    return group_id
+
+
 def _backfill_class_chat_access(user):
     """Give a freshly logged-in user access to their existing class chats.
 
@@ -1840,19 +1879,10 @@ class CourseChatView(APIView):
                 status=400,
             )
 
-        try:
-            group_id = create_course_chat_group(
-                educator_uid=request.user.firebase_uid,
-                course_id=course.id,
-                course_name=course.name,
-                member_uids=_course_member_uids(course),
-            )
-        except Exception as exc:
-            logger.error("Class chat creation failed for course %s: %s", course.id, exc)
+        group_id = _ensure_course_chat(course)
+        if not group_id:
             return Response({"error": "Could not create the class chat. Try again."}, status=503)
 
-        course.chat_group_id = group_id
-        course.save(update_fields=['chat_group_id'])
         return Response(self._payload(course), status=201)
 
     def delete(self, request, course_id):
@@ -1893,6 +1923,13 @@ class CreateCourseView(APIView):
             description=description,
             educator=request.user,
         )
+
+        # Give every new course a class chat up front, so educators and students
+        # never have to know a chat has to be switched on. Best-effort: a
+        # Firestore outage leaves chat_group_id blank and the app creates the
+        # chat on first tap instead of failing the course itself.
+        _ensure_course_chat(course)
+
         return Response(CourseSerializer(course).data, status=201)
 
 class MyCoursesView(APIView):
