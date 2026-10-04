@@ -1163,6 +1163,57 @@ class QuizImportTests(APITestCase):
         self.assertIn('not among its options', resp.data['error'])
         self.assertEqual(Quiz.objects.count(), 0)
 
+    def test_imports_a_typed_quiz_with_no_options(self):
+        # A typed question has no options to begin with, so the "has answer
+        # options" check used to make every Identification/FIB package
+        # impossible to import.
+        resp = self.client.post(
+            reverse('quiz_import'),
+            self._package(
+                quiz_type='Identification',
+                questions=[{
+                    'question_text': 'Which pigment catches light?',
+                    'correct_answer': 'Chlorophyll',
+                    'explanation': 'It absorbs light for photosynthesis.',
+                }],
+            ),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)
+        question = Quiz.objects.get(id=resp.data['id']).questions.first()
+        self.assertEqual(question.correct_answer, 'Chlorophyll')
+        self.assertEqual(list(question.options or []), [])
+
+    def test_typed_import_drops_stray_options(self):
+        # Options carried by an older package must not survive, or the quiz
+        # review offers buttons for a question the student answered by typing.
+        pkg = self._package(
+            quiz_type='Fill-in-the-Blank',
+            questions=[{
+                'question_text': 'The water cycle stage is ____.',
+                'options': ['Evaporation', 'Condensation'],
+                'correct_answer': 'Evaporation',
+            }],
+        )
+        resp = self.client.post(reverse('quiz_import'), pkg, format='json')
+        self.assertEqual(resp.status_code, 201)
+        question = Quiz.objects.get(id=resp.data['id']).questions.first()
+        self.assertEqual(list(question.options or []), [])
+
+    def test_typed_import_accepts_a_correct_answer_outside_the_options(self):
+        # Meaningless for a typed question, and checking it would reject valid
+        # packages whose stray options happened to be absent.
+        pkg = self._package(
+            quiz_type='Identification',
+            questions=[{
+                'question_text': 'Which pigment catches light?',
+                'options': ['Not the answer'],
+                'correct_answer': 'Chlorophyll',
+            }],
+        )
+        resp = self.client.post(reverse('quiz_import'), pkg, format='json')
+        self.assertEqual(resp.status_code, 201)
+
     def test_rejects_a_question_with_no_options(self):
         pkg = self._package()
         pkg['questions'][0]['options'] = []
@@ -1229,6 +1280,82 @@ class GenerateQuizReliabilityTests(APITestCase):
         body = {'content': 'Study the water cycle.', 'count': 3}
         body.update(extra)
         return self.client.post(reverse('generate_quiz'), body, format='json')
+
+    # -- typed questions carry no options --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_typed_quiz_stores_questions_without_options(self, mock_call):
+        # A typed question is answered by typing. The generator used to demand
+        # four options for every type and reject anything with fewer than two, so
+        # an Identification quiz was stored with decoy options -- which the quiz
+        # review then rendered as a multiple choice question the student never
+        # saw.
+        mock_call.return_value = _deepseek_response(
+            _quiz_payload(3, correct_answer='Chlorophyll')
+        )
+        resp = self.post_quiz(count=3, type='Identification')
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        # The generation response echoes the model's JSON rather than the row,
+        # so read the stored quiz back instead of trusting resp.data.
+        quiz = Quiz.objects.get(user=self.educator, title='Generated')
+        self.assertEqual(quiz.quiz_type, 'Identification')
+        self.assertEqual(quiz.questions.count(), 3)
+        for question in quiz.questions.all():
+            self.assertEqual(list(question.options or []), [])
+            self.assertEqual(question.correct_answer, 'Chlorophyll')
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_typed_prompt_tells_the_model_not_to_invent_options(self, mock_call):
+        mock_call.return_value = _deepseek_response(_quiz_payload(3))
+        self.post_quiz(count=3, type='Identification')
+
+        prompt = mock_call.call_args[0][0]['messages'][1]['content']
+        # Telling the model what to omit is not enough on its own -- the schema
+        # block in the system prompt also shows an options array -- so both have
+        # to agree, or the model copies the schema.
+        system_prompt = mock_call.call_args[0][0]['messages'][0]['content']
+        self.assertIn('NO "options" field at all', prompt)
+        self.assertNotIn('"options": ["Option A"', system_prompt)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_typed_quiz_strips_options_a_model_invented_anyway(self, mock_call):
+        # A model that ignores the prompt still returns options. Dropping them
+        # beats rejecting the quiz: the educator gets the typed question they
+        # asked for either way, and the decoys were only ever harmful.
+        mock_call.return_value = _deepseek_response(_quiz_payload(3))
+        resp = self.post_quiz(count=3, type='Fill-in-the-Blank')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        quiz = Quiz.objects.get(user=self.educator, title='Generated')
+        self.assertEqual(quiz.questions.count(), 3)
+        for question in quiz.questions.all():
+            self.assertEqual(list(question.options or []), [])
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_multiple_choice_still_requires_and_keeps_options(self, mock_call):
+        # The exemption must not leak to choice questions, where a missing
+        # option list makes the question ungradable.
+        mock_call.return_value = _deepseek_response(
+            _quiz_payload(3, options=['Only one'])
+        )
+        resp = self.post_quiz(count=3, type='Multiple Choice')
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn('fewer than 2 options', resp.data['error'])
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_true_false_still_gets_two_options(self, mock_call):
+        mock_call.return_value = _deepseek_response(
+            _quiz_payload(3, options=['True', 'False'], correct_answer='True')
+        )
+        resp = self.post_quiz(count=3, type='True/False')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        prompt = mock_call.call_args[0][0]['messages'][1]['content']
+        self.assertIn('exactly 2 options', prompt)
 
     # -- request shape --
 

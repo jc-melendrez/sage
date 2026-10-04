@@ -64,6 +64,10 @@ export default function TabLayout() {
         tabBarInactiveTintColor: isDark ? '#f6f0ff' : '#c0a7e7',
         headerShown: false,
         tabBarButton: HapticTab,
+      // The AI assistant composes messages from a tab screen, and the bar was
+      // covering the bottom of the input with the keyboard up. Hiding it is the
+      // fix; `keyboardHidesTabBar` in app.json alone did nothing on Android.
+      tabBarHideOnKeyboard: true,
         tabBarStyle: {
           // 🔥 Tab bar color (your choice)
           backgroundColor: '#4C1D95', // purple

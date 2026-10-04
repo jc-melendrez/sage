@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, Animated, ScrollView, Alert, ActivityIndicator } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
@@ -25,6 +25,39 @@ const PLACEMENT_XP: Record<number, number> = { 1: 100, 2: 60, 3: 40 };
 
 function placementXpFor(rank: number) {
   return PLACEMENT_XP[rank] ?? 25;
+}
+
+/**
+ * A team that has not finished yet.
+ *
+ * Deliberately a separate component from TeamResultCard rather than a `pending`
+ * flag on it: that card is built around a known score (it derives accuracy from
+ * it, and the expanded form lists every member's contribution), so masking it
+ * properly means not rendering its score-dependent parts at all.
+ *
+ * The score is shown as an em dash rather than left blank, because an empty
+ * right-hand column reads as a rendering bug. The point is that there IS a
+ * score here, it just is not knowable yet.
+ */
+function PendingTeamCard({ team }: { team: TeamEntry }) {
+  const fade = useState(new Animated.Value(0))[0];
+  useEffect(() => {
+    Animated.timing(fade, { toValue: 1, duration: 320, useNativeDriver: true }).start();
+  }, [fade]);
+
+  const members = team.memberCount ?? team.memberIds?.length ?? 0;
+  return (
+    <Animated.View style={[styles.row, styles.rowPending, { opacity: fade }]}>
+      <Text style={styles.medal}>{'–'}</Text>
+      <View style={[styles.rowMain, { borderLeftColor: team.color, borderLeftWidth: 3, paddingLeft: 8 }]}>
+        <Text style={styles.name} numberOfLines={1}>{team.name}</Text>
+        <Text style={styles.rowMeta} numberOfLines={1}>
+          Still playing&hellip;{members === 1 ? ' 1 player' : ` ${members} players`}
+        </Text>
+      </View>
+      <Text style={[styles.score, styles.scorePending]}>{'— pts'}</Text>
+    </Animated.View>
+  );
 }
 
 export default function FinalScreen() {
@@ -63,6 +96,15 @@ export default function FinalScreen() {
   // room over (HostClaimView) and the new host has to see the button too.
   const [isHost, setIsHost] = useState(false);
   const [rematching, setRematching] = useState(false);
+  /**
+   * True once the owner has actually closed the room.
+   *
+   * This is the switch between "watch the scores arrive" and "here they all
+   * are". Before settlement each entry's score is only shown once that student or
+   * team has pressed Finish; after it, everything is revealed at once, because
+   * the game is over and holding the last row back would only look broken.
+   */
+  const [settled, setSettled] = useState(false);
 
   const startRematch = useCallback(async () => {
     try {
@@ -133,6 +175,7 @@ export default function FinalScreen() {
         setTeamMode(!!data?.teamMode);
         setQuestions((data?.questions ?? []) as GameQuestion[]);
         setSettledRank(data?.teamResults ?? []);
+        setSettled(data?.status === 'finished');
         if (myUserId && data?.hostId != null) {
           setIsHost(String(data.hostId) === myUserId);
         }
@@ -288,25 +331,111 @@ const breakdown = useMemo(() => buildBreakdown({
         ? (myTeamIndex >= 0 ? myTeamIndex + 1 : null)
         : myRank;
 
-  const showPodium = teamMode ? rankedTeams.length >= 3 : playersList.length >= 3;
-  const podiumSecond = teamMode ? rankedTeams[1] : playersList[1];
-  const podiumFirst = teamMode ? rankedTeams[0] : playersList[0];
-  const podiumThird = teamMode ? rankedTeams[2] : playersList[2];
+  /* ── reveal on finish ───────────────────────────────────────────────────
+     A score is shown once its owner has pressed Finish, not while it is still
+     climbing. This board used to sort every row by score as it updated, so the
+     final screen leaked the whole running order: a student still on question 7
+     could see exactly where they sat, and the "who finished first" reveal that
+     makes the last question tense turned into a leaderboard everyone could read
+     at any point during the game.
+
+     So each entry is one of three things:
+       finished  score shown, ranked normally
+       pending   score masked, marked as still playing
+       settled   the owner closed the room, so nothing is held back any more
+
+     Offline and LAN rows are written with `isFinished: true` by their own
+     session paths, and `settled` is forced true for them, so neither regresses. */
+  const revealed = settled || isOffline || isLan;
+  // Memoised so the filters below can honestly list it: it closes over
+  // `revealed`, and a fresh closure every render would make every one of those
+  // memos depend on an unstable identity.
+  const isFinished = useCallback(
+    (e: { isFinished?: boolean } | null | undefined) =>
+      revealed || e?.isFinished === true,
+    [revealed],
+  );
+  const finishedPlayers = useMemo(
+    () => playersList.filter(isFinished), [playersList, isFinished]);
+  const pendingPlayers = useMemo(
+    () => playersList.filter((p) => !isFinished(p)), [playersList, isFinished]);
+
+  // Teams still playing. Held back individually, so a team only appears once
+  // every member has finished -- a team that finished first should be revealed
+  // first, not in score order among teams that are still mid-quiz.
+  const finishedTeams = useMemo(
+    () => rankedTeams.filter(isFinished), [rankedTeams, isFinished]);
+  const pendingTeams = useMemo(
+    () => rankedTeams.filter((t) => !isFinished(t)), [rankedTeams, isFinished]);
+
+  /**
+   * Re-pulses when the podium's membership changes, so a row revealed while the
+   * screen is already open announces itself instead of quietly appearing.
+   *
+   * Keyed on the ids rather than the count, so a live re-sort that keeps the
+   * same three teams does not re-fire on every score tick. The first render only
+   * records the key -- there is nothing to announce yet.
+   */
+  const podiumPulse = useState(new Animated.Value(1))[0];
+  const podiumKey = useMemo(
+    () => (teamMode
+      ? finishedTeams.map(t => String(t.id)).join(',')
+      : finishedPlayers.map(p => String(p.id)).join(',')),
+    [teamMode, finishedTeams, finishedPlayers],
+  );
+  const lastPodiumKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastPodiumKey.current === null) { lastPodiumKey.current = podiumKey; return; }
+    if (lastPodiumKey.current === podiumKey) return;
+    lastPodiumKey.current = podiumKey;
+    podiumPulse.setValue(0.94);
+    Animated.spring(podiumPulse, { toValue: 1, friction: 7, tension: 55, useNativeDriver: true }).start();
+  }, [podiumKey, podiumPulse]);
+
+  /**
+   * The podium is drawn from FINISHED entries only.
+   *
+   * It used to index `rankedTeams` directly, which meant a team that was still
+   * mid-quiz could occupy a podium column and print its score -- the exact leak
+   * the masking below exists to prevent. With fewer than three finished entries
+   * there is no podium at all; the list below carries them instead.
+   */
+  const podiumTeams = useMemo(() => finishedTeams.slice(0, 3), [finishedTeams]);
+  const podiumTeamIds = useMemo(
+    () => new Set(podiumTeams.map(t => String(t.id))), [podiumTeams]);
+
+  const showPodium = teamMode ? podiumTeams.length >= 3 : finishedPlayers.length >= 3;
+  const podiumSecond = teamMode ? podiumTeams[1] : finishedPlayers[1];
+  const podiumFirst = teamMode ? podiumTeams[0] : finishedPlayers[0];
+  const podiumThird = teamMode ? podiumTeams[2] : finishedPlayers[2];
   const podiumName = (t: any) => t?.displayName ?? t?.name ?? '?';
   const podiumScore = (t: any) => t?.score ?? 0;
   const podiumColor = (t: any) => (teamMode && t?.color) || '#2d2a6e';
 
-  // Teams that are not already represented elsewhere on the screen. This used
-  // to filter to `rankOf(t) > 3`, which assumes a podium is being drawn: with
-  // two teams (or a player who watched from the Spectators column, who has no
-  // team of their own) that filter matched nothing, so the list was empty and
-  // the screen showed a title and nothing else. Anything already on the podium
-  // or expanded as the viewer's own team is dropped, so no team shows twice.
-  const onPodium = !!myTeam && showPodium && rankOf(myTeam) <= 3;
-  const detailTeam = teamMode && myTeam && !onPodium ? myTeam : null;
+  // Teams that are not already represented elsewhere on the screen. Membership
+  // is by identity rather than by rank: with a podium drawn from finished teams
+  // while the overall ranking still counts the teams still playing, a
+  // `rankOf(t) <= 3` filter dropped the right rows and kept the wrong ones.
+  const onPodium = !!myTeam && showPodium && podiumTeamIds.has(String(myTeam.id));
+  /**
+   * The viewer's own team, expanded. Only when it has finished: TeamResultCard
+   * prints the team score, its accuracy and every member's contribution, so
+   * handing it a still-playing team would reveal the whole thing through the
+   * back door that masking the list was meant to close.
+   */
+  const detailTeam = teamMode && myTeam && !onPodium && isFinished(myTeam) ? myTeam : null;
   const listData = teamMode
-    ? rankedTeams.filter(t => !(showPodium && rankOf(t) <= 3) && !(detailTeam && sameTeamId(t.id, detailTeam.id)))
-    : showPodium ? playersList.slice(3) : playersList;
+    ? [
+      ...finishedTeams.filter(t =>
+        !podiumTeamIds.has(String(t.id))
+        && !(detailTeam && sameTeamId(t.id, detailTeam.id))),
+      // Still-playing teams are appended rather than dropped, so the row the
+      // student is waiting on is visibly waiting instead of simply missing.
+      ...pendingTeams.filter(t => !(detailTeam && sameTeamId(t.id, detailTeam.id))),
+    ]
+    : [...finishedPlayers.slice(showPodium ? 3 : 0), ...pendingPlayers];
+  // A row appended for being pending is not ranked -- it has no score yet.
+  const isPendingRow = (item: any) => !isFinished(item);
   // Cards below the podium keep their true overall rank, which can be far
   // lower than their position in the filtered list.
   const listRank = (t: TeamEntry) => rankOf(t);
@@ -348,7 +477,15 @@ const breakdown = useMemo(() => buildBreakdown({
         <Animated.View
           style={[
             styles.podiumRow,
-            { opacity: podiumAnim, transform: [{ scale: podiumAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) }] },
+            {
+              opacity: podiumAnim,
+              transform: [
+                { scale: podiumAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) },
+                // The re-pulse is nested inside the entrance transform rather than
+                // replacing it, so a newly revealed podium still animates in.
+                { scale: podiumPulse },
+              ],
+            },
           ]}
         >
           <View style={[styles.podiumCol, styles.podiumSecond]}>
@@ -396,9 +533,16 @@ const breakdown = useMemo(() => buildBreakdown({
             data={listData}
             keyExtractor={i => String(i.id)}
             scrollEnabled={false}
-            renderItem={({ item }) => (
-              <TeamResultCard team={item as TeamEntry} rank={listRank(item as TeamEntry)} expanded={false} isMyTeam={false} />
-            )}
+            renderItem={({ item }) => {
+              const team = item as TeamEntry;
+              if (isPendingRow(team)) {
+                // A masked card, not TeamResultCard. Its accuracy, stat strip and
+                // per-member contributions would otherwise read straight off the
+                // score that is being held back.
+                return <PendingTeamCard team={team} />;
+              }
+              return <TeamResultCard team={team} rank={listRank(team)} expanded={false} isMyTeam={false} />;
+            }}
           />
         </>
       ) : (
@@ -410,22 +554,34 @@ const breakdown = useMemo(() => buildBreakdown({
           // ScrollView and the inner gesture swallows the outer one.
           scrollEnabled={false}
           renderItem={({ item, index }) => {
-            const rank = showPodium ? index + 4 : index + 1;
+            const pending = isPendingRow(item);
+            // Only a finished entry gets a rank. A pending row has no score, so
+            // numbering it would imply a position it does not have.
+            const rank = pending ? null : (showPodium ? index + 4 : index + 1);
             const answered = item.answeredCount ?? 0;
             const accuracy = answered > 0
               ? Math.round(((item.correctCount ?? 0) / answered) * 100)
               : 0;
             return (
-              <View style={styles.row}>
-                <Text style={styles.medal}>{rank}.</Text>
+              <View style={[styles.row, pending && styles.rowPending]}>
+                <Text style={styles.medal}>{pending ? '–' : `${rank}.`}</Text>
                 <View style={styles.rowMain}>
                   <Text style={styles.name} numberOfLines={1}>{item.displayName}</Text>
                   <Text style={styles.rowMeta} numberOfLines={1}>
-                    {accuracy}% · {item.correctCount ?? 0}/{answered}
-                    {item.bestStreak ? ` · best ${item.bestStreak}` : ''}
+                    {pending
+                      ? 'Still playing…'
+                      : `${accuracy}% · ${item.correctCount ?? 0}/${answered}`
+                        + (item.bestStreak ? ` · best ${item.bestStreak}` : '')}
                   </Text>
                 </View>
-                <Text style={styles.score}>{item.score} pts</Text>
+                {/* Masked rather than omitted: an empty right column reads as a
+                    rendering bug, and the point is that there IS a score here,
+                    it just is not knowable yet. */}
+                {pending ? (
+                  <Text style={[styles.score, styles.scorePending]}>— pts</Text>
+                ) : (
+                  <Text style={styles.score}>{item.score} pts</Text>
+                )}
               </View>
             );
           }}
@@ -482,6 +638,8 @@ const styles = StyleSheet.create({
   teamDot: { width: 10, height: 10, borderRadius: 5, marginRight: 10 },
   score: { color: '#7F77DD', fontWeight: 'bold', fontSize: 16 },
   btn: { backgroundColor: '#7F77DD', borderRadius: 12, padding: 16, alignItems: 'center', marginTop: 16 },
+  rowPending: { opacity: 0.62 },
+  scorePending: { color: '#9AA0B4' },
   rematchBtn: { backgroundColor: '#10B981', marginTop: 10 },
   btnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
   podiumRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'center', marginBottom: 28, gap: 8 },

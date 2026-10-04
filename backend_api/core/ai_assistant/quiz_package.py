@@ -11,6 +11,8 @@ into the recipient's own quiz list as an independent copy. Versioned so a
 future format change is detected rather than silently mis-parsed.
 """
 
+from core.question_types import TYPED_QUESTION_TYPES, normalise_question_type
+
 QUIZ_PACKAGE_FORMAT = 'sage.quiz'
 QUIZ_PACKAGE_VERSION = 1
 
@@ -69,6 +71,10 @@ def validate_quiz_package(package):
         return None, f"A quiz can have at most {MAX_IMPORT_QUESTIONS} questions."
 
     quiz_type = str(package.get('quiz_type') or 'Multiple Choice')[:50]
+    # A typed package carries no options, and the two checks below ("has answer
+    # options" / "correct answer is among its options") are the wrong test for
+    # one -- which made every typed package impossible to import.
+    typed = normalise_question_type(quiz_type) in TYPED_QUESTION_TYPES
     prepared = []
     for index, raw in enumerate(raw_questions, start=1):
         if not isinstance(raw, dict):
@@ -80,6 +86,17 @@ def validate_quiz_package(package):
             return None, f"Question {index} has no text."
         if not correct_answer:
             return None, f"Question {index} has no correct answer."
+        if typed:
+            # Options on a typed question are ignored on the way in, for the
+            # same reason the generator strips them: the review screen would
+            # otherwise offer buttons for a question answered by typing.
+            prepared.append({
+                'question_text': question_text,
+                'options': [],
+                'correct_answer': correct_answer,
+                'explanation': str(raw.get('explanation') or ''),
+            })
+            continue
         if not isinstance(options, list) or not options:
             return None, f"Question {index} has no answer options."
         options = [str(opt)[:MAX_IMPORT_OPTION_CHARS] for opt in options]

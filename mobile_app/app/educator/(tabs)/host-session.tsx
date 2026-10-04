@@ -742,10 +742,16 @@ export default function HostSessionScreen() {
       const res = await fetch(`${API_BASE_URL}/game/finish/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ roomCode: code }),
+        // `confirm` is what actually closes the room. Without it this call only
+        // recorded the educator's own "I'm done" vote, so ending a session from
+        // here left the game running: no settlement, nobody paid, and no Recent
+        // Activity row -- which is the button an educator reaches for when a
+        // class has finished early.
+        body: JSON.stringify({ roomCode: code, confirm: 'true' }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      // 409 is the "some players are still answering" guard, not a failure.
+      if (!res.ok && res.status !== 409) throw new Error(data.error);
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally {

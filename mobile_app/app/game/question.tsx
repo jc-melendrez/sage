@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -207,17 +207,27 @@ export default function QuestionScreen() {
     points: number;
     /** Part of `points` earned by answering fast, above the 500 floor. */
     speedBonus?: number;
-    /** What the player chose; '' on timeout. */
+    /** What the player chose; '' on timeout. Also the member's own team pick,
+     * which the disagreement copy quotes back to them. */
     picked?: string;
     /* ── team mode ── */
     /** The team's single answer, from the shared reveal. */
     teamAnswer?: string;
     /** How many members backed the team's answer. A count, never a list of names. */
     agreed?: number;
-    /** Whether THIS member's own pick matched the team's answer. A voided
-     * (tied) question counts as agreeing: there was no team answer to disagree
-     * with, and punishing it twice would be wrong. */
-    iAgreed?: boolean;
+    /**
+     * Whether THIS member's own pick matched the team's answer.
+     *
+     * Three states, and the distinction is the whole point:
+     *  - `true`  picked with the team.
+     *  - `false` picked against the team. Distinct from having not picked at
+     *    all, which is a different piece of feedback.
+     *  - `null`  there was no team answer to compare against -- the question was
+     *    voided by a tie. The server sends null rather than true here; folding
+     *    it into `true` made a 2-2 split report "you agreed with your team" to
+     *    all four players, including the two on the losing side.
+     */
+    iAgreed?: boolean | null;
     /** Members who submitted a pick, of those expected. */
     pickers?: number;
     /** The team split and nobody answered for it, so it scored nothing. */
@@ -258,6 +268,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const [boostedName, setBoostedName] = useState<string | null>(null);
   const [teamAssignments, setTeamAssignments] = useState<any[] | null>(null);
   const [showTeamReveal, setShowTeamReveal] = useState(false);
+  const [lockInBusy, setLockInBusy] = useState(false);
   const [waitTimer, setWaitTimer] = useState(0);
   const [engineError, setEngineError] = useState<string | null>(null);
   /* ── team mode: the ROOM owns the shared question ──
@@ -860,6 +871,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     setShowRoulette(false);
     setRouletteTarget(null);
     setRoulettePhase('idle');
+    // The bar has to snap back to full here. Classic does this in its own reset
+    // effect (line ~879) and team mode did not, so the drain animation below
+    // resumed from whatever the previous question had left it at and spent its
+    // first 900ms animating backwards to full. The bar looked like it was
+    // rewinding while the new question was already being answered.
+    timerBarAnim.setValue(1);
   }, [teamMode, teamIndex]);
 
   useEffect(() => {
@@ -883,6 +900,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     const limit = teamMode ? teamTimeLimit : timePerQuestion;
     const target = limit > 0 ? timeLeft / limit : 0;
     // ✨ UPDATED: RNAnimated
+    // Skip the tween when the bar is already where it is going. Without this the
+    // effect fires on every reset, where target is 1 and the bar is already 1,
+    // and starts a pointless 900ms animation that delays the first real tick --
+    // so the bar sat visibly still for the first second of the question.
+    const current = (timerBarAnim as unknown as { __getValue?: () => number }).__getValue?.();
+    if (current != null && Math.abs(current - target) < 0.001) return;
     RNAnimated.timing(timerBarAnim, {
       toValue: target,
       duration: 900,
@@ -1044,6 +1067,28 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // so a teammate's award cannot leave this player tapping a dead button.
   const pool = (teamMode && myTeam ? myTeam.powerups : powerups) ?? powerups;
 
+  /**
+   * Whether this member can end the round early.
+   *
+   * The leader holds it, plus the host -- a leader who has gone quiet would
+   * otherwise freeze their team for the rest of the quiz. The fallback to the
+   * first member mirrors the server for rooms that predate `leaderId`, so the
+   * button never appears for someone the API will refuse. The server re-checks
+   * all of this regardless.
+   */
+  const amTeamLeader = useMemo(() => {
+    if (!teamMode || !myTeam) return false;
+    const members = (myTeam.memberIds ?? []).map(String);
+    const stored = myTeam.leaderId != null ? String(myTeam.leaderId) : null;
+    const leader = stored && members.includes(stored) ? stored : (members[0] ?? null);
+    return leader != null && userId != null && leader === String(userId);
+  }, [teamMode, myTeam, userId]);
+
+  // Stays disabled once the team has picked in full or the round is resolved.
+  const teamRoundOpen =
+    teamMode && !result && !spectator
+    && (teamPickCount == null || teamPickCount.picked < teamPickCount.expected);
+
   /* ── team mode: the shared quorum count and the team's reveal ──
    *
    * Two things arrive here that a member cannot get from their own pick
@@ -1067,21 +1112,33 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
 
     const reveal = myTeam.reveals?.[`q${teamIndex}`] ?? null;
     if (!reveal) return;
-    // Only ever fill a gap: the member who submitted last already has the exact
-    // payload from their own response, including the powerup award.
-    setResult(prev => prev ?? {
-      correct: reveal.correct,
-      correctAnswer: reveal.correctAnswer,
-      points: reveal.points,
-      speedBonus: reveal.speedBonus,
-      multiplier: reveal.multiplier,
-      picked: ownAnswers?.[`q${teamIndex}`]?.picked ?? selectedRef.current ?? '',
-      teamAnswer: reveal.answer,
-      agreed: reveal.agreed,
-      iAgreed: ownAnswers?.[`q${teamIndex}`]?.agreed ?? false,
-      pickers: reveal.pickers,
-      voided: reveal.void,
-    });
+    // Two independent Firestore documents describe this reveal, and they arrive
+    // in no guaranteed order: `reveals.q{n}` on the team document, and the
+    // member's own verdict on `answers.q{n}` on their player document.
+    //
+    // This used to be `prev ?? {...}`, which latched whichever arrived first. When
+    // the team document won the race, `iAgreed` was written as `false` because
+    // the member's own log had not loaded yet, and the later, correct value was
+    // thrown away -- the player was told they disagreed with their team for the
+    // rest of the question. So the shared fields still fill only a gap, but the
+    // two per-member fields are always taken from the member's own log, and
+    // `??` is deliberately avoided on `agreed`: null means the question was
+    // voided by a tie, and coalescing it to false would report a split vote as a
+    // disagreement.
+    const own = ownAnswers?.[`q${teamIndex}`];
+    setResult(prev => ({
+      ...(prev ?? {}),
+      correct: prev?.correct ?? reveal.correct,
+      correctAnswer: prev?.correctAnswer ?? reveal.correctAnswer,
+      points: prev?.points ?? reveal.points,
+      speedBonus: prev?.speedBonus ?? reveal.speedBonus,
+      picked: own?.picked ?? prev?.picked ?? selectedRef.current ?? '',
+      teamAnswer: prev?.teamAnswer ?? reveal.answer,
+      agreed: prev?.agreed ?? reveal.agreed,
+      iAgreed: own?.agreed !== undefined ? own.agreed : prev?.iAgreed,
+      pickers: prev?.pickers ?? reveal.pickers,
+      voided: prev?.voided ?? reveal.void,
+    }));
   }, [teamMode, myTeam, teamIndex, ownAnswers]);
   // Classic has no team document to hang the pool HUD on, so synthesize one
   // from the player's own stats. Feeding PowerupPoolHUD the same shape it
@@ -1217,7 +1274,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
    * screen must NOT show a result, because there is not one yet, and must not
    * show what anyone picked, because that is private.
    */
-  const submitTeamPick = async (answer: string, force: boolean) => {
+  const submitTeamPick = async (answer: string, force: boolean, lockIn = false) => {
     if (isOffline || isLan || spectator) return;
     try {
       const token = await getToken();
@@ -1235,6 +1292,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           // answer they did not make.
           timeTaken: teamStartedAt != null ? (Date.now() - teamStartedAt) / 1000 : teamTimeLimit,
           force: force ? 'true' : 'false',
+          // The leader ending the round early instead of waiting out the clock.
+          // The server re-checks the authority, so this is a hint, not a grant.
+          lockIn: lockIn ? 'true' : 'false',
           useHint: activePowerups.hint ? 'true' : 'false',
           useDoublePoints: activePowerups.doublePoints ? 'true' : 'false',
           useShield: activePowerups.shield ? 'true' : 'false',
@@ -1245,6 +1305,16 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
+        if (res.status === 403 && /leader/i.test(data.error || '')) {
+          // Leadership moved (or this member never had it). The message carries
+          // the current holder so the screen can explain rather than just
+          // refusing -- a button that silently stops working reads as a bug.
+          setError(data.leaderId
+            ? `Only the team leader can lock in. The team is now led by ${data.leaderId}.`
+            : (data.error || 'Only the team leader can lock in the answer.'));
+          setLockInBusy(false);
+          return;
+        }
         if (res.status === 403 && /team|spectator/i.test(data.error || '')) {
           setIsSpectating(true);
           lockPick(null);
@@ -1291,7 +1361,13 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         picked: answer,
         teamAnswer: data.answer ?? '',
         agreed: data.agreed ?? 0,
-        iAgreed: data.void ? true : !!answer && answer === (data.answer ?? ''),
+        // A tie has no team answer, so there is nothing to agree or disagree
+        // with. This used to be `data.void ? true : ...`, which reported a split
+        // vote as the whole team being in agreement -- including for the member
+        // who was on the losing side of it. `null` lets the reveal below say the
+        // vote was split instead. Same for the classic path, where this is not
+        // even a team question and the flag is only ever null.
+        iAgreed: data.void ? null : !!answer && answer === (data.answer ?? ''),
         pickers: data.pickers ?? 0,
         voided: !!data.void,
       });
@@ -1314,6 +1390,27 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     }
   };
   teamPickRef.current = (answer, force) => { void submitTeamPick(answer, force); };
+
+  /**
+   * End the round early on the team's answer.
+   *
+   * Sends the leader's own pick, because "lock in" is a decision and a decision
+   * needs something to commit. The server rejects a blank one rather than
+   * settling the question on nothing, which would void it for the whole team.
+   */
+  const lockInTeamAnswer = async () => {
+    const answer = selectedRef.current ?? pendingAnswerRef.current ?? '';
+    if (!String(answer).trim()) {
+      setError('Pick an answer before locking it in.');
+      return;
+    }
+    setLockInBusy(true);
+    try {
+      await submitTeamPick(answer, false, true);
+    } finally {
+      setLockInBusy(false);
+    }
+  };
 
   /**
    * Move the room on to the next shared question.
@@ -1344,25 +1441,51 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   /**
-   * End of a team game.
+   * End of a game: vote that this player is done, and settle if that settles it.
    *
-   * Everyone votes that they are done; only the room OWNER actually settles it.
-   * Navigation is left to the room listener, which fires when the server has
-   * really closed the room -- a member who votes must not be dropped onto a
-   * results screen for a game that is still running.
+   * Everyone votes; only the room OWNER can actually close it, so a student's tap
+   * only ever records `isFinished`. That split is deliberate, and it is also why
+   * this has to be a two-step call: a plain vote leaves the room running, and a
+   * room that never gets closed means `_settle` never runs, which means nobody
+   * is paid and -- the bug this fixes -- no Recent Activity row is ever written
+   * for the game.
+   *
+   * The classic path used to POST `{ roomCode }` and stop, so a solo game that
+   * everybody finished was never settled and produced no history at all. Now:
+   * vote first, then settle immediately if this voter is the owner and the room
+   * reports itself ready. A non-owner settles when the owner is not present to
+   * do it, which the server already guards by rejecting the confirm.
    */
-  const finishTeamGame = async () => {
+  const finishGame = async () => {
     try {
       const token = await getToken();
       const isOwner = roomOwnerId != null && String(roomOwnerId) === String(userId);
-      await fetch(`${API_BASE_URL}/game/finish/`, {
+      const post = (confirm: boolean) => fetch(`${API_BASE_URL}/game/finish/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ roomCode, confirm: isOwner ? 'true' : 'false' }),
+        // The server reads these as truthy strings, not JSON booleans.
+        body: JSON.stringify({ roomCode, confirm: confirm ? 'true' : 'false' }),
       });
+
+      const voted = await post(false);
+      if (!voted.ok) return;
+      const vote = await voted.json().catch(() => ({}));
+      // The room is only closed if this voter owns it and everybody is done.
+      if (isOwner && vote?.readyToSettle) await post(true);
     } catch {
       // Never strand the player on a dead card; the host can still end it.
     }
+  };
+
+  /**
+   * End of a team game.
+   *
+   * Same two-step as the solo path. Navigation is left to the room listener,
+   * which fires when the server has really closed the room -- a member who votes
+   * must not be dropped onto a results screen for a game that is still running.
+   */
+  const finishTeamGame = async () => {
+    await finishGame();
   };
 
   const handleAnswer = async (answer: string | null) => {
@@ -1548,16 +1671,10 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       // the claim first means that listener loses the race instead of winning it.
       // Losing the claim means the room already settled, so this call is redundant.
       if (!claimNav()) return;
-      try {
-        const token = await getToken();
-        await fetch(`${API_BASE_URL}/game/finish/`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-          body: JSON.stringify({ roomCode }),
-        });
-      } catch {
-        // Never strand the player on a dead question card if the call fails.
-      }
+      // Votes, then settles if this is the owner and the room is ready. See
+      // `finishGame` -- a bare vote here used to leave a finished solo game
+      // unsettled, so it was never paid out and never recorded.
+      await finishGame();
       router.replace({ pathname: '/game/final', params: { roomCode } });
       return;
     }
@@ -1666,6 +1783,25 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             </View>
           )}
         </View>
+
+        {/* ── leader: end the round early ──
+            Hidden from everyone else rather than disabled, because a greyed-out
+            control most members can never use is just noise on the busiest
+            screen in the game. */}
+        {amTeamLeader && teamRoundOpen && (
+          <TouchableOpacity
+            style={[styles.lockInBtn, lockInBusy && styles.lockInBtnBusy]}
+            onPress={() => { void lockInTeamAnswer(); }}
+            disabled={lockInBusy}
+            activeOpacity={0.75}
+            accessibilityLabel="Lock in your team answer"
+          >
+            <Ionicons name="lock-closed" size={13} color="#fff" />
+            <Text style={styles.lockInText}>
+              {lockInBusy ? 'Locking\u2026' : 'Lock in'}
+            </Text>
+          </TouchableOpacity>
+        )}
 
         <TouchableOpacity
           style={[styles.standingsToggle, showStandings && styles.standingsToggleActive]}
@@ -1852,7 +1988,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             ]}
           >
             <View style={styles.resultStripMain}>
-              <Text style={styles.resultStripLabel}>
+              <Text style={[styles.resultStripLabel, !result.correct && styles.resultStripLabelWrong]}>
                 {teamMode
                   ? (result.voided
                       ? "\U0001f91d Split vote \u2014 no majority, so it scored nothing"
@@ -1870,7 +2006,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   {(result.speedBonus ?? 0) > 0 ? `  (${result.speedBonus} speed)` : ''}
                 </Text>
               ) : (
-                <Text style={styles.resultAnswerLine}>Answer: {result.correctAnswer}</Text>
+                <Text style={styles.resultAnswerLine} numberOfLines={3} ellipsizeMode="tail">
+                  Answer: {result.correctAnswer}
+                </Text>
               )}
             </View>
             {/* Team mode: what the TEAM picked, and whether this member was part
@@ -1883,10 +2021,22 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                 {typeof result.agreed === 'number' ? `  \u00b7  ${result.agreed} agreed` : ''}
               </Text>
             )}
-            {teamMode && !result.voided && result.iAgreed != null && (
+            {teamMode && !result.voided && result.iAgreed === true && (
               <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
-                {result.iAgreed
-                  ? 'You agreed with your team'
+                You agreed with your team
+              </Text>
+            )}
+            {/* Three separate verdicts, not two.
+                The old copy had one branch for "did not agree" and used it for
+                both "picked something else" and "never picked at all", so a player
+                who deliberately disagreed was told they had run out of time --
+                and there was no way to tell which had happened. Their own pick is
+                now shown either way, so the disagreement is at least legible.
+                A void (null) is handled by the split-vote line above. */}
+            {teamMode && !result.voided && result.iAgreed === false && (
+              <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
+                {result.picked
+                  ? `You picked ${result.picked} \u2014 the team went with ${result.teamAnswer}`
                   : 'You did not pick before time ran out'}
               </Text>
             )}
@@ -2289,6 +2439,18 @@ const styles = StyleSheet.create({
   teamPillDot: { width: 8, height: 8, borderRadius: 4 },
   teamPillName: { fontSize: 12, fontFamily: FONTS.bold, color: COLORS.textPrimary, flexShrink: 1 },
   teamPillScore: { fontSize: 12, fontFamily: FONTS.black },
+  /** Leader-only, in the header so it stays reachable once a pick is made. */
+  lockInBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: '#7C3AED',
+  },
+  lockInBtnBusy: { opacity: 0.6 },
+  lockInText: { fontSize: 12, fontFamily: FONTS.bold, color: '#fff' },
   progressText: {
     fontSize: 15,
     fontFamily: FONTS.extraBold,
@@ -2512,14 +2674,24 @@ const styles = StyleSheet.create({
   },
   // The strip became a column when the explanation was added, so the label and
   // the points share a row of their own instead of sitting on one line.
+  // A column, not a row. With the verdict and the answer sharing a line, an
+  // answer long enough to wrap dropped below the "Incorrect" label and drifted
+  // out from under it, so the box grew taller without the verdict staying put
+  // beside it. Stacked, the answer always starts at the same x as the verdict
+  // no matter how long it is.
   resultStripMain: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: 6,
   },
+  // Bounded height. An identification answer can be a full sentence, and the
+  // strip sits directly above the answer area, so an uncapped block pushed the
+  // explanation off the screen. Three lines covers every answer the question
+  // bank produces; the full text is in the explanation below.
   resultAnswerLine: {
-    marginLeft: 12,
+    flexShrink: 1,
     fontSize: 13,
+    lineHeight: 19,
     fontFamily: FONTS.bold,
     color: '#34D399',
   },
@@ -2549,10 +2721,14 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(16,185,129,0.35)',
   },
   resultStripLabel: {
-    flex: 1,
     fontSize: 14,
     fontFamily: FONTS.bold,
     color: '#34D399',
+  },
+  /* The verdict takes the strip's own colour. It used to be hardcoded green, so
+     "Incorrect" rendered green inside the red strip it is warning about. */
+  resultStripLabelWrong: {
+    color: '#FCA5A5',
   },
   resultStripWrong: {
     backgroundColor: 'rgba(239,68,68,0.12)',

@@ -35,6 +35,7 @@ from core.llm import (
     deepseek_chat_completion,
     safe_json_parse,
 )
+from core.question_types import TYPED_QUESTION_TYPES, normalise_question_type
 from core.throttling import AIChatThrottle, AIQuizThrottle
 from users.ai_usage import charge, record_tokens
 
@@ -740,25 +741,74 @@ class GenerateQuizView(APIView):
         # authorised, so a rejected request never costs the student anything.
         charge(request.user, 'quiz')
 
+        # Which kinds of question the student answers by tapping one of a fixed
+        # set of options. Everything else is answered by typing.
+        #
+        # The prompt used to describe an `options` array for every type and the
+        # validator below then rejected anything with fewer than two entries, so
+        # an Identification or Fill-in-the-Blank quiz was stored with four decoy
+        # options per question. The quiz player then had to decide what the
+        # student actually saw, and it guessed from the presence of options --
+        # which sent the typed question down the multiple choice branch. The
+        # decoys are the root cause; the display bug was a symptom.
+        canonical_type = normalise_question_type(q_type)
+        typed = canonical_type in TYPED_QUESTION_TYPES
+
+        option_count = 2 if canonical_type == 'true_false' else 4
+
+        if typed:
+            schema_block = (
+                "  \"questions\": ["
+                "{"
+                "  \"id\": 1,"
+                "  \"question\": \"The question text\","
+                "  \"correct_answer\": \"The exact expected answer\","
+                "  \"explanation\": \"Brief explanation why\""
+                "}"
+                "]"
+            )
+            brevity_rules = (
+                "Strict length limits, so the whole quiz fits one response:\n"
+                "- title: at most 60 characters\n"
+                "- question: at most 20 words\n"
+                "- NO \"options\" field at all. This question is answered by typing.\n"
+                "- correct_answer: the single answer being tested, at most 5 words\n"
+                "- explanation: ONE sentence, at most 20 words. Never more than one.\n"
+                "- no markdown, no numbering, no commentary outside the JSON\n"
+            )
+        else:
+            schema_block = (
+                "  \"questions\": ["
+                "{"
+                "  \"id\": 1,"
+                "  \"question\": \"The question text\","
+                "  \"options\": [\"Option A\", \"Option B\", \"Option C\", \"Option D\"],"
+                "  \"correct_answer\": \"The exact string of the correct option\","
+                "  \"explanation\": \"Brief explanation why\""
+                "}"
+                "]"
+            )
+            brevity_rules = (
+                "Strict length limits, so the whole quiz fits one response:\n"
+                "- title: at most 60 characters\n"
+                "- question: at most 20 words\n"
+                f"- exactly {option_count} options, each at most 10 words\n"
+                "- correct_answer: copy the chosen option text exactly\n"
+                "- explanation: ONE sentence, at most 20 words. Never more than one.\n"
+                "- no markdown, no numbering, no commentary outside the JSON\n"
+            )
+
         system_prompt = (
             "You are an expert educator. Create a quiz based on the provided content. "
             "You MUST return ONLY valid JSON. Do not include any introductory text or markdown code blocks. "
             "The JSON structure must be: "
             "{"
             "  \"title\": \"Quiz Title\","
-            "  \"questions\": ["
-            "    {"
-            "      \"id\": 1,"
-            "      \"question\": \"The question text\","
-            "      \"options\": [\"Option A\", \"Option B\", \"Option C\", \"Option D\"],"
-            "      \"correct_answer\": \"The exact string of the correct option\","
-            "      \"explanation\": \"Brief explanation why\""
-            "    }"
-            "  ]"
+            f"{schema_block}"
             "}"
         )
 
-        # Output budget, restated in the prompt.
+        # Output budget, restated in the prompt above.
         #
         # Without these limits the model writes as much prose as it likes, and
         # the explanation field is where it goes. At 30 questions that fit
@@ -766,17 +816,6 @@ class GenerateQuizView(APIView):
         # and the request is rejected before a token is generated. A hard
         # per-field budget is what makes the larger batches reachable in one
         # call, which is the whole point of not chunking.
-        option_count = 2 if q_type.lower() in ('true/false', 'true false', 'boolean') else 4
-        brevity_rules = (
-            "Strict length limits, so the whole quiz fits one response:\n"
-            "- title: at most 60 characters\n"
-            "- question: at most 20 words\n"
-            f"- exactly {option_count} options, each at most 10 words\n"
-            "- correct_answer: copy the chosen option text exactly\n"
-            "- explanation: ONE sentence, at most 20 words. Never more than one.\n"
-            "- no markdown, no numbering, no commentary outside the JSON\n"
-        )
-
         user_prompt = (
             f"Generate a {difficulty} level quiz with exactly {count} {q_type} questions. "
             f"Additional Instructions: {instructions}\n\n"
@@ -919,25 +958,35 @@ class GenerateQuizView(APIView):
                               'Please try again.'},
                     status=502)
 
-            # Validate before writing anything. A question missing its options
-            # or correct answer is ungradable, and saving it left educators with
-            # a quiz they could not hand out.
+            # Validate before writing anything. A question missing its correct
+            # answer is ungradable, and saving it left educators with a quiz they
+            # could not hand out.
             for i, q in enumerate(questions):
                 if not str(q.get('question') or '').strip():
                     return Response(
                         {"error": f"AI returned a blank question at position {i + 1}."},
                         status=502)
                 options = [str(o) for o in (q.get('options') or []) if str(o).strip()]
-                if len(options) < 2:
-                    return Response(
-                        {"error": f"AI returned question {i + 1} with fewer than 2 options."},
-                        status=502)
+                if typed:
+                    # A typed question must NOT keep options. The prompt tells the
+                    # model to omit the field, but a model that ignores that
+                    # produces a quiz whose review screen offers the student four
+                    # buttons for a question they answered by typing. Drop them
+                    # here rather than rejecting the quiz -- losing one stray field
+                    # is a far better outcome than failing the whole generation,
+                    # and the educator gets the typed question they asked for.
+                    q['options'] = []
+                else:
+                    if len(options) < 2:
+                        return Response(
+                            {"error": f"AI returned question {i + 1} with fewer than 2 options."},
+                            status=502)
+                    q['options'] = options
                 correct = str(q.get('correct_answer') or '').strip()
                 if not correct:
                     return Response(
                         {"error": f"AI returned question {i + 1} with no correct answer."},
                         status=502)
-                q['options'] = options
                 q['correct_answer'] = correct
 
             # One transaction: a Quiz row plus N question rows. Creating them

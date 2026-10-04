@@ -57,6 +57,15 @@ interface Props {
    * only other cue (nothing) is indistinguishable from the tap never landing.
    */
   highlightTeamId?: string | null;
+  /**
+   * Whether this viewer may hand a team over to somebody else: the team's
+   * current leader, or the room host (whose client passes `canRename`, which is
+   * exactly the same authority).
+   */
+  canTransferLeader?: boolean;
+  /** null while idle, otherwise the team being handed over. */
+  busyTransferTeamId?: string | null;
+  onTransferLeader?: (teamId: string, userId: string) => Promise<void>;
 }
 
 const MIN_NAME = 2;
@@ -87,6 +96,42 @@ const SPECTATOR_KEY = '__spectator__';
 const FALLBACK_TEAM_COLORS = [
   '#22D3EE', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899',
 ];
+
+/**
+ * Darken a team accent until it is legible as TEXT on a white card.
+ *
+ * The team colors are chosen to be distinguishable from each other, which is
+ * the opposite job to being readable: #22D3EE on white is roughly 1.9:1, well
+ * under the 4.5:1 that body text needs, so a cyan team name was effectively
+ * invisible in the lobby. Only text goes through this -- borders, tints and
+ * avatar fills keep the bright accent, because those are not text and
+ * darkening them would leave teams looking identical.
+ */
+function ink(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return COLORS.textPrimary;
+  const n = parseInt(m[1], 16);
+  let r = (n >> 16) & 255;
+  let g = (n >> 8) & 255;
+  let b = n & 255;
+
+  // Relative luminance, per WCAG 2.x.
+  const channel = (c: number) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  const luminance = () => 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+
+  // Scale toward black by a shrinking factor until the ratio clears 4.5. Capped
+  // so a near-black accent is not pushed all the way down for nothing.
+  for (let i = 0; i < 24 && 1.05 / (luminance() + 0.05) < 4.5; i++) {
+    r = Math.round(r * 0.94);
+    g = Math.round(g * 0.94);
+    b = Math.round(b * 0.94);
+  }
+  const hexOut = (c: number) => c.toString(16).padStart(2, '0');
+  return `#${hexOut(r)}${hexOut(g)}${hexOut(b)}`;
+}
 
 /**
  * Boxes to draw for one team, clamped to the range the server enforces.
@@ -128,10 +173,27 @@ export default function TeamColumns({
   teams, players, myId, myTeamId, locked, canRename, busyTeamId,
   onJoin, onRename, canAddTeam = false, onAddTeam, addingTeam = false,
   highlightTeamId = null,
+  canTransferLeader = false, busyTransferTeamId = null, onTransferLeader,
 }: Props) {
   const [renaming, setRenaming] = useState<TeamEntry | null>(null);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // The server owns who leads, but a team document that predates `leaderId`
+  // still reads as led by its first member -- matching the backend fallback so
+  // the badge never points at somebody the API would refuse.
+  const leaderOf = (team: TeamEntry): string | null => {
+    const stored = team.leaderId != null ? String(team.leaderId) : null;
+    if (stored && team.memberIds.some(id => String(id) === stored)) return stored;
+    return team.memberIds.length ? String(team.memberIds[0]) : null;
+  };
+  const isLeader = (team: TeamEntry, member: PlayerEntry) =>
+    String(leaderOf(team)) === String(member.id);
+
+  const transferLeader = async (team: TeamEntry, member: PlayerEntry) => {
+    if (!onTransferLeader) return;
+    await onTransferLeader(String(team.id), String(member.id));
+  };
 
   const membersByTeam = useMemo(() => {
     const map = new Map<string, PlayerEntry[]>();
@@ -182,20 +244,42 @@ export default function TeamColumns({
     }
   };
 
-  const renderMember = (member: PlayerEntry, accent: string) => {
+  const renderMember = (
+    member: PlayerEntry,
+    accent: string,
+    leader: boolean,
+    onPress?: (member: PlayerEntry) => void,
+  ) => {
     const isMe = myId != null && String(member.id) === String(myId);
     const initial = (member.displayName || '?').charAt(0).toUpperCase();
+    const label = member.displayName || 'Player';
     return (
-      <View key={member.id} style={[styles.member, isMe && styles.memberYou]}>
+      <TouchableOpacity
+        key={member.id}
+        onPress={onPress ? () => onPress(member) : undefined}
+        activeOpacity={onPress ? 0.7 : 1}
+        disabled={!onPress}
+        accessibilityRole={onPress ? 'button' : 'text'}
+        accessibilityLabel={onPress ? `Make ${label} the team leader` : label}
+        style={[styles.member, isMe && styles.memberYou]}
+      >
         {pfpSource(member.avatar) ? (
           <Image source={pfpSource(member.avatar)!} style={styles.avatar} resizeMode="cover" />
         ) : (
           <View style={[styles.avatarFallback, { borderColor: accent + '88' }]}>
-            <Text style={[styles.avatarText, { color: accent }]}>{initial}</Text>
+            <Text style={[styles.avatarText, { color: ink(accent) }]}>{initial}</Text>
           </View>
         )}
-        <Text style={styles.memberName} numberOfLines={1}>{member.displayName}</Text>
-      </View>
+        <Text style={styles.memberName} numberOfLines={1}>{label}</Text>
+        {/* A filled star, not the TV crown: the leader is whoever holds the
+            team together (renames it, locks in its answer), which is a badge of
+            responsibility rather than the "host of the show" the crown read as. */}
+        {leader && (
+          <View style={[styles.leaderBadge, { backgroundColor: accent + '26' }]}>
+            <Ionicons name="star" size={11} color={ink(accent)} />
+          </View>
+        )}
+      </TouchableOpacity>
     );
   };
 
@@ -330,6 +414,7 @@ export default function TeamColumns({
           // every use below concatenates an alpha suffix, so a missing color
           // would put "undefined3A" into a style and silently drop the box.
           const accent = team.color || FALLBACK_TEAM_COLORS[teamIndex % FALLBACK_TEAM_COLORS.length];
+          const accentInk = ink(accent);
           const label = team.name || `Team ${key}`;
           const isHighlighted = sameTeamId(team.id, highlightTeamId);
 
@@ -363,7 +448,7 @@ export default function TeamColumns({
                 <View style={[styles.header, { backgroundColor: accent + '26' }]}>
                   <View style={[styles.colorBar, { backgroundColor: accent }]} />
                   <View style={styles.titleRow}>
-                    <Text style={[styles.name, { color: accent }]} numberOfLines={1}>
+                    <Text style={[styles.name, { color: accentInk }]} numberOfLines={1}>
                       {label}
                     </Text>
                     {canRename && !team.nameLocked && !locked && (
@@ -373,17 +458,17 @@ export default function TeamColumns({
                         style={styles.pencil}
                         accessibilityLabel={`Rename ${label}`}
                       >
-                        <Ionicons name="pencil" size={12} color={accent} />
+                        <Ionicons name="pencil" size={12} color={accentInk} />
                       </TouchableOpacity>
                     )}
                   </View>
                   <View style={styles.countRow}>
-                    <Text style={[styles.count, { color: accent }]}>
+                    <Text style={[styles.count, { color: accentInk }]}>
                       {members.length}/{seats}
                     </Text>
                     {isMyTeam && <View style={styles.youPill}><Text style={styles.youPillText}>YOU</Text></View>}
                     {full && !isMyTeam && (
-                      <Text style={[styles.fullTag, { color: accent }]}>FULL</Text>
+                      <Text style={[styles.fullTag, { color: accentInk }]}>FULL</Text>
                     )}
                   </View>
                 </View>
@@ -392,7 +477,22 @@ export default function TeamColumns({
                 <View style={styles.body}>
                   {Array.from({ length: slots }).map((_, i) => {
                     const member = members[i];
-                    if (member) return renderMember(member, accent);
+                    if (member) {
+                      // Only the leader and the host can hand the seat on, and
+                      // only while the room is still waiting -- the same window
+                      // the rename pencil uses, because the server refuses both
+                      // once the game starts.
+                      const canPromote = canTransferLeader && !locked
+                        && busyTransferTeamId === null
+                        && !isLeader(team, member)
+                        && leaderOf(team) != null;
+                      return renderMember(
+                        member,
+                        accent,
+                        isLeader(team, member),
+                        canPromote ? (m: PlayerEntry) => transferLeader(team, m) : undefined,
+                      );
+                    }
 
                     return (
                       <TouchableOpacity
@@ -415,7 +515,7 @@ export default function TeamColumns({
                   })}
 
                   {members.length === 0 && (
-                    <Text style={[styles.emptyText, { color: accent + 'AA' }]}>
+                    <Text style={[styles.emptyText, { color: accentInk + 'CC' }]}>
                       {canTap ? 'Tap a slot to join' : locked ? 'Locked' : 'Tap another team'}
                     </Text>
                   )}
@@ -428,7 +528,10 @@ export default function TeamColumns({
                     <Text
                       style={[
                         styles.footerText,
-                        { color: isMyTeam ? accent : full ? COLORS.textMuted : COLORS.textSecondary },
+                        {
+                          color: isMyTeam ? accentInk
+                            : full ? COLORS.textMuted : COLORS.textSecondary,
+                        },
                       ]}
                       numberOfLines={1}
                     >
@@ -601,6 +704,11 @@ const styles = StyleSheet.create({
   memberName: {
     flex: 1, fontSize: 12, fontFamily: FONTS.semiBold,
     color: COLORS.textPrimary,
+  },
+  /** Filled star on a tinted chip, so it reads as a badge not a letter. */
+  leaderBadge: {
+    width: 18, height: 18, borderRadius: 9,
+    alignItems: 'center', justifyContent: 'center', marginLeft: 4,
   },
   emptyText: { fontSize: 11, fontFamily: FONTS.semiBold, textAlign: 'center', paddingVertical: 6 },
 

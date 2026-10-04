@@ -175,6 +175,18 @@ export interface TeamEntry {
    */
   pickCount?: number;
   /**
+   * Every member of this team has pressed Finish.
+   *
+   * Rolled up server-side when the last member finishes, because the final
+   * screen reveals a team's score on completion and has to know whether the
+   * TEAM is done rather than re-counting members on a subscription that may not
+   * have delivered all of them yet. Absent on rooms created before it existed,
+   * which read as "not finished" -- see the settled check on the results screen.
+   */
+  isFinished?: boolean;
+  /** Who seated first, and owns the team for the session. */
+  leaderId?: string | null;
+  /**
    * What the team settled on, per question index, once it is resolved.
    *
    * Every member reads the same reveal, so a member who picked early learns the

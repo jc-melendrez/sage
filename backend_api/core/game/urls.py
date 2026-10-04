@@ -14,6 +14,7 @@ urlpatterns = [
     path('teams/assign/', views.AssignTeamView.as_view(), name='assign-team'),
     path('teams/add/', views.AddTeamView.as_view(), name='add-team'),
     path('teams/rename/', views.RenameTeamView.as_view(), name='rename-team'),
+    path('teams/leader/', views.TransferTeamLeaderView.as_view(), name='transfer-team-leader'),
     path('teams/auto-assign/', views.AutoAssignTeamsView.as_view(), name='auto-assign-teams'),
     path('teams/open-pick/', views.OpenTeamPickView.as_view(), name='open-team-pick'),
     path('host/claim/', views.HostClaimView.as_view(), name='host-claim'),

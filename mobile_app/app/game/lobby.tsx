@@ -57,7 +57,13 @@ const COLORS = {
   danger: '#EF4444',
   textPrimary: '#1F2937',
   textSecondary: '#6B7280',
-  textMuted: '#9CA3AF',
+  /**
+   * Darkened from #9CA3AF, which is only about 2.6:1 on the white lobby cards.
+   * It was used for every secondary label on the screen -- counts, sub-captions,
+   * disabled button text -- so most of the lobby's smaller text failed contrast
+   * outright. #6B7280 clears 4.5:1 on white and still reads as muted.
+   */
+  textMuted: '#6B7280',
   cardBorder: 'rgba(76, 29, 149, 0.12)',
   /** Text and icons that sit on the gradient itself, not on a card. */
   onGradient: '#FFFFFF',
@@ -109,6 +115,7 @@ export default function LobbyScreen() {
   // no other cue -- which is indistinguishable from "nothing happened". The
   // server echoes the new teamId, so we scroll it into view and pulse it.
   const [highlightTeamId, setHighlightTeamId] = useState<string | null>(null);
+  const [busyTransferTeamId, setBusyTransferTeamId] = useState<string | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   // Both failure modes below used to be invisible. A rejected request only
   // raised an Alert (dismissable, and missed entirely when the tap "did
@@ -788,6 +795,26 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
     return () => clearTimeout(t);
   }, [highlightTeamId]);
 
+  // Hands a team to a different member. The leader is not just a label -- it
+  // decides who may rename the team and who may lock in its answer -- and it is
+  // assigned by arrival order, so without this a member who wanted either power
+  // had no way to ask for it and a leader who left left the team stuck.
+  const doTransferLeader = async (teamId: string, userId: string) => {
+    if (busyTransferTeamId != null) return;
+    if (!roomCode) return;
+    setBusyTransferTeamId(teamId);
+    setAddTeamError(null);
+    try {
+      await post('teams/leader/', { roomCode, teamId, userId });
+    } catch (e: any) {
+      console.warn('[lobby] transferLeader failed', e?.message);
+      setAddTeamError(e?.message || 'Could not hand over the team.');
+      throw e;
+    } finally {
+      setBusyTransferTeamId(null);
+    }
+  };
+
   // Success confirmation is explicitly dismissible; failures are not, because a
   // failure that quietly disappears is how this reached "reproducible nowhere".
   const addTeamNotice = addTeamError
@@ -1009,8 +1036,11 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
               canAddTeam={isHostUser}
               onAddTeam={doAddTeam}
               addingTeam={addingTeam}
-              highlightTeamId={highlightTeamId}
-            />
+highlightTeamId={highlightTeamId}
+      canTransferLeader={isHostUser || myTeamId != null}
+      busyTransferTeamId={busyTransferTeamId}
+      onTransferLeader={doTransferLeader}
+    />
           </Animated.View>
         )}
 
@@ -1149,7 +1179,13 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
                   {teamPickCountdown != null && teamPickCountdown > 0 ?
                     `Team selection ends in ${teamPickCountdown}s` :
                     teamPickCountdown === 0 ? 'Starting the game' :
-                    'Tap a team to claim a seat, or wait for the host to deal you in'}
+                    // Host and student are told different things because their
+                    // next action is different. Telling the host to "pick a
+                    // team" is the old copy, and it is wrong: the host does not
+                    // pick, the host decides the roster and starts the game.
+                    isHostUser
+                      ? 'Assign players to teams, then press START'
+                      : 'Tap a team to claim a seat, or wait for the host to deal you in'}
                   {teamPickCountdown != null && teamPickCountdown > 0 && (
                     <Text style={styles.teamPickCountdownTimer}>or host can start now</Text>
                   )}
@@ -1187,7 +1223,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
             )}
 
             {autoAssignDone && unassigned.length === 0 && !quizPending && (
-              <Text style={styles.autoAssignDone}>Teams assigned · press Start when ready</Text>
+              <Text style={styles.autoAssignDone}>Teams assigned · press START when ready</Text>
             )}
           </View>
 ) : (
@@ -1309,14 +1345,16 @@ const styles = StyleSheet.create({
   },
   codeTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
   codeTab: { backgroundColor: COLORS.purplePrimary, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 5 },
-  codeTabText: { color: COLORS.accent, fontSize: 11, fontFamily: FONTS.extraBold, letterSpacing: 1.5 },
+  // White on #7C3AED is ~5.4:1. The cyan accent it replaced was ~3.1:1, which
+  // is why the room code's own label was the least legible text in the hero.
+  codeTabText: { color: '#FFFFFF', fontSize: 11, fontFamily: FONTS.extraBold, letterSpacing: 1.5 },
   openPill: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     backgroundColor: 'rgba(16,185,129,0.12)', borderWidth: 1, borderColor: 'rgba(16,185,129,0.3)',
     borderRadius: 10, paddingHorizontal: 10, paddingVertical: 5,
   },
   openDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: COLORS.success },
-  openText: { color: '#34D399', fontSize: 10, fontFamily: FONTS.extraBold, letterSpacing: 1 },
+  openText: { color: '#047857', fontSize: 10, fontFamily: FONTS.extraBold, letterSpacing: 1 },
 
   codeChips: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 18 },
   codeChip: {

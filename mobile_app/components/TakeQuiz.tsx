@@ -7,10 +7,12 @@ import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { answerMatches } from '@/services/offlineEngine';
 
 // Define a basic interface for a quiz question
+type QuizQuestionType = 'Multiple Choice' | 'True/False' | 'Identification' | 'Fill-in-the-Blank';
+
 interface QuizQuestion {
   id: number;
   question: string;
-  type: 'Multiple Choice' | 'True/False' | 'Identification' | 'Fill-in-the-Blank';
+  type: QuizQuestionType;
   options?: string[]; // For Multiple Choice
   correct_answer?: string; // For validation (optional for this template)
   /**
@@ -35,14 +37,22 @@ export interface TakeQuizResult {
   correct: boolean;
   explanation: string;
   /**
+   * The question's type, carried through so the review renders the question the
+   * way it was actually asked. Without it the review had to guess from whether
+   * `options` was present, which sent a typed question down the multiple choice
+   * branch whenever the stored question happened to carry options.
+   */
+  type: QuizQuestionType;
+  /**
    * The question's options as presented, so the detail view can show every
    * choice with the student's pick and the right one both marked. Only present
-   * for choice questions.
+   * for choice questions -- always absent for a typed question, even if the
+   * stored row has stale options on it.
    */
   options?: string[];
   /** 1-based position, for the numbered grid. */
   number: number;
-  /** `A`/`B`/... for choice questions, null for typed answers. */
+  /** `A`/`B`/... for multiple choice, `T`/`F` for true/false, null for typed answers. */
   yourLabel: string | null;
   correctLabel: string | null;
 }
@@ -66,6 +76,31 @@ interface TakeQuizProps {
 }
 
 const OPTION_LABELS = ['A', 'B', 'C', 'D', 'E', 'F'];
+
+/**
+ * The two types the student answers by tapping one of a fixed set of options.
+ *
+ * This is the single source of truth for "does this question have options", and
+ * it deliberately matches `HAS_OPTIONS` in `components/educator/QuizEditorSheet`
+ * -- the educator editor already hides the option editor for typed questions,
+ * so the quiz player and the quiz author have to agree on the same line.
+ *
+ * The summary used to decide this by asking whether `options` was non-empty,
+ * which was wrong in both directions: an AI-generated Identification quiz
+ * carries decoy options, so it rendered as a multiple choice question the
+ * student never saw, and a choice question whose options failed to load rendered
+ * as a typed answer instead.
+ */
+
+/**
+ * Type match that tolerates the casing and spacing a free-text column allows.
+ *
+ * A regex rather than an array lookup because "Multiple choice", "multiple
+ * choice" and "True / False" all arrive from AI generation and hand-authored
+ * quizzes.
+ */
+const isChoiceType = (type?: string | null): boolean =>
+  /multiple\s*choice|true\s*[/&-]?\s*false/.test((type || '').trim().toLowerCase());
 
 const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onClose, onFinishError }) => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
@@ -209,11 +244,23 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
     return String(value);
   };
 
-  /** The option letter for a value, or null when it is not one of the options. */
-  const labelFor = (value: string, options?: string[]): string | null => {
+  /**
+   * The compact marker for a value in the numbered grid.
+   *
+   * Multiple choice gets its option letter. True/False gets `T`/`F` rather than
+   * `A`/`B`: the student answered by tapping a button labelled True or False, so
+   * labelling those choices A and B in the summary described a question they
+   * were never shown, and the grid cell is 62px wide, which leaves room for two
+   * characters but not for the words.
+   */
+  const labelFor = (value: string, options?: string[], type?: string | null): string | null => {
     if (!options?.length) return null;
     const index = options.findIndex(o => o === value);
-    return index === -1 ? null : getOptionLabel(index);
+    if (index === -1) return null;
+    const isTrueFalse = /true\s*[/&-]?\s*false/.test((type || '').trim().toLowerCase());
+    if (!isTrueFalse) return getOptionLabel(index);
+    const short = options[index].trim().slice(0, 1).toUpperCase();
+    return short === 'T' || short === 'F' ? short : getOptionLabel(index);
   };
 
   const handleSubmitQuiz = () => {
@@ -226,21 +273,25 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
       const yourAnswer = normalise(rawAnswer);
       const correctAnswer = normalise(q.correct_answer);
       // Lenient about case and whitespace, strict about spelling. Shared with the
-// game so a quiz and a game grade the same answer the same way.
-const correct = yourAnswer.length > 0
+      // game so a quiz and a game grade the same answer the same way.
+      const correct = yourAnswer.length > 0
         && correctAnswer.length > 0
         && answerMatches(yourAnswer, correctAnswer);
       if (correct) correctCount++;
+      const choice = isChoiceType(q.type);
       return {
         question: q.question,
         yourAnswer: yourAnswer.length > 0 ? yourAnswer : null,
         correctAnswer,
         correct,
         explanation: (q.explanation ?? '').trim(),
-        options: q.options?.length ? q.options : undefined,
+        type: q.type,
+        // Dropped for a typed question even when the stored row still carries
+        // options, so the review below cannot be talked into rendering them.
+        options: choice && q.options?.length ? q.options : undefined,
         number: index + 1,
-        yourLabel: labelFor(yourAnswer, q.options),
-        correctLabel: labelFor(correctAnswer, q.options),
+        yourLabel: labelFor(yourAnswer, q.options, q.type),
+        correctLabel: labelFor(correctAnswer, q.options, q.type),
       };
     });
 
@@ -282,6 +333,34 @@ const correct = yourAnswer.length > 0
   };
 
   const missedCount = useMemo(() => review.filter((r) => !r.correct).length, [review]);
+
+  /**
+   * The question this student needs to look at again.
+   *
+   * `review` holds this student's own graded answers and nothing else -- there
+   * is no class-wide tally anywhere on the client -- so this deliberately does
+   * NOT report how many people missed a question. An earlier version grouped
+   * results that happened to share a `correctAnswer` and printed "N of M got
+   * it wrong", which invented a class statistic out of one student's data,
+   * counted two different questions as one whenever their answers matched, and
+   * showed nothing at all unless a question had been missed more than once.
+   *
+   * So it says what it can honestly say: the first question this student got
+   * wrong, which is the one whose explanation is most worth reading. Skipped
+   * questions are excluded -- there is no answer to learn from -- and ties
+   * resolve to the earliest question.
+   */
+  const missedQuestion = useMemo(() => {
+    // A plain loop rather than forEach: TypeScript does not track assignments
+    // made inside a callback, so the forEach form narrowed this to `never`.
+    for (let index = 0; index < review.length; index++) {
+      const r = review[index];
+      if (r.correct || !r.yourAnswer) continue;
+      return { index, number: r.number, question: r.question };
+    }
+    return null;
+  }, [review]);
+
   const openResult = openQuestion != null ? review[openQuestion] ?? null : null;
 
   const isLastQuestion = currentQuestionIndex >= answers.length - 1;
@@ -417,6 +496,32 @@ const correct = yourAnswer.length > 0
               <Text style={styles.gridHint}>Tap a number to see the question</Text>
             </View>
 
+            {/* The one question worth opening first. The grid below is scannable but
+                anonymous -- 40 red cells all look the same -- so this names the
+                question this student got wrong and links straight to its
+                explanation. Deliberately not "most missed": the client has only
+                this student's answers, so any class-wide count would be made up. */}
+            {missedQuestion && (
+              <TouchableOpacity
+                style={styles.trapCard}
+                onPress={() => setOpenQuestion(missedQuestion.index)}
+                accessibilityRole="button"
+                accessibilityLabel={`Review question ${missedQuestion.number}. ${missedQuestion.question}`}
+              >
+                <View style={styles.trapHead}>
+                  <Ionicons name="trending-down" size={13} color="#B91C1C" />
+                  <Text style={styles.trapLabel}>Worth another look</Text>
+                  <Text style={styles.trapCount}>
+                    you missed this one
+                  </Text>
+                </View>
+                <Text style={styles.trapQuestion} numberOfLines={2}>
+                  <Text style={styles.trapNumber}>Q{missedQuestion.number}  </Text>
+                  {missedQuestion.question}
+                </Text>
+              </TouchableOpacity>
+            )}
+
             <ScrollView
               style={styles.reviewScroll}
               contentContainerStyle={styles.reviewContent}
@@ -498,10 +603,19 @@ const correct = yourAnswer.length > 0
                 <ScrollView style={styles.detailScroll} showsVerticalScrollIndicator={false}>
                   <Text style={styles.detailQuestion}>{openResult.question}</Text>
 
-                  {openResult.options?.length ? (
+                  {/* Branched on the question's own type, not on whether it happens
+                      to carry options: an AI-generated Identification quiz stores
+                      decoy options, and rendering those turned a typed answer into
+                      an unanswerable-looking multiple choice question. */}
+                  {isChoiceType(openResult.type) && openResult.options?.length ? (
                     <View style={styles.detailOptions}>
                       {openResult.options.map((option, index) => {
-                        const letter = getOptionLabel(index);
+                        // True/False is asked as two labelled buttons, so the
+                        // letter prefix is dropped for it; the value already reads
+                        // correctly on its own.
+                        const letter = /true\s*[/&-]?\s*false/.test(openResult.type.trim().toLowerCase())
+                          ? ''
+                          : getOptionLabel(index);
                         const isYours = option === openResult.yourAnswer;
                         const isRight = option === openResult.correctAnswer;
                         return (
@@ -514,18 +628,20 @@ const correct = yourAnswer.length > 0
                               isYours && isRight && styles.detailOptionRight,
                             ]}
                           >
-                            <View style={[
-                              styles.detailOptionPrefix,
-                              isRight && styles.detailOptionPrefixRight,
-                              isYours && !isRight && styles.detailOptionPrefixWrong,
-                            ]}>
-                              <Text style={[
-                                styles.detailOptionPrefixText,
-                                (isRight || isYours) && { color: '#FFFFFF' },
+                            {letter !== '' && (
+                              <View style={[
+                                styles.detailOptionPrefix,
+                                isRight && styles.detailOptionPrefixRight,
+                                isYours && !isRight && styles.detailOptionPrefixWrong,
                               ]}>
-                                {letter}
-                              </Text>
-                            </View>
+                                <Text style={[
+                                  styles.detailOptionPrefixText,
+                                  (isRight || isYours) && { color: '#FFFFFF' },
+                                ]}>
+                                  {letter}
+                                </Text>
+                              </View>
+                            )}
                             <Text style={styles.detailOptionText}>{option}</Text>
                             {isRight && (
                               <Text style={styles.detailOptionTag}>correct</Text>
@@ -751,6 +867,22 @@ const styles = StyleSheet.create({
   },
   reviewHeading: { fontSize: 16, fontWeight: '800', color: '#1F2937' },
   gridHint: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+
+  trapCard: {
+    marginHorizontal: 20,
+    marginTop: 10,
+    paddingVertical: 11,
+    paddingHorizontal: 13,
+    borderRadius: 13,
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+  },
+  trapHead: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  trapLabel: { fontSize: 11, fontWeight: '800', color: '#B91C1C', letterSpacing: 0.4 },
+  trapCount: { fontSize: 11, fontWeight: '600', color: '#991B1B', marginLeft: 'auto' },
+  trapQuestion: { fontSize: 13, color: '#7F1D1D', lineHeight: 18, marginTop: 5 },
+  trapNumber: { fontWeight: '800' },
 
   reviewScroll: { flex: 1 },
   reviewContent: { paddingHorizontal: 20, paddingBottom: 24, paddingTop: 12 },

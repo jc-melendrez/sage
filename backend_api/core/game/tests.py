@@ -985,13 +985,63 @@ class TeamSeatTests(TestCase):
                                 {'roomCode': 'SEAT'}, format='json')
         self.assertEqual(resp.status_code, 200)
         sizes = resp.json()['sizes']
-        self.assertEqual(sum(sizes.values()), 4)
-        # Round-robin over 3 teams with 4 people: two teams of 1, one of 2.
+        # The host is not dealt a seat, so 3 of the 4 people in the room are.
+        self.assertEqual(sum(sizes.values()), 3)
+        # Round-robin over 3 teams with 3 people: one seat each.
         self.assertLessEqual(max(sizes.values()) - min(sizes.values()), 1)
         for team_id, team in ((t, self.team(t)) for t in ('1', '2', '3')):
             self.assertEqual(len(team['memberIds']), sizes[team_id])
             for member in team['memberIds']:
                 self.assertEqual(self.player_doc(member)['teamId'], team_id)
+
+    def test_auto_assign_leaves_the_host_unseated(self):
+        # The host runs the room rather than playing it. Dealing them in used to
+        # occupy a seat a student then had to be moved out of, and counted their
+        # non-participation against a team they never played for.
+        self.client.force_authenticate(user=self.host)
+        self.client.post(reverse('auto-assign-teams'), {'roomCode': 'SEAT'}, format='json')
+        self.assertIsNone(self.player(self.host)['teamId'])
+        for team_id in ('1', '2', '3'):
+            self.assertNotIn(str(self.host.id), self.team(team_id)['memberIds'])
+
+    def test_auto_assign_respects_a_hand_picked_host_seat(self):
+        # If the host deliberately joined a team they keep it: what is refused is
+        # the host being *dealt* one, not the host choosing to compete.
+        self.client.force_authenticate(user=self.host)
+        self.client.post(reverse('assign-team'),
+                         {'roomCode': 'SEAT', 'teamId': '2'}, format='json')
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('auto-assign-teams'),
+                                {'roomCode': 'SEAT'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()['hostSeated'])
+        self.assertEqual(self.player(self.host)['teamId'], '2')
+        self.assertIn(str(self.host.id), self.team('2')['memberIds'])
+
+    def test_auto_assign_repoints_the_leader(self):
+        # The roster is rebuilt from scratch, so a leader left over from the
+        # previous deal would point at a non-member and gate the wrong person.
+        self.room_ref.collection('teams').document('1').set(
+            {'leaderId': str(self.p1.id)}, merge=True)
+        self.room_ref.collection('teams').document('2').set(
+            {'memberIds': [str(self.p1.id)], 'leaderId': str(self.p1.id)}, merge=True)
+
+        self.client.force_authenticate(user=self.host)
+        self.client.post(reverse('auto-assign-teams'), {'roomCode': 'SEAT'}, format='json')
+
+        for team_id in ('1', '2', '3'):
+            team = self.team(team_id)
+            members = [str(m) for m in team['memberIds']]
+            if members:
+                self.assertEqual(str(team.get('leaderId')), members[0])
+
+    def test_auto_assign_reports_who_was_left_out(self):
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('auto-assign-teams'),
+                                {'roomCode': 'SEAT'}, format='json')
+        # One player per team, so nobody is dropped -- the host, who is simply
+        # not eligible, must not show up here.
+        self.assertEqual(resp.json()['unassigned'], [])
 
     def player_doc(self, player_id):
         return self.room_ref.collection('players').document(str(player_id)).get().to_dict()
@@ -1011,8 +1061,8 @@ class TeamSeatTests(TestCase):
         resp = self.client.post(reverse('auto-assign-teams'),
                                 {'roomCode': 'SEAT'}, format='json')
         self.assertEqual(resp.status_code, 200)
-        # 4 players / 3 teams, so team 2 keeps one person but not necessarily p1.
-        self.assertEqual(sum(len(self.team(t)['memberIds']) for t in ('1', '2', '3')), 4)
+        # 3 dealt players / 3 teams, so everyone keeps a seat.
+        self.assertEqual(sum(len(self.team(t)['memberIds']) for t in ('1', '2', '3')), 3)
 
     def test_auto_assign_is_host_only(self):
         self.client.force_authenticate(user=self.p1)
@@ -2361,6 +2411,202 @@ class AnswerLogTests(TestCase):
         self.assertEqual(len(self.answers(self.a)), 1)
 
 
+class TeamLeadershipTests(TestCase):
+    """The leader seat decides real powers, so it has to move.
+
+    `leaderId` gates renaming and locking in the team's answer. It was assigned
+    by arrival order and never revisited, so a member who wanted either power
+    had no way to ask for it, and a leader who left kept both over a team they
+    were no longer on.
+    """
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='host', password='pass')
+        self.p1 = User.objects.create_user(username='p1', password='pass')
+        self.p2 = User.objects.create_user(username='p2', password='pass')
+        self.p3 = User.objects.create_user(username='p3', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('LEAD')
+        self.room_ref.set({
+            'status': 'waiting', 'hostId': self.host.id, 'teamMode': True,
+            'teamCount': 1, 'topic': 't', 'questionCount': 1, 'timePerQuestion': 15,
+            'questions': [{'type': 'mcq', 'question': 'q',
+                           'choices': ['A. y', 'B. n'], 'correctAnswer': 'A. y'}],
+        })
+        self.room_ref.collection('teams').document('1').set({
+            'name': 'Team 1', 'color': '#22D3EE', 'score': 0, 'correctCount': 0,
+            'answeredCount': 0, 'memberIds': [str(self.p1.id), str(self.p2.id)],
+            'memberCount': 2, 'maxSize': 5, 'leaderId': str(self.p1.id),
+            'teamCorrect': 0, 'multiplier': 1.0, 'nameLocked': False,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+        for user in (self.host, self.p1, self.p2, self.p3):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': 0, 'isFinished': False,
+            })
+        # p1 and p2 are on the team; p3 and the host are not.
+        for user in (self.p1, self.p2):
+            self.room_ref.collection('players').document(str(user.id)).update({'teamId': '1'})
+
+    def team(self):
+        return self.room_ref.collection('teams').document('1').get().to_dict()
+
+    def player(self, user):
+        return self.room_ref.collection('players').document(str(user.id)).get().to_dict()
+
+    def test_transfer_moves_the_seat(self):
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('transfer-team-leader'), {
+            'roomCode': 'LEAD', 'teamId': '1', 'userId': str(self.p2.id),
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(str(self.team()['leaderId']), str(self.p2.id))
+
+    def test_the_new_leader_gains_the_rights_the_old_one_held(self):
+        # The seat is not a label: it is what gates rename and lock-in, so a
+        # transfer has to change behaviour, not just the badge.
+        self.client.force_authenticate(user=self.p2)
+        self.assertEqual(self.client.post(reverse('rename-team'), {
+            'roomCode': 'LEAD', 'teamId': '1', 'name': 'Blocked',
+        }, format='json').status_code, 403)
+
+        self.client.force_authenticate(user=self.p1)
+        self.client.post(reverse('transfer-team-leader'), {
+            'roomCode': 'LEAD', 'teamId': '1', 'userId': str(self.p2.id),
+        }, format='json')
+
+        self.client.force_authenticate(user=self.p2)
+        self.assertEqual(self.client.post(reverse('rename-team'), {
+            'roomCode': 'LEAD', 'teamId': '1', 'name': 'Allowed',
+        }, format='json').status_code, 200)
+
+    def test_an_outsider_cannot_take_over(self):
+        self.client.force_authenticate(user=self.p3)
+        resp = self.client.post(reverse('transfer-team-leader'), {
+            'roomCode': 'LEAD', 'teamId': '1', 'userId': str(self.p3.id),
+        }, format='json')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_a_plain_member_cannot_hand_the_seat_on(self):
+        self.client.force_authenticate(user=self.p2)
+        resp = self.client.post(reverse('transfer-team-leader'), {
+            'roomCode': 'LEAD', 'teamId': '1', 'userId': str(self.p2.id),
+        }, format='json')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_the_host_can_hand_the_seat_on(self):
+        # A team whose leader has gone quiet would otherwise be unable to rename
+        # itself or lock in an answer for the rest of the quiz.
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('transfer-team-leader'), {
+            'roomCode': 'LEAD', 'teamId': '1', 'userId': str(self.p2.id),
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_leadership_cannot_leave_the_team(self):
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('transfer-team-leader'), {
+            'roomCode': 'LEAD', 'teamId': '1', 'userId': str(self.p3.id),
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_teams_lock_once_the_game_starts(self):
+        self.room_ref.update({'status': 'active'})
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('transfer-team-leader'), {
+            'roomCode': 'LEAD', 'teamId': '1', 'userId': str(self.p2.id),
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_leader_follows_the_leaver_off_the_team(self):
+        # Leaving used to leave `leaderId` behind, so a player who walked away
+        # kept rename and lock-in over a team they were no longer on.
+        self.client.force_authenticate(user=self.p1)
+        self.client.post(reverse('assign-team'),
+                         {'roomCode': 'LEAD', 'teamId': None}, format='json')
+        # `.get` because leaving DELETES the field rather than nulling it.
+        self.assertIsNone(self.player(self.p1).get('teamId'))
+        self.assertEqual(str(self.team()['leaderId']), str(self.p2.id))
+
+    def test_a_stale_leader_id_is_not_trusted(self):
+        # Guards the read path directly: a team document whose stored leader is
+        # no longer a member must not hand that person the team's powers.
+        self.room_ref.collection('teams').document('1').update({
+            'memberIds': [str(self.p2.id)], 'memberCount': 1,
+            'leaderId': str(self.p1.id),
+        })
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('rename-team'), {
+            'roomCode': 'LEAD', 'teamId': '1', 'name': 'Ghost',
+        }, format='json')
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.team()['name'], 'Team 1')
+
+    # ── lock in ──
+
+    def _start_question(self):
+        self.room_ref.update({
+            'status': 'active',
+            'teamQuestionIndex': 0,
+            'teamStartedAt': timezone.now() - timedelta(seconds=120),
+        })
+
+    def test_the_leader_can_lock_in_the_team_answer(self):
+        self._start_question()
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('team-pick'), {
+            'roomCode': 'LEAD', 'questionIndex': 0,
+            'answer': 'A. y', 'timeTaken': 2.0, 'lockIn': 'true',
+        }, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        # Locked in early, so the question is resolved rather than pending even
+        # though p2 has not picked.
+        self.assertFalse(resp.json()['pending'])
+        self.assertIn(0, list(self.team().get('resolvedQuestions') or []))
+
+    def test_a_plain_member_cannot_lock_in(self):
+        self._start_question()
+        self.client.force_authenticate(user=self.p2)
+        resp = self.client.post(reverse('team-pick'), {
+            'roomCode': 'LEAD', 'questionIndex': 0,
+            'answer': 'A. y', 'timeTaken': 2.0, 'lockIn': 'true',
+        }, format='json')
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()['leaderId'], str(self.p1.id))
+        # Still open, so the team carries on voting.
+        self.assertNotIn(0, list(self.team().get('resolvedQuestions') or []))
+
+    def test_lock_in_needs_an_answer(self):
+        # It is a decision, so there has to be a decision to commit; otherwise
+        # "lock in" would settle on nothing and hand out a void question.
+        self._start_question()
+        self.client.force_authenticate(user=self.p1)
+        resp = self.client.post(reverse('team-pick'), {
+            'roomCode': 'LEAD', 'questionIndex': 0,
+            'answer': '', 'timeTaken': 2.0, 'lockIn': 'true',
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_lock_in_cannot_score_the_question_twice(self):
+        self._start_question()
+        self.client.force_authenticate(user=self.p1)
+        self.client.post(reverse('team-pick'), {
+            'roomCode': 'LEAD', 'questionIndex': 0,
+            'answer': 'A. y', 'timeTaken': 2.0, 'lockIn': 'true',
+        }, format='json')
+        again = self.client.post(reverse('team-pick'), {
+            'roomCode': 'LEAD', 'questionIndex': 0,
+            'answer': 'B. n', 'timeTaken': 2.0, 'lockIn': 'true',
+        }, format='json')
+        self.assertEqual(again.status_code, 409)
+
+
 class TeamMajorityVoteTests(TestCase):
     """The mechanic itself: private picks, one majority answer, one shared score.
 
@@ -2683,6 +2929,72 @@ class TeamMajorityVoteTests(TestCase):
         self.assertEqual(body['agreed'], 1)
         # The two members who never voted are not counted as agreeing.
         self.assertFalse(self.player(self.members[1])['answers']['q0']['agreed'])
+
+    def test_a_member_who_disagreed_is_recorded_as_disagreeing(self):
+        # The bug being pinned: a member who picked against the majority was
+        # written into their own log with `agreed` unset, and the client read
+        # that as "you did not pick before time ran out" -- accusing them of
+        # timing out when they had answered, deliberately, differently.
+        self.close([
+            (self.members[0], 'A. yes'),
+            (self.members[1], 'A. yes'),
+            (self.members[2], 'B. no'),
+        ])
+        answers = self.player(self.members[2])['answers']
+        self.assertEqual(answers['q0']['picked'], 'B. no')
+        self.assertFalse(answers['q0']['agreed'])
+        # And the member who did agree, really did.
+        self.assertTrue(self.player(self.members[0])['answers']['q0']['agreed'])
+
+    def test_a_tie_records_no_agreement_for_anybody(self):
+        # A 2-2 split has no majority, so nobody agreed with anybody. This used
+        # to write `agreed: True` on every member's entry, and the client showed
+        # "You agreed with your team" to all four players -- including the two
+        # who had just voted against each other.
+        self.members.append(User.objects.create_user(username='m3', password='pass'))
+        self.room_ref.collection('teams').document('1').update({
+            'memberIds': [str(u.id) for u in self.members], 'memberCount': 4,
+        })
+        self.room_ref.collection('players').document(str(self.members[3].id)).set({
+            'displayName': 'm3', 'score': 0, 'answeredCount': 0, 'correctCount': 0,
+            'streak': 0, 'teamId': '1', 'isFinished': False,
+            'powerups': {'freeze': 0, 'hint': 0, 'doublePoints': 0, 'shield': 0},
+        })
+        body = self.close([
+            (self.members[0], 'A. yes'),
+            (self.members[1], 'A. yes'),
+            (self.members[2], 'B. no'),
+            (self.members[3], 'B. no'),
+        ])
+        self.assertTrue(body['void'])
+        for user in self.members:
+            agreed = self.player(user)['answers']['q0']['agreed']
+            # None, not False: "the vote was split" is not "you were on the
+            # wrong side", and the client renders them differently.
+            self.assertIsNone(agreed, f'{user.username} should not be scored agreed or disagreed')
+
+    def test_agreement_is_graded_leniently_on_a_typed_question(self):
+        # `is_correct` compares the team answer with `answer_matches`, but this
+        # per-member check used a plain `==`. So a member who typed
+        # "chlorophyll" against a team answer of "Chlorophyll" was scored CORRECT
+        # and simultaneously told they had disagreed with their team.
+        self.room_ref.update({
+            'questions': [{
+                'type': 'identification', 'question': 'Which pigment?',
+                'correctAnswer': 'Chlorophyll',
+            }],
+        })
+        self.close([
+            (self.members[0], 'Chlorophyll'),
+            (self.members[1], 'Chlorophyll'),
+            (self.members[2], 'chlorophyll'),
+        ])
+        answers = self.player(self.members[2])['answers']
+        self.assertTrue(answers['q0']['correct'], 'team was scored correct')
+        self.assertTrue(
+            answers['q0']['agreed'],
+            'a case-only difference must not read as disagreeing with the team',
+        )
 
     def test_a_client_cannot_close_the_question_before_the_deadline(self):
         # A fresh timer: this is the moment a member picks, not the moment the

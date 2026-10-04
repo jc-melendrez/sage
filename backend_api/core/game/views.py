@@ -15,6 +15,11 @@ from users.utils.file_parser import extract_text_from_file
 from users.gamification import award_xp, log_activity, record_game_finish
 from users.models import User
 from users.ai_usage import charge, record_tokens
+from core.question_types import (
+    TYPED_QUESTION_TYPES,
+    answer_matches,
+    normalise_question_type,
+)
 from core.throttling import AIGameThrottle, TvLeaderboardThrottle
 from .models import OfflineGameResult
 
@@ -276,12 +281,25 @@ def agreement_rate(answers):
     Reads the player's OWN answer log, where each entry carries `agreed`. Only
     ever called with one player's log, so it cannot expose anybody else's picks.
     A player who never answered has no rate rather than a misleading zero.
+
+    The denominator is the questions this player actually picked, not every
+    question the team reached. They used to be the same number, which made a
+    member who joined late look maximally disagreeable: they were written an
+    entry for every question the team answered, `agreed` was false on all the
+    ones before they arrived, and the rate came out at 0%. Someone who disagreed
+    with their team and someone who was not in the room yet produced the same
+    number, which is the opposite of what this stat is for.
+
+    A voided question is excluded too -- `agreed` is None there, since a split
+    vote is not agreement -- rather than counted as a disagreement.
     """
     entries = [e for e in (answers or {}).values() if e]
-    if not entries:
+    # Only questions the player was present for, and only ones with a verdict.
+    answered = [e for e in entries if e.get('picked') and e.get('agreed') is not None]
+    if not answered:
         return 0
-    agreed = len([e for e in entries if e.get('agreed')])
-    return round(agreed / len(entries) * 100)
+    agreed = len([e for e in answered if e.get('agreed')])
+    return round(agreed / len(answered) * 100)
 
 
 def team_capacity(room_data, player_count):
@@ -370,12 +388,19 @@ def team_leader_id(team_data):
     cannot both claim it -- AssignTeamView writes it inside the same transaction
     that appends the member id. Falls back to the first member for teams that
     predate the field.
+
+    A stored leader who is no longer on the team is treated as absent rather
+    than trusted. Leadership decides who may rename a team and who may lock in
+    its answer, so a stale id is not cosmetic: without this check a player who
+    left a team kept both powers over it for the rest of the session, and a team
+    whose leader left had nobody able to act. Re-reading the roster instead means
+    the seat self-heals on the first request after anyone sits or leaves.
     """
+    members = [str(m) for m in ((team_data or {}).get('memberIds') or [])]
     leader = (team_data or {}).get('leaderId')
-    if leader:
+    if leader and str(leader) in members:
         return str(leader)
-    members = (team_data or {}).get('memberIds') or []
-    return str(members[0]) if members else ''
+    return members[0] if members else ''
 
 
 def _settled_team_members(room_ref, team_data):
@@ -514,44 +539,14 @@ def snapshot_team_results(room_ref, room_data):
 #: Question types graded leniently -- the player types the answer instead of
 #: picking one. Both are the same kind of free-text response, so both use the
 #: same rule.
-TYPED_QUESTION_TYPES = frozenset({'identification', 'fill_in_blank'})
-
-
-def normalise_question_type(raw):
-    """Collapse every spelling of a question type to one canonical value.
-
-    Callers disagree about how to spell these: the AI generator posts display
-    labels ('Identification', 'Fill-in-the-Blank'), the upload screen posts
-    short ids ('sa', 'mc', 'tf'), and older rooms carry the runtime type. They
-    used to be compared with `== 'identification'`, so every variant except that
-    one exact string fell through to the multiple-choice prompt -- which is how
-    an upload asking for typed answers quietly got four options per question.
-    """
-    value = str(raw or '').strip().casefold()
-    if value in ('sa', 'short answer', 'short_answer', 'identification', 'identify'):
-        return 'identification'
-    if value in ('fib', 'fill in the blank', 'fill-in-the-blank', 'fill_in_blank', 'fillblank'):
-        return 'fill_in_blank'
-    if value in ('tf', 'true/false', 'true false', 'truefalse', 'boolean'):
-        return 'true_false'
-    return 'mcq'
-
-
-def answer_matches(given, expected):
-    """Compare a typed answer to the expected one.
-
-    Lenient about the things a phone keyboard changes on its own -- capitalisation
-    and stray or doubled whitespace -- and strict about everything else. A
-    misspelling is wrong: the question asked for a term, and quietly accepting
-    "photosynthosis" would teach the student nothing. So there is deliberately
-    no edit distance or fuzzy matching here.
-
-    `casefold` rather than `lower` so accented answers ("Beyoncé") compare
-    correctly against their uppercase form.
-    """
-    if given is None or expected is None:
-        return False
-    return ' '.join(str(given).split()).casefold() == ' '.join(str(expected).split()).casefold()
+#:
+#: `TYPED_QUESTION_TYPES`, `normalise_question_type` and `answer_matches` now live
+#: in `core.question_types` and are imported at the top of this file, so the quiz
+#: generator and the quiz package importer share one definition of "which types
+#: are answered by typing" and one definition of lenient grading. A quiz that
+#: graded an answer differently from the game with the same question text was a
+#: real inconsistency. They stay importable from this module because everything
+#: below already refers to them here.
 
 
 def build_questions_from_quiz(quiz):
@@ -1050,12 +1045,25 @@ class StartGameView(APIView):
                 # clean slate so a reshuffled roster never double-counts.
                 for tid in team_docs:
                     room_ref.collection('teams').document(tid).update({
-                        'memberIds': [], 'memberCount': 0,
+                        'memberIds': [], 'memberCount': 0, 'leaderId': None,
                     })
-                shuffled = list(players)
-                rng.shuffle(shuffled)
-                for i, player_snap in enumerate(shuffled):
-                    place(player_snap, str((i % team_count) + 1))
+                # The host runs the room rather than playing it, so they are not
+                # dealt a seat -- same rule as the auto-assign endpoint.
+                host_uid = str(room_data.get('hostId') or '')
+                dealt = [p for p in players if str(p.id) != host_uid]
+                rng.shuffle(dealt)
+                placement = {str((i % team_count) + 1): [] for i in range(len(dealt))}
+                for i, player_snap in enumerate(dealt):
+                    target = str((i % team_count) + 1)
+                    place(player_snap, target)
+                    placement[target].append(str(player_snap.id))
+                # One leader per team, taken from the settled roster rather than
+                # written per placement, so the badge does not depend on the
+                # order the shuffle happened to be dealt in.
+                for tid, member_ids in placement.items():
+                    room_ref.collection('teams').document(tid).update({
+                        'leaderId': member_ids[0] if member_ids else None,
+                    })
             elif not allow_unassigned:
                 # Honour the teams students picked in the lobby columns, then
                 # deal anyone left over into the emptiest team. Sorting by
@@ -1073,6 +1081,18 @@ class StartGameView(APIView):
                     target = min(load, key=lambda tid: (load[tid], tid))
                     load[target] += 1
                     place(player_snap, target)
+                # Same one-pass rule as auto-assign: the leader is read back off
+                # the roster instead of being assumed, because leftovers land on
+                # teams that already have members who outrank them.
+                for tid in load:
+                    placed = [
+                        str(p.id) for p in room_ref.collection('players').stream()
+                        if str((p.to_dict() or {}).get('teamId') or '') == tid
+                    ]
+                    if placed:
+                        room_ref.collection('teams').document(tid).update({
+                            'leaderId': placed[0],
+                        })
             # else: allow_unassigned -- these players keep spectating, which is
             # the state the host confirmed when they pressed START. Placing them
             # here would make START silently reassign people, which is exactly
@@ -1630,6 +1650,21 @@ class FinishGameView(APIView):
 
             player_ref.update({'isFinished': True})
 
+            # A team is finished when every one of its members is. The final
+            # screen reveals finished entries first and holds the rest back, and
+            # it reads the team, not the individual members, so the flag has to
+            # be rolled up here or a team game has nothing to reveal.
+            team_id = (player_doc.to_dict() or {}).get('teamId')
+            if team_mode and team_id:
+                team_doc = room_ref.collection('teams').document(str(team_id)).get()
+                members = [str(uid) for uid in ((team_doc.to_dict() or {}).get('memberIds') or [])]
+                done = [
+                    p.id for p in room_ref.collection('players').stream()
+                    if str(p.id) in members and bool((p.to_dict() or {}).get('isFinished'))
+                ]
+                if members and len(done) >= len(members):
+                    room_ref.collection('teams').document(str(team_id)).update({'isFinished': True})
+
             room_data = room_ref.get().to_dict() or {}
             status = self._progress(room_ref, room_data, uid)
 
@@ -1737,7 +1772,15 @@ class FinishGameView(APIView):
             entries.append({
                 'user_id': user_id,
                 'display_name': data.get('displayName', 'Player'),
+                # The same name under the key the activity snapshot is read
+                # with. It was only written as `display_name`, and the Recent
+                # Activity detail reads `name` -- so every player in every
+                # settled solo game rendered as "Player" with no name at all.
+                'name': data.get('displayName', 'Player'),
                 'score': data.get('score', 0),
+                'correct': data.get('correctCount', 0) or 0,
+                'answered': data.get('answeredCount', 0) or 0,
+                'bestStreak': data.get('bestStreak', 0) or 0,
             })
         entries.sort(key=lambda e: e['score'], reverse=True)
         return entries
@@ -1820,34 +1863,47 @@ class FinishGameView(APIView):
             ranks = self._competition_ranks([rank_values[tid] for tid in ordered])
             team_rank = dict(zip(ordered, ranks))
 
-            # Read the players once: they are needed both to pay and to build
-            # the results snapshot stored on each player's activity row.
-            players = {}
-            for p in room_ref.collection('players').stream():
-                players[p.id] = p.to_dict() or {}
-
+            # The per-member rows come from `_settled_team_members`, which reads
+            # the players collection itself, so there is no up-front read here.
             teams_snapshot = []
             for tid, data in team_doc.items():
-                member_ids = [str(uid) for uid in (data.get('memberIds') or [])]
-                members = []
-                for uid in member_ids:
-                    pdata = players.get(uid)
-                    if pdata is None:
-                        continue
-                    members.append({
-                        'user_id': int(uid) if str(uid).isdigit() else uid,
-                        'name': pdata.get('displayName', 'Player'),
-                        'score': pdata.get('score', 0) or 0,
-                        'correct': pdata.get('correctCount', 0) or 0,
-                        'answered': pdata.get('answeredCount', 0) or 0,
-                    })
+                # Reuse the helper the final results screen already uses, rather
+                # than re-deriving a thinner set of fields here. The two used to
+                # disagree: the end screen showed accuracy, agreement, streak and
+                # MVP, and none of that reached the activity row, so "full battle
+                # history" in Recent Activity was a strictly poorer version of
+                # the screen the student had just looked at.
+                enriched = dict(data, __id=tid)
+                stats = _team_stats(data)
+                members, mvp_id = _settled_team_members(room_ref, enriched)
+                leader = team_leader_id(data)
                 teams_snapshot.append({
                     'id': tid,
                     'name': data.get('name') or f'Team {tid}',
                     'score': data.get('score', 0) or 0,
                     'correct': data.get('teamCorrect', 0) or 0,
                     'rank': team_rank.get(tid),
-                    'members': members,
+                    'accuracy': stats['accuracy'],
+                    'bestStreak': stats['bestStreak'],
+                    # The snapshot outlives the room, so the leader and MVP are
+                    # resolved to ids here; the name would otherwise be lost and
+                    # the badge could not be attributed.
+                    'leaderId': leader or None,
+                    'mvpId': mvp_id,
+                    'members': [{
+                        'user_id': m['userId'],
+                        'name': m['displayName'],
+                        'score': m['score'],
+                        'correct': m['correctCount'],
+                        'answered': m['answeredCount'],
+                        'accuracy': m['accuracy'],
+                        'agreement': m['agreement'],
+                        'bestStreak': m['bestStreak'],
+                        'avatar': m['avatar'],
+                        'isLeader': str(m['userId']) == leader,
+                        'isMvp': m['isMvp'],
+                        'earlyFinisher': m['earlyFinisher'],
+                    } for m in members],
                 })
             teams_snapshot.sort(key=lambda t: (t['rank'] is None, t['rank']))
             results = {
@@ -2248,7 +2304,9 @@ class AssignTeamView(APIView):
             # ("all reads must precede all writes"), so the reads are hoisted
             # here and the writes follow them.
             if old_ref is not None:
-                transaction.get(old_ref)
+                current_old_team = old_ref.get(transaction=transaction).to_dict() or {}
+            else:
+                current_old_team = {}
             if team_ref is not None:
                 # Read through the document reference, NOT
                 # transaction.get(team_ref) -- the latter yields a lazy
@@ -2270,6 +2328,17 @@ class AssignTeamView(APIView):
                     'memberIds': fs.ArrayRemove([uid]),
                     'memberCount': fs.Increment(-1),
                 })
+                # A leader who walks away hands the seat to whoever is
+                # left, rather than leaving a team that cannot rename
+                # itself or lock in its own answer.
+                if team_leader_id(current_old_team) == uid:
+                    remaining = [
+                        str(m) for m in (current_old_team.get('memberIds') or [])
+                        if str(m) != uid
+                    ]
+                    transaction.update(old_ref, {
+                        'leaderId': remaining[0] if remaining else None,
+                    })
             if unassign:
                 # DELETE_FIELD rather than None. Every read treats a missing
                 # field and a null one as "spectating", but writing null would
@@ -2473,6 +2542,63 @@ class RenameTeamView(APIView):
         return Response({'message': 'Team renamed', 'teamId': team_id, 'name': name})
 
 
+class TransferTeamLeaderView(APIView):
+    """Hand the team over to a different member.
+
+    The leader is not decorative. It already decides who may rename the team and
+    who may lock in its answer, so a member who wants either of those things has
+    no way to ask for them -- the seat is assigned by arrival order and never
+    moves. This is the transfer.
+
+    Who may call it: the current leader (handing it on, voluntarily or because
+    they are done) or the room host (because a team whose leader left mid-quiz
+    would otherwise be stuck with nobody able to act for the rest of the game).
+    Who may be handed to: a current member of that team, and nobody else --
+    otherwise this becomes a way to hand a team to a player who never sat on it.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        team_id = str(request.data.get('teamId') or '')
+        new_leader = str(request.data.get('userId') or '')
+        if not room_code or not team_id or not new_leader:
+            return Response(
+                {'error': 'roomCode, teamId and userId are required'}, status=400)
+
+        try:
+            room_ref, room_data = _room_and_teams(room_code)
+            team_ref = room_ref.collection('teams').document(team_id)
+            team_doc = team_ref.get()
+            if not team_doc.exists:
+                return Response({'error': 'Team not found'}, status=404)
+            team_data = team_doc.to_dict() or {}
+        except _Rejected as rejected:
+            return Response(rejected.payload, status=rejected.status)
+
+        uid = str(request.user.id)
+        is_host = str(room_data.get('hostId')) == uid
+        if not is_host and team_leader_id(team_data) != uid:
+            return Response(
+                {'error': 'Only the current team leader or the host can hand over leadership'},
+                status=403)
+
+        members = [str(m) for m in (team_data.get('memberIds') or [])]
+        if new_leader not in members:
+            return Response(
+                {'error': 'Leadership can only go to someone on that team'}, status=400)
+        if room_data.get('status') != 'waiting':
+            return Response({'error': 'Teams are locked once the game starts'}, status=400)
+
+        team_ref.update({'leaderId': new_leader})
+        return Response({
+            'message': 'Team leader handed over',
+            'teamId': team_id,
+            'leaderId': new_leader,
+        })
+
+
 def _room_and_teams(room_code):
     """Shared room/team-mode guard for the team views.
 
@@ -2538,6 +2664,9 @@ class TeamPickView(APIView):
         use_shield = str(request.data.get('useShield', 'false')).lower() == 'true'
         use_hint = str(request.data.get('useHint', 'false')).lower() == 'true'
         force = str(request.data.get('force', 'false')).lower() == 'true'
+        # The leader pressing "Lock in" settles the question early instead of
+        # waiting out the clock for the rest of the team.
+        lock_in = str(request.data.get('lockIn', 'false')).lower() == 'true'
 
         try:
             room_ref, room_data = _room_and_teams(room_code)
@@ -2566,6 +2695,29 @@ class TeamPickView(APIView):
         if str(request.user.id) not in members:
             return Response({'error': 'Join a team before answering'}, status=403)
 
+        # Locking in is the leader's call, and it is the one team action that
+        # ends the question for everybody, so it is gated here rather than
+        # trusted from the client. The host can also do it, for the same reason
+        # they can rename: a leader who has gone quiet would otherwise freeze the
+        # team for the rest of the quiz.
+        if lock_in:
+            uid = str(request.user.id)
+            if str(room_data.get('hostId')) != uid and team_leader_id(team_data) != uid:
+                return Response({
+                    'error': 'Only the team leader can lock in the answer',
+                    'leaderId': team_leader_id(team_data) or None,
+                }, status=403)
+            # Refused once the question is resolved, so a double tap cannot
+            # score the same question twice.
+            if f'reveals.q{question_index}' in (team_data.get('reveals') or {}):
+                return Response({'error': 'This question is already locked in'}, status=400)
+            # Locking in is a decision, so it needs a decision to commit. The
+            # leader's own pick is the fallback when the team has not converged:
+            # it is the one answer somebody is actually standing behind.
+            if not str(answer or '').strip():
+                return Response(
+                    {'error': 'Pick an answer before locking it in'}, status=400)
+
         time_per_q = question_time_limit(questions[question_index], room_data)
         time_taken = min(max(time_taken, 0.0), time_per_q)
 
@@ -2591,6 +2743,7 @@ class TeamPickView(APIView):
             player_id=str(request.user.id),
             answer=answer, time_taken=time_taken, expired=expired,
             use_double=use_double, use_shield=use_shield, use_hint=use_hint,
+            lock_in=lock_in,
         )
         if settled.get('_error'):
             return Response(settled, status=settled.get('_status', 400))
@@ -2614,7 +2767,7 @@ class TeamPickView(APIView):
 
 def _resolve_team_question(db, room_ref, team_ref, questions, question_index, time_per_q,
                            player_id, answer, time_taken, expired,
-                           use_double=False, use_shield=False, use_hint=False):
+                           use_double=False, use_shield=False, use_hint=False, lock_in=False):
     """Tally one team's picks and, if the question closed, score it once.
 
     Returns the resolved payload (identical for every member, so nobody can see
@@ -2629,6 +2782,10 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
     and the server clock. It is never taken from the request: a client that
     declared its own timer expired could close the question early and lock in
     whatever tally it liked.
+
+    `lock_in` is the leader ending the round early by decision rather than by
+    clock. It is a third closing condition alongside "everyone picked" and "the
+    deadline passed", and it is authorised by the caller before it gets here.
 
     The tally itself lives in the server-only `_server` subcollection, NOT on the
     team document. `firestore.rules` lets any authenticated user read a team's
@@ -2679,8 +2836,8 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
         picks[player_id] = {'answer': answer, 'timeTaken': time_taken}
         pickers = len([p for p in picks.values() if pick_answer(p)])
 
-        # Everyone picked, or the deadline closed it.
-        if pickers < len(members) and not expired:
+        # Everyone picked, the deadline closed it, or the leader locked it in.
+        if pickers < len(members) and not expired and not lock_in:
             # `set`, not `update`: this document does not exist until a team
             # picks for the first time, and the full tally is in hand here.
             transaction.set(picks_ref, {'questionIndex': question_index, 'picks': picks})
@@ -2845,6 +3002,17 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             # now, but a bare string on a room that predates that. Slicing the
             # raw value would put "{'answer': 'Lon" in the member's own log.
             own_pick = pick_answer(picks.get(uid))[:200]
+            # Whether this member's own pick matched the team, graded the same way
+            # the team was graded. It used to be a plain `==`, which put the two
+            # in direct contradiction on a typed question: a member who typed
+            # "chlorophyll" against a team answer of "Chlorophyll" was scored
+            # correct -- `is_correct` compares with `answer_matches` -- and then
+            # told they had disagreed with their team, because `==` is
+            # case-sensitive. Same question, same answer, opposite verdicts.
+            own_matched = (
+                answer_matches(own_pick, choice)
+                if q_type in TYPED_QUESTION_TYPES else own_pick == choice
+            ) if own_pick else False
             member_updates = {
                 'answeredCount': fs.Increment(1),
                 'answeredQuestions': fs.ArrayUnion([question_index]),
@@ -2857,9 +3025,15 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
                     # The viewer's own pick only. Nobody can read a teammate's
                     # out of their own document.
                     'picked': own_pick,
-                    # A voided question has no team answer to agree with, so it
-                    # counts as agreeing rather than punishing a split twice.
-                    'agreed': True if tie else bool(own_pick and own_pick == choice),
+                    # Three states, not two.
+                    #
+                    # This used to be `True if tie else bool(own_pick == choice)`,
+                    # which folded "the question was voided" into "you agreed".
+                    # On a 2-2 split every member then read "you agreed with your
+                    # team", including the two who disagreed -- and a tie is
+                    # exactly the case where nobody agreed with anybody. `None` is
+                    # what tells the client to say the vote was split instead.
+                    'agreed': None if tie else own_matched,
                     'agreedCount': agreed,
                     'pickers': distinct,
                 },
@@ -3036,6 +3210,21 @@ class AutoAssignTeamsView(APIView):
         if not players:
             return Response({'error': 'Nobody is in the room yet'}, status=400)
 
+        # The host is not dealt a seat.
+        #
+        # They run the room: they press Start, they watch the standings, and in
+        # team mode they are not competing. Dealing them in is not harmless --
+        # they occupy a seat that a student then has to be moved out of, and the
+        # host's own placement counts against a team they never played for.
+        # If they have already picked a team by hand that choice is respected;
+        # what is refused is the host being *dealt* one.
+        host_id = str(room_data.get('hostId') or room_data.get('ownerId') or '')
+        host_seated = next(
+            (p for p in players if str(p.id) == host_id and (p.to_dict() or {}).get('teamId')),
+            None,
+        )
+        to_deal = [p for p in players if str(p.id) != host_id]
+
         # Full reshuffle: everyone is redealt, so a roster that was already
         # balanced stays balanced and a hand-picked one is equalised. Starting
         # from a clean slate first is what stops a reshuffle from double-counting
@@ -3048,17 +3237,30 @@ class AutoAssignTeamsView(APIView):
         # Round-robin over a shuffle lands sizes within one of each other without
         # having to sort by load each step, and stays correct when there are more
         # teams than players (the extra teams come up empty).
-        shuffled = list(players)
+        shuffled = list(to_deal)
         rng.shuffle(shuffled)
         team_ids = sorted(team_docs, key=lambda t: (len(str(t)), str(t)))
         placement = {tid: [] for tid in team_ids}
         for i, player_snap in enumerate(shuffled):
             placement[team_ids[i % len(team_ids)]].append(player_snap.id)
 
+        # A hand-picked host goes back to the team they chose rather than being
+        # wiped out by the clear above.
+        if host_seated:
+            hosted = str((host_seated.to_dict() or {}).get('teamId'))
+            if hosted in placement:
+                placement[hosted].append(host_seated.id)
+
         for tid, member_ids in placement.items():
+            # The leader is re-seated at the front. It has to be rewritten here
+            # because the roster was just rebuilt from scratch: the old
+            # `leaderId` is left pointing at whoever used to sit first, who may
+            # now be on a different team entirely, so the leader badge and every
+            # permission gated on it would belong to a non-member.
             room_ref.collection('teams').document(tid).update({
                 'memberIds': member_ids,
                 'memberCount': len(member_ids),
+                'leaderId': str(member_ids[0]) if member_ids else None,
             })
             for pid in member_ids:
                 room_ref.collection('players').document(str(pid)).update({'teamId': str(tid)})
@@ -3078,6 +3280,7 @@ class AutoAssignTeamsView(APIView):
             serialize_team(tid, {
                 **team_docs[tid],
                 'memberIds': placement[tid],
+                'leaderId': str(placement[tid][0]) if placement[tid] else None,
                 'maxSize': max(team_max_size(team_docs[tid]), len(placement[tid])),
             })
             for tid in team_ids
@@ -3087,6 +3290,13 @@ class AutoAssignTeamsView(APIView):
             'message': f'Dealt {len(shuffled)} players into {len(team_ids)} teams',
             'teams': final_teams,
             'sizes': {t: len(placement[t]) for t in team_ids},
+            # Reported so the lobby can say who was left out instead of the host
+            # discovering it by counting seats.
+            'unassigned': [
+                str(p.id) for p in to_deal
+                if not any(str(p.id) in ids for ids in placement.values())
+            ],
+            'hostSeated': bool(host_seated),
         })
 
 

@@ -45,6 +45,9 @@ export default function EducatorTabLayout() {
         tabBarInactiveTintColor: isDark ? '#f6f0ff' : '#c0a7e7',
         headerShown: false,
         tabBarButton: HapticTab,
+      // Same reason as the student layout: any screen in here that composes
+      // text had its input hidden behind the bar once the keyboard opened.
+      tabBarHideOnKeyboard: true,
         tabBarStyle: {
           backgroundColor: '#4C1D95',
           borderTopWidth: 0,
