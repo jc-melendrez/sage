@@ -39,6 +39,7 @@ import { Ionicons } from '@expo/vector-icons';
 import PowerupPoolHUD from '@/components/game/PowerupPoolHUD';
 import StandingsTicker from '@/components/game/StandingsTicker';
 import { answerLogFromOutcomes } from '@/services/gameBreakdown';
+import { TYPED_QUESTION_TYPES } from '@/services/offlineEngine';
 import ReactionBar from '@/components/game/ReactionBar';
 import { sameTeamId, activeMembersByTeam, teamRankValue, type PowerupKey, type TeamEntry, type PlayerAnswerLog } from '@/types/game';
 import { pfpSource } from '@/constants/pfps';
@@ -77,9 +78,13 @@ const FONTS = {
   regular: 'Montserrat-Regular',
 };
 
-/* ── helper: pull the letter chip out of "A. Paris" ── */
-const letterOf = (c: string) => c.charAt(0);
-const textOf = (c: string) => c;
+/* ── helper: pull the letter chip out of "A. Paris" ──
+ *
+ * Both coerce through String: a choice that arrived as a number (or null, from a
+ * hand-written or AI-generated question) used to make `charAt` throw and take the
+ * whole screen down. A malformed option should cost one chip, not the round. */
+const letterOf = (c: unknown) => String(c ?? '').charAt(0);
+const textOf = (c: unknown) => String(c ?? '');
 
 /**
  * A Firestore timestamp as epoch milliseconds, tolerating the shapes the value
@@ -111,6 +116,28 @@ function sharedTimeLimit(roomData: any, index: number): number {
   if (typeof own === 'number' && own > 0) return own;
   const fallback = roomData?.timePerQuestion;
   return typeof fallback === 'number' && fallback > 0 ? fallback : 15;
+}
+
+/**
+ * True when two snapshots carry identical content.
+ *
+ * Used to stop a Firestore listener from handing React a brand-new array for a
+ * delivery that changed nothing. Firestore re-delivers the whole document set
+ * on metadata changes and on remote events, so rebuilding the array on every
+ * delivery made every downstream `useEffect` dep change for no reason. That is
+ * not cosmetic here: one of those effects writes `result`, and `result` gates
+ * the auto-advance countdown, so an unrelated snapshot silently restarted the
+ * countdown and replayed the reveal haptics.
+ *
+ * JSON comparison is safe for this data: it is plain Firestore JSON with no
+ * cycles, and the doc order Firestore returns (by document id) is stable.
+ */
+function sameSnapshot(a: unknown, b: unknown): boolean {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -201,6 +228,22 @@ export default function QuestionScreen() {
   const [questionOrder, setQuestionOrder] = useState<number[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
+  /**
+   * Whether this member's answer for the CURRENT question has been submitted.
+   *
+   * This has to be separate from `selected`, because `selected` holds the answer
+   * *text* and a timeout submits the empty string. `''` is falsy, so every guard
+   * written as `if (selected) return` fell straight through after a timeout: the
+   * options stayed tappable and Submit stayed live, the player's next real tap
+   * posted a SECOND answer for the same index, and the server's idempotency
+   * cache (`answeredQuestions`) handed back the blank verdict -- a correct
+   * answer shown as Incorrect with the streak destroyed and no way to recover.
+   *
+   * A latch is also the honest model: running out of time IS an attempt, scored
+   * as a miss. So the question is locked either way, and the answer text is
+   * only ever what to display.
+   */
+  const [answered, setAnswered] = useState(false);
   const [result, setResult] = useState<{
     correct: boolean;
     correctAnswer: string;
@@ -233,7 +276,6 @@ export default function QuestionScreen() {
     /** The team split and nobody answered for it, so it scored nothing. */
     voided?: boolean;
   } | null>(null);
-  const [typedAnswer, setTypedAnswer] = useState('');
   const [boxChars, setBoxChars] = useState<string[]>([]);
   const [wordLengths, setWordLengths] = useState<number[]>([]);
   const boxRefs = useRef<any[]>([]);
@@ -243,6 +285,15 @@ export default function QuestionScreen() {
   const [timePerQuestion, setTimePerQuestion] = useState(15);
   const [userId, setUserId] = useState<number | string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * True from the moment an answer goes out until the server's verdict lands.
+   *
+   * A timeout now resolves locally (running out of time is a miss, so the card
+   * should flip at once rather than sitting on a dead timer for a round-trip),
+   * but that local verdict is provisional. Gating the auto-advance on this is
+   * what stops the room moving on with the real score still in flight.
+   */
+  const [submitting, setSubmitting] = useState(false);
   const [pendingAnswer, setPendingAnswer] = useState<string | null>(null);
   const [powerups, setPowerups] = useState({ freeze: 0, hint: 0, doublePoints: 0, shield: 0 });
   const [activePowerups, setActivePowerups] = useState({ hint: false, doublePoints: false, shield: false });
@@ -291,6 +342,16 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const [roomOwnerId, setRoomOwnerId] = useState<string | null>(null);
   /** Latches once a forced pick has been sent for this question. */
   const teamForceSentRef = useRef(false);
+  /**
+   * A one-shot retry scheduled for the exact moment the server says the shared
+   * question closes.
+   *
+   * The half-second clock tick used to re-force on every tick instead, so a
+   * client whose clock ran fractionally ahead of the server's kept hammering
+   * `/game/teams/pick/` for as long as the skew lasted. The server's
+   * `secondsLeft` is authoritative, so one scheduled retry replaces the spin.
+   */
+  const teamRetryTimerRef = useRef<any>(null);
   /** Latest submit/pick closure for the clock interval, which must not capture
    * a stale render's state. */
   const teamPickRef = useRef<(answer: string, force: boolean) => void>(() => {});
@@ -299,6 +360,15 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
    * would otherwise be re-created on every keystroke. */
   const selectedRef = useRef<string | null>(null);
   const pendingAnswerRef = useRef<string | null>(null);
+  /**
+   * Mirror of `answered` for the timer callbacks.
+   *
+   * Those run from a `setState` updater created by a render that has long since
+   * been replaced, so a `selected` read inside them is whatever that stale
+   * render captured -- which is why the old `if (!selected)` expiry check was
+   * dead code. A ref is always current.
+   */
+  const answeredRef = useRef(false);
   // A spectator is a player in a team game who has no team assigned. The server
   // rejects their POST /game/answer/ with 403 and ignores them in settlement, so
   // the UI must not offer them an answer path in the first place.
@@ -624,6 +694,15 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           setTeamAssignments(assignments);
           setShowTeamReveal(!!(data.teamMode && data.status === 'active' && assignments));
         }
+        // Who may settle this room. Deliberately outside the `teamMode` branch:
+        // it used to sit inside it, so a classic room -- which has no `teamMode`
+        // field at all -- left `roomOwnerId` null forever. `isOwner` was then
+        // always false, the client never sent `confirm`, and `_settle` (whose
+        // only caller is the confirm branch) never ran: no XP, no Recent
+        // Activity row, and `status` never reached 'finished' so the results
+        // screen never settled either. It read as a missing feature rather than
+        // a request that was never made.
+        setRoomOwnerId(String(data.ownerId ?? data.hostId ?? ''));
         // The shared question state is re-read on EVERY snapshot, not just at
         // boot: the host advances the room, and a member who is behind has to
         // catch up to the question everyone else is actually answering.
@@ -632,7 +711,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           setTeamIndex(index);
           setTeamTimeLimit(sharedTimeLimit(data, index));
           setTeamStartedAt(timestampMillis(data.teamStartedAt));
-          setRoomOwnerId(String(data.ownerId ?? data.hostId ?? ''));
         }
         if (data.status === 'finished' && claimNav()) {
           setRoomStatus('finished');
@@ -754,7 +832,14 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       .collection('gameRooms').doc(roomCode)
       .collection('teams')
       .onSnapshot(snap => {
-        setTeams((snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []) as TeamEntry[]);
+        const next = (snap?.docs?.map(d => ({ id: d.id, ...d.data() })) ?? []) as TeamEntry[];
+        // Keep the previous array when the delivery is identical. See
+        // `sameSnapshot`: this listener used to rebuild `teams` on every
+        // snapshot, which re-ran the reveal effect below, which produced a new
+        // `result` object, which restarted the auto-advance countdown and
+        // replayed the reveal haptics -- several times a second, which is what
+        // made a team's lock-in look like it was stuck.
+        setTeams(prev => (sameSnapshot(prev, next) ? prev : next));
       });
     return () => { unsub(); };
   }, [teamMode, roomCode]);
@@ -832,10 +917,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       const elapsed = (Date.now() - teamStartedAt) / 1000;
       const left = Math.max(0, Math.ceil(teamTimeLimit - elapsed));
       setTimeLeft(left);
-      if (left <= 0 && !teamForceSentRef.current) {
+      if (left <= 0 && !teamForceSentRef.current && teamRetryTimerRef.current == null) {
         // The shared clock is the server's to enforce: this claims expiry, and
         // the server decides from its own clock whether the round really is
-        // over. If it is not, the pending pick stays pending.
+        // over. If it is not, it answers `pending` with the remaining time and
+        // `submitTeamPick` schedules the single retry -- so the tick must not
+        // force again in the meantime (`teamRetryTimerRef` is the latch).
         //
         // Resend the LOCKED pick, never a blank one: a forced submit overwrites
         // this member's slot in the tally, so a blank here would erase a choice
@@ -847,7 +934,16 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     };
     tick();
     timerRef.current = setInterval(tick, 500);
-    return () => clearInterval(timerRef.current);
+    return () => {
+      if (timerRef.current != null) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      if (teamRetryTimerRef.current != null) {
+        clearTimeout(teamRetryTimerRef.current);
+        teamRetryTimerRef.current = null;
+      }
+    };
   }, [teamMode, teamStartedAt, teamTimeLimit, teamIndex, questions.length, showTeamReveal]);
 
   // A new shared question resets everything the last one left behind.
@@ -855,13 +951,15 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     if (!teamMode) return;
     teamForceSentRef.current = false;
     setCurrentIndex(teamIndex);
+    // The room moved, so whatever we were waiting to advance past is done.
+    setError(null);
     selectedRef.current = null;
     pendingAnswerRef.current = null;
+    markAnswered(false);
     setSelected(null);
     setPendingAnswer(null);
     setResult(null);
     setTeamPickCount({ picked: 0, expected: 0 });
-    setTypedAnswer('');
     setBoxChars([]);
     setIsFrozen(false);
     setShowStandings(false);
@@ -886,11 +984,24 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     timerBarAnim.setValue(1);
     timerRef.current = setInterval(() => {
       setTimeLeft(t => {
-        if (t <= 1) { clearInterval(timerRef.current); if (!selected) handleAnswer(null); return 0; }
+        if (t <= 1) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+          // `answeredRef`, not `selected`: this closure was built by a render
+          // that has since been replaced, so a `selected` read here could never
+          // be anything but that stale render's value and the guard was dead.
+          if (!answeredRef.current) handleAnswer(null);
+          return 0;
+        }
         return t - 1;
       });
     }, 1000);
-    return () => clearInterval(timerRef.current);
+    return () => {
+      if (timerRef.current !== null) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
   }, [currentIndex, questions, showTeamReveal, teamMode]);
 
   useEffect(() => {
@@ -914,12 +1025,40 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   }, [timeLeft, isFrozen, teamMode, teamTimeLimit, timePerQuestion]);
 
   useEffect(() => {
-    if (question?.type === 'identification') {
-      const words = question.correctAnswer.trim().split(/\s+/);
-      setWordLengths(words.map((w: string) => w.length));
-      setBoxChars(Array(words.join('').length).fill(''));
-      boxRefs.current = [];
+    // Both typed families need the same letter-box row, so this keys off the
+    // shared list rather than `type === 'identification'`. `fill_in_blank` used
+    // to render NOTHING at all -- no input, no boxes, no way to answer -- because
+    // the gate named one type and the offline engine already knew there were two.
+    // `TYPED_QUESTION_TYPES` is the single source of truth; it is also what
+    // `offlineEngine` grades against, so a type that looks typed here is typed
+    // there.
+    if (!(TYPED_QUESTION_TYPES as readonly string[]).includes(question?.type)) {
+      return;
     }
+    const raw = String(question?.correctAnswer ?? '').trim();
+    if (!raw) {
+      // An empty answer yields a zero-length row, and `[].every(...)` is true --
+      // so Submit lit up with nothing to send and the question scored free. There
+      // is no answer to lay out; leave the boxes empty and let the Submit guard
+      // below keep the button dead.
+      setWordLengths([]);
+      setBoxChars([]);
+      boxRefs.current = [];
+      return;
+    }
+    const words = raw.split(/\s+/);
+    setWordLengths(words.map(w => w.length));
+    // Length derived from the SAME words as `wordLengths`. It used to be built
+    // from `words.join('')`, which is fine, but the two were computed in
+    // separate statements over separate arrays -- and the letter-box render
+    // slices `boxChars` by `wordLengths`, so any drift left the tail of the row
+    // unrenderable and silently shorter than the answer. One array, two views.
+    setBoxChars(Array(words.join('').length).fill(''));
+    boxRefs.current = [];
+    // `currentIndex` and `questions` are the only inputs `question` derives from,
+    // so they are the whole dependency set. Naming `question` here is impossible:
+    // it is declared further down this render, and the deps array is evaluated
+    // before that declaration is reached.
   }, [currentIndex, questions]);
 
   useEffect(() => {
@@ -953,6 +1092,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // or the game would sit on question one for them forever.
     if (!result && !spectator) { setAutoCountdown(0); return; }
 
+    // The provisional timeout verdict flips the card immediately, but the real
+    // score is still in flight. Advancing now would move the room on before the
+    // server had recorded anything, which is how a timed-out question used to
+    // end up unrecorded. Wait for the verdict, then count down as normal.
+    if (submitting) { setAutoCountdown(0); return; }
+
     // If the powerup roulette is already showing, pause the countdown
     // so the reward is actually visible before we auto-advance. The
     // roulette timer will later clear showRoulette, at which point this
@@ -976,7 +1121,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       });
     }, 1000);
     return () => { if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; } };
-  }, [result, showRoulette, spectator]);
+  }, [result, showRoulette, spectator, submitting]);
 
   /* ── all handlers below are UNCHANGED ── */
   const joinWithSpaces = (chars: string[]) => {
@@ -990,13 +1135,30 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     return result;
   };
 
+  /**
+   * Whether the letter-box row is fully and legitimately filled.
+   *
+   * The `length > 0` half is load-bearing: `[].every(c => c)` is `true`, so a
+   * question whose `correctAnswer` is empty produced a zero-box row that read as
+   * complete. Submit lit up, sent `''`, and the server graded the empty string
+   * against the empty answer -- a question nobody could fail, handed out for
+   * free.
+   */
+  const boxesComplete = boxChars.length > 0 && boxChars.every(c => !!c);
+
   const handleBoxChange = (text: string, index: number) => {
     const char = text.slice(-1);
-    const next = [...boxChars];
-    next[index] = char;
-    setBoxChars(next);
+    // Functional update. The old copy-then-set read `boxChars` from the render
+    // that owned this handler, so two keystrokes landing before a re-render both
+    // wrote the SAME base array and the second silently dropped the first
+    // letter -- which then read as a wrong answer for a correctly typed one.
+    setBoxChars(prev => {
+      if (index < 0 || index >= prev.length) return prev;
+      const next = [...prev];
+      next[index] = char;
+      return next;
+    });
     if (char && index < boxChars.length - 1) boxRefs.current[index + 1]?.focus();
-    if (next.every(c => c)) setTypedAnswer(joinWithSpaces(next));
   };
 
   const handleBoxKeyPress = (e: any, index: number) => {
@@ -1005,7 +1167,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const handleFreeze = async () => {
-    if (selected || isFrozen || freezeBusy) return;
+    if (answered || isFrozen || freezeBusy) return;
     if (!isOffline && !isLan) {
       const poolFreeze = teamMode ? pool.freeze : powerups.freeze;
       if (poolFreeze <= 0) return;
@@ -1108,7 +1270,14 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   useEffect(() => {
     if (!teamMode || !myTeam) return;
     const expected = myTeam.memberCount || myTeam.memberIds?.length || 0;
-    setTeamPickCount({ picked: myTeam.pickCount ?? 0, expected });
+    setTeamPickCount(prev => {
+      const picked = myTeam.pickCount ?? 0;
+      // Same reasoning as the `result` wrapper below: an identical count is not
+      // news, and handing back a new object re-renders the whole card on every
+      // delivery.
+      if (prev && prev.picked === picked && prev.expected === expected) return prev;
+      return { picked, expected };
+    });
 
     const reveal = myTeam.reveals?.[`q${teamIndex}`] ?? null;
     if (!reveal) return;
@@ -1126,19 +1295,28 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // voided by a tie, and coalescing it to false would report a split vote as a
     // disagreement.
     const own = ownAnswers?.[`q${teamIndex}`];
-    setResult(prev => ({
-      ...(prev ?? {}),
-      correct: prev?.correct ?? reveal.correct,
-      correctAnswer: prev?.correctAnswer ?? reveal.correctAnswer,
-      points: prev?.points ?? reveal.points,
-      speedBonus: prev?.speedBonus ?? reveal.speedBonus,
-      picked: own?.picked ?? prev?.picked ?? selectedRef.current ?? '',
-      teamAnswer: prev?.teamAnswer ?? reveal.answer,
-      agreed: prev?.agreed ?? reveal.agreed,
-      iAgreed: own?.agreed !== undefined ? own.agreed : prev?.iAgreed,
-      pickers: prev?.pickers ?? reveal.pickers,
-      voided: prev?.voided ?? reveal.void,
-    }));
+    setResult(prev => {
+      const next = {
+        ...(prev ?? {}),
+        correct: prev?.correct ?? reveal.correct,
+        correctAnswer: prev?.correctAnswer ?? reveal.correctAnswer,
+        points: prev?.points ?? reveal.points,
+        speedBonus: prev?.speedBonus ?? reveal.speedBonus,
+        picked: own?.picked ?? prev?.picked ?? selectedRef.current ?? '',
+        teamAnswer: prev?.teamAnswer ?? reveal.answer,
+        agreed: prev?.agreed ?? reveal.agreed,
+        iAgreed: own?.agreed !== undefined ? own.agreed : prev?.iAgreed,
+        pickers: prev?.pickers ?? reveal.pickers,
+        voided: prev?.voided ?? reveal.void,
+      };
+      // Returning the SAME object when nothing changed is the point of this
+      // wrapper. A bare object literal always has a new identity, and `result`
+      // gates the auto-advance countdown and the flip/haptics effect -- so an
+      // identical re-render of the reveal used to restart the countdown from
+      // two and buzz again. Compare before adopting.
+      if (prev && sameSnapshot(prev, next)) return prev;
+      return next;
+    });
   }, [teamMode, myTeam, teamIndex, ownAnswers]);
   // Classic has no team document to hang the pool HUD on, so synthesize one
   // from the player's own stats. Feeding PowerupPoolHUD the same shape it
@@ -1176,7 +1354,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const handleHint = async () => {
-    if (pool.hint <= 0 || selected || activePowerups.hint) return;
+    if (pool.hint <= 0 || answered || activePowerups.hint) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
@@ -1202,7 +1380,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const handleDoublePoints = async () => {
-    if (pool.doublePoints <= 0 || selected || activePowerups.doublePoints) return;
+    if (pool.doublePoints <= 0 || answered || activePowerups.doublePoints) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
@@ -1216,7 +1394,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const handleShield = async () => {
-    if (pool.shield <= 0 || selected || activePowerups.shield) return;
+    if (pool.shield <= 0 || answered || activePowerups.shield) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
@@ -1262,6 +1440,15 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const lockPick = (next: string | null) => {
     selectedRef.current = next;
     setSelected(next);
+  };
+
+  /**
+   * Set or clear the "this question is answered" latch. Always go through this
+   * so the ref and the state cannot drift apart.
+   */
+  const markAnswered = (value: boolean) => {
+    answeredRef.current = value;
+    setAnswered(value);
   };
 
   /**
@@ -1324,22 +1511,44 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         }
         // "Time is still on the clock": our countdown and the server's disagreed
         // (a slow request, a clock skew). Nothing was charged and the pick stays
-        // valid, so just keep waiting -- the next tick tries again.
+        // valid. Schedule exactly ONE retry at the moment the server says the
+        // round closes, instead of letting the half-second tick re-force over and
+        // over for as long as the skew lasted.
         if (res.status === 400 && data.pending) {
-          // Allow another forced attempt: the server simply says the round has
-          // not closed yet, and the next tick of a still-running clock may.
+          const secs = Number(data.secondsLeft ?? 0);
+          const retryAnswer = answer;
           teamForceSentRef.current = false;
+          if (teamRetryTimerRef.current == null) {
+            teamRetryTimerRef.current = setTimeout(() => {
+              teamRetryTimerRef.current = null;
+              teamForceSentRef.current = true;
+              void submitTeamPick(retryAnswer, true);
+            }, Math.max(0, secs) * 1000 + 80);
+          }
           return;
         }
-        // Stale question: the room moved on without us. The room listener pulls
-        // us onto the current one, and the local card is reset by that effect.
+        // Two very different situations arrive as a 409 and treating them alike was
+        // its own bug. The room moved on (`questionIndex` tells us where it is
+        // now) versus this exact question is already scored and the reveal is
+        // on its way. Wiping on the second one used to blank the answer the
+        // player had just submitted and left the card looking unanswered.
         if (res.status === 409) {
-          setError(null);
-          lockPick(null);
-          pendingAnswerRef.current = null;
-          setPendingAnswer(null);
           setTeamPickCount(null);
-          setResult(null);
+          if (data.questionIndex != null || /not the current question/i.test(data.error || '')) {
+            // Stale index: the room listener pulls us onto the current question
+            // and that effect resets the card, so re-open it here too.
+            markAnswered(false);
+            setError(null);
+            lockPick(null);
+            pendingAnswerRef.current = null;
+            setPendingAnswer(null);
+            setResult(null);
+          } else {
+            // Already settled. Keep the latch shut -- that question is over and
+            // must not be answerable again -- and wait for the reveal instead of
+            // throwing the player's own pick away.
+            setError(null);
+          }
           return;
         }
         throw new Error(data.error || `Server error ${res.status}`);
@@ -1383,6 +1592,10 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       // A pick that never reached the server must not look like a scored one.
       // It can be re-sent: the server treats a member's own pick as idempotent.
       setError(msg);
+      // Re-open the question, or the latch set in `handleAnswer` would keep
+      // rejecting the very retry this screen is offering -- the pick is cleared
+      // but the options would stay dead.
+      markAnswered(false);
       lockPick(null);
       pendingAnswerRef.current = answer || null;
       setPendingAnswer(answer || null);
@@ -1430,10 +1643,24 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ roomCode, questionIndex: teamIndex + 1 }),
       });
-      await res.json().catch(() => ({}));
-      // Every outcome here is fine: 200 moved the room, 409 means somebody else
-      // already did (or the round is still open, and the next attempt will
-      // land). The room listener is what actually moves this screen.
+      const data = await res.json().catch(() => ({}));
+      // "The question is still open" is a 409 that arrives with `secondsLeft`,
+      // and it used to be thrown away by a blanket "every outcome is fine". A
+      // member on a fast team tapping Next then got nothing at all: no question
+      // moved and no explanation, so the tap looked broken. Say what is
+      // happening and for how long.
+      if (res.status === 409 && data.secondsLeft != null) {
+        const secs = Math.ceil(Number(data.secondsLeft));
+        setError(
+          data.waitingTeams
+            ? `Waiting on ${data.waitingTeams} team${data.waitingTeams === 1 ? '' : 's'} — this question closes in ${secs}s.`
+            : `This question closes in ${secs}s.`,
+        );
+        return false;
+      }
+      // Everything else really is fine: 200 moved the room, and the remaining
+      // 409s mean somebody else already advanced. The room listener is what
+      // actually moves this screen.
       return res.ok;
     } catch {
       return false;
@@ -1489,32 +1716,53 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const handleAnswer = async (answer: string | null) => {
-    if (selected || spectator) return;
+    // The latch, not the answer text: a timeout submits '' and a second
+    // submission for the same index is answered from the server's cache with
+    // the blank verdict, so a correct pick could be scored as wrong.
+    if (answeredRef.current || spectator) return;
+    markAnswered(true);
     if (teamMode) {
       // Team play submits a private PICK, not an answer: the team has one
       // answer and the server tallies it. Nothing here decides the outcome.
-      clearInterval(timerRef.current);
+      //
+      // The shared clock is deliberately NOT stopped. It is owned by the effect
+      // that runs off the ROOM's `teamStartedAt`, and that effect's deps do not
+      // change when a member picks -- so clearing the interval here left the
+      // countdown frozen mid-drain for everyone left in the round, with no tick
+      // left to force their own pick when it reached zero. `markAnswered` is
+      // what records that this member is done.
       lockPick(answer || '');
-      pendingAnswerRef.current = answer;
-      setPendingAnswer(answer);
+      // A timeout must not erase an answer the player had already chosen and is
+      // trying to re-send: `handleRetry` needs it. Only a real pick replaces it.
+      if (answer != null) {
+        pendingAnswerRef.current = answer;
+        setPendingAnswer(answer);
+      }
       setError(null);
       await submitTeamPick(answer || '', false);
       return;
     }
     clearInterval(timerRef.current);
     lockPick(answer || '');
-    pendingAnswerRef.current = answer;
-    setPendingAnswer(answer);
+    if (answer != null) {
+      pendingAnswerRef.current = answer;
+      setPendingAnswer(answer);
+    }
     setError(null);
     const timeTaken = (Date.now() - startTimeRef.current) / 1000;
     const actualIndex = effectiveOrder[currentIndex];
+    // Running out of time IS an attempt, so it is scored as a miss -- but a blank
+    // pick must not also spend a powerup. The server no longer charges one for a
+    // blank, and sending the flags anyway would have the client and the server
+    // disagreeing about what was spent.
+    const blank = answer == null || !String(answer).trim();
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game) return;
       const outcome = game.answer(actualIndex, answer || '', timeTaken, {
-        useHint: activePowerups.hint,
-        useDoublePoints: activePowerups.doublePoints,
-        useShield: activePowerups.shield,
+        useHint: !blank && activePowerups.hint,
+        useDoublePoints: !blank && activePowerups.doublePoints,
+        useShield: !blank && activePowerups.shield,
       });
       setResult({
         correct: outcome.correct,
@@ -1555,6 +1803,20 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       const token = await getToken();
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
+      setSubmitting(true);
+      if (blank) {
+        // Provisional, and deliberately wrong: a blank attempt is never correct.
+        // It exists so the timer hitting zero reacts on the same frame as the
+        // tap that would have, instead of after the POST comes back. The server's
+        // verdict overwrites it below.
+        setResult({
+          correct: false,
+          correctAnswer: String((questions[actualIndex] || {}).correctAnswer ?? ''),
+          points: 0,
+          speedBonus: 0,
+          picked: '',
+        });
+      }
       const res = await fetch(`${API_BASE_URL}/game/answer/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -1563,9 +1825,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           questionIndex: actualIndex,
           answer: answer || '',
           timeTaken,
-          useHint: activePowerups.hint ? 'true' : 'false',
-          useDoublePoints: activePowerups.doublePoints ? 'true' : 'false',
-          useShield: activePowerups.shield ? 'true' : 'false',
+          useHint: !blank && activePowerups.hint ? 'true' : 'false',
+          useDoublePoints: !blank && activePowerups.doublePoints ? 'true' : 'false',
+          useShield: !blank && activePowerups.shield ? 'true' : 'false',
         }),
         signal: controller.signal,
       });
@@ -1604,20 +1866,54 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         ? 'Server timed out. Check your connection and try again.'
         : e.message || 'Network error. Check your connection.';
       setError(msg);
-      setSelected(null);
+      // Re-open the question: nothing reached the server, so this pick was
+      // never scored and the player is entitled to send it again. `answeredRef`
+      // has to be cleared as well as the state, or the latch would keep
+      // rejecting the retry that this screen is explicitly inviting.
+      markAnswered(false);
+      lockPick(null);
+      // Drop the provisional timeout verdict: the request never landed, so
+      // nothing was scored and the question is open again.
+      setSubmitting(false);
+      setResult(null);
       startTimeRef.current = Date.now();
       setTimeLeft(timePerQuestion);
+      // The restarted clock re-sends the answer the player already chose rather
+      // than posting a blank. It used to call `handleAnswer(null)`, which
+      // overwrote `pendingAnswer` with null -- killing the Retry button (it
+      // requires one) and scoring the question wrong for a submission that had
+      // never left the device.
+      const resubmit = () => {
+        const held = pendingAnswerRef.current;
+        if (held != null && String(held).trim()) handleAnswer(held);
+        else handleAnswer(null);
+      };
       timerRef.current = setInterval(() => {
         setTimeLeft(t => {
-          if (t <= 1) { clearInterval(timerRef.current); if (!selected) handleAnswer(null); return 0; }
+          if (t <= 1) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+            // `answeredRef`, not `selected`: this closure was built by a render
+            // that has since been replaced, so a `selected` read here could
+            // never be anything but that stale render's value.
+            if (!answeredRef.current) resubmit();
+            return 0;
+          }
           return t - 1;
         });
       }, 1000);
+    } finally {
+      // Belt and braces: the success path and the catch both clear this, so a
+      // late throw here can never leave the card stuck with auto-advance off.
+      setSubmitting(false);
     }
   };
 
   const handleRetry = () => {
-    if (!pendingAnswer) return;
+    // No `pendingAnswer`, nothing to re-send. This used to be a silent no-op
+    // behind a button that still rendered, because a timeout had overwritten the
+    // held answer with null.
+    if (pendingAnswer == null || !String(pendingAnswer).trim()) return;
     setError(null);
     handleAnswer(pendingAnswer);
   };
@@ -1630,6 +1926,13 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const handleNext = async () => {
+    // The animation ref was set but never READ, so a second tap while the card
+    // was still sliding ran the whole body again: two `setCurrentIndex(i => i + 1)`
+    // calls, two questions skipped, and the player never saw the one in between.
+    if (isAnimatingRef.current) return;
+    // Same reason as the auto-advance gate: a provisional verdict is not a
+    // score, and a tap on Next would end the question before the server answered.
+    if (submitting) return;
     if (teamMode && !isOffline && !isLan) {
       if (teamIndex + 1 >= questions.length) {
         await finishTeamGame();
@@ -1690,8 +1993,11 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       cardOpacity.setValue(0);
       setCurrentIndex(i => i + 1);
       setSelected(null);
+      // Re-open the question for the new index. Without this the latch stayed
+      // latched across the whole classic game and every question after the first
+      // was untappable and its Submit dead.
+      markAnswered(false);
       setResult(null);
-      setTypedAnswer('');
       setPendingAnswer(null);
       setIsFrozen(false);
       setShowStandings(false);
@@ -1739,11 +2045,17 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   }
 
   const actualIndex = questionOrder[currentIndex];
-  const question = questions[actualIndex];
+  // A `currentIndex` past the end of the order left `question` undefined and the
+  // next line threw on `.type`, blanking the screen mid-round. Fall back to an
+  // empty object: the card renders empty instead of crashing, and the existing
+  // loading guard below keeps the empty state out of sight in normal play.
+  const question = questions[actualIndex] || {};
   const playerRank = standings.findIndex(p => String(p.id) === String(userId)) + 1;
   const isDanger = !isFrozen && timeLeft <= 5;
   const visibleChoices = question.type === 'mcq'
-    ? question.choices.filter((c: string) => !hintedChoices.includes(c))
+    // `choices` is absent on a malformed MCQ just as often as it is wrong, and
+    // `.filter` on undefined is a hard crash.
+    ? (question.choices || []).filter((c: string) => !hintedChoices.includes(c))
     : [];
   // In team play the room owns the question order, so "last" is a fact about the
   // room's index rather than about this screen's own shuffle.
@@ -1870,7 +2182,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       )}
 
       {/* ── ACTIVE POWERUP BANNERS ── */}
-      {!selected && !result && (activePowerups.doublePoints || activePowerups.shield) && (
+      {!answered && !result && (activePowerups.doublePoints || activePowerups.shield) && (
         <View style={styles.bannerRow}>
           {activePowerups.doublePoints && (
             <View style={[styles.banner, styles.banner2x]}>
@@ -2049,14 +2361,17 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         {/* ── MCQ CHOICES ── */}
         {!spectator && question.type === 'mcq' && (
           <View style={styles.choicesWrap}>
-            {visibleChoices.map((choice: string) => {
+            {visibleChoices.map((choice: string, choiceIdx: number) => {
               const isCorrect = result && choice === result.correctAnswer;
               const isWrongPick = result && choice === selected && !result.correct;
               const isDimmed = result && !isCorrect && choice !== selected;
               const isPending = selected === choice && !result && !error;
               return (
                 <TouchableOpacity
-                  key={choice}
+                  // Positional: two options with the same text (a duplicated
+                  // choice in a generated question) collided as React keys, which
+                  // made one of them unpressable.
+                  key={`${choiceIdx}-${textOf(choice)}`}
                   style={[
                     styles.choice,
                     isCorrect && styles.choiceCorrect,
@@ -2068,7 +2383,10 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                     if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                     handleAnswer(choice);
                   }}
-                  disabled={!!selected}
+                  // `answered`, not `selected`: after a timeout `selected` is '' and every
+                  // `!!selected` guard fell open, leaving the options live for a
+                  // question that was already scored.
+                  disabled={answered}
                   activeOpacity={0.7}
                 >
                   <View style={[
@@ -2100,13 +2418,14 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           </View>
         )}
 
-        {/* ── IDENTIFICATION INPUT ── */}
-        {!spectator && question.type === 'identification' && (
+        {/* ── TYPED INPUT (identification + fill_in_blank) ── */}
+        {!spectator && (TYPED_QUESTION_TYPES as readonly string[]).includes(question.type) && (
           <View style={styles.idArea}>
-            {activePowerups.hint && question.correctAnswer && (
+            {/* A hint only makes sense when there is a first letter to give. */}
+            {activePowerups.hint && String(question.correctAnswer ?? '').trim() && (
               <View style={styles.hintBanner}>
                 <Text style={styles.hintBannerText}>
-                  💡 Starts with: <Text style={styles.hintLetter}>{question.correctAnswer.charAt(0).toUpperCase()}</Text>
+                  💡 Starts with: <Text style={styles.hintLetter}>{String(question.correctAnswer).charAt(0).toUpperCase()}</Text>
                 </Text>
               </View>
             )}
@@ -2125,7 +2444,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                         onChangeText={(t) => handleBoxChange(t, gi)}
                         onKeyPress={(e) => handleBoxKeyPress(e, gi)}
                         maxLength={1}
-                        editable={!selected}
+                        editable={!answered}
                         autoCapitalize="characters"
                         selectionColor={COLORS.accentBright}
                       />
@@ -2138,12 +2457,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             </View>
             {!result && (
               <TouchableOpacity
-                style={[styles.submitBtn, !boxChars.every(c => c) && styles.submitBtnDisabled]}
+                style={[styles.submitBtn, !boxesComplete && styles.submitBtnDisabled]}
                 onPress={() => {
                   if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                   handleAnswer(joinWithSpaces(boxChars));
                 }}
-                disabled={!!selected || !boxChars.every(c => c)}
+                disabled={answered || !boxesComplete}
                 activeOpacity={0.8}
               >
                 <Text style={styles.submitBtnText}>Submit</Text>
@@ -2238,7 +2557,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       )}
 
       {/* ── POWERUP BAR (pinned bottom) ── */}
-{!spectator && !selected && !result && hasPoolPowerups && (
+        {!spectator && !answered && !result && hasPoolPowerups && (
           <View style={styles.powerupBar}>
           {/* Freeze is solo-only. There is no per-player timer in a team game to
               stop -- one shared countdown belongs to everybody -- and the server
@@ -2248,7 +2567,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             <TouchableOpacity
               style={[styles.puBtn, isFrozen && styles.puBtnFreezeActive]}
               onPress={handleFreeze}
-              disabled={!!selected || isFrozen || freezeBusy}
+              disabled={answered || isFrozen || freezeBusy}
               activeOpacity={0.7}
             >
               <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.freeze}</Text></View>
@@ -2260,7 +2579,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             <TouchableOpacity
               style={[styles.puBtn, activePowerups.hint && styles.puBtnUsed]}
               onPress={handleHint}
-              disabled={!!selected || activePowerups.hint}
+              disabled={answered || activePowerups.hint}
               activeOpacity={0.7}
             >
               <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.hint}</Text></View>
@@ -2272,7 +2591,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             <TouchableOpacity
               style={[styles.puBtn, activePowerups.doublePoints && styles.puBtnUsed]}
               onPress={handleDoublePoints}
-              disabled={!!selected || activePowerups.doublePoints}
+              disabled={answered || activePowerups.doublePoints}
               activeOpacity={0.7}
             >
               <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.doublePoints}</Text></View>
@@ -2284,7 +2603,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             <TouchableOpacity
               style={[styles.puBtn, activePowerups.shield && styles.puBtnShieldActive]}
               onPress={handleShield}
-              disabled={!!selected || activePowerups.shield}
+              disabled={answered || activePowerups.shield}
               activeOpacity={0.7}
             >
               <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.shield}</Text></View>

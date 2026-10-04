@@ -118,10 +118,16 @@ DOUBLE_POINT_EVERY = 5
 XP_PER_CORRECT = 10
 
 # Grace period before the server accepts an expired team question. Clients run
-# their own countdown off `teamStartedAt`, so they expire a few milliseconds
-# before the server would. Without the slack, the last member of every team gets
-# a spurious "that question is already settled" error on each round.
-EXPIRY_GRACE_SECONDS = 2.0
+# their own countdown off `teamStartedAt`, so they expire a moment before the
+# server would, and without any slack the last member of every team gets a
+# spurious "that question is already settled" error on each round.
+#
+# This only has to absorb clock skew, which is milliseconds -- but it is charged
+# against every player staring at a stopped timer. At 2.0s a team waited more
+# than two seconds after the countdown visibly hit zero before the wrong answer
+# appeared, which read as the game hanging. 0.5s still swallows realistic skew
+# while keeping the wait under the threshold where it feels broken.
+EXPIRY_GRACE_SECONDS = 0.5
 
 
 def shared_question_elapsed(room_data, now=None):
@@ -1188,12 +1194,21 @@ class AnswerQuestionView(APIView):
 
             correct_answer = questions[question_index]['correctAnswer']
             q_type = questions[question_index].get('type', 'mcq')
-            
+
             # Determine correctness
             if q_type in TYPED_QUESTION_TYPES:
                 is_correct = answer_matches(answer, correct_answer)
             else:
                 is_correct = answer == correct_answer
+
+            # An empty key is not a guessable answer, so it cannot be matched by
+            # one. Without this a question whose `correctAnswer` came through
+            # blank graded '' as CORRECT -- every player was handed the point for
+            # free, and on a typed question the client had nothing to type
+            # against in the first place. The client refuses to submit such a
+            # question at all; this is the same rule enforced where it counts.
+            if not str(correct_answer or '').strip():
+                is_correct = False
 
             player_ref = room_ref.collection('players').document(str(request.user.id))
             team_mode = bool(room.get('teamMode', False))
@@ -1251,10 +1266,16 @@ class AnswerQuestionView(APIView):
             # The hint narrows the choices on the client *before* the answer is
             # submitted, so there is no separate server call to charge. It is
             # settled inside the answer transaction below, after the
-            # idempotency check — charging it here meant a retried submission
+            # idempotency check -- charging it here meant a retried submission
             # (the `answeredQuestions` cache hit path) could still debit a
             # fresh hint each time, draining the team pool for free.
-            hint_charge = use_hint
+            #
+            # A blank answer is a timeout, not a guess, and nothing was revealed
+            # by the hint to produce it. Charging there spent the player's hint
+            # on the one question they never got to read.
+            submitted_answer = bool(str(answer or '').strip())
+            shield_applied = bool(use_shield) and submitted_answer
+            hint_charge = use_hint and submitted_answer
 
             @fs.transactional
             def answer_in_transaction(transaction, player_ref, team_ref):
@@ -1427,14 +1448,22 @@ class AnswerQuestionView(APIView):
                     }
                     # Shield protects the streak -- and is only paid for here,
                     # where it actually did something.
-                    if use_shield:
+                    #
+                    # Not on a blank answer either: running out of time is not
+                    # something a shield is supposed to absorb, so charging it
+                    # there only threw the powerup away on a question the
+                    # player never answered.
+                    if shield_applied:
                         powerups_spent['powerups.shield'] = fs.Increment(-1)
                     else:
                         updates['streak'] = 0
 
-                # Merge result cache into a single atomic player update
+                # Merge result cache into a single atomic player update.
+                # `shield_applied` rather than the raw `use_shield`: the shield
+                # only ever absorbs a streak break it was actually armed for,
+                # and a blank answer is a timeout the shield does not cover.
                 final_updates = updates if is_correct else {'answeredCount': fs.Increment(1)}
-                if not is_correct and not use_shield:
+                if not is_correct and not shield_applied:
                      final_updates['streak'] = 0
                 if team_ref is None:
                     # Classic mode: the player pays for their own powerups.
@@ -2709,7 +2738,15 @@ class TeamPickView(APIView):
                 }, status=403)
             # Refused once the question is resolved, so a double tap cannot
             # score the same question twice.
-            if f'reveals.q{question_index}' in (team_data.get('reveals') or {}):
+            #
+            # Keyed `q{n}`, not `reveals.q{n}`. The settle writes
+            # `reveals.q{n}` as a dotted field path, which Firestore stores as a
+            # nested map -- `reveals` -> `q0` -> {...} -- so `reveals` holds the
+            # keys `q0`, `q1`, ... and the dotted form was never present. The
+            # guard therefore never fired, a duplicate lock-in fell through to
+            # the resolver's `resolvedQuestions` check, and the client got a 409
+            # "already settled" instead of the 400 it was meant to get.
+            if f'q{question_index}' in (team_data.get('reveals') or {}):
                 return Response({'error': 'This question is already locked in'}, status=400)
             # Locking in is a decision, so it needs a decision to commit. The
             # leader's own pick is the fallback when the team has not converged:
@@ -2871,6 +2908,11 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             answer_matches(choice, correct_answer)
             if q_type in TYPED_QUESTION_TYPES else choice == correct_answer
         )
+        # A blank key cannot be guessed, so it cannot be matched. See the same
+        # rule on the solo endpoint: without it a question with an empty
+        # `correctAnswer` scored every pick -- including a blank -- as correct.
+        if not str(correct_answer or '').strip():
+            is_correct = False
 
         pool = dict(team.get('powerups') or {})
         # Same rule as the solo endpoint: a self-asserted flag is only honoured
@@ -2878,8 +2920,12 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
         # assigning to the parameters would make this closure read them as
         # unbound locals, which is what UnboundLocalError means here.
         spent_double = bool(use_double) and (pool.get('doublePoints', 0) or 0) > 0
-        spent_shield = bool(use_shield) and (pool.get('shield', 0) or 0) > 0
-        spent_hint = bool(use_hint) and (pool.get('hint', 0) or 0) > 0
+        # Same rule as the solo endpoint: a blank submission is a timeout, and a
+        # timeout is not something the pool should be charged for. Without this a
+        # team that ran out of the clock burned its shield on the miss.
+        submitted_answer = bool(str(answer or '').strip())
+        spent_shield = bool(use_shield) and submitted_answer and (pool.get('shield', 0) or 0) > 0
+        spent_hint = bool(use_hint) and submitted_answer and (pool.get('hint', 0) or 0) > 0
         # A boost bought through BoostTeammateView already paid for itself when
         # it was purchased, so it is not charged again here -- it only has to be
         # applied, and then cleared, so it cannot carry to the next question.

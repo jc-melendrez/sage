@@ -638,6 +638,109 @@ class PowerupRewardTests(TestCase):
         self.assertEqual(self.player_doc(player_ref)['answeredCount'], interval)
 
 
+class BlankAnswerTests(TestCase):
+    """Running out of time is a miss, not an opening.
+
+    A timeout posts an empty answer. Every guard in the old flow was written
+    against the answer TEXT, and `''` is falsy, so a blank slipped past all of
+    them and was then scored as a real attempt that happened to spend the
+    player's powerups. These pin the two consequences that matters: a blank
+    spends nothing, and it is never graded correct.
+    """
+
+    ROOM_CODE = 'BLANK1'
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='bhost', password='pass')
+        self.player = User.objects.create_user(username='bplayer', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.url = reverse('answer-question')
+
+    def seed_room(self, questions):
+        room_ref = self.store.collection('gameRooms').document(self.ROOM_CODE)
+        room_ref.set({
+            'status': 'active',
+            'hostId': self.host.id,
+            'teamMode': False,
+            'timePerQuestion': 15,
+            'questions': questions,
+        })
+        player_ref = room_ref.collection('players').document(str(self.player.id))
+        player_ref.set({
+            'displayName': 'Player', 'score': 0, 'answeredCount': 0, 'streak': 3,
+            'questionOrder': list(range(len(questions))),
+            'isReady': True, 'isFinished': False,
+            'powerups': {'freeze': 0, 'hint': 2, 'doublePoints': 2, 'shield': 2},
+        })
+        return player_ref
+
+    def post_blank(self, index, **flags):
+        self.client.force_authenticate(user=self.player)
+        return self.client.post(self.url, {
+            'roomCode': self.ROOM_CODE,
+            'questionIndex': index,
+            'answer': '',
+            'timeTaken': '15',
+            **flags,
+        }, format='json')
+
+    def test_a_blank_answer_does_not_spend_the_hint(self):
+        player_ref = self.seed_room([
+            {'type': 'mcq', 'question': 'Q0', 'choices': ['A. yes', 'B. no'],
+             'correctAnswer': 'A. yes'},
+        ])
+        resp = self.post_blank(0, useHint='true')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(player_ref.get().to_dict()['powerups']['hint'], 2)
+
+    def test_a_blank_answer_does_not_spend_the_shield(self):
+        player_ref = self.seed_room([
+            {'type': 'mcq', 'question': 'Q0', 'choices': ['A. yes', 'B. no'],
+             'correctAnswer': 'A. yes'},
+        ])
+        resp = self.post_blank(0, useShield='true')
+        self.assertEqual(resp.status_code, 200)
+        # The shield is there to rescue an answer the player actually gave, so it
+        # survives a timeout untouched -- including the streak it protects.
+        data = player_ref.get().to_dict()
+        self.assertEqual(data['powerups']['shield'], 2)
+        self.assertEqual(data['streak'], 3)
+
+    def test_a_blank_answer_is_still_recorded_as_an_attempt(self):
+        player_ref = self.seed_room([
+            {'type': 'mcq', 'question': 'Q0', 'choices': ['A. yes', 'B. no'],
+             'correctAnswer': 'A. yes'},
+        ])
+        resp = self.post_blank(0)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()['correct'])
+        data = player_ref.get().to_dict()
+        self.assertEqual(data['answeredCount'], 1)
+        self.assertIn(0, data['answeredQuestions'])
+
+    def test_a_question_with_a_blank_key_cannot_be_answered_correctly(self):
+        # The client refuses to submit this one (there is nothing to type), so
+        # this only fires if a caller posts directly. Grading '' as a match for ''
+        # would hand the point out for free to anyone who found the endpoint.
+        player_ref = self.seed_room([
+            {'type': 'identification', 'question': 'Name the organ', 'correctAnswer': ''},
+        ])
+        self.client.force_authenticate(user=self.player)
+        resp = self.client.post(self.url, {
+            'roomCode': self.ROOM_CODE, 'questionIndex': 0,
+            'answer': '', 'timeTaken': '1',
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()['correct'])
+        self.assertEqual(player_ref.get().to_dict()['score'], 0)
+
+
 
 
 class MomentumRemovalTests(TestCase):
@@ -1262,6 +1365,99 @@ class TeamPlacementXpTests(TestCase):
         self.assertEqual(forced.status_code, 200, forced.data)
         self.assertTrue(forced.json()['endedEarly'])
         self.assertEqual(self.room_ref.get().to_dict()['status'], 'finished')
+
+
+class ClassicSettlementTests(TestCase):
+    """A classic (non-team) game must actually settle, and leave a history row.
+
+    The server side of this always worked, but nothing exercised it: the only
+    client that sent `confirm` for a student-owned room was the educator
+    host-session screen, and the play screen never got as far as sending it
+    because it only read `ownerId` from inside a `teamMode` guard. So every
+    classic game ended with the room still `active`, nobody paid, and no
+    Recent Activity row -- the failure looked like a missing feature rather
+    than a missing request.
+
+    These pin the contract the play screen depends on: a classic room has no
+    `teamMode` field at all, and the owner's confirm must settle it.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(username='owner', password='pass')
+        self.other = User.objects.create_user(username='other', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('CLAS1')
+        # Deliberately NO `teamMode` key: that is exactly what a classic room
+        # document looks like, since the field is only written for team rooms.
+        self.room_ref.set({
+            'status': 'active', 'hostId': self.owner.id, 'ownerId': self.owner.id,
+            'hostIsStudent': True, 'topic': 't', 'questionCount': 1,
+            'timePerQuestion': 15, 'questions': [],
+        })
+        for user, score in ((self.owner, 1200), (self.other, 400)):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': score,
+                'isFinished': True, 'answers': {}, 'answeredCount': 1,
+                'correctCount': 1,
+            })
+
+    def confirm(self, user=None, **extra):
+        self.client.force_authenticate(user=user or self.owner)
+        return self.client.post(
+            reverse('finish-game'), {'roomCode': 'CLAS1', **extra}, format='json')
+
+    def test_a_bare_vote_does_not_settle_a_classic_room(self):
+        resp = self.confirm(confirm='false')
+        self.assertEqual(resp.status_code, 200)
+        # `canSettle` is a readiness flag, and everybody here has already voted
+        # done, so the room genuinely IS ready. What matters is that voting is
+        # not settling: the room is still running and nobody has been paid.
+        self.assertTrue(resp.json()['canSettle'])
+        self.assertEqual(self.room_ref.get().to_dict()['status'], 'active')
+        self.assertFalse(Activity.objects.filter(user=self.owner).exists())
+
+    def test_the_owner_confirming_settles_the_classic_room(self):
+        resp = self.confirm(confirm='true')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self.room_ref.get().to_dict()['status'], 'finished')
+
+    def test_a_finished_classic_game_leaves_a_recent_activity_row(self):
+        # The whole point: a classic game has to be findable in Recent Activity
+        # afterwards, with a results payload the detail sheet can render.
+        self.confirm(confirm='true')
+
+        for user in (self.owner, self.other):
+            row = Activity.objects.filter(user=user).order_by('-created_at').first()
+            self.assertIsNotNone(
+                row, f'{user.username} got no activity row from a finished classic game')
+            self.assertEqual(row.kind, 'game')
+            results = (row.payload or {}).get('results')
+            self.assertIsNotNone(results, 'the activity row carried no results snapshot')
+            self.assertEqual(results['mode'], 'classic')
+            self.assertTrue(results['participants'])
+            # Every participant is represented, so the detail sheet can render a
+            # final standings table rather than an empty card.
+            names = {p['name'] for p in results['participants']}
+            self.assertEqual(names, {'owner', 'other'})
+
+    def test_classic_results_rank_the_winner_first(self):
+        self.confirm(confirm='true')
+        row = Activity.objects.filter(user=self.owner).order_by('-created_at').first()
+        results = row.payload['results']
+        top = max(results['participants'], key=lambda p: p['score'])
+        self.assertEqual(top['name'], 'owner')
+        self.assertEqual(top['rank'], 1)
+
+    def test_a_non_owner_still_cannot_settle_a_classic_room(self):
+        resp = self.confirm(user=self.other, confirm='true')
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.room_ref.get().to_dict()['status'], 'active')
 
 
 class RematchTests(TestCase):
@@ -2604,7 +2800,20 @@ class TeamLeadershipTests(TestCase):
             'roomCode': 'LEAD', 'questionIndex': 0,
             'answer': 'B. n', 'timeTaken': 2.0, 'lockIn': 'true',
         }, format='json')
-        self.assertEqual(again.status_code, 409)
+        # 400 "already locked in", not 409 "already settled". The lock-in guard
+        # reads `reveals` for the key `q0`, because the settle writes
+        # `reveals.q0` as a dotted field path and Firestore nests it. It used to
+        # test for the literal key `reveals.q0`, which never existed, so the
+        # guard was dead and a duplicate lock-in fell through to the resolver's
+        # resolvedQuestions check -- which the client treats as a stale index
+        # and answers by blanking the screen.
+        self.assertEqual(again.status_code, 400)
+        self.assertIn('already locked in', again.json()['error'].lower())
+        # And it really is refused rather than re-settled: the reveal still holds
+        # the first answer, and the question was only ever counted once.
+        team = self.team()
+        self.assertEqual(team['answeredCount'], 1)
+        self.assertEqual(team['reveals']['q0']['answer'], 'A. y')
 
 
 class TeamMajorityVoteTests(TestCase):
