@@ -25,14 +25,32 @@ const iosGoogleServices = resolveFirebaseFile(
   'GoogleService-Info.plist'
 );
 
+// Web builds (Render's static deploy) run on a machine that has no
+// google-services.json -- it is git-ignored, so it only ever exists in a
+// developer's working copy. `expo export` never executes config-plugin mods
+// (those only run in prebuild / run:android / EAS) and the web Firebase SDK
+// reads its config from JS, so the file's contents are genuinely unused here.
+// EXPO_SKIP_GOOGLE_SERVICES_CHECK opts out of the guard for that case only.
+const skipGoogleServicesCheck = ['1', 'true', 'yes'].includes(
+  String(process.env.EXPO_SKIP_GOOGLE_SERVICES_CHECK ?? '').toLowerCase()
+);
+
 // Android is the primary target, so a missing file must fail the build loudly
 // rather than ship an APK with no Firebase app (auth would then throw
 // "No Firebase App '[DEFAULT]' has been created" at runtime).
 if (!androidGoogleServices.exists) {
-  throw new Error(
-    `[SAGE] google-services.json not found at ${androidGoogleServices.absolutePath}. ` +
-      'Set the GOOGLE_SERVICES_JSON env var to a valid path, or place the file at ./google-services.json.'
-  );
+  if (skipGoogleServicesCheck) {
+    console.warn(
+      '[SAGE] google-services.json is missing but EXPO_SKIP_GOOGLE_SERVICES_CHECK is set, ' +
+        'so the guard is bypassed. That is only safe for web-only exports -- an Android or EAS build ' +
+        'will now silently produce an app with no Firebase config.'
+    );
+  } else {
+    throw new Error(
+      `[SAGE] google-services.json not found at ${androidGoogleServices.absolutePath}. ` +
+        'Set the GOOGLE_SERVICES_JSON env var to a valid path, or place the file at ./google-services.json.'
+    );
+  }
 }
 
 // iOS is optional for now: app.config.js is evaluated for every platform, so

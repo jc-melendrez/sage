@@ -24,6 +24,19 @@ services:
     buildCommand: cd mobile_app && npm ci && npm run build:web
     staticPublishPath: ./mobile_app/web-build
     healthCheckPath: /
+    envVars:
+      # google-services.json is git-ignored, so it is absent on Render's build
+      # machine. It is not needed for a web export (config-plugin mods do not run
+      # during `expo export`, and the web Firebase SDK reads its config from JS),
+      # so this opts out of the app.config.js guard. Do NOT set it for an Android
+      # or EAS build -- that would ship an app with no Firebase config.
+      - key: EXPO_SKIP_GOOGLE_SERVICES_CHECK
+        value: "1"
+      # Read by mobile_app/config/api.ts -> getTvPageBaseUrl(). Without it the
+      # educator "copy TV link" button silently produces a relative URL. No
+      # trailing slash.
+      - key: EXPO_PUBLIC_WEB_URL
+        value: https://sage-web-cdep.onrender.com
     routes:
       # Render never applies a rule to a path that exists as a real file, so these
       # rules only ever fire for paths the CDN does not have on disk. That is what
@@ -48,7 +61,6 @@ services:
         name: Cache-Control
         value: public, max-age=31536000, immutable
 
-# Backend needs these in the environment too (app.config.js throws during the web
-# build without the first one):
-#   GOOGLE_SERVICES_JSON  path to the mounted Secret File, e.g. /opt/render/project/src/google-services.json
-#   EXPO_PUBLIC_WEB_URL   https://sage-web-cdep.onrender.com  (without the trailing slash)
+# The backend (Django on Render, Postgres on RDS) is deployed from a separate
+# service and is NOT declared here -- applying this Blueprint must not touch it.
+# It needs GOOGLE_SERVICES_JSON-style secrets of its own; see backend_api/core/Procfile.

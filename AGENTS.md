@@ -88,9 +88,12 @@ python manage.py test            # runs Django tests
 - **The web build is TV-only.** `app/_layout.tsx` (web-only effect) redirects any path that is not `/tv…` or a bare alphanumeric segment to `/tv`, and skips auth/offline init on web. Do not expect login/game/educator screens to be reachable on the web.
 - The 109 per-route HTML files that `expo export` emits for `web.output: "static"` are **deleted** by the build script — routing is client-side, and their directories would otherwise ship to the CDN.
 - Expo assets stay at the site root (`/_expo/…`, `/assets/…`) because the shell references them with root-absolute URLs.
-- `render.yaml` is **not** auto-applied to an existing Render service. Either use Settings → Blueprint, or paste `buildCommand`, `staticPublishPath` and the three rewrite rules into the Dashboard by hand.
+- `render.yaml` is **not** auto-applied to an existing Render service. Either use Settings → Blueprint, or paste `buildCommand`, `staticPublishPath` and the three rewrite rules into the Dashboard by hand. Beware: the Blueprint button can offer to *create* a new service instead of updating the existing one — for `sage-web`, hand-pasting is safer.
 - `npm run build:web` takes ~12 min (Metro bundles the whole app into a ~10 MB `entry-*.js`). Use `node scripts/build-web.js --skip-export` to re-run only the assembly step against the existing `mobile_app/dist`.
-- Env vars the build needs: `GOOGLE_SERVICES_JSON` (path to a mounted Secret File — `app.config.js` **throws** without it) and `EXPO_PUBLIC_WEB_URL` (e.g. `https://sage-web-cdep.onrender.com`, no trailing slash). Without the latter, `getTvPageBaseUrl()` returns `''` in release builds and the educator "copy TV link" button silently does nothing.
+- Env vars the build needs (both set in `render.yaml`): `EXPO_SKIP_GOOGLE_SERVICES_CHECK=1` and `EXPO_PUBLIC_WEB_URL` (e.g. `https://sage-web-cdep.onrender.com`, no trailing slash).
+  - **Why the skip var exists:** `google-services.json` is git-ignored (`mobile_app/.gitignore:7`), so it only exists in a developer's working copy and is *never* on Render's build machine. `app.config.js` throws when it's missing, to stop an Android/EAS build shipping an app with no Firebase config. A web export doesn't need it at all: config-plugin mods never run during `expo export` (only in `prebuild` / `run:android` / EAS), and the web Firebase SDK reads its config from JS. So the guard is bypassed for web only. **Never set this for an Android or EAS build** — it would silently produce a Firebase-less app.
+  - `EXPO_PUBLIC_WEB_URL` is not optional: without it `getTvPageBaseUrl()` returns `''` in release builds and the educator "copy TV link" button silently does nothing.
+  - `render.yaml` declares **only** the `sage-web` static site, so applying the Blueprint cannot touch the Django backend service.
 
 ## Gotchas
 
