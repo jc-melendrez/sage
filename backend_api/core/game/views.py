@@ -1806,10 +1806,16 @@ class FinishGameView(APIView):
                 # Activity detail reads `name` -- so every player in every
                 # settled solo game rendered as "Player" with no name at all.
                 'name': data.get('displayName', 'Player'),
+                'avatar': data.get('avatar') or None,
                 'score': data.get('score', 0),
                 'correct': data.get('correctCount', 0) or 0,
                 'answered': data.get('answeredCount', 0) or 0,
                 'bestStreak': data.get('bestStreak', 0) or 0,
+                # Read by the activity snapshot to decide who actually raced to
+                # submit rather than waiting for the clock to end the round. It
+                # is popped again before the snapshot is written, because "did
+                # you press Finish" is a live-game detail, not a result.
+                'isFinished': bool(data.get('isFinished', False)),
             })
         entries.sort(key=lambda e: e['score'], reverse=True)
         return entries
@@ -1960,7 +1966,26 @@ class FinishGameView(APIView):
         participants = []
         for entry, rank in zip(standings, ranks):
             entry['rank'] = rank
+            entry['accuracy'] = round(entry['correct'] / entry['answered'] * 100) if entry['answered'] else 0
+            # `isFinished` on its own cannot separate "raced the clock" from
+            # "waited for everyone else", so it is paired with having actually
+            # answered -- the same rule the team settle applies to its own early
+            # finishers. Popped afterwards so the live detail does not outlive
+            # the game in the activity history.
+            entry['earlyFinisher'] = bool(entry['isFinished']) and entry['answered'] > 0
+            entry.pop('isFinished', None)
             participants.append(entry)
+        # One MVP for the room. Solo play has no team agreement to rank on, so
+        # this is accuracy among the players who actually answered, with the best
+        # run breaking a tie and score after that. Nobody who skipped the quiz can
+        # win it, and `max` returns exactly one name even on a full tie.
+        mvp = max(
+            (p for p in participants if p['answered'] > 0),
+            key=lambda p: (p['accuracy'], p['bestStreak'], p['score']),
+            default=None,
+        )
+        for entry in participants:
+            entry['isMvp'] = bool(mvp and entry['user_id'] == mvp['user_id'])
         results = {
             'mode': 'classic',
             'roomCode': room_code,

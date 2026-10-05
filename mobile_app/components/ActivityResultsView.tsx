@@ -1,6 +1,7 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { pfpSource } from '@/constants/pfps';
 
 export interface ActivityResultMember {
   user_id?: number | string;
@@ -10,6 +11,20 @@ export interface ActivityResultMember {
   answered?: number;
   /** Only present on classic-mode participants; team mode ranks whole teams. */
   rank?: number | null;
+  /** Profile picture written by the settle for both modes. */
+  avatar?: string | null;
+  /** Correct out of `answered`, as a percentage. 0 when nobody answered. */
+  accuracy?: number;
+  /** How often this member voted with their team, 0-100. Team mode only. */
+  agreement?: number;
+  /** Best run of consecutive correct answers. */
+  bestStreak?: number;
+  /** Holds the team together: renames it, locks in its answer. */
+  isLeader?: boolean;
+  /** Highest agreement on their team. At most one per team. */
+  isMvp?: boolean;
+  /** Submitted before the round closed, rather than waiting out the clock. */
+  earlyFinisher?: boolean;
 }
 
 export interface ActivityResultTeam {
@@ -18,6 +33,11 @@ export interface ActivityResultTeam {
   score?: number;
   correct?: number;
   rank?: number | null;
+  accuracy?: number;
+  bestStreak?: number;
+  /** Resolved to ids at settle time, so the names can be attributed here. */
+  leaderId?: string | number | null;
+  mvpId?: string | number | null;
   members?: ActivityResultMember[];
 }
 
@@ -57,6 +77,26 @@ function initials(name?: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
+/**
+ * A single-word marker on a member row.
+ *
+ * Icon-only on purpose: MVP / leader / early finisher all apply to the same
+ * handful of rows, and spelling them out put three labels across a row that is
+ * already carrying a name, an accuracy line and a score. The label is kept as an
+ * accessibilityLabel so a screen reader still says what the glyph means.
+ */
+function Badge({ icon, tint, label }: {
+  icon: keyof typeof Ionicons.glyphMap;
+  tint: string;
+  label: string;
+}) {
+  return (
+    <View style={[styles.badge, { backgroundColor: `${tint}1F` }]} accessibilityLabel={label}>
+      <Ionicons name={icon} size={10} color={tint} />
+    </View>
+  );
+}
+
 function StatChip({ icon, label, value, tint }: {
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
@@ -81,20 +121,48 @@ function MemberRow({ member, isMe, tone }: {
 }) {
   const answered = member.answered ?? 0;
   const correct = member.correct ?? 0;
+  // Older rows predate the snapshot's `accuracy`; deriving it keeps them from
+  // rendering as blank rather than silently showing 0%.
+  const accuracy = member.accuracy ?? (answered > 0 ? Math.round((correct / answered) * 100) : 0);
+  const streak = member.bestStreak ?? 0;
+  const source = pfpSource(member.avatar);
+
+  const sub: string[] = [];
+  if (answered > 0) {
+    sub.push(`${correct}/${answered} correct`);
+    sub.push(`${accuracy}%`);
+    if (typeof member.agreement === 'number') sub.push(`${member.agreement}% agreed`);
+  }
+
   return (
     <View style={[styles.memberRow, isMe && styles.memberRowMe, tone ? { borderLeftColor: tone } : null]}>
-      <View style={[styles.avatar, isMe && styles.avatarMe]}>
-        <Text style={styles.avatarText}>{initials(member.name)}</Text>
-      </View>
+      {source ? (
+        <Image source={source} style={[styles.avatar, styles.avatarPhoto]} resizeMode="cover" />
+      ) : (
+        <View style={[styles.avatar, styles.avatarFallback, isMe && styles.avatarMe]}>
+          <Text style={[styles.avatarText, isMe && styles.avatarTextMe]}>{initials(member.name)}</Text>
+        </View>
+      )}
       <View style={styles.memberMeta}>
-        <Text style={[styles.memberName, isMe && styles.memberNameMe]} numberOfLines={1}>
-          {member.name || 'Player'}
-          {isMe ? '  (you)' : ''}
-        </Text>
-        {answered > 0 ? (
-          <Text style={styles.memberSub}>{correct}/{answered} correct</Text>
+        <View style={styles.memberNameRow}>
+          <Text style={[styles.memberName, isMe && styles.memberNameMe]} numberOfLines={1}>
+            {member.name || 'Player'}
+            {isMe ? '  (you)' : ''}
+          </Text>
+          {member.isMvp ? <Badge icon="ribbon" tint={COLORS.warning} label="MVP" /> : null}
+          {member.isLeader ? <Badge icon="star" tint={COLORS.purpleVibrant} label="Team leader" /> : null}
+          {member.earlyFinisher ? <Badge icon="flash" tint={COLORS.success} label="Finished early" /> : null}
+        </View>
+        {sub.length > 0 ? (
+          <Text style={styles.memberSub} numberOfLines={1}>{sub.join('   ')}</Text>
         ) : null}
       </View>
+      {streak >= 2 ? (
+        <View style={styles.streakPill} accessibilityLabel={`Best run ${streak}`}>
+          <Ionicons name="flame" size={10} color={COLORS.warning} />
+          <Text style={styles.streakText}>{streak}</Text>
+        </View>
+      ) : null}
       <Text style={styles.memberScore}>{member.score ?? 0}</Text>
     </View>
   );
@@ -104,10 +172,13 @@ function MemberRow({ member, isMe, tone }: {
  * Renders the settled snapshot attached to a Recent Activity row.
  *
  * The list row only ever has room for a title and a one-line description, so
- * this is where the parts that were actually interesting live: who else
- * played, what they scored, and -- for a team game -- how each team placed and
- * who was on it. Rows written before snapshots existed render nothing rather
- * than an empty shell, and the caller falls back to the description.
+ * this is where the parts that were actually interesting live: who else played,
+ * what they scored, how accurate they were, who led and who carried their team,
+ * and -- for a team game -- how each team placed and who was on it. Every field
+ * below is written by the settle, so nothing here is derived on the client from
+ * a screen the student no longer has open. Rows written before snapshots existed
+ * render nothing rather than an empty shell, and the caller falls back to the
+ * description.
  */
 export default function ActivityResultsView({ results, myUserId, myTeamId }: {
   results?: ActivityResults | null;
@@ -124,6 +195,11 @@ export default function ActivityResultsView({ results, myUserId, myTeamId }: {
 
   if (!isTeam && !isClassic && !isOffline) return null;
 
+  const mine = (list: ActivityResultMember[] | undefined) =>
+    list?.find(m => !!myUserId && String(m.user_id) === String(myUserId)) ?? null;
+  const ranked = [...results.participants!]
+    .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
+
   return (
     <View style={styles.wrap}>
       {isTeam ? (
@@ -139,6 +215,13 @@ export default function ActivityResultsView({ results, myUserId, myTeamId }: {
             const rank = team.rank ?? index + 1;
             const podium = rank <= 3 ? PODIUM[rank - 1] : null;
             const isMyTeam = !!myTeamId && String(team.id) === String(myTeamId);
+            const nameOf = (id: string | number | null | undefined) => {
+              if (id == null) return null;
+              const hit = (team.members ?? []).find(m => String(m.user_id) === String(id));
+              return hit?.name || null;
+            };
+            const leaderName = nameOf(team.leaderId);
+            const mvpName = nameOf(team.mvpId);
             return (
               <View
                 key={team.id ?? index}
@@ -150,10 +233,29 @@ export default function ActivityResultsView({ results, myUserId, myTeamId }: {
                       {rank}
                     </Text>
                   </View>
-                  <Text style={styles.teamName} numberOfLines={1}>
-                    {team.name || `Team ${team.id}`}
-                    {isMyTeam ? '  (your team)' : ''}
-                  </Text>
+                  <View style={styles.teamNameWrap}>
+                    <Text style={styles.teamName} numberOfLines={1}>
+                      {team.name || `Team ${team.id}`}
+                      {isMyTeam ? '  (your team)' : ''}
+                    </Text>
+                    {team.correct != null || team.accuracy != null ? (
+                      <Text style={styles.teamSub} numberOfLines={1}>
+                        {[
+                          team.correct != null ? `${team.correct} correct` : null,
+                          team.accuracy != null ? `${team.accuracy}% accuracy` : null,
+                          team.bestStreak ? `best run ${team.bestStreak}` : null,
+                        ].filter(Boolean).join('   ')}
+                      </Text>
+                    ) : null}
+                    {leaderName || mvpName ? (
+                      <Text style={styles.teamRoles} numberOfLines={1}>
+                        {[
+                          leaderName ? `Led by ${leaderName}` : null,
+                          mvpName ? `MVP ${mvpName}` : null,
+                        ].filter(Boolean).join('   ')}
+                      </Text>
+                    ) : null}
+                  </View>
                   <Text style={styles.teamScore}>{team.score ?? 0}</Text>
                 </View>
                 {(team.members ?? []).length === 0 ? (
@@ -183,20 +285,49 @@ export default function ActivityResultsView({ results, myUserId, myTeamId }: {
               <Text style={styles.sectionMeta}>{results.questionCount} questions</Text>
             ) : null}
           </View>
-          {[...results.participants!]
-            .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0))
-            .map((member, index) => {
-              const rank = member.rank ?? index + 1;
-              const podium = rank <= 3 ? PODIUM[rank - 1] : null;
-              return (
-                <MemberRow
-                  key={member.user_id ?? index}
-                  member={member}
-                  isMe={!!myUserId && String(member.user_id) === String(myUserId)}
-                  tone={podium ?? undefined}
+          {(() => {
+            // The viewer's own line, promoted above the table so a solo game
+            // answers "how did I do" before it lists everybody else. Skipped
+            // when the caller could not attribute a row to this user.
+            const me = mine(results.participants);
+            if (!me) return null;
+            const answered = me.answered ?? 0;
+            return (
+              <View style={styles.statRow}>
+                <StatChip icon="star" label="points" value={me.score ?? 0} tint={COLORS.warning} />
+                <StatChip
+                  icon="checkmark-circle"
+                  label="correct"
+                  value={`${me.correct ?? 0}/${answered}`}
+                  tint={COLORS.success}
                 />
-              );
-            })}
+                <StatChip
+                  icon="analytics"
+                  label="accuracy"
+                  value={`${me.accuracy ?? (answered > 0 ? Math.round(((me.correct ?? 0) / answered) * 100) : 0)}%`}
+                  tint={COLORS.purpleVibrant}
+                />
+                <StatChip
+                  icon="flame"
+                  label="best run"
+                  value={me.bestStreak ?? 0}
+                  tint={COLORS.warning}
+                />
+              </View>
+            );
+          })()}
+          {ranked.map((member, index) => {
+            const rank = member.rank ?? index + 1;
+            const podium = rank <= 3 ? PODIUM[rank - 1] : null;
+            return (
+              <MemberRow
+                key={member.user_id ?? index}
+                member={member}
+                isMe={!!myUserId && String(member.user_id) === String(myUserId)}
+                tone={podium ?? undefined}
+              />
+            );
+          })}
         </>
       ) : null}
 
@@ -278,12 +409,14 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
   },
   rankTextPodium: { color: '#FFFFFF' },
+  teamNameWrap: { flex: 1, gap: 1 },
   teamName: {
     fontFamily: 'Montserrat-Bold',
     fontSize: 13,
     color: COLORS.textPrimary,
-    flex: 1,
   },
+  teamSub: { fontFamily: 'Montserrat-Medium', fontSize: 10, color: COLORS.textMuted },
+  teamRoles: { fontFamily: 'Montserrat-SemiBold', fontSize: 10, color: COLORS.purpleVibrant },
   teamScore: { fontFamily: 'Montserrat-ExtraBold', fontSize: 14, color: COLORS.purpleVibrant },
 
   memberRow: {
@@ -297,21 +430,44 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   memberRowMe: { backgroundColor: COLORS.purpleGhost + '55' },
+  memberMeta: { flex: 1, gap: 1 },
+  memberNameRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  memberName: { flexShrink: 1, fontFamily: 'Montserrat-SemiBold', fontSize: 12, color: COLORS.textPrimary },
+  memberNameMe: { fontFamily: 'Montserrat-ExtraBold' },
+  memberSub: { fontFamily: 'Montserrat-Regular', fontSize: 10, color: COLORS.textMuted },
+  memberScore: { fontFamily: 'Montserrat-ExtraBold', fontSize: 12, color: COLORS.textPrimary },
+
   avatar: {
     width: 26,
     height: 26,
     borderRadius: 13,
-    backgroundColor: COLORS.purpleGhost,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  avatarPhoto: { backgroundColor: COLORS.bgSecondary },
+  avatarFallback: { backgroundColor: COLORS.purpleGhost },
   avatarMe: { backgroundColor: COLORS.purpleVibrant },
   avatarText: { fontFamily: 'Montserrat-Bold', fontSize: 10, color: COLORS.textPrimary },
-  memberMeta: { flex: 1 },
-  memberName: { fontFamily: 'Montserrat-SemiBold', fontSize: 12, color: COLORS.textPrimary },
-  memberNameMe: { fontFamily: 'Montserrat-ExtraBold' },
-  memberSub: { fontFamily: 'Montserrat-Regular', fontSize: 10, color: COLORS.textMuted },
-  memberScore: { fontFamily: 'Montserrat-ExtraBold', fontSize: 12, color: COLORS.textPrimary },
+  avatarTextMe: { color: '#FFFFFF' },
+
+  /** Icon-only so three of them still fit beside a name on a narrow row. */
+  badge: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  streakPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    backgroundColor: COLORS.warning + '1F',
+    borderRadius: 999,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  streakText: { fontFamily: 'Montserrat-ExtraBold', fontSize: 10, color: COLORS.warning },
 
   emptyLine: { fontFamily: 'Montserrat-Regular', fontSize: 11, color: COLORS.textMuted },
 

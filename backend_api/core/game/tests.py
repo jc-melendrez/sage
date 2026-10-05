@@ -1460,6 +1460,118 @@ class ClassicSettlementTests(TestCase):
         self.assertEqual(self.room_ref.get().to_dict()['status'], 'active')
 
 
+class ClassicSnapshotEnrichmentTests(TestCase):
+    """The classic activity snapshot has to carry what the detail sheet renders.
+
+    Team-mode games already write `accuracy`, `agreement`, `bestStreak`,
+    `avatar`, `isLeader`, `isMvp` and `earlyFinisher` per member. Classic games
+    wrote `name`/`score`/`correct`/`answered` and nothing else, so the same
+    component rendered a solo game as a bare score table: no picture, no
+    accuracy, no notion of who finished early or who carried the room. These pin
+    the fields a settled solo game is expected to carry.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(username='owner', password='pass')
+        self.ace = User.objects.create_user(username='ace', password='pass')
+        self.quitter = User.objects.create_user(username='quitter', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('CLSNP')
+        self.room_ref.set({
+            'status': 'active', 'hostId': self.owner.id, 'ownerId': self.owner.id,
+            'hostIsStudent': True, 'topic': 't', 'questionCount': 4,
+            'timePerQuestion': 15, 'questions': [],
+        })
+        # ace: 4/4, longest run, finished early.
+        # owner: 2/4, finished early.
+        # quitter: never answered, but still pressed Finish.
+        for user, score, correct, answered, streak, finished, avatar in (
+            (self.owner, 900, 2, 4, 1, True, 'https://cdn/owner.png'),
+            (self.ace, 1600, 4, 4, 4, True, 'https://cdn/ace.png'),
+            (self.quitter, 0, 0, 0, 0, True, ''),
+        ):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': score,
+                'correctCount': correct, 'answeredCount': answered,
+                'bestStreak': streak, 'isFinished': finished,
+                'avatar': avatar, 'answers': {},
+            })
+
+    def settle(self):
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.post(
+            reverse('finish-game'),
+            {'roomCode': 'CLSNP', 'confirm': 'true'}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return (Activity.objects.filter(user=self.ace).order_by('-created_at')
+                .first().payload['results'])
+
+    def participant(self, results, username):
+        return next(p for p in results['participants'] if p['name'] == username)
+
+    def test_every_participant_carries_an_accuracy(self):
+        results = self.settle()
+        self.assertEqual(self.participant(results, 'ace')['accuracy'], 100)
+        self.assertEqual(self.participant(results, 'owner')['accuracy'], 50)
+        # Nobody who answered nothing has no accuracy to report, and it must not
+        # be a division by zero surfaced as an error.
+        self.assertEqual(self.participant(results, 'quitter')['accuracy'], 0)
+
+    def test_an_avatar_is_carried_through(self):
+        results = self.settle()
+        self.assertEqual(self.participant(results, 'ace')['avatar'], 'https://cdn/ace.png')
+        # Absent rather than the empty string, which is what the team snapshot
+        # writes, so the client only has one "no picture" case to check.
+        self.assertIsNone(self.participant(results, 'quitter')['avatar'])
+
+    def test_finishing_early_needs_having_answered_something(self):
+        results = self.settle()
+        # The quitter pressed Finish but never answered: racing the clock and
+        # waiting it out look identical on that flag alone.
+        self.assertTrue(self.participant(results, 'ace')['earlyFinisher'])
+        self.assertTrue(self.participant(results, 'owner')['earlyFinisher'])
+        self.assertFalse(self.participant(results, 'quitter')['earlyFinisher'])
+
+    def test_the_best_performer_is_the_room_mvp(self):
+        results = self.settle()
+        flagged = [p['name'] for p in results['participants'] if p['isMvp']]
+        self.assertEqual(flagged, ['ace'])
+
+    def test_someone_who_skipped_the_quiz_cannot_be_the_mvp(self):
+        results = self.settle()
+        self.assertFalse(self.participant(results, 'quitter')['isMvp'])
+
+    def test_a_streak_breaks_a_tie_on_accuracy(self):
+        # Nobody has 100%, and the top two tie on it, so the longer run decides
+        # rather than the name or the id.
+        self.room_ref.collection('players').document(str(self.ace.id)).update({
+            'correctCount': 3, 'answeredCount': 4, 'score': 1400})
+        self.room_ref.collection('players').document(str(self.owner.id)).update({
+            'correctCount': 3, 'answeredCount': 4, 'score': 1000,
+            'bestStreak': 2})
+        results = self.settle()
+        # 3/4 each; ace kept the longer run (4) against owner's 2.
+        self.assertEqual(self.participant(results, 'ace')['isMvp'], True)
+        self.assertEqual(self.participant(results, 'owner')['isMvp'], False)
+
+    def test_the_live_is_finished_flag_does_not_outlive_the_game(self):
+        # `isFinished` is how the play screen knows to move on; it is a live-game
+        # detail and must not sit in a results row that outlives the room.
+        results = self.settle()
+        for participant in results['participants']:
+            self.assertNotIn('isFinished', participant)
+
+    def test_the_best_streak_survives_into_the_snapshot(self):
+        results = self.settle()
+        self.assertEqual(self.participant(results, 'ace')['bestStreak'], 4)
+
+
 class RematchTests(TestCase):
     """A rematch reuses the room so the code students typed keeps working.
 

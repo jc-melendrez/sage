@@ -150,6 +150,72 @@ function seatsFor(team: TeamEntry): number {
 }
 
 /**
+ * How wide the seat-progress track should read, as a percentage.
+ *
+ * Floored at a visible sliver once anyone has joined, so a one-player team is
+ * not indistinguishable from an empty one, and capped at 100 so a roster that
+ * outgrew its seats still fills the track rather than overflowing it.
+ */
+function seatFillPercent(members: number, seats: number): number {
+  if (members <= 0) return 0;
+  const pct = Math.round((members / Math.max(1, seats)) * 100);
+  return Math.max(8, Math.min(100, pct));
+}
+
+/**
+ * Articles and prepositions, skipped when picking a team's crest letters.
+ *
+ * Without this every room's "The Brainy Bunch" team stamps a "T" on its crest,
+ * which is both wrong-looking and identical to every other "The ..." team name
+ * students actually pick.
+ */
+const SKIP_INITIALS = new Set(['the', 'of', 'and', 'a', 'an']);
+
+/**
+ * The letters stamped on a team's crest.
+ *
+ * Team names are free text, so an emblem cannot be drawn from one. Two initials
+ * from the first two meaningful words keeps "Blue Team" from rendering as the
+ * same single "B" as "Brainy Bunch"; a team with no letters at all falls back to
+ * the leading digits of its id, which is numeric and therefore never blank.
+ */
+function teamInitials(name: string, teamId: string): string {
+  const words = (name || '').trim().split(/\s+/).filter(Boolean);
+  const meaningful = words.filter(w => !SKIP_INITIALS.has(w.toLowerCase()));
+  const picked = (meaningful.length ? meaningful : words).slice(0, 2);
+  if (picked.length === 0) {
+    return (teamId || '?').replace(/\D/g, '').slice(0, 2).toUpperCase() || '?';
+  }
+  return picked.map(w => w[0]).join('').toUpperCase();
+}
+
+/**
+ * Legible text color to sit ON a filled team accent.
+ *
+ * This is the mirror of `ink()`: there the accent has to become text on a white
+ * card, here it becomes the fill under text. Team colors are picked to be
+ * tellable apart from each other, not to carry white ink, so white cannot be
+ * assumed -- on the brighter accents a near-black label is the readable one.
+ * Whichever wins on contrast is returned, with a floor so it is never a coin
+ * flip decided by rounding.
+ */
+function onAccent(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return '#FFFFFF';
+  const n = parseInt(m[1], 16);
+  const channel = (c: number) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  const l = 0.2126 * channel((n >> 16) & 255)
+    + 0.7152 * channel((n >> 8) & 255)
+    + 0.0722 * channel(n & 255);
+  const onWhite = 1.05 / (l + 0.05);
+  const onDark = (l + 0.05) / 0.05;
+  return onWhite >= onDark ? '#FFFFFF' : '#111827';
+}
+
+/**
  * Team boxes for the waiting room.
  *
  * Laid out as a vertical list: Spectators pinned at the top, then one box per
@@ -435,19 +501,19 @@ export default function TeamColumns({
                 accessibilityLabel={label}
                 style={[
                   styles.box,
-                  { borderColor: isMyTeam ? accent : accent + '3A' },
-                  isMyTeam && { backgroundColor: accent + '1A' },
-                  // Full-opacity border + tint instead of a thicker border:
-                  // styles.box is a fixed-size grid cell, so changing borderWidth
-                  // would nudge the inner content by half a pixel for 2s.
-                  isHighlighted && { borderColor: accent, backgroundColor: accent + '24' },
+                  { borderColor: isMyTeam || isHighlighted ? accent : accent + '3A' },
+                  (isMyTeam || isHighlighted) && styles.boxClaimed,
                   (locked || (full && !isMyTeam)) && styles.boxMuted,
                 ]}
               >
-                {/* ── header: name, count, rename ── */}
-                <View style={[styles.header, { backgroundColor: accent + '26' }]}>
-                  <View style={[styles.colorBar, { backgroundColor: accent }]} />
+                {/* ── header: crest, name, seat progress, rename ── */}
+                <View style={styles.header}>
                   <View style={styles.titleRow}>
+                    <View style={[styles.crest, { borderColor: accent }]}>
+                      <Text style={[styles.crestText, { color: accentInk }]}>
+                        {teamInitials(label, key)}
+                      </Text>
+                    </View>
                     <Text style={[styles.name, { color: accentInk }]} numberOfLines={1}>
                       {label}
                     </Text>
@@ -462,13 +528,27 @@ export default function TeamColumns({
                       </TouchableOpacity>
                     )}
                   </View>
-                  <View style={styles.countRow}>
+
+                  {/* Seat progress. The header used to carry a bare "3/5" and the
+                      slots below repeated it visually; a filled track makes "how
+                      much room is left" readable at a glance, which is the one
+                      thing the host is scanning this card for. */}
+                  <View style={styles.progressRow}>
+                    <View style={styles.progressTrack}>
+                      <View
+                        style={[
+                          styles.progressFill,
+                          { backgroundColor: accent },
+                          { width: `${seatFillPercent(members.length, seats)}%` },
+                        ]}
+                      />
+                    </View>
                     <Text style={[styles.count, { color: accentInk }]}>
                       {members.length}/{seats}
                     </Text>
                     {isMyTeam && <View style={styles.youPill}><Text style={styles.youPillText}>YOU</Text></View>}
                     {full && !isMyTeam && (
-                      <Text style={[styles.fullTag, { color: accentInk }]}>FULL</Text>
+                      <Text style={styles.fullTag}>FULL</Text>
                     )}
                   </View>
                 </View>
@@ -508,7 +588,7 @@ export default function TeamColumns({
                         accessibilityLabel={`Join ${label}`}
                       >
                         <Text style={styles.slotText}>
-                          {full ? 'full' : canTap ? 'Tap to join' : 'empty'}
+                          {full ? 'full' : 'empty'}
                         </Text>
                       </TouchableOpacity>
                     );
@@ -516,7 +596,7 @@ export default function TeamColumns({
 
                   {members.length === 0 && (
                     <Text style={[styles.emptyText, { color: accentInk + 'CC' }]}>
-                      {canTap ? 'Tap a slot to join' : locked ? 'Locked' : 'Tap another team'}
+                      {locked ? 'Locked' : 'No players yet'}
                     </Text>
                   )}
                 </View>
@@ -525,18 +605,40 @@ export default function TeamColumns({
                   {busyTeamId === key ? (
                     <ActivityIndicator size="small" color={accent} />
                   ) : (
-                    <Text
+                    <TouchableOpacity
+                      onPress={() => canTap && onJoin(key)}
+                      disabled={!canTap}
+                      activeOpacity={0.8}
+                      accessibilityRole="button"
+                      accessibilityLabel={
+                        isMyTeam ? `You are on ${label}`
+                          : full ? `${label} is full`
+                          : `Join ${label}`
+                      }
+                      accessibilityState={{ disabled: !canTap }}
                       style={[
-                        styles.footerText,
-                        {
-                          color: isMyTeam ? accentInk
-                            : full ? COLORS.textMuted : COLORS.textSecondary,
-                        },
+                        styles.ctaBtn,
+                        // Three states, chosen once so the button and its label
+                        // cannot disagree: mine (accent outline, always
+                        // tappable so a member can leave), disabled (full or
+                        // locked), and join (accent fill).
+                        isMyTeam && { borderColor: accent },
+                        !isMyTeam && (full || locked) && styles.ctaBtnDisabled,
+                        !isMyTeam && !full && !locked && { backgroundColor: accent, borderColor: accent },
                       ]}
-                      numberOfLines={1}
                     >
-                      {isMyTeam ? '✓ You are here' : full ? 'Team is full' : locked ? 'Locked' : 'Tap to join'}
-                    </Text>
+                      <Text
+                        style={[
+                          styles.ctaText,
+                          isMyTeam && { color: accentInk },
+                          !isMyTeam && (full || locked) && { color: COLORS.textMuted },
+                          !isMyTeam && !full && !locked && { color: onAccent(accent) },
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {isMyTeam ? "You're in" : full ? 'Team full' : locked ? 'Locked' : 'Join team'}
+                      </Text>
+                    </TouchableOpacity>
                   )}
                 </View>
               </TouchableOpacity>
@@ -593,6 +695,11 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: COLORS.surface,
   },
+  // A full-opacity border, not a tint: every card surface stays pure white, so
+  // claiming a card has to read through its edge rather than its fill. Border
+  // width is safe to change here because the border sits outside the padding --
+  // the old note about a "fixed-size grid cell" predates the vertical layout.
+  boxClaimed: { borderWidth: 2.5 },
   boxMuted: { opacity: 0.55 },
 
   teamGroup: { gap: 0 },
@@ -669,13 +776,28 @@ const styles = StyleSheet.create({
   },
 
   header: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 8 },
-  colorBar: { height: 3, borderRadius: 2, marginBottom: 8, marginHorizontal: 2 },
-  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  /** The team's emblem. White face with an accent ring, so it reads as a crest
+      on the card rather than as a filled swatch of the team colour. */
+  crest: {
+    width: 34, height: 34, borderRadius: 11,
+    borderWidth: 2,
+    backgroundColor: COLORS.surface,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  crestText: { fontSize: 13, fontFamily: FONTS.extraBold, letterSpacing: 0.3 },
   name: { flex: 1, fontSize: 15, fontFamily: FONTS.extraBold, letterSpacing: 0.2 },
   pencil: { padding: 3 },
-  countRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+
+  progressRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 9 },
+  progressTrack: {
+    flex: 1, height: 5, borderRadius: 3,
+    backgroundColor: COLORS.surfaceLight,
+    overflow: 'hidden',
+  },
+  progressFill: { height: '100%', borderRadius: 3 },
   count: { fontSize: 11, fontFamily: FONTS.bold },
-  fullTag: { fontSize: 9, fontFamily: FONTS.extraBold, letterSpacing: 0.6 },
+  fullTag: { fontSize: 9, fontFamily: FONTS.extraBold, letterSpacing: 0.6, color: COLORS.textMuted },
   youPill: {
     backgroundColor: COLORS.success,
     borderRadius: 4,
@@ -726,13 +848,27 @@ const styles = StyleSheet.create({
   slotText: { fontSize: 10, fontFamily: FONTS.medium, color: COLORS.textMuted },
 
   footer: {
+    paddingHorizontal: 12,
     paddingVertical: 9,
     alignItems: 'center',
     justifyContent: 'center',
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
-  footerText: { fontSize: 11, fontFamily: FONTS.bold },
+  /** A real control, not a sentence. The footer used to read "Tap to join",
+      which is indistinguishable from the caption above it and gives a screen
+      reader nothing to activate. */
+  ctaBtn: {
+    width: '100%',
+    paddingVertical: 10,
+    borderRadius: 11,
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  ctaBtnDisabled: { backgroundColor: COLORS.surfaceLight, borderColor: COLORS.border },
+  ctaText: { fontSize: 12, fontFamily: FONTS.extraBold, letterSpacing: 0.4 },
 
   backdrop: {
     flex: 1, backgroundColor: 'rgba(0,0,0,0.72)',

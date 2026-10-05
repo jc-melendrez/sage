@@ -194,6 +194,116 @@ function StandingsRow({ player, index, isYou }: { player: any; index: number; is
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   SpectatorTeamPanel — what a spectator can actually watch
+   ═══════════════════════════════════════════════════════════════ */
+/**
+ * Live team state for someone who is not on a team.
+ *
+ * A spectator used to get one static line explaining they were not scoring,
+ * which made standing by a room pointless: everything happening in it -- who has
+ * locked in, what each team is deciding, where the scores sit -- was already on
+ * this subscription but hidden behind the fact that the viewer cannot answer.
+ *
+ * Every field read here comes from the room document (`pickCount`, `score`,
+ * `reveals`) or the roster snapshot (`standings`, which carries every player in
+ * the room whether or not the viewer is on their team). Nothing here needs a
+ * second subscription, and nothing is a pick the spectator could not already
+ * have read for themselves.
+ */
+function SpectatorTeamPanel({
+  teams,
+  roster,
+  questionIndex,
+}: {
+  teams: TeamEntry[];
+  roster: any[];
+  questionIndex: number;
+}) {
+  return (
+    <View style={styles.specPanel}>
+      <View style={styles.specHead}>
+        <Ionicons name="eye" size={14} color={COLORS.accent} />
+        <Text style={styles.specHeadTitle}>TEAMS</Text>
+        <Text style={styles.specHeadMeta}>Question {questionIndex + 1}</Text>
+      </View>
+
+      {teams.map(team => {
+        const reveal = team.reveals?.[`q${questionIndex}`] ?? null;
+        // Quorum is against the members who are actually here, not the seats:
+        // a team of three in a five-seat room resolves at three, and counting
+        // to five would leave the dots permanently incomplete.
+        const expected = team.memberCount || team.memberIds?.length || 0;
+        const picked = team.pickCount ?? 0;
+        const settled = !!reveal;
+        const members = roster
+          .filter(p => sameTeamId(p.teamId, team.id))
+          .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+
+        return (
+          <View key={String(team.id)} style={styles.specRow}>
+            <View style={styles.specRowTop}>
+              <View style={[styles.specDot, { backgroundColor: team.color || '#8B5CF6' }]} />
+              <Text style={styles.specName} numberOfLines={1}>{team.name}</Text>
+              {settled ? (
+                <Ionicons
+                  name={reveal.void ? 'remove-circle' : reveal.correct ? 'checkmark-circle' : 'close-circle'}
+                  size={15}
+                  color={reveal.void ? COLORS.textMuted : reveal.correct ? '#34D399' : '#F87171'}
+                />
+              ) : (
+                <Text style={styles.specPickCount}>{picked}/{expected || '–'}</Text>
+              )}
+              <Text style={styles.specScore}>{(team.score ?? 0).toLocaleString()}</Text>
+            </View>
+
+            {/* A revealed team shows what it decided; an unresolved one shows
+                how far it is from deciding. Never both, and never a pick the
+                spectator cannot see. */}
+            {settled ? (
+              <Text style={styles.specAnswer} numberOfLines={2}>
+                {reveal.void
+                  ? 'Split vote — nobody scored'
+                  : `${reveal.answer} · ${reveal.agreed}/${reveal.expected || expected} agreed`}
+              </Text>
+            ) : expected > 0 ? (
+              <View style={styles.specDots}>
+                {Array.from({ length: Math.min(expected, 10) }).map((_, i) => (
+                  <View key={i} style={[styles.specDotSm, i < picked && styles.specDotSmOn]} />
+                ))}
+              </View>
+            ) : null}
+
+            {members.length > 0 && (
+              <View style={styles.specAvatars}>
+                {members.slice(0, 6).map((m, i) => (
+                  pfpSource(m.avatar) ? (
+                    <Image
+                      key={`${m.id}-${i}`}
+                      source={pfpSource(m.avatar)!}
+                      style={styles.specAvatar}
+                      resizeMode="cover"
+                    />
+                  ) : (
+                    <View key={`${m.id}-${i}`} style={styles.specAvatarFallback}>
+                      <Text style={styles.specAvatarText}>
+                        {(m.displayName || '?').charAt(0).toUpperCase()}
+                      </Text>
+                    </View>
+                  )
+                ))}
+                {members.length > 6 && (
+                  <Text style={styles.specMore}>+{members.length - 6}</Text>
+                )}
+              </View>
+            )}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
    QuestionScreen
    ═══════════════════════════════════════════════════════════════ */
 const POWERUP_ITEMS = [
@@ -2216,7 +2326,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           <View style={{ flex: 1 }}>
             <Text style={styles.spectatorTitle}>Watching only</Text>
             <Text style={styles.spectatorBody}>
-              You&rsquo;re not on a team, so you&rsquo;re not scoring. You can follow every question and the standings.
+              You&rsquo;re not on a team, so you&rsquo;re not scoring.
             </Text>
           </View>
         </View>
@@ -2356,6 +2466,18 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               <Text style={styles.resultExplanation}>{question.explanation}</Text>
             ) : null}
           </RNAnimated.View>
+        )}
+
+        {/* ── SPECTATOR TEAM BOARD ──
+            A spectator sees the same room as everyone else; only the ability to
+            answer differs. This reads the fields the team branch already uses
+            for its own team, so what a spectator watches is what a player sees. */}
+        {spectator && teamMode && sortedTeams.length > 0 && (
+          <SpectatorTeamPanel
+            teams={sortedTeams}
+            roster={standings as any[]}
+            questionIndex={teamIndex}
+          />
         )}
 
         {/* ── MCQ CHOICES ── */}
@@ -2650,6 +2772,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               },
             ]}
           >
+            <View style={styles.drawerHighlight} />
             <View style={styles.standingsDrawerHeader}>
               <Text style={styles.standingsDrawerTitle}>STANDINGS</Text>
             </View>
@@ -3346,26 +3469,41 @@ const styles = StyleSheet.create({
     top: 110,
     left: 0,
     right: 0,
-    backgroundColor: COLORS.bgSecondary,
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
+    backgroundColor: COLORS.cardBg,
+    borderRadius: 24,
+    overflow: 'hidden',
     borderWidth: 1,
     borderColor: COLORS.cardBorder,
-    paddingHorizontal: 20,
-    paddingTop: 20,
+    paddingHorizontal: 24,
+    paddingTop: 24,
     paddingBottom: 28,
-    maxHeight: SCREEN_HEIGHT * 0.55,
+    maxHeight: SCREEN_HEIGHT * 0.62,
+    // The same lift as the question card this drawer is read as a continuation
+    // of. It used to be y20 / .5 / r60, which read as a separate sheet floating
+    // over the screen instead of the card continuing downward.
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 20 },
-    shadowOpacity: 0.5,
-    shadowRadius: 60,
-    elevation: 20,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 32,
+    elevation: 16,
+  },
+  /** Mirrors styles.cardHighlight so the drawer starts with the same edge
+      highlight the question card has. Needs the drawer's overflow: 'hidden'. */
+  drawerHighlight: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 3,
+    backgroundColor: 'rgba(255,255,255,0.4)',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
   },
   standingsDrawerHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 6,
+    marginBottom: 10,
   },
   standingsDrawerTitle: {
     fontSize: 16,
@@ -3387,14 +3525,18 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   moverBannerText: { fontSize: 11, fontFamily: FONTS.bold, color: '#34D399' },
-  standingsScroll: { maxHeight: SCREEN_HEIGHT * 0.38 },
-  standingsTeamsBlock: { marginBottom: 10 },
+  // Was a flat SCREEN_HEIGHT * 0.38, which clipped the list well short of the
+  // drawer's own ceiling and so made a two-player room scroll like a full one.
+  // Now it takes the height it needs up to a cap: a short room gets a short
+  // drawer, and a long one still scrolls instead of running off the screen.
+  standingsScroll: { flexGrow: 0, maxHeight: SCREEN_HEIGHT * 0.52 },
+  standingsTeamsBlock: { marginBottom: 12 },
   standingsBlockLabel: {
-    fontSize: 10,
+    fontSize: 11,
     fontFamily: FONTS.extraBold,
     letterSpacing: 2,
     color: COLORS.textMuted,
-    marginBottom: 6,
+    marginBottom: 8,
     marginTop: 4,
   },
   teamStandDot: { width: 10, height: 10, borderRadius: 5 },
@@ -3430,7 +3572,9 @@ const styles = StyleSheet.create({
   srAvatarText: { fontSize: 14, fontFamily: FONTS.bold, color: '#E2E8F0' },
   srNameWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 4 },
   srName: { fontSize: 14, fontFamily: FONTS.bold, color: '#E2E8F0' },
-  srSub: { fontSize: 10, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 1 },
+  // 10px was two steps below the rows it labels; on cardBg the muted grey also
+  // had less contrast to work with than it did on the old bgSecondary.
+  srSub: { fontSize: 11, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 1 },
 
   boostWrap: { gap: 6 },
   boostLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
@@ -3458,6 +3602,85 @@ const styles = StyleSheet.create({
   srMoveDown: { fontSize: 11, fontFamily: FONTS.extraBold, color: '#F87171', width: 36, textAlign: 'center' },
   srMoveSame: { fontSize: 11, fontFamily: FONTS.extraBold, color: '#64748B', width: 36, textAlign: 'center' },
   srScore: { fontSize: 16, fontFamily: FONTS.black, color: '#fff', minWidth: 52, textAlign: 'right' },
+
+  /* spectator team board */
+  specPanel: {
+    backgroundColor: COLORS.cardBg,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 6,
+    marginTop: 14,
+  },
+  specHead: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10 },
+  specHeadTitle: {
+    flex: 1,
+    fontSize: 11,
+    fontFamily: FONTS.extraBold,
+    letterSpacing: 2,
+    color: COLORS.textMuted,
+  },
+  specHeadMeta: {
+    fontSize: 10,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
+  },
+  specRow: {
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.08)',
+  },
+  specRowTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  specDot: { width: 10, height: 10, borderRadius: 5 },
+  specName: {
+    flex: 1,
+    fontSize: 14,
+    fontFamily: FONTS.bold,
+    color: '#E2E8F0',
+  },
+  specPickCount: {
+    fontSize: 12,
+    fontFamily: FONTS.extraBold,
+    color: COLORS.accent,
+  },
+  specScore: {
+    fontSize: 14,
+    fontFamily: FONTS.black,
+    color: '#fff',
+    minWidth: 48,
+    textAlign: 'right',
+  },
+  specAnswer: {
+    fontSize: 11,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+    marginTop: 5,
+    marginLeft: 18,
+    lineHeight: 16,
+  },
+  specDots: { flexDirection: 'row', gap: 5, marginTop: 8, marginLeft: 18 },
+  specDotSm: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+  },
+  specDotSmOn: { backgroundColor: COLORS.accent },
+  specAvatars: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 9, marginLeft: 18 },
+  specAvatar: { width: 22, height: 22, borderRadius: 11, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
+  specAvatarFallback: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(124,58,237,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  specAvatarText: { fontSize: 10, fontFamily: FONTS.extraBold, color: '#E2E8F0' },
+  specMore: { fontSize: 10, fontFamily: FONTS.semiBold, color: COLORS.textMuted, marginLeft: 2 },
 
   /* LAN waiting screen */
   centerBox: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 30 },
