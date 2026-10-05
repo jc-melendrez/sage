@@ -1,0 +1,66 @@
+# Render Blueprint for the SAGE web deployment.
+#
+# This serves the TV leaderboard SPA on Render's CDN:
+#
+#   https://sage-web-cdep.onrender.com/        -> landing_page/index.html (marketing page)
+#   https://sage-web-cdep.onrender.com/tv      -> TV room-code entry
+#   https://sage-web-cdep.onrender.com/tv/CODE -> live leaderboard
+#   https://sage-web-cdep.onrender.com/CODE    -> live leaderboard (the link educators
+#                                                  copy from the app, see
+#                                                  app/educator/(tabs)/host-session.tsx)
+#
+# scripts/build-web.js writes the whole layout into mobile_app/web-build. The
+# backend (Django, Postgres) is deployed separately from backend_api/core/Procfile
+# and is not declared here.
+#
+# NOTE: Render does not retroactively apply a Blueprint to an existing service.
+# Either run Settings -> Blueprint on the live service, or paste buildCommand,
+# staticPublishPath and the routes below into the Dashboard by hand.
+
+services:
+  - type: web
+    runtime: static
+    name: sage-web
+    buildCommand: cd mobile_app && npm ci && npm run build:web
+    staticPublishPath: ./mobile_app/web-build
+    healthCheckPath: /
+    envVars:
+      # google-services.json is git-ignored, so it is absent on Render's build
+      # machine. It is not needed for a web export (config-plugin mods do not run
+      # during `expo export`, and the web Firebase SDK reads its config from JS),
+      # so this opts out of the app.config.js guard. Do NOT set it for an Android
+      # or EAS build -- that would ship an app with no Firebase config.
+      - key: EXPO_SKIP_GOOGLE_SERVICES_CHECK
+        value: "1"
+      # Read by mobile_app/config/api.ts -> getTvPageBaseUrl(). Without it the
+      # educator "copy TV link" button silently produces a relative URL. No
+      # trailing slash.
+      - key: EXPO_PUBLIC_WEB_URL
+        value: https://sage-web-cdep.onrender.com
+    routes:
+      # Render never applies a rule to a path that exists as a real file, so these
+      # rules only ever fire for paths the CDN does not have on disk. That is what
+      # lets index.html be the landing page while /tv still reaches the SPA.
+      #
+      # The catch-all destination is app.html, NOT index.html -- the Expo shell is
+      # renamed on purpose, otherwise every unknown path would serve the landing page.
+      - type: rewrite
+        source: /tv
+        destination: /app.html
+      - type: rewrite
+        source: /tv/*
+        destination: /app.html
+      - type: rewrite
+        source: /*
+        destination: /app.html
+    headers:
+      - path: /app.html
+        name: Cache-Control
+        value: no-cache
+      - path: /_expo/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+
+# The backend (Django on Render, Postgres on RDS) is deployed from a separate
+# service and is NOT declared here -- applying this Blueprint must not touch it.
+# It needs GOOGLE_SERVICES_JSON-style secrets of its own; see backend_api/core/Procfile.
