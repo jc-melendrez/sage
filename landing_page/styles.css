@@ -1097,25 +1097,6 @@ main {
   place-items: center;
 }
 
-.store-text {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  line-height: 1.2;
-}
-
-.store-text small {
-  font-size: 0.72rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  opacity: 0.75;
-}
-
-.store-text strong {
-  font-size: 1.02rem;
-  font-weight: 800;
-}
-
 .note {
   display: inline-flex;
   align-items: center;
