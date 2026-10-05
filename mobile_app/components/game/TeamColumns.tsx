@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Modal, TextInput,
-  ActivityIndicator, Image, ScrollView,
+  ActivityIndicator, Image, ScrollView, Animated, Easing,
 } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { pfpSource } from '@/constants/pfps';
@@ -213,6 +215,210 @@ function onAccent(hex: string): string {
   const onWhite = 1.05 / (l + 0.05);
   const onDark = (l + 0.05) / 0.05;
   return onWhite >= onDark ? '#FFFFFF' : '#111827';
+}
+
+/**
+ * Entrance: one fade-and-rise per team, staggered down the list.
+ *
+ * Deliberately mount-only (the effect depends on nothing that changes) so
+ * joining or leaving a team does not replay the whole cascade -- the boxes that
+ * did not change would visibly re-pop for no reason.
+ */
+function RiseIn({ delay, children }: { delay: number; children: ReactNode }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const anim = Animated.timing(v, {
+      toValue: 1,
+      duration: 380,
+      delay,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [v, delay]);
+  return (
+    <Animated.View
+      style={{
+        opacity: v,
+        transform: [{ translateY: v.interpolate({ inputRange: [0, 1], outputRange: [14, 0] }) }],
+      }}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+/**
+ * Press feedback for a whole team box.
+ *
+ * Its own node rather than a scale on the box itself: the box already runs a
+ * stagger animation, and two `Animated.timing`s driving the same value on one
+ * view fight each other -- the press would stutter the entrance. Split, each has
+ * one owner.
+ */
+function BoxPress({
+  style, onPress, disabled, accessibilityLabel, children,
+}: {
+  style: any;
+  onPress: () => void;
+  disabled: boolean;
+  accessibilityLabel: string;
+  children: ReactNode;
+}) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const settle = (to: number) => {
+    Animated.spring(scale, {
+      toValue: to, speed: 45, bounciness: 3, useNativeDriver: true,
+    }).start();
+  };
+  return (
+    <Animated.View
+      // Press handlers on the outer view so the border and the shadow scale with
+      // the content; the TouchableOpacity inside carries the card surface.
+      onStartShouldSetResponder={() => !disabled}
+      onResponderGrant={() => settle(0.975)}
+      onResponderRelease={() => settle(1)}
+      onResponderTerminate={() => settle(1)}
+      style={[style, { transform: [{ scale }] }]}
+    >
+      <TouchableOpacity
+        onPress={onPress}
+        disabled={disabled}
+        activeOpacity={1}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        accessibilityState={{ disabled }}
+        style={styles.boxPressInner}
+      >
+        {children}
+      </TouchableOpacity>
+    </Animated.View>
+  );
+}
+
+/**
+ * The seat bar, animated to its new width.
+ *
+ * Set straight to the first value instead of tweening in from zero, so a box
+ * rendered mid-settle does not appear to fill up on its own.
+ */
+function SeatFill({ percent, color }: { percent: number; color: string }) {
+  const w = useRef(new Animated.Value(percent)).current;
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (!seeded.current) {
+      seeded.current = true;
+      w.setValue(percent);
+      return;
+    }
+    const anim = Animated.timing(w, {
+      toValue: percent,
+      duration: 420,
+      easing: Easing.out(Easing.cubic),
+      // Width is not a native-driver property.
+      useNativeDriver: false,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [percent, w]);
+  return (
+    <Animated.View
+      style={[
+        styles.progressFill,
+        { backgroundColor: color },
+        { width: w.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }) },
+      ]}
+    />
+  );
+}
+
+/** How many faces the header stack shows before folding into a "+N". */
+const STACK_MAX = 4;
+
+/**
+ * Overlapping faces in the header, as a quick read on who is on the team before
+ * anyone starts reading names. The seat list below stays the interactive one --
+ * it carries the ready state, the leader star and the tap-to-promote target,
+ * none of which survive a horizontal strip.
+ */
+function AvatarStack({ members, accent }: { members: PlayerEntry[]; accent: string }) {
+  if (members.length === 0) return null;
+  const shown = members.slice(0, STACK_MAX);
+  const overflow = members.length - shown.length;
+  return (
+    <View style={styles.avatarStack}>
+      {shown.map((m, i) => {
+        const initial = (m.displayName || '?').charAt(0).toUpperCase();
+        return (
+          <View
+            key={m.id}
+            style={[
+              styles.stackAvatar,
+              { marginLeft: i === 0 ? 0 : -9 },
+              // Later faces sit on top, so the row reads left-to-right as the
+              // order the members are already listed in underneath.
+              { zIndex: STACK_MAX - i },
+            ]}
+          >
+            {pfpSource(m.avatar) ? (
+              <Image source={pfpSource(m.avatar)!} style={styles.stackAvatarImg} resizeMode="cover" />
+            ) : (
+              <View style={[styles.stackAvatarFallback, { borderColor: accent + '88' }]}>
+                <Text style={[styles.stackAvatarText, { color: ink(accent) }]}>{initial}</Text>
+              </View>
+            )}
+          </View>
+        );
+      })}
+      {overflow > 0 && (
+        <View style={[styles.stackAvatar, styles.stackOverflow, { marginLeft: -9, zIndex: 0 }]}>
+          <Text style={styles.stackOverflowText}>+{overflow}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+/**
+ * Gentle breathing on your own CTA while you have not joined yet.
+ *
+ * Scoped to the viewer's own box: a loop on every team would run one animation
+ * per box forever for a hint only the local player acts on.
+ */
+function ReadyPulse({ active, children }: { active: boolean; children: ReactNode }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!active) {
+      v.setValue(0);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(v, { toValue: 1, duration: 850, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+        Animated.timing(v, { toValue: 0, duration: 850, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [active, v]);
+  return (
+    <Animated.View
+      // `width: '100%'` has to be restated on the wrapper: the footer centres its
+      // children, so without it this view would shrink to its content and the
+      // `width: '100%'` CTA inside it would have nothing to measure against.
+      style={[
+        styles.ctaPulse,
+        {
+          // 0.82 -> 1.0: enough to notice, not enough to look like a flicker.
+          opacity: Animated.add(Animated.multiply(v, 0.18), 0.82),
+          transform: [{ scale: v.interpolate({ inputRange: [0, 1], outputRange: [1, 1.015] }) }],
+        },
+      ]}
+    >
+      {children}
+    </Animated.View>
+  );
 }
 
 /**
@@ -494,29 +700,43 @@ export default function TeamColumns({
                 </View>
               )}
 
-              <TouchableOpacity
-                onPress={() => canTap && onJoin(key)}
-                activeOpacity={0.8}
-                disabled={!canTap}
-                accessibilityLabel={label}
-                style={[
-                  styles.box,
-                  { borderColor: isMyTeam || isHighlighted ? accent : accent + '3A' },
-                  (isMyTeam || isHighlighted) && styles.boxClaimed,
-                  (locked || (full && !isMyTeam)) && styles.boxMuted,
-                ]}
-              >
+              <RiseIn delay={teamIndex * 70}>
+                <BoxPress
+                  style={[
+                    styles.boxOuter,
+                    { borderColor: isMyTeam || isHighlighted ? accent : accent + '3A' },
+                    (isMyTeam || isHighlighted) && styles.boxClaimed,
+                    (locked || (full && !isMyTeam)) && styles.boxMuted,
+                    // The card surface itself stays pure white; only the shadow
+                    // reads the team colour, so claiming a box never tints it.
+                    isMyTeam && { shadowColor: accent, elevation: 6 },
+                  ]}
+                  onPress={() => canTap && onJoin(key)}
+                  disabled={!canTap}
+                  accessibilityLabel={label}
+                >
                 {/* ── header: crest, name, seat progress, rename ── */}
+                <View style={[styles.accentEdge, { backgroundColor: accent }]} />
                 <View style={styles.header}>
                   <View style={styles.titleRow}>
-                    <View style={[styles.crest, { borderColor: accent }]}>
-                      <Text style={[styles.crestText, { color: accentInk }]}>
+                    {/* Gradient shield rather than a flat bordered square: the
+                        crest is the first thing anyone reads on the card, and a
+                        solid fill in the team colour makes the teams scannable at
+                        a glance without tinting the card itself. */}
+                    <LinearGradient
+                      colors={[accent, accent + 'CC']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.crest}
+                    >
+                      <Text style={[styles.crestText, { color: onAccent(accent) }]}>
                         {teamInitials(label, key)}
                       </Text>
-                    </View>
+                    </LinearGradient>
                     <Text style={[styles.name, { color: accentInk }]} numberOfLines={1}>
                       {label}
                     </Text>
+                    <AvatarStack members={members} accent={accent} />
                     {canRename && !team.nameLocked && !locked && (
                       <TouchableOpacity
                         onPress={() => openRename(team)}
@@ -535,12 +755,9 @@ export default function TeamColumns({
                       thing the host is scanning this card for. */}
                   <View style={styles.progressRow}>
                     <View style={styles.progressTrack}>
-                      <View
-                        style={[
-                          styles.progressFill,
-                          { backgroundColor: accent },
-                          { width: `${seatFillPercent(members.length, seats)}%` },
-                        ]}
+                      <SeatFill
+                        percent={seatFillPercent(members.length, seats)}
+                        color={accent}
                       />
                     </View>
                     <Text style={[styles.count, { color: accentInk }]}>
@@ -605,43 +822,46 @@ export default function TeamColumns({
                   {busyTeamId === key ? (
                     <ActivityIndicator size="small" color={accent} />
                   ) : (
-                    <TouchableOpacity
-                      onPress={() => canTap && onJoin(key)}
-                      disabled={!canTap}
-                      activeOpacity={0.8}
-                      accessibilityRole="button"
-                      accessibilityLabel={
-                        isMyTeam ? `You are on ${label}`
-                          : full ? `${label} is full`
-                          : `Join ${label}`
-                      }
-                      accessibilityState={{ disabled: !canTap }}
-                      style={[
-                        styles.ctaBtn,
-                        // Three states, chosen once so the button and its label
-                        // cannot disagree: mine (accent outline, always
-                        // tappable so a member can leave), disabled (full or
-                        // locked), and join (accent fill).
-                        isMyTeam && { borderColor: accent },
-                        !isMyTeam && (full || locked) && styles.ctaBtnDisabled,
-                        !isMyTeam && !full && !locked && { backgroundColor: accent, borderColor: accent },
-                      ]}
-                    >
-                      <Text
+                    <ReadyPulse active={isMyTeam && !locked}>
+                      <TouchableOpacity
+                        onPress={() => canTap && onJoin(key)}
+                        disabled={!canTap}
+                        activeOpacity={0.8}
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          isMyTeam ? `You are on ${label}`
+                            : full ? `${label} is full`
+                            : `Join ${label}`
+                        }
+                        accessibilityState={{ disabled: !canTap }}
                         style={[
-                          styles.ctaText,
-                          isMyTeam && { color: accentInk },
-                          !isMyTeam && (full || locked) && { color: COLORS.textMuted },
-                          !isMyTeam && !full && !locked && { color: onAccent(accent) },
+                          styles.ctaBtn,
+                          // Three states, chosen once so the button and its label
+                          // cannot disagree: mine (accent outline, always
+                          // tappable so a member can leave), disabled (full or
+                          // locked), and join (accent fill).
+                          isMyTeam && { borderColor: accent },
+                          !isMyTeam && (full || locked) && styles.ctaBtnDisabled,
+                          !isMyTeam && !full && !locked && { backgroundColor: accent, borderColor: accent },
                         ]}
-                        numberOfLines={1}
                       >
-                        {isMyTeam ? "You're in" : full ? 'Team full' : locked ? 'Locked' : 'Join team'}
-                      </Text>
-                    </TouchableOpacity>
+                        <Text
+                          style={[
+                            styles.ctaText,
+                            isMyTeam && { color: accentInk },
+                            !isMyTeam && (full || locked) && { color: COLORS.textMuted },
+                            !isMyTeam && !full && !locked && { color: onAccent(accent) },
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {isMyTeam ? "You're in" : full ? 'Team full' : locked ? 'Locked' : 'Join team'}
+                        </Text>
+                      </TouchableOpacity>
+                    </ReadyPulse>
                   )}
                 </View>
-              </TouchableOpacity>
+                </BoxPress>
+              </RiseIn>
             </View>
           );
         })}
@@ -689,8 +909,20 @@ const styles = StyleSheet.create({
   // Vertical list: spectators on top, then each team box with a VS between.
   stack: { gap: 0 },
 
-  box: {
+  // The press-scale wrapper. Border and shadow live here rather than on `box` so
+  // the whole card -- edge included -- scales together under a press; an inner
+  // scale would shrink the content and leave the outline standing still.
+  boxOuter: {
     borderWidth: 1.5,
+    borderRadius: 16,
+    shadowOpacity: 0.22,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  // `overflow: hidden` clips the top accent bar to the rounded corners, so the
+  // two together give a card that reads as one solid object rather than a stripe
+  // laid over a rectangle.
+  boxPressInner: {
     borderRadius: 16,
     overflow: 'hidden',
     backgroundColor: COLORS.surface,
@@ -718,7 +950,16 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
     gap: 8,
   },
-  spectatorBarActive: { borderColor: COLORS.textSecondary, backgroundColor: 'rgba(107,114,128,0.08)' },
+  // Opaque, not a tint. Both hosts of this bar paint a violet gradient behind it
+  // (lobby.tsx, game/index.tsx), so an alpha fill let the violet straight through
+  // and the bar read as violet *only while you were spectating* -- the active
+  // style was the difference between "white when you leave it" and "violet when
+  // you are in it". A solid border plus the YOU pill carry that state instead.
+  spectatorBarActive: {
+    borderColor: COLORS.textSecondary,
+    borderStyle: 'solid',
+    backgroundColor: COLORS.surface,
+  },
   spectatorBarHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   spectatorBarTitle: { flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 },
   spectatorBarLeave: { gap: 6 },
@@ -776,18 +1017,38 @@ const styles = StyleSheet.create({
   },
 
   header: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 8 },
+  // Team-coloured hairline along the top inner edge. `boxPressInner` clips it to
+  // the card's rounded corners, and because it is a child rather than a border it
+  // cannot change the card's measured width the way a thicker border would.
+  accentEdge: { height: 4, width: '100%' },
   titleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  /** The team's emblem. White face with an accent ring, so it reads as a crest
-      on the card rather than as a filled swatch of the team colour. */
+/** The team's emblem: a gradient shield in the team colour. The face is filled
+    rather than white-outlined so the card is identifiable by shape and hue at a
+    glance down a list of four, and `onAccent` picks the legible ink for whatever
+    fill a room's saved colour happens to be. */
   crest: {
     width: 34, height: 34, borderRadius: 11,
-    borderWidth: 2,
-    backgroundColor: COLORS.surface,
     alignItems: 'center', justifyContent: 'center',
   },
   crestText: { fontSize: 13, fontFamily: FONTS.extraBold, letterSpacing: 0.3 },
-  name: { flex: 1, fontSize: 15, fontFamily: FONTS.extraBold, letterSpacing: 0.2 },
+  name: { flexShrink: 1, fontSize: 15, fontFamily: FONTS.extraBold, letterSpacing: 0.2 },
   pencil: { padding: 3 },
+
+  /** Overlapping faces, right-aligned between the team name and the pencil. */
+  avatarStack: { flexDirection: 'row', alignItems: 'center', marginLeft: 'auto', paddingLeft: 6 },
+  stackAvatar: {
+    width: 22, height: 22, borderRadius: 11,
+    borderWidth: 2, borderColor: COLORS.surface,
+    backgroundColor: COLORS.surface,
+    alignItems: 'center', justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  stackAvatarImg: { width: '100%', height: '100%' },
+  stackAvatarFallback: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  stackAvatarText: { fontSize: 9, fontFamily: FONTS.extraBold },
+  stackOverflow: { backgroundColor: COLORS.surfaceLight },
+  stackOverflowText: { fontSize: 8, fontFamily: FONTS.extraBold, color: COLORS.textSecondary },
+  ctaPulse: { width: '100%' },
 
   progressRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 9 },
   progressTrack: {
@@ -810,19 +1071,24 @@ const styles = StyleSheet.create({
   member: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 7,
+    gap: 8,
     backgroundColor: COLORS.surfaceLight,
-    borderRadius: 9,
-    paddingHorizontal: 7,
-    paddingVertical: 6,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    paddingHorizontal: 8,
+    paddingVertical: 7,
   },
-  memberYou: { backgroundColor: 'rgba(124,58,237,0.10)' },
-  avatar: { width: 20, height: 20, borderRadius: 10 },
+  memberYou: { backgroundColor: 'rgba(124,58,237,0.10)', borderColor: 'rgba(124,58,237,0.22)' },
+  // 24 rather than 20: at 20 the initials render at 9pt and the face is too small
+  // to recognise, which is the whole reason the row shows a picture.
+  avatar: { width: 24, height: 24, borderRadius: 12 },
   avatarFallback: {
-    width: 20, height: 20, borderRadius: 10,
+    width: 24, height: 24, borderRadius: 12,
     borderWidth: 1.5, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: COLORS.surface,
   },
-  avatarText: { fontSize: 9, fontFamily: FONTS.extraBold },
+  avatarText: { fontSize: 10, fontFamily: FONTS.extraBold },
   memberName: {
     flex: 1, fontSize: 12, fontFamily: FONTS.semiBold,
     color: COLORS.textPrimary,

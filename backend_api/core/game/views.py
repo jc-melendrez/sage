@@ -1957,7 +1957,7 @@ class FinishGameView(APIView):
                     continue
                 self._pay(user_id=p.id, rank=team_rank[team_id], room_code=room_code,
                           label=f"#{team_rank[team_id]} with {team_doc[team_id].get('name') or f'Team {team_id}'}",
-                          results=results, team_id=team_id)
+                          results=results, team_id=team_id, topic=room_data.get('topic'))
             return
 
         room_data = room_ref.get().to_dict() or {}
@@ -1994,9 +1994,9 @@ class FinishGameView(APIView):
         }
         for entry, rank in zip(standings, ranks):
             self._pay(user_id=entry['user_id'], rank=rank, room_code=room_code, label=f'#{rank}',
-                      results=results)
+                      results=results, topic=room_data.get('topic'))
 
-    def _pay(self, user_id, rank, room_code, label, results=None, team_id=None):
+    def _pay(self, user_id, rank, room_code, label, results=None, team_id=None, topic=None):
         user = User.objects.filter(id=user_id).first()
         if not user:
             return
@@ -2026,8 +2026,22 @@ class FinishGameView(APIView):
                     if 'score' not in payload:
                         payload['score'] = mine_entry.get('score', 0)
                     payload.setdefault('correct', mine_entry.get('correct', 0))
+            # Name the quiz in the activity title instead of the placement. The
+            # row used to be titled "#1 (CLAS1)", which identifies the game by its
+            # room code and says nothing about what was played -- so a student's
+            # whole Recent Activity list was a column of "#3", "#1", "#2" with no
+            # way to tell the quizzes apart. The topic is already on the room doc.
+            # "Quiz pending" and "Study Quiz" are the placeholders CreateRoomView
+            # writes when there is no course quiz behind the room, so they name no
+            # quiz either and fall back to the generic word.
+            name = str(topic or '').strip()
+            if name.lower() in ('', 'quiz pending', 'study quiz'):
+                name = 'Game'
+            score = payload.get('score', 0) or 0
             record_game_finish(user, rank, room_code=room_code, context=label,
-                               results=results, payload=payload or None)
+                               results=results, payload=payload or None,
+                               title=f'{name} · {score:,} pts',
+                               description=f'{label} · {score:,} pts')
         except Exception as e:
             print(f'[FinishGame XP Award Error] user {user_id}: {e}')
 

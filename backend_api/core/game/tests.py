@@ -1322,8 +1322,13 @@ class TeamPlacementXpTests(TestCase):
 
         winner_activity = Activity.objects.filter(user=self.winner, kind='game').first()
         self.assertIsNotNone(winner_activity)
-        self.assertIn('Winners', winner_activity.title)
-        self.assertNotIn('Chasers', winner_activity.title)
+        # The title names the quiz and the score, so the team the member actually
+        # played for is attributed on the row via the description and the payload
+        # rather than in the title. Same guarantee as before -- their own team,
+        # never the other one -- just not crammed into the one-line title.
+        self.assertIn('Winners', winner_activity.description)
+        self.assertNotIn('Chasers', winner_activity.description)
+        self.assertEqual(winner_activity.payload['teamName'], 'Winners')
 
     def test_team_results_carry_accuracy_and_contribution(self):
         self.settle(confirm='true')
@@ -1458,6 +1463,116 @@ class ClassicSettlementTests(TestCase):
         resp = self.confirm(user=self.other, confirm='true')
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(self.room_ref.get().to_dict()['status'], 'active')
+
+
+class ActivityTitleNamesTheQuizTests(TestCase):
+    """A finished game's activity row has to say which quiz it was, and the score.
+
+    Every settled game logged `#1 (CLAS1)`: the placement, and the room code. Both
+    are true and neither is what a student recognises their own game by, so a
+    Recent Activity list was a column of "#3", "#1", "#2" with nothing to tell
+    the quizzes apart -- and the score, the only number anyone actually wants
+    afterwards, was not in the row at all. The topic is already on the room doc,
+    and the settlement already knows each participant's score, so the title is
+    built from those.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(username='owner', password='pass')
+        self.other = User.objects.create_user(username='other', password='pass')
+        self.teammate = User.objects.create_user(username='mate', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('CLAS1')
+        self.room_ref.set({
+            'status': 'active', 'hostId': self.owner.id, 'ownerId': self.owner.id,
+            'topic': 'Photosynthesis', 'questionCount': 1,
+            'timePerQuestion': 15, 'questions': [],
+        })
+        for user, score in ((self.owner, 1200), (self.other, 400)):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': score,
+                'isFinished': True, 'answers': {}, 'answeredCount': 1,
+                'correctCount': 1,
+            })
+
+    def settle(self, user=None, **extra):
+        self.client.force_authenticate(user=user or self.owner)
+        return self.client.post(
+            reverse('finish-game'),
+            {'roomCode': 'CLAS1', 'confirm': 'true', 'force': 'true', **extra},
+            format='json')
+
+    def row(self, user):
+        return Activity.objects.filter(user=user).order_by('-created_at').first()
+
+    def test_the_row_is_titled_with_the_quiz_name_and_the_score(self):
+        self.assertEqual(self.settle().status_code, 200)
+        self.assertEqual(self.row(self.owner).title, 'Photosynthesis · 1,200 pts')
+
+    def test_the_score_in_the_title_is_each_players_own(self):
+        self.settle()
+        # Not the room's best score, and not shared: 400 is what `other` scored.
+        self.assertEqual(self.row(self.other).title, 'Photosynthesis · 400 pts')
+
+    def test_the_title_does_not_lead_with_the_placement_or_the_room_code(self):
+        self.settle()
+        title = self.row(self.owner).title
+        self.assertNotIn('CLAS1', title)
+        self.assertFalse(title.startswith('#'), f'title still leads with the placement: {title}')
+
+    def test_a_placeholder_topic_falls_back_to_a_generic_name(self):
+        # "Quiz pending" and "Study Quiz" are what CreateRoomView writes when a
+        # room has no course quiz behind it. Naming either one is no more useful
+        # than naming the room code, so both collapse to the generic word.
+        for placeholder in ('Quiz pending', 'Study Quiz', '', None):
+            with self.subTest(topic=placeholder):
+                Activity.objects.all().delete()
+                self.room_ref.set({'topic': placeholder, 'status': 'active'}, merge=True)
+                self.settle()
+                self.assertEqual(self.row(self.owner).title, 'Game · 1,200 pts')
+
+    def test_the_description_keeps_the_placement(self):
+        # The title no longer carries the placement, and the detail sheet falls
+        # back to the description, so it has to go somewhere or "#1" is lost.
+        self.settle()
+        description = self.row(self.owner).description
+        self.assertIn('#1', description)
+        self.assertIn('1,200 pts', description)
+
+    def test_a_team_row_is_titled_with_the_team_score(self):
+        self.room_ref.set({
+            'teamMode': True, 'teamCount': 2, 'status': 'active',
+            'teamQuestionIndex': 1, 'teamStartedAt': 'earlier',
+        }, merge=True)
+        self.room_ref.collection('teams').document('1').set({
+            'name': 'Winners', 'color': '#22D3EE', 'score': 900,
+            'teamCorrect': 2, 'answeredCount': 2, 'teamStreak': 2, 'bestStreak': 2,
+            'memberIds': [str(self.owner.id)], 'memberCount': 1,
+            'leaderId': str(self.owner.id),
+            'reveals': {'0': {'answer': 'a', 'correct': True}},
+        })
+        self.room_ref.collection('teams').document('2').set({
+            'name': 'Chasers', 'color': '#10B981', 'score': 100,
+            'memberIds': [str(self.teammate.id)], 'memberCount': 1,
+            'leaderId': str(self.teammate.id),
+        })
+        self.room_ref.collection('players').document(str(self.owner.id)).update({'teamId': '1'})
+        self.room_ref.collection('players').document(str(self.teammate.id)).set({
+            'displayName': self.teammate.username, 'score': 100, 'teamId': '2',
+            'correctCount': 0, 'answeredCount': 1, 'isFinished': True, 'answers': {},
+        })
+
+        self.assertEqual(self.settle().status_code, 200)
+        # The team's 900, not this member's own 1,200: members share one score,
+        # and 900 is what they were actually paid for.
+        self.assertEqual(self.row(self.owner).title, 'Photosynthesis · 900 pts')
+        self.assertEqual(self.row(self.teammate).title, 'Photosynthesis · 100 pts')
 
 
 class ClassicSnapshotEnrichmentTests(TestCase):

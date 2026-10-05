@@ -319,13 +319,26 @@ def record_daily_checkin(user):
     }
 
 
-def record_game_finish(user, rank, room_code=None, context=None, results=None, label=None, payload=None):
+def record_game_finish(user, rank, room_code=None, context=None, results=None, label=None, payload=None, title=None, description=None, detail=None):
     """Award placement XP after a multiplayer game finishes.
 
     `context` is a human-readable placement label. In team mode the rank is
     the team's finishing position, so the activity feed says e.g.
     "#1 with The Brainy Bunch" rather than implying the student individually
     came first against every other student in the room.
+
+    `title` overrides the whole activity title when the caller can say what the
+    student actually played. The default is placement plus the room code, which
+    names the game precisely once -- it tells you that you came first and which
+    room you were in, and nothing about the quiz itself. Every finished game then
+    read as "#1 (CLAS1)", so a student with a full Recent Activity list had no way
+    to tell which quizzes they had played. A caller with the quiz topic and the
+    student's score passes them here instead. `description` overrides the
+    subtitle the detail sheet falls back to.
+
+    `detail` is merged into the stored payload like `payload` is, and a
+    `description` key in it overrides `description`. It is the older spelling of
+    the same idea and is kept working so callers written against it do not break.
 
     `results` is the settled room snapshot (participants, scores, teams). It is
     stored on the activity row so the Recent Activity detail sheet can render
@@ -342,16 +355,31 @@ def record_game_finish(user, rank, room_code=None, context=None, results=None, l
             badges.append(_badge_dicts([champ])[0])
 
     activity_payload = {'route': '/games'}
+    if room_code:
+        # What identifies the game when the title does not. Every settled row
+        # needs it to point back at the room it came from.
+        activity_payload['roomCode'] = room_code
     if payload:
         activity_payload.update(payload)
+    if detail:
+        # Copied, not merged in place: a caller reuses one dict across a whole
+        # room's field, and popping `description` out of it would empty the key
+        # for every member after the first.
+        activity_payload.update(detail)
+    activity_payload['rank'] = rank
     if results is not None:
         activity_payload['results'] = results
+
+    detail_description = (detail or {}).get('description')
     placement = label or context or f'#{rank} in live game'
     log_activity(
         user,
         kind='game',
-        title=placement + (f" ({room_code})" if room_code else ""),
-        description='Multiplayer game finished',
+        # A caller-supplied title is the whole title: no room-code suffix is
+        # appended to it, because it already carries the two things a student
+        # scans the list for -- which quiz it was, and how they did.
+        title=title or (placement + (f" ({room_code})" if room_code else "")),
+        description=detail_description or description or 'Multiplayer game finished',
         xp=result['xp'],
         payload=activity_payload,
     )
