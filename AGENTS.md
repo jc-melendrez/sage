@@ -3,6 +3,8 @@
 ## Project structure
 
 - **`mobile_app/`** — Expo 55 + React Native 0.83 TS app (file-based routing via expo-router)
+- **`landing_page/`** — standalone marketing page (plain HTML/CSS, no build). Deployed to `/`
+- **`render.yaml`** — Render Blueprint for the web deployment (see "Web deployment")
 - **`backend_api/core/`** — Django 6.0.4 + DRF backend. SQLite locally, **Postgres (AWS RDS)** in production when `DATABASE_URL` is set
 - **`env/`** — Python virtual env (git-ignored but present locally)
 - **`games.tsx`** (root) — stale copy; ignore it. Real game screens live in `mobile_app/app/game/`
@@ -17,6 +19,7 @@ npx expo start          # dev server
 npm run android         # builds Android (patches gradle first)
 npm run ios             # iOS build
 npm run web             # web version
+npm run build:web        # production web build -> mobile_app/web-build/
 npm run lint            # expo lint (ESLint)
 ```
 
@@ -67,6 +70,27 @@ python manage.py test            # runs Django tests
 - **Real-time**: game rooms and group chats use Firestore as real-time layer (server writes, mobile reads). Game rooms in `gameRooms` collection, group messages in `groups/<id>/messages`
 - **CORS**: custom middleware at `core.cors.CORSMiddleware` — allows all origins, methods, and `Content-Type, Authorization` headers
 - **Testing**: `test_api.py` at `backend_api/core/test_api.py` (manual HTTP request script)
+
+## Web deployment (Render)
+
+`sage-web-cdep.onrender.com` is a Render **static site** serving `mobile_app/web-build/`, assembled by `mobile_app/scripts/build-web.js` (`npm run build:web`).
+
+| URL | Served by |
+|---|---|
+| `/` | `landing_page/index.html` (real file) |
+| `/styles.css` | `landing_page/styles.css` (real file) |
+| `/tv` | rewrite → `app.html` → TV room-code entry |
+| `/tv/<CODE>` | rewrite → `app.html` → live leaderboard |
+| `/<CODE>` | rewrite → `app.html` → live leaderboard (the link educators copy) |
+| anything else | rewrite → `app.html`, then `app/_layout.tsx` bounces to `/tv` |
+
+- **The Expo shell is renamed `index.html` → `app.html` on purpose.** Render serves a rewrite's destination as a real file, so if the catch-all `/*` still pointed at `/index.html`, every unknown path would return the landing page instead of the app. The landing page needs the name `index.html`; the shell must not have it.
+- **The web build is TV-only.** `app/_layout.tsx` (web-only effect) redirects any path that is not `/tv…` or a bare alphanumeric segment to `/tv`, and skips auth/offline init on web. Do not expect login/game/educator screens to be reachable on the web.
+- The 109 per-route HTML files that `expo export` emits for `web.output: "static"` are **deleted** by the build script — routing is client-side, and their directories would otherwise ship to the CDN.
+- Expo assets stay at the site root (`/_expo/…`, `/assets/…`) because the shell references them with root-absolute URLs.
+- `render.yaml` is **not** auto-applied to an existing Render service. Either use Settings → Blueprint, or paste `buildCommand`, `staticPublishPath` and the three rewrite rules into the Dashboard by hand.
+- `npm run build:web` takes ~12 min (Metro bundles the whole app into a ~10 MB `entry-*.js`). Use `node scripts/build-web.js --skip-export` to re-run only the assembly step against the existing `mobile_app/dist`.
+- Env vars the build needs: `GOOGLE_SERVICES_JSON` (path to a mounted Secret File — `app.config.js` **throws** without it) and `EXPO_PUBLIC_WEB_URL` (e.g. `https://sage-web-cdep.onrender.com`, no trailing slash). Without the latter, `getTvPageBaseUrl()` returns `''` in release builds and the educator "copy TV link" button silently does nothing.
 
 ## Gotchas
 
