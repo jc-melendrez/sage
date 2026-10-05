@@ -137,12 +137,26 @@ module.exports = {
       [
         "expo-splash-screen",
         {
+          // The "Sage" wordmark. Rendered to this file by
+          // scripts/generate-splash.py -- re-run that script rather than
+          // editing the PNG by hand.
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
           "resizeMode": "contain",
           "backgroundColor": "#7C3AED",
           "dark": {
             "backgroundColor": "#1E1B4B"
+          },
+          "android": {
+            // Smaller than iOS on purpose. Android 12+ masks
+            // windowSplashScreenAnimatedIcon into a circle covering the inner
+            // 2/3 of its 240dp icon window, so anything wider than ~170dp gets
+            // its ends clipped off. 170 keeps the whole wordmark inside that
+            // circle with a few dp to spare.
+            "imageWidth": 170
+          },
+          "ios": {
+            // No mask on iOS, so the wordmark can use the full 200pt.
+            "imageWidth": 200
           }
         }
       ],
