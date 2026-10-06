@@ -17,6 +17,7 @@ Including another URLconf
 import os
 
 from django.contrib import admin
+from django.conf import settings
 from django.http import JsonResponse
 from django.urls import path, include
 
@@ -57,12 +58,15 @@ def healthz(request):
         # A cache backend without a health() helper: nothing to report, and
         # not worth failing the liveness probe over.
         pass
+    body['otp_enabled'] = bool(getattr(settings, 'OTP_ENABLED', False))
+    body['email_configured'] = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
+    body['email_backend'] = settings.EMAIL_BACKEND.rsplit('.', 1)[-1]
     return JsonResponse(body)
 
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/healthz/', healthz),
+    path('api/healthz/', healthz, name='healthz'),
     path('api/users/', include('users.urls')),
     path('api/ai/', include('ai_assistant.urls')),
     path('api/game/', include('game.urls')),

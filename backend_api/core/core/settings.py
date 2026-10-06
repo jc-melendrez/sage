@@ -224,6 +224,12 @@ EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
+# Bound the SMTP connect so a dead egress path fails over to the next address
+# (and surfaces 503) instead of hanging a gunicorn worker until it is killed.
+# socket.create_connection tries smtp.gmail.com's addresses in order (IPv6
+# first); with no timeout an unroutable family stalls forever and never falls
+# through to IPv4, which is how a worker-abort SystemExit became a 500.
+EMAIL_TIMEOUT = int(os.environ.get('EMAIL_TIMEOUT', '10'))
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD')
 DEFAULT_FROM_EMAIL = os.environ.get('EMAIL_HOST_USER', 'noreply@sage.app')

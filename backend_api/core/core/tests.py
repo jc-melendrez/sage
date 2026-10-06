@@ -312,6 +312,39 @@ class ThrottleCacheBackendTests(SimpleTestCase):
             )
 
 
+class HealthzEndpointTests(TestCase):
+    """/api/healthz/ reports the OTP/email state that gates password logins.
+
+    A deploy that turns OTP on without email credentials looks healthy to every
+    existing probe while every password login 503s. Reporting the two flags here
+    makes that misconfiguration visible without digging through Render logs.
+    """
+
+    def test_reports_otp_and_email_state(self):
+        response = self.client.get(reverse('healthz'))
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertIn('otp_enabled', body)
+        self.assertIn('email_configured', body)
+        self.assertIn('email_backend', body)
+
+    def test_otp_flag_follows_the_setting(self):
+        with override_settings(OTP_ENABLED=False):
+            response = self.client.get(reverse('healthz'))
+            self.assertIs(response.json()['otp_enabled'], False)
+        with override_settings(OTP_ENABLED=True):
+            response = self.client.get(reverse('healthz'))
+            self.assertIs(response.json()['otp_enabled'], True)
+
+    def test_email_configured_reflects_credentials(self):
+        with override_settings(EMAIL_HOST_USER='sage@example.com', EMAIL_HOST_PASSWORD='secret'):
+            response = self.client.get(reverse('healthz'))
+            self.assertIs(response.json()['email_configured'], True)
+        with override_settings(EMAIL_HOST_USER='', EMAIL_HOST_PASSWORD=''):
+            response = self.client.get(reverse('healthz'))
+            self.assertIs(response.json()['email_configured'], False)
+
+
 class CacheFallbackTests(TestCase):
     """A missing `django_cache` table must not become a 500.
 

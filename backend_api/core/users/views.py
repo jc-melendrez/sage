@@ -204,7 +204,11 @@ class FirebaseLoginView(APIView):
                 challenge = create_otp_challenge(user)
             except Exception:
                 from .models import LoginOtpChallenge
-                LoginOtpChallenge.objects.filter(user=user, verified=False).delete()
+                try:
+                    LoginOtpChallenge.objects.filter(user=user, verified=False).delete()
+                except Exception:
+                    # The cleanup must not mask the original failure as a 500.
+                    logger.exception("Failed to clean up OTP challenges for user %s", user.id)
                 return Response(
                     {"error": "Could not send the verification code. Please try again."},
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -2173,6 +2177,11 @@ def _serialize_game_room(room):
         'time_per_question': room.time_per_question,
         'player_count': room.player_count,
         'host_name': room.host_name,
+        # Which class the game was hosted for, if any. `course` is SET_NULL and
+        # nullable: a game run from the dashboard FAB has no class at all, and
+        # the owner-wide list needs to say so rather than omit the row.
+        'course_id': room.course_id,
+        'course_name': room.course.name if room.course else None,
         'status': room.status,
         'final_payload': room.final_payload,
         # Round one of a rematched room. Present only after a rematch, so the
@@ -2220,7 +2229,7 @@ class CourseGamesView(APIView):
         # current owner does not teach) must not surface in the wrong class.
         rooms = GameRoom.objects.filter(
             course=course, owner=request.user,
-        ).order_by('-created_at')
+        ).select_related('course').order_by('-created_at')
 
         return Response({
             'course_id': course.id,
@@ -2228,6 +2237,27 @@ class CourseGamesView(APIView):
             # Every status, including waiting/active, so the tab can show a live
             # room alongside finished history rather than only revealing it once
             # the game is over.
+            'games': [_serialize_game_room(r) for r in rooms],
+        })
+
+
+class MyGamesView(APIView):
+    """Every game this user hosted, newest first, class or no class.
+
+    CourseGamesView filters on `course=course`, so a room hosted from the
+    dashboard FAB (course=None) is archived but unreachable from any screen.
+    This is the owner-wide read: `GameRoom.owner` plus the existing
+    (owner, -created_at) index, no course lookup and no 403 -- a user only
+    ever sees rooms they own.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        rooms = GameRoom.objects.filter(
+            owner=request.user,
+        ).select_related('course').order_by('-created_at')
+        return Response({
             'games': [_serialize_game_room(r) for r in rooms],
         })
 
