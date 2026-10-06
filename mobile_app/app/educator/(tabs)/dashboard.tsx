@@ -17,6 +17,8 @@ import { CreateFab } from '@/components/educator/CreateFab';
 import { getCurrentUser } from '@/services/authService';
 import { getMyCourses, CourseSummary } from '@/services/courseService';
 import { getActivities, ClassActivity, ActivityKind } from '@/services/activityService';
+import { getMyGames, CourseGame } from '@/services/gameHistoryService';
+import { GameHistoryRow } from '@/components/educator/GameHistoryRow';
 import { describeDue } from '@/services/dueDate';
 import { pfpSource } from '@/constants/pfps';
 
@@ -40,6 +42,8 @@ const RETRY_TEXT = readableOn(COLORS.purpleVibrant, composite(COLORS.purpleVibra
 /** How many rows each list shows before deferring to the full Assignments tab. */
 const REVIEW_PREVIEW = 3;
 const ACTIVITY_PREVIEW = 5;
+/** Games preview before deferring to the Hosted games screen. */
+const GAMES_PREVIEW = 3;
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -106,8 +110,10 @@ export default function EducatorDashboardScreen() {
   const [avatarKey, setAvatarKey] = useState<string | null>(null);
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [activities, setActivities] = useState<ClassActivity[]>([]);
+  const [games, setGames] = useState<CourseGame[]>([]);
   const [loadingClasses, setLoadingClasses] = useState(true);
   const [loadingActivities, setLoadingActivities] = useState(true);
+  const [gamesFailed, setGamesFailed] = useState(false);
   const [classesFailed, setClassesFailed] = useState(false);
   const [activitiesFailed, setActivitiesFailed] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -151,18 +157,30 @@ export default function EducatorDashboardScreen() {
     }
   }, []);
 
+  const loadGames = useCallback(async () => {
+    try {
+      // Owner-wide on purpose: a game hosted from the FAB has no class, so
+      // the per-course endpoints can never answer this list.
+      setGames((await getMyGames()).games);
+      setGamesFailed(false);
+    } catch {
+      setGamesFailed(true);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     setRefreshing(true);
-    await Promise.all([loadTeacher(), loadCourses(), loadActivities()]);
+    await Promise.all([loadTeacher(), loadCourses(), loadActivities(), loadGames()]);
     setRefreshing(false);
-  }, [loadTeacher, loadCourses, loadActivities]);
+  }, [loadTeacher, loadCourses, loadActivities, loadGames]);
 
   useFocusEffect(
     useCallback(() => {
       loadTeacher();
       loadCourses();
       loadActivities();
-    }, [loadTeacher, loadCourses, loadActivities])
+      loadGames();
+    }, [loadTeacher, loadCourses, loadActivities, loadGames])
   );
 
   // Two disjoint slices of one ranked list. Splitting on "is there grading
@@ -436,9 +454,44 @@ export default function EducatorDashboardScreen() {
             </View>
           )}
         </View>
+
+        {/* 4 — Games this educator ran, class or no class. Hidden while empty:
+             a teacher who never hosts should not see a dead section, and the
+             FAB two lines below is already the affordance to start one. */}
+        {(games.length > 0 || gamesFailed) && (
+          <View style={styles.section}>
+            <SectionHeader
+              title="Recent games"
+              actionLabel="See all"
+              onAction={() => router.push('/educator/hosted-games' as any)}
+            />
+
+            {gamesFailed ? (
+              renderRetry(loadGames)
+            ) : (
+              <>
+                {games.slice(0, GAMES_PREVIEW).map(g => (
+                  <GameHistoryRow key={g.id} game={g} showCourse />
+                ))}
+                {games.length > GAMES_PREVIEW && (
+                  <TouchableOpacity
+                    style={styles.moreRow}
+                    onPress={() => router.push('/educator/hosted-games' as any)}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.moreText}>
+                      {games.length - GAMES_PREVIEW} more in Hosted games
+                    </Text>
+                    <Ionicons name="chevron-forward" size={15} color={REVIEW_TEXT} />
+                  </TouchableOpacity>
+                )}
+              </>
+            )}
+          </View>
+        )}
       </ScrollView>
 
-      {/* 4 — Creation. Demoted below the work that needs attention, and folded
+      {/* 5 — Creation. Demoted below the work that needs attention, and folded
            into a speed-dial FAB so it costs no vertical space. */}
       <CreateFab />
     </View>

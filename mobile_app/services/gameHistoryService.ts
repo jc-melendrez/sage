@@ -25,6 +25,9 @@ export interface CourseGame {
   player_count: number;
   /** The host is recorded here because an educator host is off the standings. */
   host_name: string;
+  /** The class this was hosted for, or null for a game run from the FAB. */
+  course_id?: number | null;
+  course_name?: string | null;
   status: CourseGameStatus;
   /**
    * Settled results in exactly the shape Recent Activity stores, so both feed
@@ -43,8 +46,9 @@ export interface CourseGame {
 }
 
 export interface CourseGamesResponse {
-  course_id: number;
-  course_name: string;
+  /** Absent from /users/games/mine/, which is not scoped to a class. */
+  course_id?: number;
+  course_name?: string;
   /** Newest first, including in-progress rooms so the tab can show them live. */
   games: CourseGame[];
 }
@@ -57,6 +61,18 @@ export interface CourseGamesResponse {
  */
 export async function getCourseGames(courseId: number): Promise<CourseGamesResponse> {
   return apiCall<CourseGamesResponse>(`/users/courses/${courseId}/games/`);
+}
+
+/**
+ * Every game this educator hosted, class or no class.
+ *
+ * The per-course endpoint filters on `course`, so a room hosted from the
+ * dashboard FAB (no class attached) is archived but unreachable there. This
+ * owner-wide read is what the dashboard's Recent games section and the
+ * Hosted games screen are built on.
+ */
+export async function getMyGames(): Promise<CourseGamesResponse> {
+  return apiCall<CourseGamesResponse>('/users/games/mine/');
 }
 
 /** True for a game still running, which is what the row's status pill keys off. */
