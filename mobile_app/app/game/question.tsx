@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -385,6 +385,15 @@ export default function QuestionScreen() {
     pickers?: number;
     /** The team split and nobody answered for it, so it scored nothing. */
     voided?: boolean;
+    /**
+     * This is the client's own guess at the verdict, shown the instant the clock
+     * hits zero -- not the server's word. It flips the card immediately instead
+     * of leaving a timed-out question sitting blank, and it is deliberately wrong
+     * about `correct` (nothing was picked). A reveal that arrives later replaces
+     * it wholesale; see the merge in the team listener. Never set on a result
+     * that came back from `POST answer/`.
+     */
+    provisional?: boolean;
   } | null>(null);
   const [boxChars, setBoxChars] = useState<string[]>([]);
   const [wordLengths, setWordLengths] = useState<number[]>([]);
@@ -429,7 +438,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const [boostedName, setBoostedName] = useState<string | null>(null);
   const [teamAssignments, setTeamAssignments] = useState<any[] | null>(null);
   const [showTeamReveal, setShowTeamReveal] = useState(false);
-  const [lockInBusy, setLockInBusy] = useState(false);
   const [waitTimer, setWaitTimer] = useState(0);
   const [engineError, setEngineError] = useState<string | null>(null);
   /* ── team mode: the ROOM owns the shared question ──
@@ -502,6 +510,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const standingsAnim = useRef(new RNAnimated.Value(0)).current;
   const timerRef = useRef<any>(null);
   const startTimeRef = useRef<number>(Date.now());
+  // Whether the question currently on screen ran out before it was answered.
+  // Set by the blank-submit (classic) and force-submit (team) paths, cleared on
+  // every question change. The auto-advance countdown reads it to pick 1.5s over
+  // 2s. A ref, not state: it is written in the same tick that sets the result and
+  // read by an effect keyed on `result`, so a state update would land too late.
+  const timedOutRef = useRef(false);
   const standingsUnsubRef = useRef<(() => void) | null>(null);
   const roomUnsubRef = useRef<(() => void) | null>(null);
   // The players snapshot effect closes over mount-time values, so the
@@ -1043,7 +1057,11 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       }
     };
     tick();
-    timerRef.current = setInterval(tick, 500);
+    // 250ms, not 500ms: this is the loop that notices expiry, so its period is
+    // the floor on how late the timeout feedback can be. The classic clock ticks
+    // at the same rate, so a timed-out team question behaves like a timed-out
+    // classic one instead of feeling twice as sluggish.
+    timerRef.current = setInterval(tick, 250);
     return () => {
       if (timerRef.current != null) {
         clearInterval(timerRef.current);
@@ -1072,13 +1090,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     setTeamPickCount({ picked: 0, expected: 0 });
     setBoxChars([]);
     setIsFrozen(false);
-    setShowStandings(false);
-    standingsAnim.setValue(0);
     setActivePowerups({ hint: false, doublePoints: false, shield: false });
     setHintedChoices([]);
     setShowRoulette(false);
     setRouletteTarget(null);
     setRoulettePhase('idle');
+    timedOutRef.current = false;
     // The bar has to snap back to full here. Classic does this in its own reset
     // effect (line ~879) and team mode did not, so the drain animation below
     // resumed from whatever the previous question had left it at and spent its
@@ -1092,27 +1109,32 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     startTimeRef.current = Date.now();
     setTimeLeft(timePerQuestion);
     timerBarAnim.setValue(1);
-    timerRef.current = setInterval(() => {
-      setTimeLeft(t => {
-        if (t <= 1) {
-          clearInterval(timerRef.current);
-          timerRef.current = null;
-          // `answeredRef`, not `selected`: this closure was built by a render
-          // that has since been replaced, so a `selected` read here could never
-          // be anything but that stale render's value and the guard was dead.
-          if (!answeredRef.current) handleAnswer(null);
-          return 0;
-        }
-        return t - 1;
-      });
-    }, 1000);
+    const tick = () => {
+      // Wall clock, not `setTimeLeft(t => t - 1)`. Decrementing a counter once
+      // per tick drifts by however long the interval is delayed, so the displayed
+      // time and the real deadline separate over a long question. This also makes
+      // the poll period the only thing standing between the clock hitting zero and
+      // the timeout firing, which is why it is 250ms and not 1000.
+      const left = Math.max(0, Math.ceil(timePerQuestion - (Date.now() - startTimeRef.current) / 1000));
+      setTimeLeft(left);
+      if (left <= 0) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+        // `answeredRef`, not `selected`: this closure was built by a render
+        // that has since been replaced, so a `selected` read here could never
+        // be anything but that stale render's value and the guard was dead.
+        if (!answeredRef.current) handleAnswer(null);
+      }
+    };
+    tick();
+    timerRef.current = setInterval(tick, 250);
     return () => {
       if (timerRef.current !== null) {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
     };
-  }, [currentIndex, questions, showTeamReveal, teamMode]);
+  }, [currentIndex, questions, showTeamReveal, teamMode, timePerQuestion]);
 
   useEffect(() => {
     // In team play the shared countdown runs against the ROOM's limit for this
@@ -1123,13 +1145,20 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // ✨ UPDATED: RNAnimated
     // Skip the tween when the bar is already where it is going. Without this the
     // effect fires on every reset, where target is 1 and the bar is already 1,
-    // and starts a pointless 900ms animation that delays the first real tick --
-    // so the bar sat visibly still for the first second of the question.
+    // and starts a pointless animation that delays the first real tick -- so the
+    // bar sat visibly still for the first second of the question.
     const current = (timerBarAnim as unknown as { __getValue?: () => number }).__getValue?.();
     if (current != null && Math.abs(current - target) < 0.001) return;
+    // 250ms linear, matching the poll period exactly. This was 900ms against a
+    // 1000ms tick: every new curve outlasted the step it was animating, so each
+    // tween was still running when the next one began and restarted from the
+    // live value partway. The bar therefore never actually reached its target --
+    // it trailed the number by a few hundred ms and stepped down in visible
+    // lurches. One tween per poll, spanning exactly one poll, drains smoothly.
     RNAnimated.timing(timerBarAnim, {
       toValue: target,
-      duration: 900,
+      duration: 250,
+      easing: Easing.linear,
       useNativeDriver: false,
     }).start();
   }, [timeLeft, isFrozen, teamMode, teamTimeLimit, timePerQuestion]);
@@ -1184,17 +1213,26 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     ]).start(() => { isAnimatingRef.current = false; });
   }, [currentIndex]);
 
+  // One haptic and one flip per *question*, not per `result` object.
+  //
+  // On a timeout the client publishes a provisional verdict so the card flips
+  // on the same frame the clock expires, then overwrites it with the server's
+  // real one. That is two distinct objects with the same `correct`, so keying the
+  // effect on `[result]` alone fired the Error haptic twice and replayed the
+  // 400ms flip on top of itself -- a stutter that read as two buzzes.
+  const verdictLatchedRef = useRef<number | null>(null);
   useEffect(() => {
-    if (result) {
-      if (Platform.OS !== 'web') {
-        if (result.correct) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        else Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      }
-      resultFlipAnim.setValue(0);
-      // ✨ UPDATED: RNAnimated
-      RNAnimated.timing(resultFlipAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+    if (!result) return;
+    if (verdictLatchedRef.current === currentIndex) return;
+    verdictLatchedRef.current = currentIndex;
+    if (Platform.OS !== 'web') {
+      if (result.correct) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      else Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     }
-  }, [result]);
+    resultFlipAnim.setValue(0);
+    // ✨ UPDATED: RNAnimated
+    RNAnimated.timing(resultFlipAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+  }, [result, currentIndex]);
 
   /* ── auto-advance: countdown then skip ── */
   useEffect(() => {
@@ -1215,21 +1253,28 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     if (showRoulette) { setAutoCountdown(0); return; }
 
     const isLast = currentIndex + 1 >= effectiveOrder.length;
-    // The 2s default is the "you already answered this" skip. A spectator has
-    // nothing to answer, so they get a real read of the question instead.
-    const total = spectator ? 5 : (isLast ? 3 : 2);
+    // A spectator has nothing to answer, so they get a real read of the question.
+    // A timed-out question gets less: the clock already ran out on it, so the
+    // player is waiting on a card they never got to choose -- 1.5s is enough to
+    // read the correct answer without feeling stuck.
+    const total = spectator ? 5 : (isLast ? 3 : timedOutRef.current ? 1.5 : 2);
     setAutoCountdown(total);
-    autoAdvanceRef.current = window.setInterval(() => {
-      setAutoCountdown(prev => {
-        if (prev <= 1) {
-          clearInterval(autoAdvanceRef.current!);
-          autoAdvanceRef.current = null;
-          handleNext();
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+    // Absolute deadline rather than decrementing a counter. A 1s decrement on a
+    // 1s interval drifts by however long each React render takes, and the
+    // fractional 1.5s total has no representation in whole ticks -- so the skip
+    // could fire a full second late. Deadline + 250ms poll is both exact and
+    // immune to a throttled interval.
+    const deadline = Date.now() + total * 1000;
+    const tick = () => {
+      const remaining = Math.max(0, deadline - Date.now());
+      setAutoCountdown(remaining / 1000);
+      if (remaining <= 0) {
+        if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; }
+        handleNext();
+      }
+    };
+    autoAdvanceRef.current = window.setInterval(tick, 250);
+    tick();
     return () => { if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; } };
   }, [result, showRoulette, spectator, submitting]);
 
@@ -1339,28 +1384,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // so a teammate's award cannot leave this player tapping a dead button.
   const pool = (teamMode && myTeam ? myTeam.powerups : powerups) ?? powerups;
 
-  /**
-   * Whether this member can end the round early.
-   *
-   * The leader holds it, plus the host -- a leader who has gone quiet would
-   * otherwise freeze their team for the rest of the quiz. The fallback to the
-   * first member mirrors the server for rooms that predate `leaderId`, so the
-   * button never appears for someone the API will refuse. The server re-checks
-   * all of this regardless.
-   */
-  const amTeamLeader = useMemo(() => {
-    if (!teamMode || !myTeam) return false;
-    const members = (myTeam.memberIds ?? []).map(String);
-    const stored = myTeam.leaderId != null ? String(myTeam.leaderId) : null;
-    const leader = stored && members.includes(stored) ? stored : (members[0] ?? null);
-    return leader != null && userId != null && leader === String(userId);
-  }, [teamMode, myTeam, userId]);
-
-  // Stays disabled once the team has picked in full or the round is resolved.
-  const teamRoundOpen =
-    teamMode && !result && !spectator
-    && (teamPickCount == null || teamPickCount.picked < teamPickCount.expected);
-
   /* ── team mode: the shared quorum count and the team's reveal ──
    *
    * Two things arrive here that a member cannot get from their own pick
@@ -1406,18 +1429,29 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // disagreement.
     const own = ownAnswers?.[`q${teamIndex}`];
     setResult(prev => {
+      // A provisional verdict is the client's own guess at the timeout, so the
+      // reveal must win outright rather than merely filling a gap. `prev?.correct
+      // ?? reveal.correct` would keep the guess instead -- and since the guess is
+      // always `correct: false`, a team that did in fact answer correctly before
+      // the clock ran out would be shown as wrong for the rest of the question,
+      // and scored 0 in front of everyone. Everything the reveal speaks to is
+      // taken from the reveal when `prev` is provisional; the per-member fields
+      // below are exempt either way because they are already the truth about this
+      // member.
+      const take = (mine: any, theirs: any) => (prev?.provisional ? theirs : (mine ?? theirs));
       const next = {
         ...(prev ?? {}),
-        correct: prev?.correct ?? reveal.correct,
-        correctAnswer: prev?.correctAnswer ?? reveal.correctAnswer,
-        points: prev?.points ?? reveal.points,
-        speedBonus: prev?.speedBonus ?? reveal.speedBonus,
+        correct: take(prev?.correct, reveal.correct),
+        correctAnswer: take(prev?.correctAnswer, reveal.correctAnswer),
+        points: take(prev?.points, reveal.points),
+        speedBonus: take(prev?.speedBonus, reveal.speedBonus),
         picked: own?.picked ?? prev?.picked ?? selectedRef.current ?? '',
-        teamAnswer: prev?.teamAnswer ?? reveal.answer,
-        agreed: prev?.agreed ?? reveal.agreed,
+        teamAnswer: take(prev?.teamAnswer, reveal.answer),
+        agreed: take(prev?.agreed, reveal.agreed),
         iAgreed: own?.agreed !== undefined ? own.agreed : prev?.iAgreed,
-        pickers: prev?.pickers ?? reveal.pickers,
-        voided: prev?.voided ?? reveal.void,
+        pickers: take(prev?.pickers, reveal.pickers),
+        voided: take(prev?.voided, reveal.void),
+        provisional: false,
       };
       // Returning the SAME object when nothing changed is the point of this
       // wrapper. A bare object literal always has a new identity, and `result`
@@ -1571,8 +1605,32 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
    * screen must NOT show a result, because there is not one yet, and must not
    * show what anyone picked, because that is private.
    */
-  const submitTeamPick = async (answer: string, force: boolean, lockIn = false) => {
+  const submitTeamPick = async (answer: string, force: boolean) => {
     if (isOffline || isLan || spectator) return;
+    // Expiry, not a deliberate lock-in: publish the client's own verdict so the
+    // card flips on the same frame the shared clock hits zero. Team mode had no
+    // equivalent of classic's blank-submit branch, so a timed-out team question
+    // just sat there -- the force submit either came back `pending` (setting the
+    // quorum count and no result) or waited on a Firestore reveal, and the player
+    // was left staring at a frozen card wondering whether the round had ended.
+    // Marked provisional, so the reveal overwrites it rather than being blocked
+    // by it -- see the merge in the team listener.
+    if (force) {
+      timedOutRef.current = true;
+      setResult(prev => (prev && !prev.provisional ? prev : {
+        correct: false,
+        correctAnswer: '',
+        points: 0,
+        speedBonus: 0,
+        picked: answer || '',
+        teamAnswer: answer || '',
+        agreed: 0,
+        iAgreed: null,
+        pickers: 0,
+        voided: false,
+        provisional: true,
+      }));
+    }
     try {
       const token = await getToken();
       const controller = new AbortController();
@@ -1589,9 +1647,13 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           // answer they did not make.
           timeTaken: teamStartedAt != null ? (Date.now() - teamStartedAt) / 1000 : teamTimeLimit,
           force: force ? 'true' : 'false',
-          // The leader ending the round early instead of waiting out the clock.
-          // The server re-checks the authority, so this is a hint, not a grant.
-          lockIn: lockIn ? 'true' : 'false',
+          // Always false. The leader's "Lock in" button is gone from the UI, so
+          // nothing in this app ends a round early any more -- `Next` advances
+          // the room instead. The field is still sent explicitly because the
+          // server defaults it to 'false' either way and an implicit omission
+          // would read as an oversight. The server keeps the capability for API
+          // callers.
+          lockIn: 'false',
           useHint: activePowerups.hint ? 'true' : 'false',
           useDoublePoints: activePowerups.doublePoints ? 'true' : 'false',
           useShield: activePowerups.shield ? 'true' : 'false',
@@ -1609,7 +1671,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           setError(data.leaderId
             ? `Only the team leader can lock in. The team is now led by ${data.leaderId}.`
             : (data.error || 'Only the team leader can lock in the answer.'));
-          setLockInBusy(false);
           return;
         }
         if (res.status === 403 && /team|spectator/i.test(data.error || '')) {
@@ -1713,27 +1774,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     }
   };
   teamPickRef.current = (answer, force) => { void submitTeamPick(answer, force); };
-
-  /**
-   * End the round early on the team's answer.
-   *
-   * Sends the leader's own pick, because "lock in" is a decision and a decision
-   * needs something to commit. The server rejects a blank one rather than
-   * settling the question on nothing, which would void it for the whole team.
-   */
-  const lockInTeamAnswer = async () => {
-    const answer = selectedRef.current ?? pendingAnswerRef.current ?? '';
-    if (!String(answer).trim()) {
-      setError('Pick an answer before locking it in.');
-      return;
-    }
-    setLockInBusy(true);
-    try {
-      await submitTeamPick(answer, false, true);
-    } finally {
-      setLockInBusy(false);
-    }
-  };
 
   /**
    * Move the room on to the next shared question.
@@ -1915,16 +1955,20 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       const timeout = setTimeout(() => controller.abort(), 15000);
       setSubmitting(true);
       if (blank) {
+        timedOutRef.current = true;
         // Provisional, and deliberately wrong: a blank attempt is never correct.
         // It exists so the timer hitting zero reacts on the same frame as the
         // tap that would have, instead of after the POST comes back. The server's
-        // verdict overwrites it below.
+        // verdict overwrites it below -- and `provisional` is what tells the flip
+        // and haptic effect that this is a placeholder rather than a second real
+        // answer, so a timed-out question buzzes once instead of twice.
         setResult({
           correct: false,
           correctAnswer: String((questions[actualIndex] || {}).correctAnswer ?? ''),
           points: 0,
           speedBonus: 0,
           picked: '',
+          provisional: true,
         });
       }
       const res = await fetch(`${API_BASE_URL}/game/answer/`, {
@@ -2110,13 +2154,19 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       setResult(null);
       setPendingAnswer(null);
       setIsFrozen(false);
-      setShowStandings(false);
-      standingsAnim.setValue(0);
+      // `showStandings` deliberately survives the move to the next question.
+      // Closing it here made the drawer vanish every time a question was scored,
+      // because scoring is followed by the auto-advance that runs this reset --
+      // so answering a question and running out of time on one both slammed it
+      // shut, which is exactly the reported symptom. It is a toggle now: it
+      // closes on the toggle and on a backdrop tap, and stays put otherwise.
+      // Standings are live, so what it shows keeps updating across questions.
       setActivePowerups({ hint: false, doublePoints: false, shield: false });
       setHintedChoices([]);
       setShowRoulette(false);
       setRouletteTarget(null);
       setRoulettePhase('idle');
+      timedOutRef.current = false;
     });
   };
 
@@ -2162,10 +2212,16 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const question = questions[actualIndex] || {};
   const playerRank = standings.findIndex(p => String(p.id) === String(userId)) + 1;
   const isDanger = !isFrozen && timeLeft <= 5;
-  const visibleChoices = question.type === 'mcq'
-    // `choices` is absent on a malformed MCQ just as often as it is wrong, and
-    // `.filter` on undefined is a hard crash.
-    ? (question.choices || []).filter((c: string) => !hintedChoices.includes(c))
+  const isChoiceQuestion = question.type === 'mcq' || question.type === 'true_false' || question.type === 'tf';
+  // Anything choice-shaped that isn't a plain MCQ is a True/False round: it
+  // renders as two letter-less buttons rather than "A / B" chips.
+  const isTfQuestion = isChoiceQuestion && question.type !== 'mcq';
+  const visibleChoices = isChoiceQuestion
+    // choices is absent on a malformed MCQ just as often as it is wrong, and
+    // .filter on undefined is a hard crash.
+    ? ((question.choices && question.choices.length > 0)
+      ? (question.choices || []).filter((c: string) => !hintedChoices.includes(c))
+      : (question.type === 'true_false' || question.type === 'tf' ? ['True', 'False'] : []))
     : [];
   // In team play the room owns the question order, so "last" is a fact about the
   // room's index rather than about this screen's own shuffle.
@@ -2205,25 +2261,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             </View>
           )}
         </View>
-
-        {/* ── leader: end the round early ──
-            Hidden from everyone else rather than disabled, because a greyed-out
-            control most members can never use is just noise on the busiest
-            screen in the game. */}
-        {amTeamLeader && teamRoundOpen && (
-          <TouchableOpacity
-            style={[styles.lockInBtn, lockInBusy && styles.lockInBtnBusy]}
-            onPress={() => { void lockInTeamAnswer(); }}
-            disabled={lockInBusy}
-            activeOpacity={0.75}
-            accessibilityLabel="Lock in your team answer"
-          >
-            <Ionicons name="lock-closed" size={13} color="#fff" />
-            <Text style={styles.lockInText}>
-              {lockInBusy ? 'Locking\u2026' : 'Lock in'}
-            </Text>
-          </TouchableOpacity>
-        )}
 
         <TouchableOpacity
           style={[styles.standingsToggle, showStandings && styles.standingsToggleActive]}
@@ -2480,10 +2517,23 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           />
         )}
 
-        {/* ── MCQ CHOICES ── */}
-        {!spectator && question.type === 'mcq' && (
+        {/* ── CHOICES (mcq + true_false) ──
+            True/False questions are NOT lettered: a T/F rendered as "A. True /
+            B. False" is the bug students reported. Same states, same grading --
+            only the chrome differs: no A/B chip, label centered full-width. */}
+        {!spectator && isChoiceQuestion && (
           <View style={styles.choicesWrap}>
+            {/* True/False has no wrong choice to eliminate, so the hint shows
+                the first letter instead of being a dead spend. */}
+            {isTfQuestion && activePowerups.hint && String(question.correctAnswer ?? '').trim() && (
+              <View style={styles.hintBanner}>
+                <Text style={styles.hintBannerText}>
+                  💡 Starts with: <Text style={styles.hintLetter}>{String(question.correctAnswer).charAt(0).toUpperCase()}</Text>
+                </Text>
+              </View>
+            )}
             {visibleChoices.map((choice: string, choiceIdx: number) => {
+              const isTf = isTfQuestion;
               const isCorrect = result && choice === result.correctAnswer;
               const isWrongPick = result && choice === selected && !result.correct;
               const isDimmed = result && !isCorrect && choice !== selected;
@@ -2496,6 +2546,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   key={`${choiceIdx}-${textOf(choice)}`}
                   style={[
                     styles.choice,
+                    isTf && styles.choiceTf,
                     isCorrect && styles.choiceCorrect,
                     isWrongPick && styles.choiceWrong,
                     isDimmed && styles.choiceDimmed,
@@ -2511,27 +2562,31 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   disabled={answered}
                   activeOpacity={0.7}
                 >
-                  <View style={[
-                    styles.choiceChip,
-                    isCorrect && styles.choiceChipCorrect,
-                    isWrongPick && styles.choiceChipWrong,
-                    isPending && styles.choiceChipPending,
-                  ]}>
-                    <Text style={[
-                      styles.choiceChipText,
-                      isCorrect && styles.choiceChipTextCorrect,
-                      isWrongPick && styles.choiceChipTextWrong,
-                      isPending && styles.choiceChipTextPending,
+                  {!isTf && (
+                    <View style={[
+                      styles.choiceChip,
+                      isCorrect && styles.choiceChipCorrect,
+                      isWrongPick && styles.choiceChipWrong,
+                      isPending && styles.choiceChipPending,
                     ]}>
-                      {isCorrect ? '✓' : isWrongPick ? '✗' : letterOf(choice)}
-                    </Text>
-                  </View>
+                      <Text style={[
+                        styles.choiceChipText,
+                        isCorrect && styles.choiceChipTextCorrect,
+                        isWrongPick && styles.choiceChipTextWrong,
+                        isPending && styles.choiceChipTextPending,
+                      ]}>
+                        {isCorrect ? '✓' : isWrongPick ? '✗' : letterOf(choice)}
+                      </Text>
+                    </View>
+                  )}
                   <Text style={[
                     styles.choiceText,
+                    isTf && styles.choiceTfText,
                     isCorrect && styles.choiceTextCorrect,
                     isWrongPick && styles.choiceTextWrong,
                     isPending && styles.choiceTextPending,
                   ]}>
+                    {isTf && (isCorrect || isWrongPick) ? `${isCorrect ? '✓' : '✗'} ` : ''}
                     {textOf(choice)}
                   </Text>
                 </TouchableOpacity>
@@ -2620,7 +2675,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                 {nextLabel}
               </Text>
               {autoCountdown > 0 && (
-                <Text style={styles.nextBtnCountdown}>{autoCountdown}s</Text>
+                <Text style={styles.nextBtnCountdown}>{Math.ceil(autoCountdown)}s</Text>
               )}
             </TouchableOpacity>
           </RNAnimated.View>
@@ -2881,18 +2936,6 @@ const styles = StyleSheet.create({
   teamPillDot: { width: 8, height: 8, borderRadius: 4 },
   teamPillName: { fontSize: 12, fontFamily: FONTS.bold, color: COLORS.textPrimary, flexShrink: 1 },
   teamPillScore: { fontSize: 12, fontFamily: FONTS.black },
-  /** Leader-only, in the header so it stays reachable once a pick is made. */
-  lockInBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 11,
-    paddingVertical: 7,
-    borderRadius: 999,
-    backgroundColor: '#7C3AED',
-  },
-  lockInBtnBusy: { opacity: 0.6 },
-  lockInText: { fontSize: 12, fontFamily: FONTS.bold, color: '#fff' },
   progressText: {
     fontSize: 15,
     fontFamily: FONTS.extraBold,
@@ -3245,6 +3288,16 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(167,139,250,0.6)',
   },
   choiceDimmed: { opacity: 0.35 },
+  /* True/False: one big centered button per answer, no letter chip. */
+  choiceTf: {
+    justifyContent: 'center',
+    minHeight: 62,
+  },
+  choiceTfText: {
+    textAlign: 'center',
+    fontSize: 18,
+    fontFamily: FONTS.bold,
+  },
   choiceChip: {
     width: 34,
     height: 34,

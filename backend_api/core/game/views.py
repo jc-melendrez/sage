@@ -3,6 +3,7 @@ import random as rng
 import string
 import json
 import requests
+from typing import NamedTuple
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -16,6 +17,7 @@ from users.gamification import award_xp, log_activity, record_game_finish
 from users.models import User
 from users.ai_usage import charge, record_tokens
 from core.question_types import (
+    GRADED_LENIENTLY,
     TYPED_QUESTION_TYPES,
     answer_matches,
     normalise_question_type,
@@ -248,7 +250,24 @@ def median_pick_time(picks):
     return (times[mid - 1] + times[mid]) / 2
 
 
-def tally_team_picks(picks):
+class TeamTally(NamedTuple):
+    """Resolved state of one round of private team picks."""
+
+    #: The team's answer. '' when there is none (no picks at all, or a split
+    #: that knowledge could not resolve).
+    choice: str
+    #: How many pickers chose `choice`.
+    agreed: int
+    #: How many members picked at all.
+    pickers: int
+    #: The vote was even and knowledge could not break it: the question voids.
+    void: bool
+    #: The vote was even. Knowledge may have resolved it (`choice` set and
+    #: `void` False) or not (`void` True).
+    split: bool
+
+
+def tally_team_picks(picks, typed=False, correct_answer=''):
     """Resolve a set of private picks into one team answer.
 
     `picks` maps player id to the choice they submitted (absent players are
@@ -256,29 +275,58 @@ def tally_team_picks(picks):
     Values may be answer strings or `{answer, timeTaken}` objects; both are
     read through `pick_answer`.
 
-    Returns `(winning_choice, agreed_count, distinct_pickers, is_tie)`.
+    Returns a `TeamTally`.
 
-    The rule is plain majority: most-picked wins. A tie -- two choices with the
-    same count, which a 2-2 split among four produces -- has no majority at all,
-    so it is reported as a tie and the caller voids the question rather than
-    awarding it to whichever side happened to be listed first. That keeps the
-    result independent of iteration order, which a `max()` over a tally would
-    not be.
+    The rule is plain majority: most-picked wins. An even split -- two members
+    of a 2-seat team picking A and B, a 2-2 among four, a 1-1-1 -- has no
+    majority, so KNOWLEDGE breaks the tie: when exactly one of the tied
+    answers is the correct one, that answer becomes the team's. It is
+    deterministic and order-independent (letting the first pick win would make
+    tap latency decide the round and render the slower teammate's vote
+    meaningless), and it stops a two-person team from voiding every question
+    the two of them simply disagreed about. When neither tied answer is
+    correct the question voids, exactly as a tie always did -- zero points
+    either way, but the "split decision" display and the honest `agreed: None`
+    stat stay.
+
+    `typed` turns on case/whitespace-normalised counting so two members who
+    typed the same answer with different capitalisation are one leader rather
+    than an automatic split. It mirrors `answer_matches`, which is what grades
+    them: the tally and the grading must agree on what "the same answer"
+    means, or a team can split on two answers the game itself calls identical.
     """
     counts = {}
+    sample = {}
     for pick in (picks or {}).values():
         choice = pick_answer(pick)
         if not choice:
             continue
-        counts[choice] = counts.get(choice, 0) + 1
+        raw = str(choice)
+        key = ' '.join(raw.split()).casefold() if typed else raw
+        counts[key] = counts.get(key, 0) + 1
+        sample.setdefault(key, raw)
     if not counts:
-        return '', 0, 0, False
+        return TeamTally('', 0, 0, False, False)
     top = max(counts.values())
-    leaders = [choice for choice, count in counts.items() if count == top]
+    leaders = [key for key, count in counts.items() if count == top]
     pickers = len([c for c in (picks or {}).values() if pick_answer(c)])
-    if len(leaders) > 1:
-        return '', top, pickers, True
-    return leaders[0], top, pickers, False
+    if len(leaders) == 1:
+        return TeamTally(sample[leaders[0]], top, pickers, False, False)
+    # Even split. Knowledge breaks a tie only for a pure 1-1 disagreement
+    # (exactly two pickers, two different answers) where exactly one of the
+    # answers is the correct answer. Any larger split with no majority, or a
+    # 1-1 where neither is correct, must void the question.
+    if len(leaders) == 2 and pickers == 2:
+        winners = [
+            key for key in leaders
+            if str(correct_answer or '').strip() and answer_matches(sample[key], correct_answer)
+        ]
+        if len(winners) == 1:
+            winner = winners[0]
+            return TeamTally(sample[winner], counts[winner], pickers, False, True)
+        # 1-1 wrong vs wrong: void
+        return TeamTally('', top, pickers, True, True)
+    return TeamTally('', top, pickers, True, True)
 
 
 def agreement_rate(answers):
@@ -675,14 +723,54 @@ def build_questions_from_quiz(quiz):
 
     Shared by room creation and by the host picking a quiz in the lobby, so a
     quiz selected after the room exists is built exactly like one chosen upfront.
+
+    The room's question type comes from the QUIZ's `quiz_type`, not from whether
+    a question happens to have options. Deriving it from `options` was the bug
+    students saw on the board: a True/False quiz is stored with two options, so
+    every T/F question collapsed into an MCQ rendered as "A. True / B. False",
+    and an Identification quiz created before decoy options were dropped still
+    had four of them, so it came back as a multiple choice question instead of
+    the typed answer the quiz asked for. Options are only consulted for a quiz
+    whose type is plain multiple choice (or unrecognised).
     """
+    canonical_quiz_type = normalise_question_type(quiz.quiz_type)
     questions = []
     for q in quiz.questions.all():
         # Carried through so a missed question can be explained on the results
         # screen. Read defensively: rooms created before this existed, and any
         # question without one, must still serialise exactly as they did.
         explanation = getattr(q, 'explanation', None) or None
-        if q.options and len(q.options) > 0:
+
+        if canonical_quiz_type == 'true_false':
+            # Never lettered. The two options ARE the answer buttons, and a
+            # fallback of True/False keeps a question that lost its options
+            # answerable instead of rendering nothing at all.
+            raw_options = [str(o).strip() for o in (q.options or []) if str(o).strip()]
+            choices = raw_options[:2] if len(raw_options) >= 2 else ['True', 'False']
+            correct_answer = next(
+                (c for c in choices if answer_matches(q.correct_answer, c)),
+                choices[0],
+            )
+            questions.append({
+                'type': 'true_false',
+                'question': q.question_text,
+                'choices': choices,
+                'correctAnswer': correct_answer,
+                'explanation': explanation,
+            })
+        elif canonical_quiz_type in TYPED_QUESTION_TYPES:
+            # The quiz asked for typed answers, so it is typed -- even when a
+            # legacy row still carries decoy options. The decoys are dropped
+            # here for the same reason the generator drops them: they sent the
+            # question down the multiple-choice branch in the game room.
+            typed_type = 'fill_in_blank' if canonical_quiz_type == 'fill_in_blank' else 'identification'
+            questions.append({
+                'type': typed_type,
+                'question': q.question_text,
+                'correctAnswer': q.correct_answer,
+                'explanation': explanation,
+            })
+        elif q.options and len(q.options) > 0:
             letters = ['A', 'B', 'C', 'D']
             choices = [f"{letters[i]}. {opt}" for i, opt in enumerate(q.options)]
             correct_idx = -1
@@ -699,12 +787,10 @@ def build_questions_from_quiz(quiz):
                 'explanation': explanation,
             })
         else:
-            # A free-text question. Which of the two typed types it is comes from
-            # the quiz, not from the absence of options: "has no options" is a
-            # property of this particular question, and an identification
-            # question that happened to be stored option-less would otherwise be
-            # indistinguishable from a fill-in-the-blank. Both grade the same
-            # way, so this only affects how the question is labelled.
+            # An MCQ quiz whose question lost its options. Which of the two
+            # typed types it is comes from the quiz, not from the absence of
+            # options: both grade the same way, so this only affects how the
+            # question is labelled.
             typed_type = (
                 'fill_in_blank'
                 if (quiz.quiz_type or '').strip().casefold() in ('fill-in-the-blank', 'fill in the blank')
@@ -1361,7 +1447,7 @@ class AnswerQuestionView(APIView):
             q_type = questions[question_index].get('type', 'mcq')
 
             # Determine correctness
-            if q_type in TYPED_QUESTION_TYPES:
+            if q_type in GRADED_LENIENTLY:
                 is_correct = answer_matches(answer, correct_answer)
             else:
                 is_correct = answer == correct_answer
@@ -2131,7 +2217,7 @@ class FinishGameView(APIView):
                     continue
                 self._pay(user_id=p.id, rank=team_rank[team_id], room_code=room_code,
                           label=f"#{team_rank[team_id]} with {team_doc[team_id].get('name') or f'Team {team_id}'}",
-                          results=results, team_id=team_id)
+                          results=results, team_id=team_id, topic=room_data.get('topic'))
             return results
 
         room_data = room_ref.get().to_dict() or {}
@@ -2168,10 +2254,10 @@ class FinishGameView(APIView):
         }
         for entry, rank in zip(standings, ranks):
             self._pay(user_id=entry['user_id'], rank=rank, room_code=room_code, label=f'#{rank}',
-                      results=results)
+                      results=results, topic=room_data.get('topic'))
         return results
 
-    def _pay(self, user_id, rank, room_code, label, results=None, team_id=None):
+    def _pay(self, user_id, rank, room_code, label, results=None, team_id=None, topic=None):
         user = User.objects.filter(id=user_id).first()
         if not user:
             return
@@ -2201,8 +2287,22 @@ class FinishGameView(APIView):
                     if 'score' not in payload:
                         payload['score'] = mine_entry.get('score', 0)
                     payload.setdefault('correct', mine_entry.get('correct', 0))
+            # Name the quiz in the activity title instead of the placement. The
+            # row used to be titled "#1 (CLAS1)", which identifies the game by its
+            # room code and says nothing about what was played -- so a student's
+            # whole Recent Activity list was a column of "#3", "#1", "#2" with no
+            # way to tell the quizzes apart. The topic is already on the room doc.
+            # "Quiz pending" and "Study Quiz" are the placeholders CreateRoomView
+            # writes when there is no course quiz behind the room, so they name no
+            # quiz either and fall back to the generic word.
+            name = str(topic or '').strip()
+            if name.lower() in ('', 'quiz pending', 'study quiz'):
+                name = 'Game'
+            score = payload.get('score', 0) or 0
             record_game_finish(user, rank, room_code=room_code, context=label,
-                               results=results, payload=payload or None)
+                               results=results, payload=payload or None,
+                               title=f'{name} · {score:,} pts',
+                               description=f'{label} · {score:,} pts')
         except Exception as e:
             print(f'[FinishGame XP Award Error] user {user_id}: {e}')
 
@@ -3100,7 +3200,21 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
                 'awaiting': len(members) - pickers,
             }
 
-        choice, agreed, distinct, tie = tally_team_picks(picks)
+        question = questions[question_index]
+        correct_answer = question.get('correctAnswer', '')
+        q_type = question.get('type', 'mcq')
+        # Plain majority; an even split is broken by knowledge, not by dict
+        # order (see `tally_team_picks`). Typed picks are counted
+        # case/whitespace-insensitively so the tally agrees with how they are
+        # graded.
+        tally = tally_team_picks(
+            picks,
+            typed=q_type in TYPED_QUESTION_TYPES,
+            correct_answer=correct_answer,
+        )
+        choice, agreed, distinct, tie = (
+            tally.choice, tally.agreed, tally.pickers, tally.void,
+        )
         # The team's speed is the median of the recorded pick times, so no single
         # member decides the payout for everyone. Falls back to this submitter's
         # time only when the room holds picks with no times at all (a round that
@@ -3108,14 +3222,12 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
         team_time = median_pick_time(picks)
         if team_time is None:
             team_time = time_taken
-        question = questions[question_index]
-        correct_answer = question.get('correctAnswer', '')
-        q_type = question.get('type', 'mcq')
-        # A tie voids the question: there is no majority, so awarding it to
-        # either side would make the result depend on dict ordering.
+        # A split knowledge could not resolve voids the question: with no
+        # majority, awarding it to either side would make the result depend on
+        # dict ordering.
         is_correct = (not tie) and (
             answer_matches(choice, correct_answer)
-            if q_type in TYPED_QUESTION_TYPES else choice == correct_answer
+            if q_type in GRADED_LENIENTLY else choice == correct_answer
         )
         # A blank key cannot be guessed, so it cannot be matched. See the same
         # rule on the solo endpoint: without it a question with an empty
@@ -3232,6 +3344,9 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             'correctAnswer': correct_answer,
             'correct': bool(is_correct),
             'void': bool(tie),
+            # The vote was even. `void` says knowledge could not break it;
+            # `split` alone says the team disagreed even when knowledge did.
+            'split': bool(tally.split),
             'agreed': agreed,
             'pickers': distinct,
             'expected': len(members),
@@ -3266,7 +3381,7 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             # case-sensitive. Same question, same answer, opposite verdicts.
             own_matched = (
                 answer_matches(own_pick, choice)
-                if q_type in TYPED_QUESTION_TYPES else own_pick == choice
+                if q_type in GRADED_LENIENTLY else own_pick == choice
             ) if own_pick else False
             member_updates = {
                 'answeredCount': fs.Increment(1),
@@ -3308,6 +3423,7 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             'correctAnswer': correct_answer,
             'answer': choice,
             'void': bool(tie),
+            'split': bool(tally.split),
             'agreed': agreed,
             'pickers': distinct,
             'pointsAwarded': int(earned_points),

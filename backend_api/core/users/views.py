@@ -687,7 +687,7 @@ class CompleteQuizView(APIView):
         award_xp = not self_authored
 
         result = record_quiz_completion(
-            request.user, score, total, course=course, grant_xp=award_xp
+            request.user, score, total, course=course, grant_xp=award_xp, quiz=quiz
         )
 
         if course and award_xp:

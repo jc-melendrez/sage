@@ -32,6 +32,7 @@ import { useCurrentUser } from '@/contexts/UserContext';
 import { apiCall } from '@/services/apiClient';
 import { isRateLimitError } from '@/services/aiLimits';
 import { dailyCheckIn } from '@/services/gamificationService';
+import TutorialModal from './TutorialModal';
 import BottomSheet from './BottomSheet';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -213,6 +214,7 @@ export default function Dashboard() {
   const [lesson, setLesson] = useState<any>(null);
   const [showLessonGenerator, setShowLessonGenerator] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showTutorial, setShowTutorial] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
 
   // Carousel state
@@ -568,6 +570,14 @@ export default function Dashboard() {
               onPress={() => router.push('/(tabs)/activities')}
             >
               <Ionicons name="book" size={22} color={COLORS.textSecondary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.headerIconBtn}
+              activeOpacity={0.7}
+              onPress={() => setShowTutorial(true)}
+              accessibilityLabel="Open tutorial"
+            >
+              <Ionicons name="help-circle-outline" size={22} color={COLORS.textSecondary} />
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.headerIconBtn}
@@ -937,6 +947,8 @@ export default function Dashboard() {
         badges={badges}
         recommendations={recommendations}
       />
+
+      {showTutorial && <TutorialModal onClose={() => setShowTutorial(false)} />}
 
       {/* View-all + detail sheets. In-tree overlays, never <Modal>, because
           Android drops a Modal stacked on another. */}

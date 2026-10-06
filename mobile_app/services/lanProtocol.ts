@@ -8,7 +8,7 @@ export function generateRoomCode(): string {
 }
 
 export interface GameQuestionPick {
-  type: 'mcq' | 'identification' | 'fill_in_blank';
+  type: 'mcq' | 'identification' | 'fill_in_blank' | 'true_false';
   question: string;
   choices?: string[];
   correctAnswer: string;

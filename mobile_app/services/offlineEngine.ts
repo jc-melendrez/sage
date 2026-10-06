@@ -31,8 +31,11 @@ export function answerMatches(given: unknown, expected: unknown): boolean {
   return norm(given) === norm(expected);
 }
 
+const TYPED_TYPES = new Set(['identification', 'fill_in_blank', 'true_false']);
+const CHOICE_TYPES = new Set(['mcq', 'true_false']);
+
 export interface GameQuestion {
-  type: 'mcq' | 'identification' | 'fill_in_blank';
+  type: 'mcq' | 'identification' | 'fill_in_blank' | 'true_false';
   question: string;
   choices?: string[];
   correctAnswer: string;
@@ -74,9 +77,44 @@ const LETTERS = ['A', 'B', 'C', 'D'];
 
 export function buildQuestions(quiz: QuizPayload): GameQuestion[] {
   const out: GameQuestion[] = [];
+  const quizType = (quiz.quiz_type || '').trim().toLowerCase();
   for (const q of quiz.questions ?? []) {
     if (!q || !q.question_text) continue;
     const opts = Array.isArray(q.options) && q.options.length > 0 ? q.options : [];
+    if (quizType === 'true_false') {
+      const raw = opts.map(o => String(o).trim()).filter(Boolean);
+      const choices = raw.length >= 2 ? raw.slice(0, 2) : ['True', 'False'];
+      let correctIdx = 0;
+      choices.forEach((c, i) => {
+        if (answerMatches(q.correct_answer, c)) correctIdx = i;
+      });
+      out.push({
+        type: 'true_false',
+        question: q.question_text,
+        choices,
+        correctAnswer: choices[correctIdx],
+        explanation: q.explanation ?? null,
+      });
+      continue;
+    }
+    if (quizType === 'fill-in-the-blank' || quizType === 'fill_in_blank') {
+      out.push({
+        type: 'fill_in_blank',
+        question: q.question_text,
+        correctAnswer: String(q.correct_answer || ''),
+        explanation: q.explanation ?? null,
+      });
+      continue;
+    }
+    if (quizType === 'identification' || quizType === 'sa' || quizType === 'short answer') {
+      out.push({
+        type: 'identification',
+        question: q.question_text,
+        correctAnswer: String(q.correct_answer || ''),
+        explanation: q.explanation ?? null,
+      });
+      continue;
+    }
     if (opts.length > 0) {
       const choices = opts.map((opt, i) => `${LETTERS[i]}. ${opt}`);
       let correctIdx = -1;
@@ -194,7 +232,7 @@ export class OfflineGame {
     const question = this.questions[questionIndex];
     if (!question) throw new Error('Invalid question index');
 
-    const isCorrect = (TYPED_QUESTION_TYPES as readonly string[]).includes(question.type)
+    const isCorrect = TYPED_TYPES.has(question.type)
       ? answerMatches(answer, question.correctAnswer)
       : answer === question.correctAnswer;
 
