@@ -33,6 +33,7 @@ import { apiCall } from '@/services/apiClient';
 import { isRateLimitError } from '@/services/aiLimits';
 import { dailyCheckIn } from '@/services/gamificationService';
 import TutorialModal from './TutorialModal';
+import BottomSheet from './BottomSheet';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -947,6 +948,8 @@ export default function Dashboard() {
         recommendations={recommendations}
       />
 
+      {showTutorial && <TutorialModal onClose={() => setShowTutorial(false)} />}
+
       {/* View-all + detail sheets. In-tree overlays, never <Modal>, because
           Android drops a Modal stacked on another. */}
       <BottomSheet
@@ -1566,14 +1569,11 @@ const styles = StyleSheet.create({
   badgeEmoji: {
     fontSize: 32,
   },
-      {showTutorial && <TutorialModal onClose={() => setShowTutorial(false)} />}
-      {showNotifications && (
-        <NotificationSheet
-          open
-          onClose={() => setShowNotifications(false)}
-          onUnreadChange={setUnreadCount}
-        />
-      )}
-    </View>
-  );
-}
+  badgeName: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontFamily: FONTS.semiBold,
+    textAlign: 'center',
+  },
+
+});
