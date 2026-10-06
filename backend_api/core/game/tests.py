@@ -91,11 +91,12 @@ class MedianTeamSpeedTests(TestCase):
     def test_the_tally_reads_both_pick_shapes(self):
         # The answer is what decides the vote; the time is irrelevant to it.
         picks = {'a': {'answer': 'A. yes', 'timeTaken': 2.0}, 'b': 'A. yes'}
-        choice, agreed, pickers, tie = tally_team_picks(picks)
+        choice, agreed, pickers, tie, split = tally_team_picks(picks)
         self.assertEqual(choice, 'A. yes')
         self.assertEqual(agreed, 2)
         self.assertEqual(pickers, 2)
         self.assertFalse(tie)
+        self.assertFalse(split)
 
 
 class TeamModeGameTests(TestCase):

@@ -195,10 +195,10 @@ export default function ActivityResultsView({ results, myUserId, myTeamId }: {
 
   if (!isTeam && !isClassic && !isOffline) return null;
 
-  const mine = (list: ActivityResultMember[] | undefined) =>
-    list?.find(m => !!myUserId && String(m.user_id) === String(myUserId)) ?? null;
-  const ranked = [...results.participants!]
-    .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
+  let ranked: ActivityResultMember[] = [];
+  if (isClassic && results.participants) {
+    ranked = [...results.participants].sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
+  }
 
   return (
     <View style={styles.wrap}>

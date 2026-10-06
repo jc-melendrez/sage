@@ -65,6 +65,7 @@ export default function ClassicGameSetupScreen() {
   const [timePerQuestion, setTimePerQuestion] = useState('15');
   const [teamMode, setTeamMode] = useState(paramTeamMode === 'true');
   const [teamCount, setTeamCount] = useState(2);
+  const [joinedPlayers, setJoinedPlayers] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingQuizzes, setLoadingQuizzes] = useState(false);
   const [mode, setMode] = useState<'home' | 'create' | 'join'>(

@@ -13,8 +13,17 @@ pulling in the other's models, views, or Firebase client.
 
 #: Question types the respondent answers by typing, never by picking one of a
 #: fixed set of options. Both are the same kind of free-text response, so both
-#: use the same grading rule.
+#: use the same rule.
 TYPED_QUESTION_TYPES = frozenset({'identification', 'fill_in_blank'})
+
+#: Types graded with the lenient `answer_matches` rule rather than exact string
+#: equality. The typed types need it because a phone keyboard changes case and
+#: spacing on its own. `true_false` is here for the same reason seen through a
+#: narrower door: the student taps the stored choice, so the strings normally
+#: match exactly -- but a room document carrying "true" against a "True" choice
+#: (or the client's True/False fallback against a differently-cased stored
+#: answer) must not grade a correct tap as wrong.
+GRADED_LENIENTLY = TYPED_QUESTION_TYPES | {'true_false'}
 
 
 def normalise_question_type(raw):
@@ -35,7 +44,7 @@ def normalise_question_type(raw):
         return 'identification'
     if value in ('fib', 'fill in the blank', 'fill-in-the-blank', 'fill_in_blank', 'fillblank'):
         return 'fill_in_blank'
-    if value in ('tf', 'true/false', 'true false', 'truefalse', 'boolean'):
+    if value in ('tf', 'true/false', 'true false', 'truefalse', 'boolean', 't/f'):
         return 'true_false'
     return 'mcq'
 

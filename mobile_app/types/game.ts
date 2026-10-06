@@ -240,7 +240,7 @@ export interface RoomData {
 }
 
 export interface GameQuestion {
-  type: 'mcq' | 'identification' | 'fill_in_blank';
+  type: 'mcq' | 'identification' | 'fill_in_blank' | 'true_false';
   question: string;
   choices?: string[];
   correctAnswer: string;

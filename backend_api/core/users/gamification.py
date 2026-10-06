@@ -174,7 +174,7 @@ def award_xp(user, amount, source='', course=None):
     }
 
 
-def record_quiz_completion(user, score, total, course=None, grant_xp=True):
+def record_quiz_completion(user, score, total, course=None, grant_xp=True, quiz=None):
     """Record a finished quiz: XP per question + pass bonus + badges.
 
     ``grant_xp=False`` still counts the attempt, logs the activity and returns
@@ -216,12 +216,15 @@ def record_quiz_completion(user, score, total, course=None, grant_xp=True):
             badges.append(_badge_dicts([course_perfect])[0])
 
     payload = {'route': f'/course/{course.id}'} if course else None
+    title = (quiz.title if quiz else (course.name if course else '')).strip() or 'Quiz'
+    description = f"Scored {score}/{total}" + (" · Perfect!" if perfect else "")
+    if not grant_xp:
+        description += " · Practice (no XP)"
     log_activity(
         user,
         kind='quiz',
-        title=f"Quiz {course.name if course else ''}".strip(),
-        description=f"Scored {score}/{total}" + (" · Perfect!" if perfect else "")
-                    + (" · Practice (no XP)" if not award_xp else ""),
+        title=title,
+        description=description,
         xp=result['xp'],
         course_name=course.name if course else '',
         payload=payload,

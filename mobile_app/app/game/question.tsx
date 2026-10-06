@@ -2212,10 +2212,16 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const question = questions[actualIndex] || {};
   const playerRank = standings.findIndex(p => String(p.id) === String(userId)) + 1;
   const isDanger = !isFrozen && timeLeft <= 5;
-  const visibleChoices = question.type === 'mcq'
-    // `choices` is absent on a malformed MCQ just as often as it is wrong, and
-    // `.filter` on undefined is a hard crash.
-    ? (question.choices || []).filter((c: string) => !hintedChoices.includes(c))
+  const isChoiceQuestion = question.type === 'mcq' || question.type === 'true_false' || question.type === 'tf';
+  // Anything choice-shaped that isn't a plain MCQ is a True/False round: it
+  // renders as two letter-less buttons rather than "A / B" chips.
+  const isTfQuestion = isChoiceQuestion && question.type !== 'mcq';
+  const visibleChoices = isChoiceQuestion
+    // choices is absent on a malformed MCQ just as often as it is wrong, and
+    // .filter on undefined is a hard crash.
+    ? ((question.choices && question.choices.length > 0)
+      ? (question.choices || []).filter((c: string) => !hintedChoices.includes(c))
+      : (question.type === 'true_false' || question.type === 'tf' ? ['True', 'False'] : []))
     : [];
   // In team play the room owns the question order, so "last" is a fact about the
   // room's index rather than about this screen's own shuffle.
@@ -2511,10 +2517,23 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           />
         )}
 
-        {/* ── MCQ CHOICES ── */}
-        {!spectator && question.type === 'mcq' && (
+        {/* ── CHOICES (mcq + true_false) ──
+            True/False questions are NOT lettered: a T/F rendered as "A. True /
+            B. False" is the bug students reported. Same states, same grading --
+            only the chrome differs: no A/B chip, label centered full-width. */}
+        {!spectator && isChoiceQuestion && (
           <View style={styles.choicesWrap}>
+            {/* True/False has no wrong choice to eliminate, so the hint shows
+                the first letter instead of being a dead spend. */}
+            {isTfQuestion && activePowerups.hint && String(question.correctAnswer ?? '').trim() && (
+              <View style={styles.hintBanner}>
+                <Text style={styles.hintBannerText}>
+                  💡 Starts with: <Text style={styles.hintLetter}>{String(question.correctAnswer).charAt(0).toUpperCase()}</Text>
+                </Text>
+              </View>
+            )}
             {visibleChoices.map((choice: string, choiceIdx: number) => {
+              const isTf = isTfQuestion;
               const isCorrect = result && choice === result.correctAnswer;
               const isWrongPick = result && choice === selected && !result.correct;
               const isDimmed = result && !isCorrect && choice !== selected;
@@ -2527,6 +2546,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   key={`${choiceIdx}-${textOf(choice)}`}
                   style={[
                     styles.choice,
+                    isTf && styles.choiceTf,
                     isCorrect && styles.choiceCorrect,
                     isWrongPick && styles.choiceWrong,
                     isDimmed && styles.choiceDimmed,
@@ -2542,27 +2562,31 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   disabled={answered}
                   activeOpacity={0.7}
                 >
-                  <View style={[
-                    styles.choiceChip,
-                    isCorrect && styles.choiceChipCorrect,
-                    isWrongPick && styles.choiceChipWrong,
-                    isPending && styles.choiceChipPending,
-                  ]}>
-                    <Text style={[
-                      styles.choiceChipText,
-                      isCorrect && styles.choiceChipTextCorrect,
-                      isWrongPick && styles.choiceChipTextWrong,
-                      isPending && styles.choiceChipTextPending,
+                  {!isTf && (
+                    <View style={[
+                      styles.choiceChip,
+                      isCorrect && styles.choiceChipCorrect,
+                      isWrongPick && styles.choiceChipWrong,
+                      isPending && styles.choiceChipPending,
                     ]}>
-                      {isCorrect ? '✓' : isWrongPick ? '✗' : letterOf(choice)}
-                    </Text>
-                  </View>
+                      <Text style={[
+                        styles.choiceChipText,
+                        isCorrect && styles.choiceChipTextCorrect,
+                        isWrongPick && styles.choiceChipTextWrong,
+                        isPending && styles.choiceChipTextPending,
+                      ]}>
+                        {isCorrect ? '✓' : isWrongPick ? '✗' : letterOf(choice)}
+                      </Text>
+                    </View>
+                  )}
                   <Text style={[
                     styles.choiceText,
+                    isTf && styles.choiceTfText,
                     isCorrect && styles.choiceTextCorrect,
                     isWrongPick && styles.choiceTextWrong,
                     isPending && styles.choiceTextPending,
                   ]}>
+                    {isTf && (isCorrect || isWrongPick) ? `${isCorrect ? '✓' : '✗'} ` : ''}
                     {textOf(choice)}
                   </Text>
                 </TouchableOpacity>
@@ -3264,6 +3288,16 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(167,139,250,0.6)',
   },
   choiceDimmed: { opacity: 0.35 },
+  /* True/False: one big centered button per answer, no letter chip. */
+  choiceTf: {
+    justifyContent: 'center',
+    minHeight: 62,
+  },
+  choiceTfText: {
+    textAlign: 'center',
+    fontSize: 18,
+    fontFamily: FONTS.bold,
+  },
   choiceChip: {
     width: 34,
     height: 34,
