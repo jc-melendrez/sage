@@ -37,6 +37,11 @@ services:
       # trailing slash.
       - key: EXPO_PUBLIC_WEB_URL
         value: https://sage-web-cdep.onrender.com
+      # DOWNLOAD_URL (landing-page APK download link) is deliberately NOT declared
+      # here -- it is set in the Dashboard (Settings -> Env) so the tokenized link
+      # stays out of git. scripts/build-web.js injects it into index.html at build
+      # time; changing it requires a manual redeploy (a static site has no runtime
+      # env). Unset, the build falls back to a baked-in default.
     routes:
       # Render never applies a rule to a path that exists as a real file, so these
       # rules only ever fire for paths the CDN does not have on disk. That is what

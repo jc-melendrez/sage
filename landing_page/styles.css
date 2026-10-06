@@ -320,14 +320,16 @@ h4 {
 .btn-success {
   color: #fff;
   background: var(--success);
-  border-color: var(--border-strong);
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 14px 30px -12px rgba(16, 185, 129, 0.75);
 }
 
 .btn-success:hover {
-  border-color: var(--primary-light);
-  
+  box-shadow: 0 20px 40px -14px rgba(16, 185, 129, 0.85);
   color: #fff;
+}
+
+.btn-success:hover svg {
+  transform: translateY(2px);
 }
 
 /* ---------- Badge / chips ---------- */

@@ -49,6 +49,14 @@ const EXPORT_DIR = path.join(APP_ROOT, 'dist');
 const OUT_DIR = path.join(APP_ROOT, 'web-build');
 const SHELL_NAME = 'app.html';
 
+// Placeholder written into landing_page/index.html; resolved here at build time.
+// Override with the DOWNLOAD_URL env var (sage-web -> Settings -> Env) -- a
+// static site has no runtime env, so a new link needs a manual redeploy.
+const DOWNLOAD_PLACEHOLDER = '__DOWNLOAD_URL__';
+const DOWNLOAD_FALLBACK =
+  'https://api.betadrop.app/api/download/69eabea9-bbab-4d97-b492-3334dfd731a9' +
+  '?token=66178334c7a74e798bea1851577ac873';
+
 function fail(message) {
   console.error(`\n❌ ${message}\n`);
   process.exit(1);
@@ -172,6 +180,27 @@ function copyLanding() {
   console.log(`▶ landing page → / (${copied.join(', ')})`);
 }
 
+/**
+ * Replaces __DOWNLOAD_URL__ in the published landing page with the DOWNLOAD_URL
+ * env var, or the baked-in fallback when the var is unset.
+ */
+function injectDownloadUrl() {
+  const fromEnv = process.env.DOWNLOAD_URL;
+  const url = (fromEnv || DOWNLOAD_FALLBACK).trim();
+  if (!/^https:\/\//.test(url)) fail(`DOWNLOAD_URL is not an https URL: ${url}`);
+
+  const file = path.join(OUT_DIR, 'index.html');
+  const html = fs.readFileSync(file, 'utf8');
+  if (!html.includes(DOWNLOAD_PLACEHOLDER)) {
+    fail(`index.html has no ${DOWNLOAD_PLACEHOLDER} placeholder to replace.`);
+  }
+
+  fs.writeFileSync(file, html.split(DOWNLOAD_PLACEHOLDER).join(url));
+  console.log(
+    `▶ download link → ${url} (${fromEnv ? 'env DOWNLOAD_URL' : 'fallback'})`
+  );
+}
+
 function verify() {
   const problems = [];
 
@@ -189,6 +218,9 @@ function verify() {
   }
   if (!/<link[^>]+href="styles\.css"/.test(indexHtml)) {
     problems.push('landing page does not reference styles.css relatively');
+  }
+  if (indexHtml.includes(DOWNLOAD_PLACEHOLDER)) {
+    problems.push(`${DOWNLOAD_PLACEHOLDER} placeholder was not replaced`);
   }
 
   const strays = listFiles(OUT_DIR).filter(
@@ -214,4 +246,5 @@ copyExport();
 renameShell();
 dropPerRouteHtml();
 copyLanding();
+injectDownloadUrl();
 verify();
