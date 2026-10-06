@@ -12,13 +12,7 @@ import { useAuth } from '../hooks/useAuth';
 import { roleHomePath } from '../services/authService';
 import { initFirebaseAuth } from '../services/firebaseAuthService';
 
-type AccountType = 'student' | 'educator';
 type Step = 'form' | 'otp';
-
-const ROLE_OPTIONS: { type: AccountType; label: string; icon: string }[] = [
-  { type: 'student', label: 'Student', icon: 'school-outline' },
-  { type: 'educator', label: 'Educator', icon: 'book-outline' },
-];
 
 const COLORS = {
   bg: '#baaeda',
@@ -106,7 +100,6 @@ export default function LoginScreen() {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [username, setUsername] = useState('');
-  const [accountType, setAccountType] = useState<AccountType>('student');
 
   // OTP second-factor state
   const [step, setStep] = useState<Step>('form');
@@ -155,8 +148,6 @@ export default function LoginScreen() {
         password,
         first_name: firstName,
         last_name: lastName,
-        is_student: accountType === 'student',
-        is_educator: accountType === 'educator',
       });
       if ('otp_required' in response) {
         setChallengeToken(response.challenge_token);
@@ -412,34 +403,6 @@ export default function LoginScreen() {
                   </TouchableOpacity>
                 )}
 
-                {isSignUp && (
-                  <View style={styles.rolePicker}>
-                    <Text style={styles.rolePickerLabel}>I am a...</Text>
-                    <View style={styles.roleOptions}>
-                      {ROLE_OPTIONS.map((role) => {
-                        const active = accountType === role.type;
-                        return (
-                          <TouchableOpacity
-                            key={role.type}
-                            style={[styles.roleOption, active && styles.roleOptionActive]}
-                            onPress={() => setAccountType(role.type)}
-                            disabled={loading}
-                          >
-                            <Ionicons
-                              name={role.icon as any}
-                              size={14}
-                              color={active ? 'white' : COLORS.purpleDeep}
-                            />
-                            <Text style={[styles.roleOptionText, active && styles.roleOptionTextActive]}>
-                              {role.label}
-                            </Text>
-                          </TouchableOpacity>
-                        );
-                      })}
-                    </View>
-                  </View>
-                )}
-
                 <TouchableOpacity
                   style={[styles.submitButton, loading && styles.submitButtonDisabled]}
                   onPress={isSignUp ? handleSignUp : handleLogin}
@@ -647,47 +610,6 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.medium,
     color: COLORS.purplePrimary,
     fontWeight: '600',
-  },
-
-  // Account type picker (Sign Up only)
-  rolePicker: {
-    marginBottom: 10,
-  },
-  rolePickerLabel: {
-    fontSize: 11,
-    fontFamily: FONTS.semiBold,
-    fontWeight: '600',
-    color: '#6B7280',
-    marginBottom: 6,
-  },
-  roleOptions: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  roleOption: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: '#F9FAFB',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    paddingVertical: 9,
-  },
-  roleOptionActive: {
-    backgroundColor: COLORS.purplePrimary,
-    borderColor: COLORS.purplePrimary,
-  },
-  roleOptionText: {
-    fontSize: 12,
-    fontFamily: FONTS.semiBold,
-    fontWeight: '600',
-    color: COLORS.purpleDeep,
-  },
-  roleOptionTextActive: {
-    color: 'white',
   },
 
   // Submit
