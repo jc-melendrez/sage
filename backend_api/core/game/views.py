@@ -1182,22 +1182,21 @@ class SetQuizView(APIView):
         except (Quiz.DoesNotExist, ValueError, TypeError):
             return Response({'error': 'Quiz not found'}, status=404)
 
-            questions = build_questions_from_quiz(quiz)
-            if not questions:
-                return Response({'error': 'That quiz has no questions yet'}, status=400)
-            # A room filed under a course stays inside it. Round two runs on the
-            # same code and the same archive row, so swapping in another class's
-            # quiz would silently break the guarantee the host was shown when they
-            # picked this class ("only this class's quizzes"). The mobile client
-            # never sends a quizId at all today, so this guards a capability that
-            # exists server-side only.
-            room_course_id = room_data.get('courseId')
-            if room_course_id and quiz.course_id != int(room_course_id):
-                return Response(
-                    {'error': 'That quiz is not from this class'},
-                    status=400,
-                )
-
+        questions = build_questions_from_quiz(quiz)
+        if not questions:
+            return Response({'error': 'That quiz has no questions yet'}, status=400)
+        # A room filed under a course stays inside it. Round two runs on the
+        # same code and the same archive row, so swapping in another class's
+        # quiz would silently break the guarantee the host was shown when they
+        # picked this class ("only this class's quizzes"). The mobile client
+        # never sends a quizId at all today, so this guards a capability that
+        # exists server-side only.
+        room_course_id = room_data.get('courseId')
+        if room_course_id and quiz.course_id != int(room_course_id):
+            return Response(
+                {'error': 'That quiz is not from this class'},
+                status=400,
+            )
 
         # Same rule as creation: every team needs at least one question, or a
         # team would sit out the round entirely.
