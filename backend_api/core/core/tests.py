@@ -325,6 +325,7 @@ class HealthzEndpointTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         body = response.json()
         self.assertIn('otp_enabled', body)
+        self.assertIn('otp_delivery', body)
         self.assertIn('email_configured', body)
         self.assertIn('email_backend', body)
 
@@ -336,13 +337,19 @@ class HealthzEndpointTests(TestCase):
             response = self.client.get(reverse('healthz'))
             self.assertIs(response.json()['otp_enabled'], True)
 
-    def test_email_configured_reflects_credentials(self):
+    def test_email_configured_reflects_delivery_paths(self):
         with override_settings(EMAIL_HOST_USER='sage@example.com', EMAIL_HOST_PASSWORD='secret'):
             response = self.client.get(reverse('healthz'))
             self.assertIs(response.json()['email_configured'], True)
-        with override_settings(EMAIL_HOST_USER='', EMAIL_HOST_PASSWORD=''):
+            self.assertEqual(response.json()['otp_delivery'], 'smtp')
+        with override_settings(RESEND_API_KEY='re_test_123'):
+            response = self.client.get(reverse('healthz'))
+            self.assertIs(response.json()['email_configured'], True)
+            self.assertEqual(response.json()['otp_delivery'], 'resend')
+        with override_settings(EMAIL_HOST_USER='', EMAIL_HOST_PASSWORD='', RESEND_API_KEY=''):
             response = self.client.get(reverse('healthz'))
             self.assertIs(response.json()['email_configured'], False)
+            self.assertEqual(response.json()['otp_delivery'], 'none')
 
 
 class CacheFallbackTests(TestCase):

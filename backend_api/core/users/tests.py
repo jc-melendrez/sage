@@ -1076,6 +1076,22 @@ class FirebaseLoginOtpTests(APITestCase):
         self.assertIn(self.user.email, mail.outbox[0].to)
         self.assertFalse(LoginOtpChallenge.objects.get().verified)
 
+    @override_settings(RESEND_API_KEY='re_test_123')
+    def test_otp_delivers_via_resend_when_configured(self):
+        """With RESEND_API_KEY set, the code goes through Resend's HTTP API
+        (not the locmem/SMTP path), so nothing lands in mail.outbox."""
+        from . import otp as users_otp
+        with patch.object(users_otp.requests, 'post') as mock_post:
+            mock_post.return_value.status_code = 200
+            res = self._login(provider='password')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data['otp_required'])
+        self.assertEqual(mock_post.call_count, 1)
+        payload = mock_post.call_args.kwargs['json']
+        self.assertEqual(payload['to'], [self.user.email])
+        self.assertIn('verification code', payload['subject'].lower())
+        self.assertIn('Your SAGE', payload['text'])
+
     @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
     def test_otp_verify_issues_jwt(self):
         res = self._login(provider='password')

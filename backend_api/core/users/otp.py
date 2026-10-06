@@ -11,6 +11,7 @@ import hmac
 import logging
 import secrets
 
+import requests
 from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone
@@ -68,6 +69,12 @@ def send_otp_email(user, otp: str) -> None:
         f"If you didn't try to sign in, you can ignore this email.\n\n"
         f"— SAGE Learning"
     )
+    if getattr(settings, 'RESEND_API_KEY', None):
+        # Render blocks SMTP egress (Errno 101), so prod OTP mail goes through
+        # Resend's HTTP API. `from` must be a sender verified in the Resend
+        # dashboard; errors raise so the login view can answer a clean 503.
+        _send_via_resend(subject, body, [user.email])
+        return
     try:
         send_mail(
             subject,
@@ -79,3 +86,23 @@ def send_otp_email(user, otp: str) -> None:
     except Exception:
         logger.exception("Failed to send OTP email to %s", user.email)
         raise
+
+
+def _send_via_resend(subject: str, text: str, recipients) -> None:
+    """Deliver a plain-text email through Resend's HTTP API."""
+    response = requests.post(
+        'https://api.resend.com/emails',
+        headers={'Authorization': f'Bearer {settings.RESEND_API_KEY}'},
+        json={
+            'from': settings.RESEND_FROM,
+            'to': recipients,
+            'subject': subject,
+            'text': text,
+        },
+        timeout=settings.EMAIL_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        logger.error(
+            'Resend send failed (%s): %s', response.status_code, response.text,
+        )
+        raise RuntimeError(f'Resend send failed ({response.status_code})')

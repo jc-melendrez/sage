@@ -234,6 +234,12 @@ EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD')
 DEFAULT_FROM_EMAIL = os.environ.get('EMAIL_HOST_USER', 'noreply@sage.app')
 
+# Email API (Resend) — Render blocks direct SMTP outbound (connect fails with
+# Errno 101 "Network is unreachable"), so prod OTP mail goes through Resend's
+# HTTP API instead. When RESEND_API_KEY is set, OTP emails skip SMTP entirely.
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
+RESEND_FROM = os.environ.get('RESEND_FROM', 'SAGE <sage.app.io@gmail.com>')
+
 # Email settings can be overridden for dev (e.g. EMAIL_BACKEND=console to print OTPs)
 if os.environ.get('EMAIL_BACKEND'):
     EMAIL_BACKEND = os.environ['EMAIL_BACKEND']

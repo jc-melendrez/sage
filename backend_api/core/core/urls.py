@@ -59,7 +59,10 @@ def healthz(request):
         # not worth failing the liveness probe over.
         pass
     body['otp_enabled'] = bool(getattr(settings, 'OTP_ENABLED', False))
-    body['email_configured'] = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
+    resend_configured = bool(getattr(settings, 'RESEND_API_KEY', None))
+    smtp_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
+    body['otp_delivery'] = 'resend' if resend_configured else ('smtp' if smtp_configured else 'none')
+    body['email_configured'] = resend_configured or smtp_configured
     body['email_backend'] = settings.EMAIL_BACKEND.rsplit('.', 1)[-1]
     return JsonResponse(body)
 
