@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, StatusBar } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { ImageSourcePropType } from 'react-native';
@@ -7,6 +7,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS } from '@/constants/educatorTheme';
 import { useEducatorBack } from '@/hooks/useEducatorBack';
 import { Avatar } from './EducatorPrimitives';
+
+/**
+ * Window-space position of the options button, measured by the header so the
+ * caller can anchor a dropdown to it without owning a ref.
+ */
+export type HeaderAnchor = { x: number; y: number };
 
 interface EducatorHeaderProps {
   title: string;
@@ -42,6 +48,23 @@ interface EducatorHeaderProps {
   /** Spoken by screen readers in place of the icon name. */
   secondaryRightLabel?: string;
   secondaryRightHint?: string;
+  /**
+   * Trailing options button (defaults to a three-dot icon), rendered to the
+   * right of every other icon in the row.
+   *
+   * Setting `onMenuPress` is what makes it appear. It receives the button's
+   * window position rather than a press event so the caller can anchor a
+   * dropdown to it: `e.nativeEvent.layout` is unpopulated on press events, so
+   * the only way to get a real anchor is `measureInWindow`.
+   *
+   * The button renders nothing about the menu's contents — the caller owns
+   * that, and must render the dropdown itself at the screen root.
+   */
+  onMenuPress?: (anchor: HeaderAnchor) => void;
+  menuIcon?: keyof typeof Ionicons.glyphMap;
+  /** Defaults to "Options"; never derived from the icon name, which would
+   *  announce the default as "ellipsis horizontal". */
+  menuLabel?: string;
   /** Initials for a small avatar button rendered on the right. */
   avatar?: string;
   /** Resolved profile picture for that avatar, e.g. pfpSource(user.avatar). */
@@ -68,6 +91,9 @@ export function EducatorHeader({
   onSecondaryRightLongPress,
   secondaryRightLabel,
   secondaryRightHint,
+  onMenuPress,
+  menuIcon = 'ellipsis-horizontal',
+  menuLabel = 'Options',
   avatar,
   avatarImage,
   onAvatarPress,
@@ -79,6 +105,16 @@ const goBack = useEducatorBack();
   // Real status-bar height. The gradient is meant to run under the bar
   // (edge-to-edge), so the controls need to sit below it.
   const insets = useSafeAreaInsets();
+  const menuRef = useRef<View>(null);
+
+  const openMenu = useCallback(() => {
+    const node = menuRef.current;
+    if (!node?.measureInWindow) return;
+    node.measureInWindow((x, y, width, height) => {
+      if (!width && !height) return;
+      onMenuPress?.({ x: x + width, y: y + height });
+    });
+  }, [onMenuPress]);
 
   return (
     <View>
@@ -144,6 +180,19 @@ style={[styles.header, { paddingTop: insets.top + (compact ? 12 : 16) }]}
               accessibilityLabel={rightIcon.replace(/-outline$/, '').replace(/-/g, ' ')}
             >
               <Ionicons name={rightIcon} size={20} color="white" />
+            </TouchableOpacity>
+          )}
+          {/* Rendered after rightIcon so the options button is the rightmost
+              action icon, matching the platform convention. */}
+          {onMenuPress && (
+            <TouchableOpacity
+              ref={menuRef as never}
+              style={[styles.iconBtn, styles.rightIconBtn]}
+              onPress={openMenu}
+              accessibilityRole="button"
+              accessibilityLabel={menuLabel}
+            >
+              <Ionicons name={menuIcon} size={20} color="white" />
             </TouchableOpacity>
           )}
           {avatar && (

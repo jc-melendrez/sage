@@ -9,8 +9,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.test import APIClient
 
 
-from users.models import Activity, User
+from users.models import Activity, Course, User
 from ai_assistant.models import Quiz, QuizQuestion
+from game.models import GameRoom
 from game.test_firestore_fake import FakeFirestoreClient, FakeStoreError, FakeTransaction
 from game.views import (
     TEAM_COLORS,
@@ -3731,3 +3732,357 @@ class TvLeaderboardTests(TestCase):
         for _ in range(150):
             resp = self.get_without_credentials()
             self.assertEqual(resp.status_code, 200)
+
+class GameArchiveTests(TestCase):
+    """A hosted game leaves a durable GameRoom row the class can list afterwards.
+
+    Everything here exists because the archive is the ONLY record of a classic
+    game that outlives the room. Firestore cannot answer "which games did this
+    class play" (rooms are addressed only by the room code), classic results are
+    never written to the room document at all, and a rematch wipes finishedAt.
+    So the failure mode of a break here is not an error, it is a silently empty
+    Games tab months later.
+    """
+
+    def setUp(self):
+        self.educator = User.objects.create_user(
+            username='teacher', password='pass', role='educator')
+        self.student = User.objects.create_user(
+            username='pupil', password='pass', role='student')
+        self.rival = User.objects.create_user(
+            username='rival', password='pass', role='educator')
+        self.course = Course.objects.create(
+            name='Year 9 Biology', educator=self.educator, description='cells')
+        self.course.students.add(self.student)
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+
+        # CreateGameView needs a real quiz or a file upload, and it only accepts
+        # a quiz the host owns -- so each host gets their own.
+        self.quizzes = {u: self._quiz_for(u) for u in (self.educator, self.student, self.rival)}
+
+    @staticmethod
+    def _quiz_for(user, title=None):
+        quiz = Quiz.objects.create(user=user, title=title or f'{user.username} quiz')
+        for i in range(5):
+            QuizQuestion.objects.create(
+                quiz=quiz, question_text=f'Question {i + 1}',
+                options=['one', 'two', 'three', 'four'], correct_answer='one',
+                explanation='',
+            )
+        return quiz
+
+    # --- create: course scoping ---
+
+    def create(self, user=None, **extra):
+        user = user or self.educator
+        self.client.force_authenticate(user=user)
+        return self.client.post(reverse('create-game'), {
+            'quizId': self.quizzes[user].id, **extra,
+        }, format='json')
+
+
+    def test_an_educator_hosting_for_a_class_files_the_room_under_it(self):
+        resp = self.create(courseId=self.course.id)
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        room = GameRoom.objects.get(room_code=resp.json()['roomCode'])
+        self.assertEqual(room.course, self.course)
+        self.assertEqual(room.owner, self.educator)
+        self.assertEqual(room.status, GameRoom.STATUS_WAITING)
+
+    def test_the_course_id_also_reaches_the_room_document(self):
+        resp = self.create(courseId=self.course.id)
+        code = resp.json()['roomCode']
+        self.assertEqual(
+            self.store.collection('gameRooms').document(code).get().to_dict()['courseId'],
+            self.course.id)
+
+    def test_another_educator_cannot_file_a_game_under_someone_elses_class(self):
+        resp = self.create(user=self.rival, courseId=self.course.id)
+        self.assertEqual(resp.status_code, 403)
+        # And nothing was created -- not even a room code handed out.
+        self.assertFalse(GameRoom.objects.exists())
+
+    def test_a_students_course_id_is_ignored_not_honoured(self):
+        # Enrolled students may legitimately try to file a game under the class
+        # they are in. The room is still created (they are allowed to host), but
+        # it belongs to nobody's course history.
+        resp = self.create(user=self.student, courseId=self.course.id)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        room = GameRoom.objects.get(room_code=resp.json()['roomCode'])
+        self.assertIsNone(room.course)
+        self.assertNotIn(
+            'courseId',
+            self.store.collection('gameRooms').document(room.room_code).get().to_dict())
+
+    def test_a_missing_course_is_a_404(self):
+        self.assertEqual(self.create(courseId=999999).status_code, 404)
+
+    def test_a_game_hosted_outside_any_class_is_still_archived(self):
+        # The archive is not course-scoped-only: "games this educator has run"
+        # is worth answering even for a game started from the FAB.
+        resp = self.create()
+        self.assertEqual(resp.status_code, 200, resp.data)
+        room = GameRoom.objects.get(room_code=resp.json()['roomCode'])
+        self.assertIsNone(room.course)
+        self.assertEqual(room.owner, self.educator)
+
+    # --- lifecycle: start / settle ---
+
+    def _archive(self, **create_extra):
+        resp = self.create(**create_extra)
+        return GameRoom.objects.get(room_code=resp.json()['roomCode']), resp.json()['roomCode']
+
+    def test_starting_a_room_stamps_the_time_it_went_live(self):
+        room, code = self._archive(courseId=self.course.id)
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.post(reverse('start-game'), {'roomCode': code}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        room.refresh_from_db()
+        self.assertEqual(room.status, GameRoom.STATUS_ACTIVE)
+        self.assertIsNotNone(room.started_at)
+
+    def test_a_second_start_does_not_move_the_original_start_time(self):
+        # START is re-issued by clients on reconnect; the moment the class
+        # actually started must not drift to the last retry.
+        room, code = self._archive(courseId=self.course.id)
+        self.client.force_authenticate(user=self.educator)
+        self.client.post(reverse('start-game'), {'roomCode': code}, format='json')
+        first = GameRoom.objects.get(pk=room.pk).started_at
+
+        self.client.post(reverse('start-game'), {'roomCode': code}, format='json')
+        self.assertEqual(GameRoom.objects.get(pk=room.pk).started_at, first)
+
+    def _started_classic_room(self):
+        """A real create -> start, with one student and the educator host joined."""
+        room, code = self._archive(courseId=self.course.id)
+        room_ref = self.store.collection('gameRooms').document(code)
+        self.client.force_authenticate(user=self.educator)
+        self.client.post(reverse('start-game'), {'roomCode': code}, format='json')
+        for user, score in ((self.educator, 0), (self.student, 900)):
+            # `set`, not `update`: only the host gets a player document from
+            # CreateGameView, so the student's does not exist yet.
+            room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': score,
+                'correctCount': 1, 'answeredCount': 1, 'isFinished': True,
+                'answers': {'0': {'picked': 'a', 'correct': True}},
+            })
+        return room, code
+
+    def _settle(self, code):
+        return self.client.post(
+            reverse('finish-game'), {'roomCode': code, 'confirm': 'true'}, format='json')
+
+    def _finished_classic_room(self):
+        """Drive a real create -> start -> settle and hand back the archive row."""
+        room, code = self._started_classic_room()
+        resp = self._settle(code)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return GameRoom.objects.get(pk=room.pk), code
+
+    def test_settling_stores_the_same_results_the_students_see(self):
+        room, code = self._finished_classic_room()
+        self.assertEqual(room.status, GameRoom.STATUS_FINISHED)
+        self.assertIsNotNone(room.finished_at)
+        self.assertIsNotNone(room.started_at)
+
+        payload = room.final_payload
+        self.assertEqual(payload['mode'], 'classic')
+        self.assertEqual(payload['roomCode'], code)
+        names = sorted(p['name'] for p in payload['participants'])
+        self.assertEqual(names, ['pupil'])
+
+        # And it really is the same snapshot, not a parallel one that can drift.
+        activity = Activity.objects.filter(user=self.student, kind='game').first()
+        self.assertIsNotNone(activity)
+        self.assertEqual(activity.payload['results'], payload)
+
+    def test_the_player_count_excludes_the_educator_host(self):
+        # The host ran the room; counting them would put "2 players" on a game
+        # with exactly one competitor.
+        room, _ = self._finished_classic_room()
+        self.assertEqual(room.player_count, 1)
+
+    def test_the_host_name_is_recorded_outside_the_results(self):
+        # An educator host is excluded from the standings, so the results alone
+        # cannot say who ran the game.
+        room, _ = self._finished_classic_room()
+        self.assertEqual(room.host_name, 'teacher')
+        self.assertNotIn('teacher', [p['name'] for p in room.final_payload['participants']])
+
+    def test_finishing_the_room_never_dies_with_the_archive(self):
+        # The archive is best-effort by design: losing the history row must not
+        # cost the class its XP or leave the room stuck mid-game. The database
+        # itself is made to fail here rather than the helper, so this exercises
+        # the guard that actually runs in production -- FinishGameView turns any
+        # exception out of _settle into a 500, taking the XP payout with it.
+        room, code = self._started_classic_room()
+        with patch.object(GameRoom, 'objects') as broken_db:
+            broken_db.filter.side_effect = RuntimeError('db down')
+            resp = self._settle(code)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            self.store.collection('gameRooms').document(code).get().to_dict()['status'],
+            'finished')
+        # The room really is settled: the students were paid despite the archive
+        # being unreachable.
+        self.assertTrue(Activity.objects.filter(user=self.student, kind='game').exists())
+
+
+    # --- rematch: round one survives ---
+
+    def test_a_rematch_files_round_one_away_instead_of_erasing_it(self):
+        room, code = self._finished_classic_room()
+        round_one = room.final_payload
+
+        resp = self.client.post(reverse('rematch'), {'roomCode': code}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        room.refresh_from_db()
+        self.assertEqual(room.previous_round, round_one)
+        self.assertIsNone(room.final_payload)
+        self.assertEqual(room.status, GameRoom.STATUS_WAITING)
+        self.assertIsNotNone(room.previous_round_finished_at)
+
+    def test_a_rematch_leaves_the_game_where_it_was_in_the_class_history(self):
+        # created_at deliberately survives: a rematch is the same game played
+        # twice, so it must not jump back to the top of the list as a new one.
+        room, code = self._finished_classic_room()
+        created = room.created_at
+
+        self.client.post(reverse('rematch'), {'roomCode': code}, format='json')
+        self.assertEqual(GameRoom.objects.get(pk=room.pk).created_at, created)
+
+    def test_the_rematched_round_gets_its_own_times(self):
+        room, code = self._finished_classic_room()
+        self.client.post(reverse('rematch'), {'roomCode': code}, format='json')
+        self.assertIsNone(GameRoom.objects.get(pk=room.pk).started_at)
+        self.assertIsNone(GameRoom.objects.get(pk=room.pk).finished_at)
+
+        self.client.post(reverse('start-game'), {'roomCode': code}, format='json')
+        self.assertIsNotNone(GameRoom.objects.get(pk=room.pk).started_at)
+
+    def test_swapping_the_quiz_on_a_rematch_is_recorded(self):
+        room, code = self._finished_classic_room()
+        quiz = self._quiz_for(self.educator, title='Round two topic')
+
+        resp = self.client.post(
+            reverse('rematch'), {'roomCode': code, 'quizId': quiz.id}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        room.refresh_from_db()
+        self.assertEqual(room.quiz_id, quiz.id)
+        self.assertEqual(room.topic, 'Round two topic')
+
+
+
+class CourseGamesHistoryTests(TestCase):
+    """GET /users/courses/<id>/games/ -- the class's Games tab."""
+
+    def setUp(self):
+        self.educator = User.objects.create_user(
+            username='teacher', password='pass', role='educator')
+        self.student = User.objects.create_user(
+            username='pupil', password='pass', role='student')
+        self.course = Course.objects.create(
+            name='Year 9 Biology', educator=self.educator, description='c')
+        self.other_course = Course.objects.create(
+            name='Year 10 Chemistry', educator=self.educator, description='c')
+
+        self.client = APIClient()
+
+    def url(self, course=None):
+        return reverse('course_games', kwargs={'course_id': (course or self.course).id})
+
+    def archive(self, code, course, **kwargs):
+        defaults = {
+            'owner': self.educator,
+            'topic': f'{code} topic',
+            'status': GameRoom.STATUS_FINISHED,
+            'player_count': 3,
+            # `finished_at` is not auto (only `created_at` is), and these rows
+            # stand in for games that actually ended.
+            'finished_at': timezone.now(),
+            # Normally written by game.views.archive_room; set here so these
+            # tests read as "a room that was actually hosted".
+            'host_name': 'teacher',
+        }
+        defaults.update(kwargs)
+        return GameRoom.objects.create(room_code=code, course=course, **defaults)
+
+
+    def get(self, user=None):
+        self.client.force_authenticate(user=user or self.educator)
+        return self.client.get(self.url())
+
+    def test_the_educator_gets_the_class_games_newest_first(self):
+        self.archive('OLD1', self.course, created_at=timezone.now() - timedelta(days=2))
+        self.archive('NEW1', self.course)
+        resp = self.get()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([g['room_code'] for g in resp.json()['games']], ['NEW1', 'OLD1'])
+
+    def test_another_classs_games_never_leak_in(self):
+        self.archive('MINE', self.course)
+        self.archive('THEIRS', self.other_course)
+        self.assertEqual([g['room_code'] for g in self.get().json()['games']], ['MINE'])
+
+    def test_a_class_with_no_games_is_an_empty_list_not_an_error(self):
+        resp = self.get()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['games'], [])
+
+    def test_a_student_cannot_read_the_host_history(self):
+        # These are the educator's own hosted games, and GameRoom.owner is the
+        # educator, so a student would only ever see an empty list. Refused
+        # outright rather than quietly empty.
+        self.archive('MINE', self.course)
+        self.assertEqual(self.get(user=self.student).status_code, 403)
+
+    def test_another_educator_cannot_read_it(self):
+        rival = User.objects.create_user(
+            username='rival', password='pass', role='educator')
+        self.assertEqual(self.get(user=rival).status_code, 403)
+
+    def test_anonymous_is_rejected(self):
+        self.assertEqual(self.client.get(self.url()).status_code, 401)
+
+    def test_a_missing_class_is_a_404(self):
+        self.client.force_authenticate(user=self.educator)
+        resp = self.client.get(reverse('course_games', kwargs={'course_id': 999999}))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_a_live_room_is_listed_so_the_tab_can_show_it_running(self):
+        # Filtering to finished-only would hide a game the teacher is in the
+        # middle of running until the moment it ended.
+        self.archive('LIVE', self.course, status=GameRoom.STATUS_WAITING)
+        self.assertEqual([g['status'] for g in self.get().json()['games']], ['waiting'])
+
+    def test_the_results_payload_reaches_the_client_untouched(self):
+        # It is handed straight to ActivityResultsView, which already renders
+        # the Recent Activity shape.
+        payload = {'mode': 'classic', 'roomCode': 'PAID', 'questionCount': 3,
+                   'participants': [{'user_id': 1, 'name': 'pupil', 'score': 900}]}
+        self.archive('PAID', self.course, final_payload=payload)
+        self.assertEqual(self.get().json()['games'][0]['final_payload'], payload)
+
+    def test_the_serialised_row_carries_what_the_card_renders(self):
+        self.archive('SHOW1', self.course, topic='Mitosis', player_count=4,
+                     question_count=6, final_payload={'mode': 'classic', 'participants': []})
+        game = self.get().json()['games'][0]
+        self.assertEqual(game['topic'], 'Mitosis')
+        self.assertEqual(game['player_count'], 4)
+        self.assertEqual(game['question_count'], 6)
+        self.assertEqual(game['host_name'], 'teacher')
+        self.assertIsNotNone(game['finished_at'])
+        # No rematch on this one, so there is no previous round to offer.
+        self.assertIsNone(game['previous_round'])
+        self.assertIsNone(game['previous_round_finished_at'])

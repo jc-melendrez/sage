@@ -21,7 +21,7 @@ from core.question_types import (
     normalise_question_type,
 )
 from core.throttling import AIGameThrottle, TvLeaderboardThrottle
-from .models import OfflineGameResult
+from .models import GameRoom, OfflineGameResult
 
 
 def generate_room_code():
@@ -371,6 +371,121 @@ def _is_teacher_host(room_data):
     return role in ('educator', 'superadmin')
 
 
+def archive_room(room_code, owner, fields):
+    """
+    Create or update the GameRoom archive row for `room_code`.
+
+    update_or_create, not create: a retried create or a settle arriving for a
+    room whose row is already there must repair the row rather than raise on the
+    unique room_code. A failure here is swallowed on purpose -- losing the
+    history record must never take down a live game, and the Firestore room is
+    the thing that actually matters.
+    """
+    try:
+        room, created = GameRoom.objects.update_or_create(
+            room_code=room_code,
+            defaults={
+                'owner': owner,
+                'host_name': get_display_name(owner),
+                **fields,
+            },
+        )
+        return room
+    except Exception as exc:  # pragma: no cover - archive is best-effort
+        print(f'[game] archive_room failed for {room_code}: {exc}')
+        return None
+
+
+def settle_archive(room_code, final_payload, player_count):
+    """
+    Mark the archive row finished and store its settled results.
+
+    `final_payload` is shaped exactly like Activity.payload['results'] so the app
+    can hand either one to the same ActivityResultsView. Passing None (or a
+    settle with nothing to report) still stamps the times -- a game that ended
+    with no results is still a game that happened.
+    """
+    try:
+        GameRoom.objects.filter(room_code=room_code).update(
+            status=GameRoom.STATUS_FINISHED,
+            finished_at=timezone.now(),
+            player_count=player_count,
+            final_payload=final_payload,
+        )
+    except Exception as exc:  # pragma: no cover - archive is best-effort
+        print(f'[game] settle_archive failed for {room_code}: {exc}')
+
+
+def stamp_started(room_code):
+    """Record that the room went live. Idempotent: the first start wins."""
+    try:
+        GameRoom.objects.filter(room_code=room_code, started_at__isnull=True).update(
+            status=GameRoom.STATUS_ACTIVE,
+            started_at=timezone.now(),
+        )
+    except Exception as exc:  # pragma: no cover - archive is best-effort
+        print(f'[game] stamp_started failed for {room_code}: {exc}')
+
+
+def rematch_archive(room_code, quiz_id=None, topic=None, question_count=None):
+    """
+    Fold the just-finished round into `previous_round` and put the row back to
+    waiting, so a rematch does not destroy round one's results.
+
+    A rematch deliberately reuses the room code (see RematchView), so there is
+    one row and it has to describe both rounds. Round one's payload is moved
+    aside and the latest round takes the live columns.
+
+    Scope: ONE previous round is kept. A second rematch overwrites round one
+    with round two. That is a deliberate bound -- an unbounded revision list
+    would mean a separate row per round and a new history UI, and a teacher
+    running a third identical round of the same code has lost the interesting
+    detail by then. Raise it only if round-one preservation proves to matter.
+
+    `started_at` is cleared so the next START re-stamps it (see stamp_started);
+    `created_at` deliberately stays, so the game keeps its original place in
+    the course's history rather than jumping to the top on every rematch.
+    """
+    try:
+        archive = GameRoom.objects.filter(room_code=room_code).first()
+        if not archive:
+            return
+        archive.previous_round = archive.final_payload
+        archive.previous_round_finished_at = archive.finished_at
+        archive.final_payload = None
+        archive.finished_at = None
+        archive.started_at = None
+        archive.status = GameRoom.STATUS_WAITING
+        if quiz_id:
+            archive.quiz_id = int(quiz_id)
+        if topic:
+            archive.topic = topic
+        if question_count is not None:
+            archive.question_count = question_count
+        archive.save()
+    except Exception as exc:  # pragma: no cover - archive is best-effort
+        print(f'[game] rematch_archive failed for {room_code}: {exc}')
+
+
+def _results_player_count(results):
+    """
+    How many people are in `results`, derived from the payload itself.
+
+    Counting player documents instead would count spectators and, in team mode,
+    anyone who never got a seat on a team -- people who appear on no leaderboard.
+    Deriving the number from the same list that is displayed means the header
+    count and the list underneath it can never disagree.
+
+    An educator host is counted in neither branch, which is right: they run the
+    room, they do not compete in it.
+    """
+    if not results:
+        return 0
+    if results.get('mode') == 'team':
+        return sum(len(t.get('members') or []) for t in results.get('teams') or [])
+    return len(results.get('participants') or [])
+
+
 def empty_powerups():
     return {key: 0 for key in POWERUP_KEYS}
 
@@ -667,6 +782,25 @@ class CreateGameView(APIView):
         if team_mode and not defer_quiz and question_count < team_count:
             return Response({'error': 'Not enough questions for that many teams'}, status=400)
 
+        # Optional course scope. Set by an educator hosting from inside a class;
+        # it is what makes the room show up in that class's Games tab. Only the
+        # course's own educator may attach it, and it is dropped entirely for a
+        # student so a game can never be filed under a class the student merely
+        # happens to be enrolled in.
+        course = None
+        raw_course_id = request.data.get('courseId') or request.data.get('course_id')
+        if raw_course_id and request.user.is_educator:
+            from users.models import Course
+            try:
+                course = Course.objects.get(id=raw_course_id)
+            except (Course.DoesNotExist, ValueError):
+                return Response({'error': 'Course not found'}, status=404)
+            if request.user != course.educator:
+                return Response(
+                    {'error': 'Only the course educator can host games for a course'},
+                    status=403,
+                )
+
         room_code = generate_room_code()
         db = get_firestore()
 
@@ -686,6 +820,8 @@ class CreateGameView(APIView):
             'questions': questions,
             'createdAt': fs.SERVER_TIMESTAMP,
         }
+        if course is not None:
+            room_data['courseId'] = course.id
         auto_assign = str(request.data.get('autoAssignTeams', 'false')).lower() == 'true'
         if auto_assign:
             room_data['autoAssignTeams'] = True
@@ -751,6 +887,21 @@ class CreateGameView(APIView):
         # out the teacher from the leaderboard without a DB round‑trip.
         db.collection('gameRooms').document(room_code)\
           .collection('players').document(str(request.user.id)).set(player_data)
+
+        # Archive row. Written for every room, not just course-scoped ones, so
+        # "games this educator has run" is answerable even for a game hosted from
+        # the FAB with no class attached. Firestore remains the live source of
+        # truth; this only has to survive the room.
+        archive_room(room_code, request.user, {
+            'course': course,
+            'quiz_id': int(quiz_id) if quiz_id else None,
+            'topic': topic,
+            'mode': 'group' if team_mode else 'classic',
+            'team_mode': team_mode,
+            'question_count': question_count,
+            'time_per_question': time_per_question,
+            'status': GameRoom.STATUS_WAITING,
+        })
 
         response_data = {
             'roomCode': room_code,
@@ -945,9 +1096,22 @@ class SetQuizView(APIView):
         except (Quiz.DoesNotExist, ValueError, TypeError):
             return Response({'error': 'Quiz not found'}, status=404)
 
-        questions = build_questions_from_quiz(quiz)
-        if not questions:
-            return Response({'error': 'That quiz has no questions yet'}, status=400)
+            questions = build_questions_from_quiz(quiz)
+            if not questions:
+                return Response({'error': 'That quiz has no questions yet'}, status=400)
+            # A room filed under a course stays inside it. Round two runs on the
+            # same code and the same archive row, so swapping in another class's
+            # quiz would silently break the guarantee the host was shown when they
+            # picked this class ("only this class's quizzes"). The mobile client
+            # never sends a quizId at all today, so this guards a capability that
+            # exists server-side only.
+            room_course_id = room_data.get('courseId')
+            if room_course_id and quiz.course_id != int(room_course_id):
+                return Response(
+                    {'error': 'That quiz is not from this class'},
+                    status=400,
+                )
+
 
         # Same rule as creation: every team needs at least one question, or a
         # team would sit out the round entirely.
@@ -1146,6 +1310,7 @@ class StartGameView(APIView):
             update_fields['teamQuestionIndex'] = 0
             update_fields['teamStartedAt'] = fs.SERVER_TIMESTAMP
         room_ref.update(update_fields)
+        stamp_started(room_code)
 
         return Response({
             'message': 'Game started!',
@@ -1764,7 +1929,11 @@ class FinishGameView(APIView):
             'status': 'finished',
             'finishedAt': fs.SERVER_TIMESTAMP,
         })
-        self._award_placement_xp(room_ref, room_code, team_mode)
+        results = self._award_placement_xp(room_ref, room_code, team_mode)
+        # `results` is the same snapshot that was just written onto every
+        # player's activity row, so the course Games tab and the student's
+        # Recent Activity render identical results for the same game.
+        settle_archive(room_code, results, _results_player_count(results))
         snapshot_team_results(room_ref, room_data)
         clear_reactions()
         return self._rank_of_caller(room_ref, room_data, team_mode)
@@ -1877,6 +2046,11 @@ class FinishGameView(APIView):
         In team mode placement is the TEAM's finishing position, and every
         member is paid that team's placement. Ranking players individually
         here is what made team mode still read as an individual game.
+
+        Returns the settled `results` snapshot (the same one written to each
+        player's activity row) so the caller can archive it. Callers must not
+        rely on it being non-None: an unpayable player is skipped rather than
+        raising, but the snapshot is built either way.
         """
         if team_mode:
             room_data = room_ref.get().to_dict() or {}
@@ -1958,7 +2132,7 @@ class FinishGameView(APIView):
                 self._pay(user_id=p.id, rank=team_rank[team_id], room_code=room_code,
                           label=f"#{team_rank[team_id]} with {team_doc[team_id].get('name') or f'Team {team_id}'}",
                           results=results, team_id=team_id)
-            return
+            return results
 
         room_data = room_ref.get().to_dict() or {}
         standings = self._get_standings(room_ref, room_data)
@@ -1995,6 +2169,7 @@ class FinishGameView(APIView):
         for entry, rank in zip(standings, ranks):
             self._pay(user_id=entry['user_id'], rank=rank, room_code=room_code, label=f'#{rank}',
                       results=results)
+        return results
 
     def _pay(self, user_id, rank, room_code, label, results=None, team_id=None):
         user = User.objects.filter(id=user_id).first()
@@ -2099,6 +2274,15 @@ class RematchView(APIView):
         reset = _reset_room_for_rematch(room_ref, room_data)
         reset.update(swap)
         room_ref.update(reset)
+        # Only now that the reset has actually been applied: a failed Firestore
+        # write above must leave the archive showing a finished game, not a
+        # waiting one whose round-one results are already filed away.
+        rematch_archive(
+            room_code,
+            quiz_id=swap.get('quizId'),
+            topic=swap.get('topic'),
+            question_count=room_data.get('questionCount'),
+        )
         return Response({
             'roomCode': room_code,
             'message': 'Rematch ready',

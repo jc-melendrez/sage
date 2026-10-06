@@ -22,9 +22,12 @@ export const CREATE_ACTIONS: CreateAction[] = [
   { id: 'lesson', label: 'Create Lesson', icon: 'book-outline', color: COLORS.purpleVibrant, route: '/educator/lesson-new' },
   { id: 'quiz', label: 'Create Quiz', icon: 'help-circle-outline', color: COLORS.accent, route: '/educator/quiz-manager' },
   // Labels say what the educator is going to do, not which object is created.
-  // Routes are unchanged: host-game is still the game setup flow, and
-  // assignments is the shared create activity form.
-  { id: 'game', label: 'Host Game', icon: 'game-controller-outline', color: COLORS.warning, route: '/educator/host-game' },
+  // The game action lands on /game, the same Game Center the student Play tab
+  // renders (app/(tabs)/games.tsx re-exports it); it role-gates itself for
+  // educators and hands START off to host-session. It has to be the root /game
+  // route, not /games — the root layout bounces any non-student role off the
+  // (tabs) segment back to their role home (app/_layout.tsx:126-128).
+  { id: 'game', label: 'Host Game', icon: 'game-controller-outline', color: COLORS.warning, route: '/game' },
   { id: 'activity', label: 'Assignments', icon: 'document-text-outline', color: COLORS.success, route: '/educator/assignments' },
 ];
 

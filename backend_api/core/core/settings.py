@@ -232,6 +232,12 @@ DEFAULT_FROM_EMAIL = os.environ.get('EMAIL_HOST_USER', 'noreply@sage.app')
 if os.environ.get('EMAIL_BACKEND'):
     EMAIL_BACKEND = os.environ['EMAIL_BACKEND']
 
+# Email OTP second factor for Firebase email/password logins. On by default;
+# set OTP_ENABLED=0 in .env for local dev when SMTP isn't available.
+OTP_ENABLED = os.environ.get('OTP_ENABLED', '1').strip().lower() not in (
+    '0', 'false', 'no', 'off',
+)
+
 # --- Cache ---
 # DRF throttles count in Django's default cache, which is LocMemCache: one
 # private dict per process. The Procfile runs `gunicorn --workers 2`, so every

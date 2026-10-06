@@ -99,7 +99,6 @@ export default function EducatorTabLayout() {
       <Tabs.Screen name="classes" options={{ href: null }} />
       <Tabs.Screen name="content" options={{ href: null }} />
       <Tabs.Screen name="student-detail" options={{ href: null }} />
-      <Tabs.Screen name="host-game" options={{ href: null }} />
       <Tabs.Screen name="host-session" options={{ href: null }} />
       <Tabs.Screen name="leaderboard" options={{ href: null }} />
       <Tabs.Screen name="announcements" options={{ href: null }} />
@@ -107,6 +106,8 @@ export default function EducatorTabLayout() {
       <Tabs.Screen name="student-progress" options={{ href: null }} />
       <Tabs.Screen name="analytics" options={{ href: null }} />
       <Tabs.Screen name="course-detail" options={{ href: null }} />
+      <Tabs.Screen name="course-students" options={{ href: null }} />
+      <Tabs.Screen name="course-leaderboard" options={{ href: null }} />
       <Tabs.Screen name="topic-detail" options={{ href: null }} />
       <Tabs.Screen name="topic-preview" options={{ href: null }} />
       <Tabs.Screen name="node-preview" options={{ href: null }} />

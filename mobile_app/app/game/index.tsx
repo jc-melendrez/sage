@@ -36,6 +36,7 @@ import { pfpSource } from '@/constants/pfps';
 import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/JoinCodeInput';
 import TeamColumns from '@/components/game/TeamColumns';
 import { sameTeamId, type PlayerEntry, type TeamEntry } from '@/types/game';
+import { useCurrentUser } from '@/contexts/UserContext';
 
 /**
  * busyTeamId sentinel for the spectator column. Team ids are numeric strings,
@@ -84,11 +85,102 @@ interface Quiz {
   questions?: any[];
 }
 
+/**
+ * Game modes the Play screen offers, in display order.
+ *
+ * Module scope so the array identity is stable across renders — it is a plain
+ * constant, not something that has to be rebuilt from props or state.
+ */
+const GAME_MODES = [
+  {
+    id: 'classic',
+    title: 'CLASSIC BATTLE',
+    description: 'Host or join a room! Compete in real-time quiz battles with friends.',
+    icon: 'game-controller' as const,
+    active: true,
+  },
+  {
+    id: 'group',
+    title: 'GROUP MODE',
+    description: 'Split into teams! Host or join a room and battle team vs team in real-time.',
+    icon: 'people' as const,
+    active: true,
+  },
+  {
+    id: 'flashcards',
+    title: 'SOLO MODE',
+    description: 'Flip through flashcards and master any quiz at your own pace.',
+    icon: 'albums' as const,
+    active: true,
+  },
+  {
+    id: 'time-attack',
+    title: 'TIME ATTACK',
+    description: 'Beat the clock! Answer as many questions as possible in 60 seconds.',
+    icon: 'timer' as const,
+    active: false,
+  },
+  {
+    id: 'solo-practice',
+    title: 'SOLO PRACTICE',
+    description: 'Practice at your own pace. Master any topic with unlimited questions.',
+    icon: 'person' as const,
+    active: false,
+  },
+];
+
+/**
+ * Modes an educator gets. They run a class from the TV, so the two modes that
+ * put a live room on screen are the whole job; the rest are a student playing.
+ *
+ * The unlisted modes are filtered out of the list rather than flipped to
+ * `active: false`, which would render them greyed out behind a "SOON" badge and
+ * imply the feature is coming for educators too.
+ */
+const EDUCATOR_GAME_MODES = new Set(['classic', 'group']);
+
 export default function GameCenterScreen() {
   const router = useRouter();
-  const { leftLobby: leftLobbyParam } = useLocalSearchParams<{ leftLobby?: string }>();
+  const { leftLobby: leftLobbyParam, courseId: courseIdParam, courseName: courseNameParam } =
+    useLocalSearchParams<{ leftLobby?: string; courseId?: string; courseName?: string }>();
   const insets = useSafeAreaInsets();
-  
+
+  /**
+   * Educators reach this same screen to host, so the role decides what the
+   * screen offers rather than which screen they land on: `app/(tabs)/games.tsx`
+   * is a one-line re-export of this file, and /game is a root-stack screen, so
+   * both roles share one Game Center.
+   *
+   * Gated on `loading` so a not-yet-resolved profile renders the student layout
+   * for a frame instead of hiding the role-specific controls and then revealing
+   * them. `is_educator` is the legacy flag the custom user model derives from
+   * `role`, and is what app/settings.tsx and app/(tabs)/profile.tsx read.
+   */
+  const { user: currentProfile, loading: profileLoading } = useCurrentUser();
+  const isEducator = !profileLoading
+    && (currentProfile?.role === 'educator'
+      || currentProfile?.role === 'superadmin'
+      || !!currentProfile?.is_educator);
+
+  /**
+   * Set when an educator opens this screen from inside one of their classes
+   * (`/game?courseId=12&courseName=Biology`).
+   *
+   * The picker is then LOCKED to that course: only its quizzes load, and the
+   * room is archived under it so the game shows up in the class's Games tab.
+   * There is deliberately no way to switch courses from here -- a game
+   * archived under the wrong class is worse than no archive at all.
+   *
+   * Parsed with Number.isFinite because expo-router hands back whatever is in
+   * the URL: a hand-typed `?courseId=Biology` would otherwise become NaN and
+   * quietly produce `/ai/quizzes/?course=NaN`.
+   */
+  const parsedCourseId = Number(courseIdParam);
+  const courseId = Number.isFinite(parsedCourseId) && parsedCourseId > 0
+    ? parsedCourseId
+    : null;
+  const courseName = courseId ? (courseNameParam || null) : null;
+
   // --- State ---
   const [selectedMode, setSelectedMode] = useState<string | null>(null);
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
@@ -370,7 +462,12 @@ const lobbyTokenRef = useRef(0);
     setLoadingQuizzes(true);
     try {
       const token = await getToken();
-      const res = await fetch(`${API_BASE_URL}/ai/quizzes/`, {
+      // A course-scoped picker asks the server for exactly that course's
+      // quizzes. `course` is the filter the backend already supports on
+      // /ai/quizzes/ (used by the course Quizzes tab), so there is no new
+      // endpoint here.
+      const query = courseId ? `?course=${courseId}` : '';
+      const res = await fetch(`${API_BASE_URL}/ai/quizzes/${query}`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       if (res.ok) {
@@ -378,7 +475,11 @@ const lobbyTokenRef = useRef(0);
         if (Array.isArray(data)) {
           setQuizzes(data);
           setUsingCachedQuizzes(false);
-          cacheQuizzes(data);
+          if (!courseId) {
+            // Never cache a course-locked list into the shared flat cache, and
+            // never repopulate it from one: see the fallback below.
+            cacheQuizzes(data);
+          }
           // No implicit "pick the first one for you" — the selector has to say
           // which quiz is being played, otherwise the host starts a game on a
           // quiz nobody chose. The guard in startGame reports it instead.
@@ -399,13 +500,25 @@ const lobbyTokenRef = useRef(0);
     }
     // Fall through to the cache. Whatever the student had selected is still
     // valid, so it is left alone rather than thrown away with the list.
+    //
+    // NOT done when courseId is set. The cache is one flat list of every quiz
+    // the user owns or is shared into, with no course on any entry, so falling
+    // back to it would silently widen a picker the host was told was locked to
+    // their class -- and the game would then be archived under that class while
+    // running a quiz from another one. An empty list is the honest answer here.
+    if (courseId) {
+      setQuizzes([]);
+      setUsingCachedQuizzes(false);
+      setLoadingQuizzes(false);
+      return;
+    }
     const cached = getCachedQuizzes();
     if (cached.length > 0) {
       setQuizzes(cached);
       setUsingCachedQuizzes(true);
     }
     setLoadingQuizzes(false);
-  }, []);
+  }, [courseId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -592,12 +705,113 @@ const lobbyTokenRef = useRef(0);
     }
   };
 
+  /**
+   * Creates the online room for `quiz` and adopts it as the screen's current
+   * room, so a later START reuses the code the educator already shared.
+   *
+   * The mode is written to the room document because that document — not this
+   * component — is what joined players read to know what they joined.
+   */
+  const createOnlineRoom = async (quiz: Quiz) => {
+    const token = await getToken();
+    const response = await fetch(`${API_BASE_URL}/game/create/`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        quizId: quiz.id,
+        timePerQuestion: parseInt(timePerQuestion) || 15,
+        teamMode: selectedMode === 'group' ? 'true' : 'false',
+        // Players choose their own team in the lobby. Auto-assign stays
+        // available as a "let the host decide" option, not the default.
+        autoAssignTeams: 'false',
+        ...(selectedMode === 'group' ? { teamCount } : {}),
+        // Files the game under a class. The server ignores this for a student
+        // and 403s another educator, so it is safe to always send.
+        ...(courseId ? { courseId } : {}),
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Failed to create room');
+
+    setRoomCode(data.roomCode);
+    setRoomTopic(data.topic || quiz.title);
+    firestore()
+      .collection('gameRooms')
+      .doc(data.roomCode)
+      .update({ mode: selectedMode === 'group' ? 'group' : 'classic' })
+      .catch(() => {});
+    return { code: data.roomCode as string, topic: data.topic || quiz.title };
+  };
+
+  /**
+   * An educator has no LAN or offline-solo path on this screen, so a dropped
+   * connection cannot fall back to anything: both would end in a hotspot game
+   * the class cannot see. Fail with a reason instead of letting the room-create
+   * fetch throw "Network request failed".
+   *
+   * Returns true when it has already reported the problem, so callers can
+   * `if (blockEducatorOffline()) return;`.
+   *
+   * Only `isOffline` counts, not `usingCachedQuizzes`: that flag also trips
+   * when the quiz list fell back to cache while still online, and an online
+   * educator can host perfectly well off the cached list.
+   */
+  const blockEducatorOffline = () => {
+    if (!isEducator || !isOffline) return false;
+    Alert.alert(
+      'No Connection',
+      'Hosting a game needs an internet connection. Reconnect and try again.',
+    );
+    return true;
+  };
+
+  /**
+   * Hands the educator off to /educator/host-session, which is the screen that
+   * owns the Start and End controls, the TV link, and the teacher-only powerup
+   * pool.
+   *
+   * Deliberately does NOT call /game/start/ the way the student host path does.
+   * Starting here would collapse the invite-then-start window this screen exists
+   * to provide: the educator would land on an already-active room with nobody in
+   * it, and host-session would have nothing left to manage.
+   *
+   * Group mode routes here too rather than to /game/lobby — host-session already
+   * renders team standings and offers to auto-assign anyone who never picked a
+   * team. Routing it to the lobby instead would put the educator in a screen
+   * whose back button returns to '/games', which the root layout then bounces
+   * to /educator/dashboard (app/_layout.tsx:126-128) mid-game.
+   */
+  const startEducatorSession = async () => {
+    const quiz = requirePlaySelections();
+    if (!quiz) return;
+
+    setIsCreatingRoom(true);
+    try {
+      const { code, topic } = roomCode
+        ? { code: roomCode, topic: roomTopic }
+        : await createOnlineRoom(quiz);
+      router.push({
+        pathname: '/educator/host-session',
+        params: { roomCode: code, topic },
+      } as any);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Could not open the host session');
+    } finally {
+      setIsCreatingRoom(false);
+    }
+  };
+
   // 2. Handle Invite Press -> Create Room (if needed) & Show Code Modal
   const handleInvitePress = async () => {
     const quiz = requirePlaySelections();
     if (!quiz) return;
+    if (blockEducatorOffline()) return;
 
-    if (isOffline || usingCachedQuizzes) {
+    if ((isOffline || usingCachedQuizzes) && !isEducator) {
       if (!lanHostRef.current) {
         setLanJoined([]);
         const code = generateRoomCode();
@@ -629,37 +843,8 @@ const lobbyTokenRef = useRef(0);
 
     setIsCreatingRoom(true);
     try {
-      const token = await getToken();
-      const response = await fetch(`${API_BASE_URL}/game/create/`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json', 
-          'Authorization': `Bearer ${token}` 
-        },
-        body: JSON.stringify({
-          quizId: quiz.id,
-          timePerQuestion: parseInt(timePerQuestion) || 15,
-          teamMode: selectedMode === 'group' ? 'true' : 'false',
-          // Players choose their own team in the lobby. Auto-assign stays
-          // available as a "let the host decide" option, not the default.
-          autoAssignTeams: 'false',
-          ...(selectedMode === 'group' ? { teamCount } : {}),
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to create room');
-
-      setRoomCode(data.roomCode);
-      setRoomTopic(data.topic || quiz.title);
-      // Sync host's selected mode to the room doc for joined players
-      firestore()
-        .collection('gameRooms')
-        .doc(data.roomCode)
-        .update({ mode: selectedMode === 'group' ? 'group' : 'classic' })
-        .catch(() => {});
+      await createOnlineRoom(quiz);
       setShowInviteModal(true); // Show the code immediately
-      
     } catch (error: any) {
       Alert.alert("Error", error.message);
     } finally {
@@ -669,6 +854,16 @@ const lobbyTokenRef = useRef(0);
 
   // 3. Handle Start Press -> Start Game & Countdown
   const handleStartPress = async () => {
+    // Educators hand off to host-session instead of starting the game here.
+    // First, because the LAN/offline branch below would otherwise send an
+    // offline educator into a solo game; second, because starting here would
+    // skip the invite-then-start window host-session is built around.
+    if (isEducator) {
+      if (blockEducatorOffline()) return;
+      await startEducatorSession();
+      return;
+    }
+
     const host = lanHostRef.current;
     // If players have joined over LAN, START must always broadcast to them,
     // regardless of the internet/offline state toggling between INVITE and START.
@@ -752,6 +947,7 @@ const lobbyTokenRef = useRef(0);
           teamMode: selectedMode === 'group' ? 'true' : 'false',
           autoAssignTeams: 'false',
           ...(selectedMode === 'group' ? { teamCount: teamCountVal } : {}),
+          ...(courseId ? { courseId } : {}),
         }),
       });
       const data = await response.json();
@@ -1277,43 +1473,9 @@ const lobbyTokenRef = useRef(0);
   const lanHostInfo = getLanHostInfo();
   const showLanHostSlot = isJoinedLan && !!lanHostInfo.name && !lanJoined.some(p => p.name === lanHostInfo.name);
 
-  const gameModes = [
-    {
-      id: 'classic',
-      title: 'CLASSIC BATTLE',
-      description: 'Host or join a room! Compete in real-time quiz battles with friends.',
-      icon: 'game-controller' as const,
-      active: true,
-    },
-    {
-      id: 'group',
-      title: 'GROUP MODE',
-      description: 'Split into teams! Host or join a room and battle team vs team in real-time.',
-      icon: 'people' as const,
-      active: true,
-    },
-    {
-      id: 'flashcards',
-      title: 'SOLO MODE',
-      description: 'Flip through flashcards and master any quiz at your own pace.',
-      icon: 'albums' as const,
-      active: true,
-    },
-    {
-      id: 'time-attack',
-      title: 'TIME ATTACK',
-      description: 'Beat the clock! Answer as many questions as possible in 60 seconds.',
-      icon: 'timer' as const,
-      active: false,
-    },
-    {
-      id: 'solo-practice',
-      title: 'SOLO PRACTICE',
-      description: 'Practice at your own pace. Master any topic with unlimited questions.',
-      icon: 'person' as const,
-      active: false,
-    },
-  ];
+  const gameModes = isEducator
+    ? GAME_MODES.filter(m => EDUCATOR_GAME_MODES.has(m.id))
+    : GAME_MODES;
 
   return (
     <View style={styles.container}>
@@ -1425,7 +1587,9 @@ const lobbyTokenRef = useRef(0);
                 </TouchableOpacity>
             </View>
 
-            {(isOffline || usingCachedQuizzes) && (
+            {/* Educators have neither path on this screen, so the banner would
+                be telling them to expect a solo game they cannot start. */}
+            {!isEducator && (isOffline || usingCachedQuizzes) && (
                 <View style={styles.offlineBanner}>
                     <Ionicons name="cloud-offline-outline" size={14} color={COLORS.warning} style={{ marginRight: 6 }} />
                     <Text style={styles.offlineBannerText}>
@@ -1570,11 +1734,33 @@ const lobbyTokenRef = useRef(0);
                 }
             >
                 <View style={styles.configSection}>
-                    <Text style={styles.configLabel}>SELECT QUIZ</Text>
+                    {/* Makes the lock visible. The host reached this screen from a
+                        class and needs to know the quiz list is that class's, not
+                        all of theirs -- otherwise "only these quizzes" reads as a
+                        bug rather than a guarantee. */}
+                    {courseId && (
+                        <View style={styles.courseScopeBar}>
+                            <Ionicons name="school" size={14} color={COLORS.purplePrimary} />
+                            <Text style={styles.courseScopeText} numberOfLines={1}>
+                                {courseName || 'This class'}
+                            </Text>
+                            <Text style={styles.courseScopeLock}>LOCKED</Text>
+                        </View>
+                    )}
+                    <Text style={styles.configLabel}>
+                        {courseId ? 'SELECT A CLASS QUIZ' : 'SELECT QUIZ'}
+                    </Text>
                     {loadingQuizzes ? (
                         <ActivityIndicator size="small" color={COLORS.purpleLight} />
                     ) : quizzes.length === 0 ? (
-                        <Text style={styles.emptyQuizText}>No quizzes found. Create one in Activities!</Text>
+                        <Text style={styles.emptyQuizText}>
+                            {courseId
+                                // Do not send the host to Activities: this picker
+                                // is locked to one class, and a quiz created there
+                                // is not on this list. Point at the class instead.
+                                ? `This class has no quizzes yet. Create one in ${courseName || 'its Quizzes tab'}.`
+                                : 'No quizzes found. Create one in Activities!'}
+                        </Text>
                     ) : (
                         <View>
                             <TouchableOpacity
@@ -1726,7 +1912,9 @@ const lobbyTokenRef = useRef(0);
           <>
             {/* Row 1: JOIN + INVITE side by side */}
             <View style={styles.bottomBarRow}>
-              {/* JOIN BUTTON — enter a room code */}
+              {/* JOIN BUTTON — enter a room code. Educators only ever host, so
+                  they get INVITE alone and it stretches to fill the row. */}
+              {!isEducator && (
               <TouchableOpacity
                 style={styles.actionBtnJoin}
                 onPress={() => setShowJoinModal(true)}
@@ -1734,6 +1922,7 @@ const lobbyTokenRef = useRef(0);
                 <Ionicons name="enter" size={20} color={COLORS.purplePrimary} style={{marginRight: 8}} />
                 <Text style={styles.actionBtnJoinText}>JOIN</Text>
               </TouchableOpacity>
+              )}
 
               {/* INVITE BUTTON */}
               <TouchableOpacity
@@ -1814,8 +2003,13 @@ const lobbyTokenRef = useRef(0);
             </View>
         </Modal>
 
-        {/* --- JOIN ROOM MODAL --- */}
-        <Modal visible={showJoinModal} animationType="fade" transparent={true}>
+        {/* --- JOIN ROOM MODAL ---
+            The JOIN button above is the only thing that can open this, so for
+            educators it is already unreachable. Gated on the role anyway: the
+            effect that drives LAN discovery hangs off `showJoinModal`, and an
+            educator who somehow landed in here would start scanning the
+            hotspot for a LAN game the moment this rendered. */}
+        <Modal visible={showJoinModal && !isEducator} animationType="fade" transparent={true}>
             <View style={styles.joinModalOverlay}>
                 <KeyboardSafeView
                     style={styles.joinModalKeyboardWrap}
@@ -2345,6 +2539,30 @@ modesScroll: {
     color: 'rgba(255,255,255,0.9)',
     marginBottom: 12,
     letterSpacing: 0.5,
+  },
+  courseScopeBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: COLORS.surfaceDim,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  courseScopeText: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: FONTS.bold,
+    color: COLORS.textPrimary,
+  },
+  courseScopeLock: {
+    fontSize: 9,
+    fontFamily: FONTS.bold,
+    color: COLORS.purplePrimary,
+    letterSpacing: 1,
   },
   quizSelector: {
     flexDirection: 'row',

@@ -17,6 +17,7 @@ cd mobile_app
 npm install
 npx expo start          # dev server
 npm run android         # builds Android (patches gradle first)
+npm run android:release  # release APK -> android/app/build/outputs/apk/release/SAGE.apk
 npm run ios             # iOS build
 npm run web             # web version
 npm run build:web        # production web build -> mobile_app/web-build/
@@ -53,6 +54,7 @@ python manage.py test            # runs Django tests
   - `python manage.py createsuperuser` → role `superadmin` (via `SageUserManager`)
   - Superadmin interface: `POST /api/users/superadmin/users/` with `role`; for `role='superadmin'` it also auto-provisions a **Firebase Auth account** (email+password) so the user can sign in on the app immediately (offline/duplicate → warning, still creates the Django user)
 - **Mobile login is Firebase-only**: the app calls `signInWithEmailAndPassword` then exchanges the ID token at `/api/users/firebase-login/` (matches Django user by `firebase_uid`, falling back to email). A backend-created user without a Firebase account can be linked by creating a Firebase Auth user with the same email (or by being created via the superadmin interface, which provisions it automatically)
+- **Email OTP 2FA**: `firebase-login` with `sign_in_provider == 'password'` responds with an OTP challenge (`{otp_required, challenge_token, email, expires_in: 300}`) and emails a 6-digit code (`users/otp.py`, Gmail SMTP in `settings.py:222`); the client finishes at `/api/users/firebase-login/verify-otp/` (`FirebaseLoginVerifyOtpView`). Google sign-ins skip OTP. Gated by `OTP_ENABLED` (default **on**; set `OTP_ENABLED=0` in `.env` to disable — GitHub the meager trick of `EMAIL_BACKEND=console` prints codes in the runserver console). Login/verify are throttled by `OtpThrottle` (`otp` scope, 20/hour)
 - **API endpoints**:
   - `/api/users/register/`, `/api/users/login/` (JWT), `/api/users/token/refresh/`
   - `/api/users/me/` (current user profile, requires JWT)
@@ -101,5 +103,10 @@ python manage.py test            # runs Django tests
 - Django settings require `DJANGO_SECRET_KEY` in `.env` or server won't start
 - `backend_api/core/db.sqlite3` is git-ignored (untracked). Prod data lives in AWS RDS via `DATABASE_URL`; local dev builds a fresh SQLite with `migrate`
 - `Android` build command runs `scripts/patch-gradle.js` before `expo run:android` — patches wrapper to Gradle 8.13
+- **`android/` is prebuild-owned and git-ignored — never hand-edit it.** Anything you put in `android/app/build.gradle`, `AndroidManifest.xml`, the gradle wrapper, etc. is reverted by the next `npx expo prebuild`, silently. That is exactly how a stale Sept-20 launcher icon survived weeks of builds (`expo run:android` skips prebuild when `android/` exists). Patch it from a script instead; `scripts/patch-gradle.js` is the existing mechanism (Gradle 8.13 wrapper + the `SAGE.apk` output name).
+- The APK is named **`SAGE.apk`**, not `app-release.apk`. AGP's default would be `${moduleDir}-${variant}.apk` because the Gradle module is `:app`; `patch-gradle.js` injects an `applicationVariants` block to override it. Run the release build via `npm run android:release` (it patches first) — bare `gradlew.bat assembleRelease` skips the patch and produces `app-release.apk` again. Debug and release land in separate directories (`outputs/apk/debug/`, `outputs/apk/release/`), so the shared name is safe.
+- Prebuild also bakes `backgroundColor` into `splashscreen_logo.png`. Re-run `python scripts/generate-splash.py` after any prebuild to restore the transparent wordmark. Same pattern for the themed-icon layer: `python scripts/generate-icon-monochrome.py` regenerates `android-icon-monochrome.png` from the foreground's alpha.
+- Icons are generated, not hand-edited: `generate-splash.py` (wordmark) and `generate-icon-monochrome.py` (Android 13+ themed-icon silhouette). Change the artwork in `assets/images/`, re-run the script, then prebuild.
+- `mobile_app/android/res/` and `mobile_app/assets/res/` are **orphans** — no build reads them (`git grep "assets/res"` → nothing), and the unanchored `android/` + `ios/` patterns in `mobile_app/.gitignore:11-12` keep them untracked. The live trees are `assets/images/*.png` → prebuild → `android/app/src/main/res/mipmap-*/`. Don't copy icons there expecting them to ship.
 - Root `games.tsx` is dead code; modify `mobile_app/app/game/` instead
 - No test framework exists for the mobile app (no Jest config found)

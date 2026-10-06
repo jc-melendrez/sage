@@ -5,16 +5,39 @@ import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, FONTS, RADIUS } from '@/constants/educatorTheme';
 
-export function HostGameCard() {
+interface HostGameCardProps {
+  /**
+   * Locks the game to one course. When set, the Game Center's quiz picker loads
+   * only this course's quizzes and the room is archived under it, so the game
+   * shows up in that class's Games tab.
+   *
+   * Omit it for the standalone card (host from anywhere, no course history).
+   */
+  courseId?: number;
+  courseName?: string;
+}
+
+export function HostGameCard({ courseId, courseName }: HostGameCardProps) {
   const router = useRouter();
   const scale = useRef(new Animated.Value(1)).current;
+
+  const openGameCenter = () => {
+    // Passed as query params rather than a separate screen: /game is already
+    // the one Game Center both roles share, and duplicating it for the
+    // course-scoped case is how the two would drift.
+    router.push(
+      courseId
+        ? ({ pathname: '/game', params: { courseId: String(courseId), courseName } } as any)
+        : ('/game' as any),
+    );
+  };
 
   return (
     <Animated.View style={{ transform: [{ scale }] }}>
       <TouchableOpacity
         style={styles.card}
         activeOpacity={0.85}
-        onPress={() => router.push('/educator/host-game' as any)}
+        onPress={openGameCenter}
         onPressIn={() => Animated.spring(scale, { toValue: 0.96, friction: 8, tension: 120, useNativeDriver: true }).start()}
         onPressOut={() => Animated.spring(scale, { toValue: 1, friction: 6, tension: 100, useNativeDriver: true }).start()}
       >
@@ -29,7 +52,11 @@ export function HostGameCard() {
           </View>
           <View style={styles.body}>
             <Text style={styles.title}>Host Live Game</Text>
-            <Text style={styles.sub}>Start a live quiz battle and watch students compete in real time</Text>
+            <Text style={styles.sub}>
+              {courseId
+                ? `Battle your class on ${courseName || 'one of its quizzes'} — saved to this course`
+                : 'Start a live quiz battle and watch students compete in real time'}
+            </Text>
           </View>
           <View style={styles.arrow}>
             <Ionicons name="arrow-forward" size={18} color="white" />

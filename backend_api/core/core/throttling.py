@@ -18,7 +18,7 @@ and hardcoding ``scope`` on each class attaches identically to function-based
 views (``generate_lesson``, ``user_recommendations``) and class-based views.
 """
 
-from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
+from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle, UserRateThrottle
 
 
 class _ScopedUserThrottle(UserRateThrottle):
@@ -79,16 +79,26 @@ class AIGameThrottle(_ScopedUserThrottle):
     scope = 'ai_game'
 
 
-class OtpThrottle(_ScopedUserThrottle):
-    """OTP login endpoints.
+class OtpThrottle(SimpleRateThrottle):
+    """POST /api/users/firebase-login/ and .../verify-otp/ -- the email-OTP flow.
 
-    The ``otp`` rate has been configured in DEFAULT_THROTTLE_RATES since it
-    was introduced but no view ever declared it, so it did nothing. Attempts
-    are separately capped by LoginOtpChallenge.MAX_ATTEMPTS; this bounds the
-    request rate (and therefore the SMTP traffic) for a single phone number.
+    Both endpoints are anonymous (AllowAny -- no JWT exists yet), so
+    ``UserRateThrottle`` would skip them entirely: its ``get_cache_key``
+    returns ``None`` for ``AnonymousUser``. Keyed by user pk when somehow
+    authenticated, client IP otherwise (the normal case), so the ``otp``
+    rate (20/hour) bounds one client's request rate and therefore its SMTP
+    traffic. Wrong-code attempts are separately capped by
+    LoginOtpChallenge.MAX_ATTEMPTS.
     """
 
     scope = 'otp'
+
+    def get_cache_key(self, request, view):
+        if request.user.is_authenticated:
+            ident = f'u{request.user.pk}'
+        else:
+            ident = self.get_ident(request)
+        return self.cache_format % {'scope': self.scope, 'ident': ident}
 
 
 class TvLeaderboardThrottle(AnonRateThrottle):

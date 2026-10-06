@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import unittest
 from datetime import date, timedelta
 from unittest.mock import Mock, patch
 
@@ -1019,7 +1018,7 @@ class GamificationEndpointTests(TestCase):
         self.assertEqual(res.status_code, 401)
 
 
-@unittest.skip('OTP challenge is temporarily disabled in FirebaseLoginView (dev skip); re-enable when OTP is restored')
+@override_settings(OTP_ENABLED=True)
 class FirebaseLoginOtpTests(APITestCase):
     """
     Email/password logins must go through an emailed OTP (2FA-style);
@@ -1027,6 +1026,10 @@ class FirebaseLoginOtpTests(APITestCase):
     """
 
     def setUp(self):
+        # The otp throttle bucket is keyed by scope+IP in the shared cache and
+        # survives across tests in the run; without a reset the class trips
+        # 20/hour partway through.
+        cache.clear()
         self.client = APIClient()
         self.user = User.objects.create_user(
             username='otpuser',

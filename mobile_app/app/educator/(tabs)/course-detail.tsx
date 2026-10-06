@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -14,23 +14,26 @@ import {
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
+import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { COLORS, FONTS, RADIUS, tint } from '@/constants/educatorTheme';
-import { EducatorHeader } from '@/components/educator/EducatorHeader';
+import { EducatorHeader, HeaderAnchor } from '@/components/educator/EducatorHeader';
+import { CourseOptionsMenu, CourseOption } from '@/components/educator/CourseOptionsMenu';
 import { SectionHeader, EmptyState, Pill, FilterChip } from '@/components/educator/EducatorPrimitives';
 import { QuizDetailModal } from '@/components/educator/QuizDetailModal';
 import { QuizOverflowButton, QuizOverflowMenu } from '@/components/educator/QuizOverflowMenu';
 import { QuizEditorSheet } from '@/components/educator/QuizEditorSheet';
 import { QuizGeneratorSheet } from '@/components/educator/QuizGeneratorSheet';
+import { HostGameCard } from '@/components/educator/HostGameCard';
+import { CourseGamesSection } from '@/components/educator/CourseGamesSection';
 import { TopicOverflowButton, TopicOverflowMenu } from '@/components/educator/TopicOverflowMenu';
-import { getCoursePath, createTopic, updateTopic, deleteTopic, createNode, generateTopic, GenerateTopicResponse, getCourseLeaderboard, CourseLeaderboard, LeaderboardSort, getCourseClassChat, createCourseClassChat, deleteCourseClassChat, CourseClassChat } from '@/services/courseService';
+import { getCoursePath, createTopic, updateTopic, deleteTopic, createNode, generateTopic, GenerateTopicResponse, getCourseLeaderboard, CourseLeaderboard, getCourseClassChat, createCourseClassChat, deleteCourseClassChat, CourseClassChat, getCourse, CourseRoster } from '@/services/courseService';
 import { getQuizzes, Quiz } from '@/services/quizService';
 import { getCourseActivities, createActivity, deleteActivity, updateActivity, ClassActivity, ActivityKind } from '@/services/activityService';
 import { describeDue } from '@/services/dueDate';
 import { pickDocument, describeFileError, SUPPORTED_LABEL, type PickedDocument } from '@/services/fileUpload';
 import { CoursePathTopic, LearningNode, NodeType, NODE_TYPE_CONFIG } from '@/types/learning';
-import CourseLeaderboardView from '@/components/courses/CourseLeaderboard';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -66,7 +69,7 @@ function countNodesByType(nodes: LearningNode[]) {
 
 type GeneratedNode = GenerateTopicResponse['nodes'][number];
 
-type SectionKey = 'topics' | 'quizzes' | 'activities';
+type SectionKey = 'topics' | 'quizzes' | 'activities' | 'games';
 
 const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: 'topics', label: 'Topics' },
@@ -96,10 +99,10 @@ export default function CourseDetailScreen() {
   const [editingQuiz, setEditingQuiz] = useState<Quiz | null>(null);
   const [generatingQuiz, setGeneratingQuiz] = useState(false);
 
-  // Class leaderboard
+  // Class leaderboard. Only `total_students` is read here (see studentTotal
+  // below) to render the "N/M submitted" counters; the ranking itself lives on
+  // the course-leaderboard screen, which owns its own sort.
   const [leaderboard, setLeaderboard] = useState<CourseLeaderboard | null>(null);
-  const [leaderboardLoading, setLeaderboardLoading] = useState(true);
-  const [leaderboardSort, setLeaderboardSort] = useState<LeaderboardSort>('points');
 
   // Reused as the denominator for "N/M attempted" on quizzes and tasks.
   const studentTotal = leaderboard?.total_students ?? 0;
@@ -153,6 +156,20 @@ export default function CourseDetailScreen() {
   const [chat, setChat] = useState<CourseClassChat | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
 
+  // Roster. Only the count and join code are used here — the per-student
+  // detail lives on the Students screen, which re-reads the same endpoint.
+  const [roster, setRoster] = useState<CourseRoster | null>(null);
+
+  // Course options menu (header three-dot). Named `optionsAnchor` because
+  // `menuAnchor` above already belongs to the per-quiz menu.
+  const [optionsAnchor, setOptionsAnchor] = useState<HeaderAnchor | null>(null);
+  const [codeCopied, setCodeCopied] = useState(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+  }, []);
+
   const loadTopics = useCallback(async () => {
     try {
       const data = await getCoursePath(cid);
@@ -182,33 +199,29 @@ export default function CourseDetailScreen() {
     }
   }, [cid]);
 
-  const onSortLeaderboard = useCallback(async (sort: LeaderboardSort) => {
-    setLeaderboardSort(sort);
-    try {
-      const data = await getCourseLeaderboard(cid, sort);
-      setLeaderboard(data);
-    } catch {
-      // non-fatal — leaderboard section shows empty
-    }
-  }, [cid]);
-
   const loadLeaderboard = useCallback(async () => {
-    setLeaderboardLoading(true);
+    // No sort param: 'points' is the server default and the only field read
+    // from this response is `total_students`, which is sort-independent.
     try {
-      const data = await getCourseLeaderboard(cid, leaderboardSort);
-      setLeaderboard(data);
+      setLeaderboard(await getCourseLeaderboard(cid));
     } catch {
       setLeaderboard(null);
-    } finally {
-      setLeaderboardLoading(false);
     }
-  }, [cid, leaderboardSort]);
+  }, [cid]);
 
   const loadChat = useCallback(async () => {
     try {
       setChat(await getCourseClassChat(cid));
     } catch {
       // non-fatal — the chat button just falls back to "not created yet"
+    }
+  }, [cid]);
+
+  const loadRoster = useCallback(async () => {
+    try {
+      setRoster(await getCourse(cid));
+    } catch {
+      // non-fatal — the Students row just falls back to "no students yet"
     }
   }, [cid]);
 
@@ -260,13 +273,101 @@ export default function CourseDetailScreen() {
     );
   }, [cid]);
 
+  // --- Course options menu ---
+
+  const closeOptionsMenu = useCallback(() => setOptionsAnchor(null), []);
+
+  const toggleOptionsMenu = useCallback((anchor: HeaderAnchor) => {
+    setOptionsAnchor((current) => (current ? null : anchor));
+  }, []);
+
+  const openStudents = useCallback(() => {
+    router.push({
+      pathname: '/educator/(tabs)/course-students',
+      params: { courseId: String(cid), courseName: courseName || '' },
+    } as any);
+  }, [router, cid, courseName]);
+
+  const openLeaderboard = useCallback(() => {
+    router.push({
+      pathname: '/educator/(tabs)/course-leaderboard',
+      params: { courseId: String(cid), courseName: courseName || '' },
+    } as any);
+  }, [router, cid, courseName]);
+
+  const copyJoinCode = useCallback(async () => {
+    if (!roster?.join_code) return;
+    await Clipboard.setStringAsync(roster.join_code);
+    setCodeCopied(true);
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => setCodeCopied(false), 1800);
+  }, [roster]);
+
+  /**
+   * Opens the shared Game Center already locked to this course.
+   *
+   * The course id and name ride as query params instead of a separate screen:
+   * /game is the one Game Center educators and students already share, and a
+   * course-specific clone is how the two would drift. The name is display-only —
+   * the server is what enforces that only this course's quizzes load and that
+   * the room is filed under this course.
+   */
+  const openHostGame = useCallback(() => {
+    router.push({
+      pathname: '/game',
+      params: { courseId: String(cid), courseName: courseName || undefined },
+    } as any);
+  }, [router, cid, courseName]);
+
+  const openGameHistory = useCallback(() => {
+    setSection('games');
+  }, []);
+
+  const courseOptions = useMemo<CourseOption[]>(() => {
+    const options: CourseOption[] = [
+      { key: 'students', label: 'Student List', icon: 'people-outline', onPress: openStudents },
+      { key: 'ranks', label: 'Ranks', icon: 'podium-outline', onPress: openLeaderboard },
+      // Games live in their own tab but are reachable here too: the three-dot
+      // menu is the one always-present affordance on this screen, and a teacher
+      // looking for "where are my games" should not have to scan the tabs.
+      { key: 'host-game', label: 'Host Game', icon: 'game-controller-outline', onPress: openHostGame },
+      { key: 'game-history', label: 'Game history', icon: 'trophy-outline', onPress: openGameHistory },
+    ];
+
+    // The copy row is only meaningful once a join code is known; a failed
+    // roster fetch must not leave a dead button in the menu.
+    if (roster?.join_code) {
+      options.push({
+        key: 'copy-code',
+        label: 'Copy join code',
+        icon: 'copy-outline',
+        onPress: copyJoinCode,
+      });
+    }
+
+    // Also reachable by long-pressing the chat icon, which is undiscoverable —
+    // this is the labelled path. The shortcut stays.
+    if (chat?.has_class_chat) {
+      options.push({
+        key: 'remove-chat',
+        label: 'Remove class chat',
+        icon: 'trash-outline',
+        onPress: removeChat,
+        destructive: true,
+      });
+    }
+
+    return options;
+  }, [openStudents, openLeaderboard, openHostGame, openGameHistory, roster, copyJoinCode, chat, removeChat]);
+
   const loadAll = useCallback(() => {
     loadTopics();
     loadQuizzes();
     loadActivities();
     loadLeaderboard();
     loadChat();
-  }, [loadTopics, loadQuizzes, loadActivities, loadLeaderboard, loadChat]);
+    loadRoster();
+  }, [loadTopics, loadQuizzes, loadActivities, loadLeaderboard, loadChat, loadRoster]);
 
   useFocusEffect(useCallback(() => { loadAll(); }, [loadAll]));
 
@@ -646,19 +747,35 @@ export default function CourseDetailScreen() {
   };
 
   const totalNodes = topics.reduce((sum, t) => sum + t.nodes.length, 0);
+  const studentCount = roster?.students?.length ?? roster?.student_count ?? null;
 
   return (
     <View style={styles.container}>
       <EducatorHeader
         title={courseName || 'Course'}
-        subtitle={`${topics.length} topic${topics.length === 1 ? '' : 's'} · ${totalNodes} node${totalNodes === 1 ? '' : 's'}`}
+        /* Doubles as the copy confirmation. The menu closes on tap, so a
+           label swap inside it would never be seen — the only reliable
+           confirmation surface is the header. */
+        subtitle={codeCopied
+          ? 'Join code copied to clipboard'
+          : [
+            `${topics.length} topic${topics.length === 1 ? '' : 's'} · ${totalNodes} node${totalNodes === 1 ? '' : 's'}`,
+            studentCount === null ? null : `${studentCount} student${studentCount === 1 ? '' : 's'}`,
+          ].filter(Boolean).join(' · ')}
         showBack
         rightIcon="add"
         onRightPress={() => {
           if (section === 'quizzes') openQuizGenerator();
           else if (section === 'activities') setActVisible(true);
           else if (section === 'topics') openAddTopic();
+          // The only thing you can add to a class's game history is another
+          // game. Every other branch above maps the + to that section's own
+          // creation flow, so leaving this one dead would read as a broken
+          // button rather than as "nothing to add".
+          else if (section === 'games') openHostGame();
         }}
+        menuLabel="Course options"
+        onMenuPress={toggleOptionsMenu}
         secondaryRightIcon="chatbubbles-outline"
         secondaryRightLabel="Class chat"
         secondaryRightHint={
@@ -769,6 +886,11 @@ export default function CourseDetailScreen() {
         {section === 'quizzes' && (
           <>
             <SectionHeader title="Quizzes" actionLabel="Generate" onAction={openQuizGenerator} />
+            {/* Above the list, not in the header: hosting needs a quiz to have
+                happened first, so this doubles as the answer to "no games yet". */}
+            <View style={{ marginBottom: 16 }}>
+              <HostGameCard courseId={cid} courseName={courseName} />
+            </View>
             {quizzes.length > 0 ? (
               <View style={{ gap: 12 }}>
                 {quizzes.map((quiz) => (
@@ -951,6 +1073,8 @@ export default function CourseDetailScreen() {
             )}
           </>
         )}
+
+        {section === 'games' && <CourseGamesSection courseId={cid} courseName={courseName} />}
 
 </ScrollView>
 
@@ -1383,6 +1507,16 @@ export default function CourseDetailScreen() {
         quiz={editingQuiz}
         onClose={() => setEditingQuiz(null)}
         onSaved={loadQuizzes}
+      />
+
+      {/* Mounted once, at the screen root and outside the ScrollView — see
+          CourseOptionsMenu's note on why the dropdown cannot live in the tree
+          it is anchored from. */}
+      <CourseOptionsMenu
+        open={!!optionsAnchor}
+        anchor={optionsAnchor}
+        options={courseOptions}
+        onClose={closeOptionsMenu}
       />
     </View>
   );

@@ -56,6 +56,8 @@ urlpatterns = [
     # --- Class Activities ---
     path('courses/<int:course_id>/activities/', views.CourseActivitiesView.as_view(), name='course_activities'),
     path('courses/<int:course_id>/leaderboard/', views.CourseLeaderboardView.as_view(), name='course_leaderboard'),
+    # Durable archive of the games hosted for this course (GameRoom rows).
+    path('courses/<int:course_id>/games/', views.CourseGamesView.as_view(), name='course_games'),
     path('activities/', views.MyClassActivitiesView.as_view(), name='my_activities'),
     path('activities/<int:activity_id>/', views.ClassActivityDetailView.as_view(), name='activity_detail'),
 

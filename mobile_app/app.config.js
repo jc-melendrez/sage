@@ -67,7 +67,11 @@ if (!iosGoogleServices.exists) {
 
 module.exports = {
   expo: {
-    name: "SAGE Learning",
+    // The launcher/drawer label. Prebuild writes this into
+    // android/app/src/main/res/values/strings.xml as app_name. Keep it in
+    // sync with the "SAGE" wordmark -- do not spell it out as "SAGE Learning",
+    // it gets truncated next to the icon.
+    name: "SAGE",
     slug: "SAGE-Learning",
     version: "1.0.0",
     // OTA updates are keyed to the native app version, so an update published
@@ -91,14 +95,21 @@ module.exports = {
       bundleIdentifier: "com.sage.learning",
       googleServicesFile: iosGoogleServices.relativePath,
       infoPlist: {
-        NSLocalNetworkUsageDescription: "SAGE Learning uses your local network so nearby phones can join offline multiplayer games."
+        NSLocalNetworkUsageDescription: "SAGE uses your local network so nearby phones can join offline multiplayer games."
       }
     },
     android: {
       adaptiveIcon: {
+        // backgroundImage is a flat white PNG, and it WINS over backgroundColor --
+        // the launcher gets white behind the sheep, which is the intended look.
+        // Do not delete backgroundImage expecting backgroundColor to take over;
+        // that swap is what the stale Sept-20 prebuild left on the device.
         backgroundColor: "#7C3AED",
         foregroundImage: "./assets/images/android-icon-foreground.png",
         backgroundImage: "./assets/images/android-icon-background.png",
+        // White silhouette derived from the foreground's alpha by
+        // scripts/generate-icon-monochrome.py -- Android 13+ tints this layer,
+        // so it must be single-colour or themed icons render as a muddy blob.
         monochromeImage: "./assets/images/android-icon-monochrome.png"
       },
       edgeToEdgeEnabled: true,
@@ -141,21 +152,21 @@ module.exports = {
       [
         "expo-image-picker",
         {
-          "photosPermission": "SAGE Learning lets you attach photos to study group chats.",
-          "cameraPermission": "SAGE Learning uses the camera so you can attach photos to study group chats."
+          "photosPermission": "SAGE lets you attach photos to study group chats.",
+          "cameraPermission": "SAGE uses the camera so you can attach photos to study group chats."
         }
       ],
       [
         "expo-media-library",
         {
-          "photosPermission": "SAGE Learning lets you save images you download in chats to your photo library.",
-          "savePhotosPermission": "SAGE Learning lets you save images you download in chats to your photo library."
+          "photosPermission": "SAGE lets you save images you download in chats to your photo library.",
+          "savePhotosPermission": "SAGE lets you save images you download in chats to your photo library."
         }
       ],
       [
         "expo-splash-screen",
         {
-          // The "Sage" wordmark. Rendered to this file by
+          // The "SAGE" wordmark. Rendered to this file by
           // scripts/generate-splash.py -- re-run that script rather than
           // editing the PNG by hand.
           "image": "./assets/images/splash-icon.png",
@@ -167,10 +178,10 @@ module.exports = {
           "android": {
             // Smaller than iOS on purpose. Android 12+ masks
             // windowSplashScreenAnimatedIcon into a circle covering the inner
-            // 2/3 of its 240dp icon window, so anything wider than ~170dp gets
-            // its ends clipped off. 170 keeps the whole wordmark inside that
-            // circle with a few dp to spare.
-            "imageWidth": 170
+            // 2/3 of its 240dp icon window, so the wordmark's corners have to
+            // stay inside that 160dp circle. Keep this equal to the
+            // mask-limited value printed by scripts/generate-splash.py.
+            "imageWidth": 174
           },
           "ios": {
             // No mask on iOS, so the wordmark can use the full 200pt.

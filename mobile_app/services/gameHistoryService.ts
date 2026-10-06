@@ -1,0 +1,81 @@
+import { apiCall } from './apiClient';
+import type { ActivityResults } from '@/components/ActivityResultsView';
+
+/**
+ * A hosted game, as archived by the backend's GameRoom rows.
+ *
+ * The Firestore room is the live state and is keyed only by room code, so it
+ * cannot answer "which games did this class play" and loses `finishedAt`
+ * entirely on a rematch. This list is the durable history instead, and it is
+ * also the only place a classic game's results survive: they are written onto
+ * each *player's* activity row, never onto the room.
+ */
+export type CourseGameStatus = 'waiting' | 'active' | 'finished';
+
+export interface CourseGame {
+  id: number;
+  room_code: string;
+  topic: string;
+  /** 'classic' | 'group'. Mirrors the room's game mode, not Firestore's. */
+  mode: string;
+  team_mode: boolean;
+  question_count: number;
+  time_per_question: number;
+  /** Competitors only. An educator host runs the room and is not counted. */
+  player_count: number;
+  /** The host is recorded here because an educator host is off the standings. */
+  host_name: string;
+  status: CourseGameStatus;
+  /**
+   * Settled results in exactly the shape Recent Activity stores, so both feed
+   * the same ActivityResultsView. Null while the game is still running.
+   */
+  final_payload: ActivityResults | null;
+  /**
+   * Round one of a rematched room, preserved rather than overwritten. Null
+   * until the host hits Rematch at least once.
+   */
+  previous_round: ActivityResults | null;
+  previous_round_finished_at: string | null;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface CourseGamesResponse {
+  course_id: number;
+  course_name: string;
+  /** Newest first, including in-progress rooms so the tab can show them live. */
+  games: CourseGame[];
+}
+
+/**
+ * Games hosted for a course, newest first.
+ *
+ * Educator-only on the server: these are the educator's own hosted games, so a
+ * student gets a 403 rather than a permanently empty list.
+ */
+export async function getCourseGames(courseId: number): Promise<CourseGamesResponse> {
+  return apiCall<CourseGamesResponse>(`/users/courses/${courseId}/games/`);
+}
+
+/** True for a game still running, which is what the row's status pill keys off. */
+export function isGameLive(game: CourseGame): boolean {
+  return game.status === 'waiting' || game.status === 'active';
+}
+
+/**
+ * The round whose results are on display: the current one, or the earlier one
+ * when a rematch has since restarted the room and wiped `final_payload`.
+ */
+export function resultsFor(
+  game: CourseGame,
+  round: 'current' | 'previous' = 'current',
+): ActivityResults | null {
+  return round === 'previous' ? game.previous_round : game.final_payload;
+}
+
+/** How many rounds of results this game has, for the "Round 1 of 2" affordance. */
+export function roundCount(game: CourseGame): number {
+  return (game.final_payload ? 1 : 0) + (game.previous_round ? 1 : 0);
+}

@@ -6,6 +6,7 @@
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "node ./scripts/patch-gradle.js && expo run:android",
+    "android:release": "node ./scripts/patch-gradle.js && cd android && gradlew.bat assembleRelease",
     "ios": "expo run:ios",
     "web": "expo start --web",
     "build:web": "node ./scripts/build-web.js",

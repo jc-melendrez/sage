@@ -6,6 +6,7 @@ import time
 import requests
 import re
 from datetime import timedelta
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -18,6 +19,11 @@ from rest_framework.views import APIView
 from rest_framework.exceptions import Throttled
 from .models import User, Badge, Recommendation, Session, Activity, StudyGroup, GroupMessage, Course, LessonProgress, RoleChangeLog, Topic, LearningNode, NodeProgress, ClassActivity, CourseScore, TaskSubmission, TaskSubmissionFile, ClassActivityAttachment, Announcement
 from ai_assistant.models import Quiz, QuizAttempt, QuizGroupShare
+# GameRoom is the durable archive of hosted games (see game/models.py). Imported
+# at module level like the other models: game/models.py imports nothing from
+# users at import time (its course FK is a lazy string reference), so this is
+# not a circular import.
+from game.models import GameRoom
 from ai_assistant.quiz_package import build_quiz_package
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserProfileSerializer, AnnouncementSerializer
@@ -38,6 +44,7 @@ from core.throttling import (
     AILessonThrottle,
     AIRecommendThrottle,
     AITopicThrottle,
+    OtpThrottle,
 )
 from .ai_usage import limit_setting, charge, record_tokens
 from .gamification import (
@@ -95,6 +102,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 class FirebaseLoginView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [OtpThrottle]
 
     def post(self, request):
         id_token = request.data.get('id_token')
@@ -189,27 +197,24 @@ class FirebaseLoginView(APIView):
 
         # 3. Email/password sign-ins require an emailed OTP before a JWT is
         #    issued (2FA-style). Google sign-ins skip OTP — Google has already
-        #    verified the account.
-        
-        # TEMPORARY DEV FIX: Skip OTP for all users
-        if sign_in_provider == 'password':
-            # COMMENTED OUT FOR DEVELOPMENT:
-            # try:
-            #     challenge = create_otp_challenge(user)
-            # except Exception:
-            #     from .models import LoginOtpChallenge
-            #     LoginOtpChallenge.objects.filter(user=user, verified=False).delete()
-            #     return Response(
-            #         {"error": "Could not send the verification code. Please try again."},
-            #         status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            #     )
-            # return Response({
-            #     "otp_required": True,
-            #     "challenge_token": str(challenge.challenge_token),
-            #     "email": user.email,
-            #     "expires_in": 300,
-            # })
-            pass # Skip the OTP challenge entirely
+        #    verified the account. Gated by OTP_ENABLED so local dev without
+        #    SMTP (OTP_ENABLED=0 in .env) can skip straight to the JWT.
+        if sign_in_provider == 'password' and settings.OTP_ENABLED:
+            try:
+                challenge = create_otp_challenge(user)
+            except Exception:
+                from .models import LoginOtpChallenge
+                LoginOtpChallenge.objects.filter(user=user, verified=False).delete()
+                return Response(
+                    {"error": "Could not send the verification code. Please try again."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            return Response({
+                "otp_required": True,
+                "challenge_token": str(challenge.challenge_token),
+                "email": user.email,
+                "expires_in": 300,
+            })
 
 # 3.5 A user may have been enrolled in a course (or created by an admin)
         # before they ever signed in, so they are in the class chat's Django
@@ -248,6 +253,7 @@ class FirebaseLoginVerifyOtpView(APIView):
     referenced by `challenge_token` and issue the Django JWT pair.
     """
     permission_classes = [AllowAny]
+    throttle_classes = [OtpThrottle]
 
     def post(self, request):
         challenge_token = request.data.get('challenge_token')
@@ -318,6 +324,10 @@ class FirebaseLoginVerifyOtpView(APIView):
                 {"error": "This account is disabled."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+
+        # Same class-chat backfill FirebaseLoginView runs before issuing a JWT:
+        # the OTP path returned early, so this is the first chance to grant it.
+        _backfill_class_chat_access(user)
 
         refresh = SAGERefreshToken.for_user(user)
         return Response(FirebaseLoginView._auth_payload(user, refresh))
@@ -2142,6 +2152,83 @@ class CourseLeaderboardView(APIView):
             'entries': ranked,
             'your_rank': your_rank,
             'total_students': len(ranked),
+        })
+
+
+def _serialize_game_room(room):
+    """Flat, camelCase-safe dict for one archived game.
+
+    Deliberately hand-built rather than a ModelSerializer: `final_payload` is an
+    arbitrary JSON blob, and the app renders it with the same
+    ActivityResultsView it already uses for Recent Activity, so the payload is
+    passed straight through untouched.
+    """
+    return {
+        'id': room.id,
+        'room_code': room.room_code,
+        'topic': room.topic,
+        'mode': room.mode,
+        'team_mode': room.team_mode,
+        'question_count': room.question_count,
+        'time_per_question': room.time_per_question,
+        'player_count': room.player_count,
+        'host_name': room.host_name,
+        'status': room.status,
+        'final_payload': room.final_payload,
+        # Round one of a rematched room. Present only after a rematch, so the
+        # client can offer "previous round" without a second fetch.
+        'previous_round': room.previous_round,
+        'previous_round_finished_at': (
+            room.previous_round_finished_at.isoformat()
+            if room.previous_round_finished_at else None
+        ),
+        'created_at': room.created_at.isoformat() if room.created_at else None,
+        'started_at': room.started_at.isoformat() if room.started_at else None,
+        'finished_at': room.finished_at.isoformat() if room.finished_at else None,
+    }
+
+
+class CourseGamesView(APIView):
+    """Games hosted for this course, newest first.
+
+    Reads the GameRoom archive rather than Firestore: rooms are addressed only
+    by document id (the room code), so Firestore cannot answer "which games did
+    this class play" without a composite index deployed by hand, and classic
+    results are never written to the room document at all.
+
+    Educator-only, unlike the leaderboard: these are the teacher's own hosted
+    games, and `GameRoom.owner` is the educator, so a student would only ever
+    see an empty list.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, course_id):
+        try:
+            course = Course.objects.get(id=course_id)
+        except (Course.DoesNotExist, ValueError):
+            return Response({"error": "Course not found"}, status=404)
+
+        if request.user != course.educator:
+            return Response(
+                {"error": "Only the course educator can view this game's history"},
+                status=403,
+            )
+
+        # `owner` as well as `course`: a room whose course was reassigned (the FK
+        # is SET_NULL, but a repaired/migrated row could still name a course the
+        # current owner does not teach) must not surface in the wrong class.
+        rooms = GameRoom.objects.filter(
+            course=course, owner=request.user,
+        ).order_by('-created_at')
+
+        return Response({
+            'course_id': course.id,
+            'course_name': course.name,
+            # Every status, including waiting/active, so the tab can show a live
+            # room alongside finished history rather than only revealing it once
+            # the game is over.
+            'games': [_serialize_game_room(r) for r in rooms],
         })
 
 

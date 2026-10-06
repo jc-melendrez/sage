@@ -204,7 +204,7 @@ export default function SettingsScreen() {
               <Text style={styles.menuItemValue}>{APP_VERSION}</Text>
             </View>
           </View>
-          <Text style={styles.footerText}>SAGE Learning — built for curious minds.</Text>
+          <Text style={styles.footerText}>SAGE — built for curious minds.</Text>
         </View>
       </ScrollView>
     </View>

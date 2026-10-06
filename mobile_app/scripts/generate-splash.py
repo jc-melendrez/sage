@@ -2,7 +2,7 @@
 """
 Generate the SAGE splash wordmark assets.
 
-Renders the word "Sage" in Montserrat ExtraBold -- the same family and weight the
+Renders the word "SAGE" in Montserrat ExtraBold -- the same family and weight the
 app already loads at runtime (constants/theme.ts `fontFamily.extraBold`) -- and
 writes it to:
 
@@ -24,7 +24,7 @@ The generated drawables keep the same 288dp-square canvas and the same
 @expo/prebuild-config's withAndroidSplashImages.js performs, so a future
 `npx expo prebuild` stays consistent with what ships here. What differs is
 `imageWidth`, which is derived below so the wordmark's corners stay inside that
-160dp circle. `imageWidth` for Android therefore has to be ~169 rather than the
+160dp circle. `imageWidth` for Android therefore has to be ~174 rather than the
 200 used on iOS, where no mask is applied.
 
 Note that `prebuild` regenerates the native drawables with the *background
@@ -61,7 +61,7 @@ FONT_PATH = os.path.join(
     "Montserrat_800ExtraBold.ttf",
 )
 
-WORDMARK = "Sage"
+WORDMARK = "SAGE"
 WORDMARK_COLOR = (255, 255, 255, 255)
 
 # Render size of the source glyphs. Large enough that the downscale into the
@@ -109,7 +109,7 @@ def max_android_image_width(aspect: float) -> int:
 
 
 def render_wordmark() -> Image.Image:
-    """Render "Sage" with manual letter spacing and crop to its ink bounds."""
+    """Render "SAGE" with manual letter spacing and crop to its ink bounds."""
     if not os.path.exists(FONT_PATH):
         sys.exit(f"Font not found: {FONT_PATH}\nRun `npm install` in mobile_app first.")
 
@@ -128,8 +128,8 @@ def render_wordmark() -> Image.Image:
     )
     draw = ImageDraw.Draw(canvas)
 
-    # Draw on the alphabetic baseline so the 'g' descender is not clipped and
-    # letters stay on one shared baseline.
+    # Draw on the alphabetic baseline so every letter sits on one shared
+    # baseline and nothing is clipped by the canvas edge.
     x = float(pad)
     for char, advance in zip(WORDMARK, advances):
         draw.text((x, pad + ascent), char, font=font, fill=WORDMARK_COLOR, anchor="ls")
