@@ -4202,3 +4202,92 @@ class CourseGamesHistoryTests(TestCase):
         # No rematch on this one, so there is no previous round to offer.
         self.assertIsNone(game['previous_round'])
         self.assertIsNone(game['previous_round_finished_at'])
+
+
+class MyGamesHistoryTests(TestCase):
+    """GET /users/games/mine/ -- every room this user hosted, class or not.
+
+    The per-course endpoint cannot return a course-less room (FAB-hosted
+    games archive with course=None), which is the whole reason this exists.
+    """
+
+    def setUp(self):
+        self.educator = User.objects.create_user(
+            username='teacher', password='pass', role='educator')
+        self.rival = User.objects.create_user(
+            username='rival', password='pass', role='educator')
+        self.student = User.objects.create_user(
+            username='pupil', password='pass', role='student')
+        self.course = Course.objects.create(
+            name='Year 9 Biology', educator=self.educator, description='c')
+        self.client = APIClient()
+
+    def url(self):
+        return reverse('my_games')
+
+    def archive(self, code, owner, course=None, **kwargs):
+        defaults = {
+            'topic': f'{code} topic',
+            'status': GameRoom.STATUS_FINISHED,
+            'player_count': 2,
+            'finished_at': timezone.now(),
+            'host_name': owner.username,
+        }
+        defaults.update(kwargs)
+        return GameRoom.objects.create(
+            room_code=code, owner=owner, course=course, **defaults)
+
+    def get(self, user=None):
+        self.client.force_authenticate(user=user or self.educator)
+        return self.client.get(self.url())
+
+    def test_a_course_less_room_is_listed(self):
+        # The point of the endpoint: a FAB-hosted game archives with no class
+        # and must still be reachable.
+        self.archive('FAB1', self.educator, course=None)
+        resp = self.get()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([g['room_code'] for g in resp.json()['games']], ['FAB1'])
+
+    def test_class_and_class_less_rooms_mixed_newest_first(self):
+        self.archive('OLDER', self.educator, created_at=timezone.now() - timedelta(days=1))
+        self.archive('NEWER', self.educator, course=self.course)
+        self.assertEqual([g['room_code'] for g in self.get().json()['games']],
+                         ['NEWER', 'OLDER'])
+
+    def test_another_users_rooms_never_leak_in(self):
+        self.archive('MINE', self.educator)
+        self.archive('THEIRS', self.rival, course=self.course)
+        self.assertEqual([g['room_code'] for g in self.get().json()['games']], ['MINE'])
+
+    def test_a_student_only_sees_what_they_hosted(self):
+        self.archive('TEACHERS', self.educator, course=self.course)
+        self.archive('PUPILS', self.student)
+        resp = self.get(user=self.student)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([g['room_code'] for g in resp.json()['games']], ['PUPILS'])
+
+    def test_anonymous_is_rejected(self):
+        self.assertEqual(self.client.get(self.url()).status_code, 401)
+
+    def test_no_games_is_an_empty_list_not_an_error(self):
+        resp = self.get()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['games'], [])
+
+    def test_the_row_says_which_class_it_belonged_to(self):
+        # The all-games list needs the class label; the per-course list gained
+        # the same two fields so both feed one card shape.
+        self.archive('IN', self.educator, course=self.course)
+        self.archive('LOOSE', self.educator, course=None)
+        games = {g['room_code']: g for g in self.get().json()['games']}
+        self.assertEqual(games['IN']['course_id'], self.course.id)
+        self.assertEqual(games['IN']['course_name'], 'Year 9 Biology')
+        self.assertIsNone(games['LOOSE']['course_id'])
+        self.assertIsNone(games['LOOSE']['course_name'])
+
+    def test_the_results_payload_reaches_the_client_untouched(self):
+        payload = {'mode': 'classic', 'roomCode': 'PAID', 'questionCount': 3,
+                   'participants': [{'user_id': 1, 'name': 'pupil', 'score': 900}]}
+        self.archive('PAID', self.educator, final_payload=payload)
+        self.assertEqual(self.get().json()['games'][0]['final_payload'], payload)

@@ -58,6 +58,9 @@ urlpatterns = [
     path('courses/<int:course_id>/leaderboard/', views.CourseLeaderboardView.as_view(), name='course_leaderboard'),
     # Durable archive of the games hosted for this course (GameRoom rows).
     path('courses/<int:course_id>/games/', views.CourseGamesView.as_view(), name='course_games'),
+    # Owner-wide archive: includes course-less rooms (hosted from the FAB),
+    # which the per-course endpoint above can never return.
+    path('games/mine/', views.MyGamesView.as_view(), name='my_games'),
     path('activities/', views.MyClassActivitiesView.as_view(), name='my_activities'),
     path('activities/<int:activity_id>/', views.ClassActivityDetailView.as_view(), name='activity_detail'),
 
