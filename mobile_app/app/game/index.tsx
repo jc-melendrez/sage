@@ -37,6 +37,7 @@ import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/
 import TeamColumns from '@/components/game/TeamColumns';
 import { sameTeamId, type PlayerEntry, type TeamEntry } from '@/types/game';
 import { useCurrentUser } from '@/contexts/UserContext';
+import { useTutorialTarget } from '@/components/TutorialSpotlight';
 
 /**
  * busyTeamId sentinel for the spectator column. Team ids are numeric strings,
@@ -144,6 +145,10 @@ export default function GameCenterScreen() {
   const { leftLobby: leftLobbyParam, courseId: courseIdParam, courseName: courseNameParam } =
     useLocalSearchParams<{ leftLobby?: string; courseId?: string; courseName?: string }>();
   const insets = useSafeAreaInsets();
+
+  // Highlighted by the guided tutorial — the INVITE/JOIN/START bar is the one
+  // control the "Play a Game" tour points at.
+  const gameActionsTargetRef = useTutorialTarget('game-actions');
 
   /**
    * Educators reach this same screen to host, so the role decides what the
@@ -314,6 +319,12 @@ const lobbyTokenRef = useRef(0);
     });
   }, [fadeAnim, scaleAnim]);
 
+  // Latch for the joined-player countdown below. Firestore re-fires the room
+  // listener on every document update, and status stays 'active' for the whole
+  // game, so the naive "if active, count down" restarted the 3-2-1 from 3 on
+  // each one and issued a second navigation to the question screen.
+  const countdownStartedRef = useRef(false);
+
   const startJoinedCountdown = useCallback((code: string) => {
     setShowCountdown(true);
     setCountdownValue(3);
@@ -373,6 +384,7 @@ const lobbyTokenRef = useRef(0);
       .onSnapshot(snap => {
         if (!snap.exists) {
           // Room deleted — reset joined state
+          countdownStartedRef.current = false;
           setJoinedRoom(false);
           setRoomCode(null);
           setRoomMode(null);
@@ -384,7 +396,12 @@ const lobbyTokenRef = useRef(0);
         setRoomStatus(d.status ?? 'waiting');
         setRoomMode(d.mode === 'group' || d.teamMode ? 'group' : 'classic');
         setRoomHostId(d.hostId ?? null);
-        if (d.status === 'active') {
+        if (d.status !== 'active') {
+          // Room went back to the lobby (reset, rematch) -- the next run counts
+          // down again.
+          countdownStartedRef.current = false;
+        } else if (!countdownStartedRef.current) {
+          countdownStartedRef.current = true;
           startJoinedCountdown(roomCode);
         }
       });
@@ -1860,7 +1877,7 @@ const lobbyTokenRef = useRef(0);
         </View>
 
         {/* Bottom Action Bar */}
-        <View style={[styles.bottomBar, { paddingBottom: 10 }]}>
+        <View ref={gameActionsTargetRef} style={[styles.bottomBar, { paddingBottom: 10 }]}>
 {isJoinedLan ? (
           <>
             {/* Joiner lobby: LEAVE + room code, waiting for the host */}

@@ -3,6 +3,7 @@ import random as rng
 import string
 import json
 import requests
+from datetime import timedelta
 from typing import NamedTuple
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -130,6 +131,36 @@ XP_PER_CORRECT = 10
 # appeared, which read as the game hanging. 0.5s still swallows realistic skew
 # while keeping the wait under the threshold where it feels broken.
 EXPIRY_GRACE_SECONDS = 0.5
+
+# How far to push `teamStartedAt` past the moment the host pressed START.
+#
+# The first thing every player sees after /game/start/ is a 3-2-1 countdown,
+# then -- in team mode -- the team reveal overlay. Both of those used to happen
+# AFTER the stamp, so by the time the timer was on screen the room had already
+# spent 5-7 seconds of a 30-45s limit: the class watched the first question
+# start halfway down, and the server agreed, because every expiry check reads
+# this same stamp.
+#
+# The clock cannot start at the press, so it starts at the end of the intro.
+# Clients clamp a negative elapsed time to zero, so a grace that is slightly
+# too generous just means the first question shows its full limit for an extra
+# beat; a grace that is too short is exactly the bug above.
+STARTUP_COUNTDOWN_SECONDS = 3.0
+# TeamRevealOverlay's own timeline: `380 + 165 * players` ms of chips flying in,
+# then a 950 ms hold and a 650 ms fade. Keep both numbers in step with
+# mobile_app/components/TeamRevealOverlay.tsx if that animation ever changes.
+TEAM_REVEAL_BASE_MS = 1980
+TEAM_REVEAL_PER_PLAYER_MS = 165
+# Round trip for the write plus the moment a client needs to paint the first
+# frame of the card.
+STARTUP_MARGIN_SECONDS = 0.6
+
+
+def startup_grace_seconds(player_count=0):
+    """Seconds a fresh room's shared clock is delayed for the intro."""
+    players = max(0, int(player_count or 0))
+    reveal_seconds = (TEAM_REVEAL_BASE_MS + TEAM_REVEAL_PER_PLAYER_MS * players) / 1000.0
+    return STARTUP_COUNTDOWN_SECONDS + reveal_seconds + STARTUP_MARGIN_SECONDS
 
 
 def shared_question_elapsed(room_data, now=None):
@@ -1392,8 +1423,16 @@ class StartGameView(APIView):
             # the same instant, and `teamStartedAt` is what every client derives
             # its countdown from -- a per-player interval would drift and let one
             # member submit after the team had already moved on.
+            #
+            # Deliberately NOT `fs.SERVER_TIMESTAMP`: that instant is while the
+            # room is still showing the 3-2-1 and the team reveal, so the class
+            # never saw a full time limit. The stamp is pushed past the intro
+            # instead; question 1's clock is the only one that moves, because
+            # every later question is stamped by AdvanceView.
             update_fields['teamQuestionIndex'] = 0
-            update_fields['teamStartedAt'] = fs.SERVER_TIMESTAMP
+            update_fields['teamStartedAt'] = (
+                timezone.now() + timedelta(seconds=startup_grace_seconds(len(assignments)))
+            )
         room_ref.update(update_fields)
         stamp_started(room_code)
 

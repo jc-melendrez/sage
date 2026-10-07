@@ -2,9 +2,10 @@
  * Home notification centre.
  *
  * Built entirely from data the app already has — recent activities, earned
- * badges, recommendations, open quizzes with deadlines, and (for group admins)
- * pending join requests. There is no notifications table in the backend, so
- * nothing is marked read; this is a live view, not an inbox.
+ * badges, recommendations, open quizzes with deadlines, class tasks and (for
+ * group admins) pending join requests. There is no notifications table in the
+ * backend, so "read" lives in AsyncStorage via useNotificationRead; this is a
+ * live view, not an inbox.
  *
  * Renders as an in-tree overlay rather than a <Modal>: Android silently drops
  * a Modal stacked on another, which is what broke the other action menus.
@@ -25,7 +26,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { apiCall } from '@/services/apiClient';
 import { getQuizzes, type Quiz } from '@/services/quizService';
 import { describeDue } from '@/services/dueDate';
-import { useNotificationReadState } from '@/hooks/useNotificationRead';
+import { getEnrolledCourses } from '@/services/courseService';
+import { getCourseActivities, type ClassActivity } from '@/services/activityService';
+import { useNotificationReadState, type NotificationKey } from '@/hooks/useNotificationRead';
 
 const COLORS = {
   bg: '#FFFFFF',
@@ -48,7 +51,13 @@ const FONTS = {
   medium: 'Montserrat-Medium',
 };
 
-export type NotificationKind = 'activity' | 'badge' | 'recommendation' | 'deadline' | 'join_request';
+export type NotificationKind =
+  | 'activity'
+  | 'badge'
+  | 'recommendation'
+  | 'deadline'
+  | 'task'
+  | 'join_request';
 
 export interface AppNotification {
   id: string;
@@ -62,6 +71,12 @@ export interface AppNotification {
   /** Optional deep link, e.g. '/(tabs)/activities'. */
   href?: string;
   urgent?: boolean;
+  /**
+   * Epoch ms the underlying record was created, for rows whose identity is
+   * their creation. Feeds the read watermark; omit it for rows that represent
+   * a change in state (a deadline inside a day, a pending join request).
+   */
+  createdAt?: number;
 }
 
 interface Props {
@@ -98,6 +113,13 @@ function relativeTime(iso?: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+/** Epoch ms for an ISO timestamp, or undefined when it is absent or unparsable. */
+function toEpoch(iso?: string | null): number | undefined {
+  if (!iso) return undefined;
+  const ms = new Date(iso).getTime();
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
 export default function NotificationSheet({
   visible,
   onClose,
@@ -110,7 +132,12 @@ export default function NotificationSheet({
   const insets = useSafeAreaInsets();
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const [joinRequests, setJoinRequests] = useState<{ groupId: string; groupName: string; displayName: string }[]>([]);
+  const [tasks, setTasks] = useState<ClassActivity[]>([]);
   const [loading, setLoading] = useState(false);
+  // True once the lazy sources have landed at least once. The badge only
+  // reports while this is set and no fetch is running, so it never publishes
+  // a count taken from a half-loaded list.
+  const [settled, setSettled] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -137,10 +164,33 @@ export default function NotificationSheet({
         }
       }
       setJoinRequests(pending);
+
+      // Class tasks the student has been set. Published ones only (a draft is
+      // not news), fetched per enrolled course -- `apiCall` caches these reads
+      // for ten minutes, so reopening the bell is cheap.
+      const courses = await getEnrolledCourses().catch(() => []);
+      const perCourse = await Promise.all(
+        courses.slice(0, 12).map(async (course) => {
+          const acts = await getCourseActivities(course.id).catch(() => [] as ClassActivity[]);
+          return acts
+            .filter((a) => a?.kind === 'task' && a.status === 'published')
+            .map((a) => ({ ...a, course_name: a.course_name || course.name }));
+        }),
+      );
+      setTasks(perCourse.flat());
+      setSettled(true);
     } finally {
       setLoading(false);
     }
   }, []);
+
+  // Kick off once on mount, not only when the sheet opens: the badge lives in
+  // the Dashboard header and has to know about deadlines, tasks and join
+  // requests without the user opening this sheet first. Re-opening still
+  // refetches so a stale count cannot survive.
+  useEffect(() => {
+    load();
+  }, [load]);
 
   useEffect(() => {
     if (visible) load();
@@ -161,6 +211,40 @@ export default function NotificationSheet({
         time: 'Pending',
         href: '/(tabs)/activities',
         urgent: true,
+      });
+    }
+
+    // Class tasks. One row per task: "new" while the assignment is fresh,
+    // "due soon" once the deadline is inside a day (or overdue), never both --
+    // two rows for the same assignment would read as a bug. The due row
+    // deliberately carries NO `createdAt`, because crossing the one-day line
+    // has to light the bell even though the task was created before the last
+    // "mark all".
+    const now = Date.now();
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    for (const t of tasks) {
+      const due = t.due_date ? describeDue(t.due_date) : null;
+      const createdAt = toEpoch(t.created_at);
+      const overdue = !!due?.isOverdue;
+      const dueSoon = !!due && !overdue && due.daysLeft <= 1;
+      const fresh = createdAt != null && now - createdAt <= 14 * DAY_MS;
+      if (!overdue && !dueSoon && !fresh) continue;
+
+      const dueRow = overdue || dueSoon;
+      out.push({
+        id: dueRow ? `task-due-${t.id}` : `task-new-${t.id}`,
+        kind: 'task',
+        icon: dueRow ? 'alarm' : 'document-text',
+        color: overdue ? COLORS.danger : dueSoon ? COLORS.purpleVibrant : COLORS.success,
+        title: dueRow ? t.title : `New task: ${t.title}`,
+        body: [
+          t.course_name,
+          !dueRow && due ? `Due ${due.short}` : null,
+        ].filter(Boolean).join(' · '),
+        time: dueRow && due ? due.label : relativeTime(t.created_at),
+        href: `/(tabs)/course/task/${t.id}`,
+        urgent: dueRow,
+        createdAt: dueRow ? undefined : createdAt,
       });
     }
 
@@ -195,6 +279,7 @@ export default function NotificationSheet({
         body: 'Nice work — it has been added to your profile.',
         time: relativeTime(b.earned_at || b.awarded_at),
         href: '/(tabs)/profile',
+        createdAt: toEpoch(b.earned_at || b.awarded_at),
       });
     }
 
@@ -232,22 +317,31 @@ export default function NotificationSheet({
         ].filter(Boolean).join(' · ') || a.description || 'Keep it up.',
         time: relativeTime(a.created_at),
         href: a.payload?.route || '/(tabs)/activities',
+        createdAt: toEpoch(a.created_at),
       });
     }
 
     return out;
-  }, [activities, badges, recommendations, quizzes, joinRequests]);
+  }, [activities, badges, recommendations, quizzes, joinRequests, tasks]);
 
-  const itemIds = useMemo(() => items.map((n) => n.id), [items]);
-  const { isUnread, markAllRead, unreadCount } = useNotificationReadState(itemIds);
+  const keys = useMemo<NotificationKey[]>(
+    () => items.map((n) => ({ id: n.id, createdAt: n.createdAt })),
+    [items],
+  );
+  const { isUnread, markAllRead, markRead, unreadCount } = useNotificationReadState(keys);
 
   // The bell badge lives in the Dashboard header, outside this sheet. Report
   // the count up rather than recomputing it there: this sheet is the only
-  // place that sees quizzes and join requests, so recomputing in the header
-  // would silently undercount.
+  // place that sees quizzes, tasks and join requests, so recomputing in the
+  // header would silently undercount.
+  //
+  // Only once the lazy sources have landed and no fetch is running. Reporting
+  // mid-load published a count taken from half a list, which then jumped the
+  // moment the rest arrived.
   useEffect(() => {
+    if (!settled || loading) return;
     onUnreadChange?.(unreadCount);
-  }, [unreadCount, onUnreadChange]);
+  }, [unreadCount, onUnreadChange, settled, loading]);
 
   if (!visible) return null;
 
@@ -260,14 +354,18 @@ export default function NotificationSheet({
         <View style={styles.header}>
           <Text style={styles.title}>Notifications</Text>
           <View style={styles.headerActions}>
-            {unreadCount > 0 && (
+            {/* Hidden while fetching: the button marks the list that is ON
+                SCREEN, so pressing it mid-load cleared only the half that had
+                arrived -- and when the rest landed a moment later the badge
+                re-lit with the leftovers, which read as "it did nothing". */}
+            {!loading && unreadCount > 0 && (
               <TouchableOpacity
                 onPress={markAllRead}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 accessibilityRole="button"
                 accessibilityLabel={`Mark all ${unreadCount} notifications as read`}
               >
-                <Text style={styles.clearAll}>Clear all</Text>
+                <Text style={styles.clearAll}>Mark all as read</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -295,6 +393,9 @@ export default function NotificationSheet({
                   style={[styles.row, n.urgent && styles.rowUrgent, unread && styles.rowUnread]}
                   activeOpacity={0.75}
                   onPress={() => {
+                    // Opened means seen; without this the row stayed unread
+                    // forever unless the user pressed "mark all".
+                    markRead(n.id);
                     onClose();
                     if (n.href && onOpenHref) onOpenHref(n.href);
                   }}

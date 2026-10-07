@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, useRouter, useSegments, usePathname, useRootNavigationState } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { Platform } from 'react-native';
+import { Platform, StyleSheet } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { UserProvider } from '@/contexts/UserContext';
+import { TutorialProvider } from '@/components/TutorialSpotlight';
 import {
   useFonts,
   Montserrat_400Regular,
@@ -137,23 +139,33 @@ export default function RootLayout() {
   if (!isReady || !fontsLoaded) return null;
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <UserProvider>
-        <Stack>
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="login" options={{ headerShown: false }} />
-          <Stack.Screen name="edit-profile" options={{ headerShown: false, presentation: 'card' }} />
-          <Stack.Screen name="settings" options={{ headerShown: false, presentation: 'card' }} />
-          <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-          <Stack.Screen name="game" options={{ headerShown: false }} />
-          <Stack.Screen name="superadmin" options={{ headerShown: false }} />
-          <Stack.Screen name="educator" options={{ headerShown: false }} />
-          <Stack.Screen name="tv" options={{ headerShown: false }} />
-          <Stack.Screen name="[roomCode]" options={{ headerShown: false }} />
-          <Stack.Screen name="chat/[groupId]" options={{ headerShown: false, presentation: 'card' }} />
-        </Stack>
-      </UserProvider>
-      <StatusBar style="auto" />
-    </ThemeProvider>
+    // Gesture root first: the tab swipe, and every other pan/gesture in the
+    // app, only works when a GestureHandlerRootView wraps the tree.
+    <GestureHandlerRootView style={styles.root}>
+      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+        <UserProvider>
+          {/* The tutorial overlays as a sibling AFTER the navigator, so it
+              paints above every screen while still living in this window. */}
+          <TutorialProvider>
+            <Stack>
+              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+              <Stack.Screen name="login" options={{ headerShown: false }} />
+              <Stack.Screen name="edit-profile" options={{ headerShown: false, presentation: 'card' }} />
+              <Stack.Screen name="settings" options={{ headerShown: false, presentation: 'card' }} />
+              <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+              <Stack.Screen name="game" options={{ headerShown: false }} />
+              <Stack.Screen name="superadmin" options={{ headerShown: false }} />
+              <Stack.Screen name="educator" options={{ headerShown: false }} />
+              <Stack.Screen name="tv" options={{ headerShown: false }} />
+              <Stack.Screen name="[roomCode]" options={{ headerShown: false }} />
+              <Stack.Screen name="chat/[groupId]" options={{ headerShown: false, presentation: 'card' }} />
+            </Stack>
+          </TutorialProvider>
+        </UserProvider>
+        <StatusBar style="auto" />
+      </ThemeProvider>
+    </GestureHandlerRootView>
   );
 }
+
+const styles = StyleSheet.create({ root: { flex: 1 } });

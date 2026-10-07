@@ -735,23 +735,65 @@ export default function HostSessionScreen() {
     );
   };
 
+  // One POST to /game/finish/, optionally with `force`. The same body shape is
+  // used for the first attempt and for the confirmation retry, so there is one
+  // place that knows what "end" means on the wire.
+  const endGame = async (force: boolean) => {
+    const token = await getToken();
+    const res = await fetch(`${API_BASE_URL}/game/finish/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      // `confirm` is what actually closes the room. Without it this call only
+      // recorded the educator's own "I'm done" vote, so ending a session from
+      // here left the game running: no settlement, nobody paid, and no Recent
+      // Activity row -- which is the button an educator reaches for when a
+      // class has finished early. `force` skips the "wait for every player"
+      // guard below.
+      body: JSON.stringify(
+        force
+          ? { roomCode: code, confirm: 'true', force: 'true' }
+          : { roomCode: code, confirm: 'true' },
+      ),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
+  };
+
+  const settleForced = async () => {
+    setLoading(true);
+    try {
+      const { ok, data } = await endGame(true);
+      if (!ok) throw new Error(data.error || 'Could not end the session.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleEndSession = async () => {
     setLoading(true);
     try {
-      const token = await getToken();
-      const res = await fetch(`${API_BASE_URL}/game/finish/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        // `confirm` is what actually closes the room. Without it this call only
-        // recorded the educator's own "I'm done" vote, so ending a session from
-        // here left the game running: no settlement, nobody paid, and no Recent
-        // Activity row -- which is the button an educator reaches for when a
-        // class has finished early.
-        body: JSON.stringify({ roomCode: code, confirm: 'true' }),
-      });
-      const data = await res.json();
-      // 409 is the "some players are still answering" guard, not a failure.
-      if (!res.ok && res.status !== 409) throw new Error(data.error);
+      const { ok, status, data } = await endGame(false);
+      if (ok) return;
+      // 409 = "some players are still answering". This used to be swallowed
+      // (`if (!res.ok && res.status !== 409)`), so the tap settled nothing and
+      // said nothing: the button looked dead, the class kept playing, and the
+      // host kept tapping. Ask before forcing instead.
+      if (status === 409) {
+        const remaining = Number(data.remaining ?? 0);
+        const total = Number(data.participantCount ?? remaining);
+        Alert.alert(
+          'End while students are still answering?',
+          `${remaining} of ${total} have not submitted yet. Everyone will be taken straight to the final screen.`,
+          [
+            { text: 'Keep playing', style: 'cancel' },
+            { text: 'End for everyone', style: 'destructive', onPress: () => settleForced() },
+          ],
+        );
+        return;
+      }
+      throw new Error(data.error || 'Could not end the session.');
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally {

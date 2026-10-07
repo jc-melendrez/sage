@@ -10,8 +10,9 @@ import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { API_BASE_URL } from '@/config/api';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { getToken } from '@/services/authService';
+import { useTutorialTarget } from '@/components/TutorialSpotlight';
 import { RateLimitError, isRateLimitError, normalizeRetryAfter } from '@/services/aiLimits';
 import { apiCall } from '@/services/apiClient';
 import { invalidateCachePrefix } from '@/services/apiCache';
@@ -75,7 +76,27 @@ interface EditDraft {
 export default function ActivitiesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { tab: requestedTab } = useLocalSearchParams<{ tab?: string }>();
   const [selectedTab, setSelectedTab] = useState('groups');
+
+  // `?tab=lessons|quizzes|groups` selects a section on entry. Without this the
+  // screen opened on Groups no matter what was asked for, so the guided
+  // tutorial's "your quizzes live here" step landed one tab away from the
+  // thing it was talking about.
+  useEffect(() => {
+    const wanted = String(requestedTab ?? '').toLowerCase();
+    if (wanted === 'lessons' || wanted === 'quizzes' || wanted === 'groups') {
+      setSelectedTab(prev => (prev === wanted ? prev : wanted));
+    }
+  }, [requestedTab]);
+
+  // Highlightable controls for the guided tutorial.
+  const tabsTargetRef = useTutorialTarget('activities-tabs');
+  const fabTargetRef = useTutorialTarget('activities-fab');
+  const joinCourseTargetRef = useTutorialTarget('activities-join-course');
+  const joinGroupTargetRef = useTutorialTarget('activities-join-group');
+  const createGroupTargetRef = useTutorialTarget('activities-create-group');
+  const quizCardTargetRef = useTutorialTarget('activities-quiz-card');
 
   // Group & Quiz state
   const [groups, setGroups] = useState<StudyGroup[]>([]);
@@ -726,6 +747,7 @@ export default function ActivitiesScreen() {
       </LinearGradient>
 
       <View
+        ref={tabsTargetRef}
         style={styles.tabsContainer}
         accessibilityRole="tablist"
       >
@@ -772,6 +794,7 @@ export default function ActivitiesScreen() {
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>My Classes</Text>
               <TouchableOpacity
+                ref={joinCourseTargetRef}
                 style={styles.sectionAction}
                 onPress={() => setIsJoinCourseModalOpen(true)}
                 accessibilityLabel="Join a class with a code"
@@ -812,7 +835,7 @@ export default function ActivitiesScreen() {
         {selectedTab === 'quizzes' && !loading && (
           <View style={[styles.itemsList, { paddingHorizontal: 24 }]}>
             {quizzes.length === 0 && (
-              <View style={styles.emptyStateCard}>
+              <View ref={quizCardTargetRef} style={styles.emptyStateCard}>
                 <View style={styles.emptyStateIconContainer}>
                   <Ionicons name="help-circle-outline" size={48} color={COLORS.purpleVibrant} />
                 </View>
@@ -820,8 +843,12 @@ export default function ActivitiesScreen() {
                 <Text style={styles.emptyStateText}>Complete lessons to unlock AI quizzes.</Text>
               </View>
             )}
-            {quizzes.map((quiz) => (
-              <View key={quiz.id} style={styles.card}>
+            {quizzes.map((quiz, quizIndex) => (
+              <View
+                key={quiz.id}
+                ref={quizIndex === 0 ? quizCardTargetRef : undefined}
+                style={styles.card}
+              >
                 <TouchableOpacity
                   style={styles.quizCardPress}
                   onPress={() => {
@@ -869,11 +896,11 @@ export default function ActivitiesScreen() {
         {selectedTab === 'groups' && !loading && (
           <View style={styles.inboxContainer}>
             <View style={styles.inboxActions}>
-              <TouchableOpacity style={styles.inboxBtn} onPress={() => setIsCreateModalOpen(true)}>
+              <TouchableOpacity ref={createGroupTargetRef} style={styles.inboxBtn} onPress={() => setIsCreateModalOpen(true)}>
                 <Ionicons name="create-outline" size={18} color={COLORS.purpleDeep} />
                 <Text style={styles.inboxBtnText}>Create</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.inboxBtn} onPress={() => setIsJoinModalOpen(true)}>
+              <TouchableOpacity ref={joinGroupTargetRef} style={styles.inboxBtn} onPress={() => setIsJoinModalOpen(true)}>
                 <Ionicons name="enter-outline" size={18} color={COLORS.purpleDeep} />
                 <Text style={styles.inboxBtnText}>Join Code</Text>
               </TouchableOpacity>
@@ -1470,6 +1497,7 @@ export default function ActivitiesScreen() {
       {/* FAB — contextual per tab (not on Courses; students join instead of creating) */}
       {selectedTab === 'quizzes' && (
         <TouchableOpacity
+          ref={fabTargetRef}
           style={styles.fab}
           onPress={() => {
             setIsGenerateQuizModalOpen(true);

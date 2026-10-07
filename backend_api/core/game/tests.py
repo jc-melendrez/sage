@@ -2800,13 +2800,23 @@ class AnswerLogTests(TestCase):
         The team's own answer is public -- it has to be, it is what scored --
         but who voted for it is not, so the log for one member must never
         contain the other member's choice.
+
+        a and b split 1-1 with a holding the right answer, so knowledge breaks
+        the tie and the question scores. That is the case where exposing both
+        picks would be most tempting, which is why it is asserted here: both
+        members read the shared outcome, each sees only their own vote.
         """
         self.settle(0, 'A. yes', 'B. no')
         self.assertEqual(self.answers(self.a)['q0']['picked'], 'A. yes')
         self.assertEqual(self.answers(self.b)['q0']['picked'], 'B. no')
-        # The tie voided the question, so nobody scored.
-        self.assertFalse(self.answers(self.a)['q0']['correct'])
-        self.assertEqual(self.team()['score'], 0)
+        # One correct pick against one wrong pick resolves to the correct one,
+        # so the whole team is graded on it -- the outcome is shared, the vote
+        # is not.
+        self.assertTrue(self.answers(self.a)['q0']['correct'])
+        self.assertTrue(self.answers(self.b)['q0']['correct'])
+        self.assertTrue(self.answers(self.a)['q0']['agreed'])
+        self.assertFalse(self.answers(self.b)['q0']['agreed'])
+        self.assertGreater(self.team()['score'], 0)
 
     def test_a_member_who_never_picked_is_logged_as_not_agreeing(self):
         # The clock runs out with only a's vote in: the team answers 'B. no'.

@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 import traceback
 import logging
@@ -772,7 +773,12 @@ class GenerateQuizView(APIView):
                 "- title: at most 60 characters\n"
                 "- question: at most 20 words\n"
                 "- NO \"options\" field at all. This question is answered by typing.\n"
-                "- correct_answer: the single answer being tested, at most 5 words\n"
+                "- correct_answer: the single answer being tested, at most 5 words. "
+                "It must be the COMPLETE answer in full -- every word the student "
+                "is expected to type, exactly as they should type it. Never "
+                "abbreviate, never truncate mid-phrase, never write \"…\" or "
+                "'etc.' or a shortened form of it. A 5-word cap is a ceiling on "
+                "which answer you pick, not a reason to cut the answer short.\n"
                 "- explanation: ONE sentence, at most 20 words. Never more than one.\n"
                 "- no markdown, no numbering, no commentary outside the JSON\n"
             )
@@ -988,6 +994,15 @@ class GenerateQuizView(APIView):
                         {"error": f"AI returned question {i + 1} with no correct answer."},
                         status=502)
                 q['correct_answer'] = correct
+                if typed:
+                    # The cap in the prompt is a ceiling on WHICH answer to
+                    # test, and a model sometimes reads it as an instruction to
+                    # cut the answer short. A trailing ellipsis is the tell --
+                    # normalise it off rather than 502 the whole quiz, because
+                    # the answer itself may be perfectly usable.
+                    stripped = re.sub(r'(\.\.\.|…|\betc\.?)$', '', correct).strip()
+                    if stripped:
+                        q['correct_answer'] = stripped
 
             # One transaction: a Quiz row plus N question rows. Creating them
             # individually left an empty quiz behind whenever a later question

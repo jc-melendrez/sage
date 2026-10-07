@@ -1,5 +1,7 @@
-import { Tabs } from 'expo-router';
-import React, { useEffect, useState } from 'react'; // ✅ added useEffect
+import { Tabs, useRouter, useSegments } from 'expo-router';
+import React, { useEffect, useMemo, useState } from 'react'; // ✅ added useEffect
+import { Keyboard, Platform, View } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import NetInfo from '@react-native-community/netinfo';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as NavigationBar from 'expo-navigation-bar'; // ✅ import
@@ -16,6 +18,19 @@ import {
   IconSparkles,
   IconUser,
 } from '@tabler/icons-react-native';
+
+/**
+ * Visible tabs, in the order the bar shows them. A swipe advances one step
+ * through this list — the same list the tab bar draws — so the order can
+ * never drift from the UI.
+ */
+const VISIBLE_TABS = [
+  { key: 'index', path: '/' },
+  { key: 'activities', path: '/activities' },
+  { key: 'games', path: '/games' },
+  { key: 'ai-assistant', path: '/ai-assistant' },
+  { key: 'profile', path: '/profile' },
+];
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
@@ -57,7 +72,8 @@ export default function TabLayout() {
   if (isOffline === null) return null;
 
   return (
-    <Tabs
+    <SwipeTabs offline={isOffline}>
+      <Tabs
       initialRouteName={isOffline ? 'games' : 'index'}
       screenOptions={{
         tabBarActiveTintColor: '#ffe081',
@@ -132,5 +148,76 @@ export default function TabLayout() {
       <Tabs.Screen name="explore" options={{ href: null }} />
       <Tabs.Screen name="dashboard" options={{ href: null }} />
     </Tabs>
+    </SwipeTabs>
+  );
+}
+
+/**
+ * Gesture layer for swiping between the visible tabs.
+ *
+ * This wraps the navigator instead of floating above it. An absolute-fill
+ * handler view would sit on top of every screen and swallow the taps and
+ * scrolls meant for the content underneath, because React Native hit-tests
+ * the topmost view first. Here the handler is on a parent of the navigator,
+ * so the gesture layer sees touches from any screen and RNGH only takes the
+ * touch once the pan actually activates.
+ *
+ * Activation rules do the rest:
+ *   activeOffsetX  — nothing happens until the finger has moved ~20px
+ *                    horizontally, so a stray jitter never changes tabs.
+ *   failOffsetY    — a vertical drag fails the pan outright, handing the
+ *                    gesture back to the scroll view that wanted it.
+ *
+ * Deliberately inert while the keyboard is up (a two-thumb keyboard swipe
+ * should edit text, not change tabs) and on hidden-tab screens such as
+ * /course/:12, where "where you are" has no visible tab to move from.
+ */
+function SwipeTabs({ children, offline }: { children: React.ReactNode; offline: boolean }) {
+  const router = useRouter();
+  const segments = useSegments();
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const show = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
+    const hide = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+
+  // Offline hides the Play tab's button, so the swipe cycle skips it too —
+  // otherwise a swipe could land on a tab the bar no longer offers.
+  const order = useMemo(
+    () => (offline ? VISIBLE_TABS.filter(t => t.key !== 'games') : VISIBLE_TABS),
+    [offline],
+  );
+
+  const gesture = useMemo(() => {
+    const insideTabs = String(segments[0] ?? '') === '(tabs)';
+    const currentKey = String(segments[1] ?? 'index');
+    const from = order.findIndex(t => t.key === currentKey);
+    const enabled = !keyboardVisible && insideTabs && from >= 0;
+
+    return Gesture.Pan()
+      .enabled(enabled)
+      .activeOffsetX([-20, 20])
+      .failOffsetY([-20, 20])
+      .onEnd(e => {
+        // A flick counts too: a fast swipe rarely travels far before release.
+        const committed = Math.abs(e.translationX) > 70 || Math.abs(e.velocityX) > 500;
+        if (!committed || from < 0) return;
+        const target = from + (e.translationX < 0 ? 1 : -1);
+        if (target < 0 || target >= order.length) return;
+        router.navigate(order[target].path as any);
+      });
+  }, [segments, keyboardVisible, order, router]);
+
+  return (
+    <GestureDetector gesture={gesture}>
+      <View style={{ flex: 1 }}>{children}</View>
+    </GestureDetector>
   );
 }

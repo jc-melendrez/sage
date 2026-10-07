@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { View, Text, Pressable, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { TUTORIAL_TOPICS } from './tutorialSteps';
+import { useTutorial } from './TutorialSpotlight';
 
 const COLORS = {
   purpleVibrant: '#8B5CF6',
@@ -10,48 +12,27 @@ const COLORS = {
   surface: '#FFFFFF',
 };
 
-const TABS = [
-  { key: 'course', label: 'Join Course', icon: 'book-outline' as const },
-  { key: 'quiz', label: 'Generate Quiz', icon: 'rocket-outline' as const },
-  { key: 'group', label: 'Join Group', icon: 'people-outline' as const },
-  { key: 'game', label: 'Play a Game', icon: 'game-controller-outline' as const },
-  { key: 'practice', label: 'Practice Quizzes', icon: 'school-outline' as const },
-];
+const TABS = TUTORIAL_TOPICS;
 
-const STEPS: Record<string, { title: string; body: string }[]> = {
-  course: [
-    { title: 'Join a course', body: 'Use the course code from your educator to join their class.' },
-    { title: 'See your class', body: 'Track progress and access quizzes assigned to you.' },
-  ],
-  quiz: [
-    { title: 'Upload material', body: 'Paste text or upload a file to generate questions with AI.' },
-    { title: 'Pick quiz type', body: 'Choose MCQ, True/False, Identification, or Fill-in-the-Blank.' },
-    { title: 'Save and share', body: 'Save your quiz to use in class or for practice.' },
-  ],
-  group: [
-    { title: 'Join a group', body: 'Enter the group code to connect with classmates.' },
-    { title: 'Chat and learn', body: 'Share resources and work together in real time.' },
-  ],
-  game: [
-    { title: 'Host or join', body: 'Create a game room or join with a room code.' },
-    { title: 'Play together', body: 'Answer questions in classic or team mode to compete.' },
-  ],
-  practice: [
-    { title: 'Find a quiz', body: 'Browse quizzes by course or topic to practice anytime.' },
-    { title: 'Review mistakes', body: 'Check explanations after each question to learn faster.' },
-  ],
-};
+const stepsFor = (key: string) => TABS.find((t) => t.key === key)?.steps ?? [];
 
 export default function TutorialModal({ onClose }: { onClose: () => void }) {
+  const tutorial = useTutorial();
   const [tab, setTab] = useState('course');
   const [page, setPage] = useState(0);
-  const steps = STEPS[tab] || [];
+  const steps = stepsFor(tab);
   const hasNext = page < steps.length - 1;
   const hasPrev = page > 0;
 
+  // The guided run: close this picker and hand over to the spotlight, which
+  // navigates to the screen for step 1 and highlights it.
+  const startTour = () => {
+    onClose();
+    tutorial?.start(tab);
+  };
+
   const goNext = () => {
     if (hasNext) setPage(p => p + 1);
-    else onClose();
   };
   const goPrev = () => setPage(p => Math.max(0, p - 1));
   const switchTab = (k: string) => {
@@ -78,7 +59,7 @@ export default function TutorialModal({ onClose }: { onClose: () => void }) {
                 style={[styles.tab, tab === t.key && styles.tabActive]}
                 onPress={() => switchTab(t.key)}
               >
-                <Ionicons name={t.icon} size={16} color={tab === t.key ? '#FFF' : COLORS.textPrimary} />
+                <Ionicons name={t.icon as any} size={16} color={tab === t.key ? '#FFF' : COLORS.textPrimary} />
                 <Text style={[styles.tabLabel, tab === t.key && styles.tabLabelActive]}>{t.label}</Text>
               </TouchableOpacity>
             ))}
@@ -99,16 +80,17 @@ export default function TutorialModal({ onClose }: { onClose: () => void }) {
           </View>
 
           <View style={styles.footer}>
-            {hasPrev ? (
-              <TouchableOpacity style={styles.btnGhost} onPress={goPrev}>
-                <Text style={styles.btnGhostText}>Back</Text>
-              </TouchableOpacity>
-            ) : (
-              <View />
-            )}
-            <TouchableOpacity style={styles.btnPrimary} onPress={goNext}>
-              <Text style={styles.btnPrimaryText}>{hasNext ? 'Next' : 'Done'}</Text>
+            <TouchableOpacity style={styles.btnGhost} onPress={goPrev} disabled={!hasPrev}>
+              <Text style={[styles.btnGhostText, !hasPrev && styles.btnGhostTextOff]}>Back</Text>
             </TouchableOpacity>
+            <View style={styles.footerRight}>
+              <TouchableOpacity style={styles.btnGhost} onPress={goNext} disabled={!hasNext}>
+                <Text style={[styles.btnGhostText, !hasNext && styles.btnGhostTextOff]}>Next</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.btnPrimary} onPress={startTour} accessibilityRole="button">
+                <Text style={styles.btnPrimaryText}>Start the tour</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </View>
@@ -134,9 +116,11 @@ const styles = StyleSheet.create({
   dots: { flexDirection: 'row', justifyContent: 'center', gap: 6 },
   dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.border },
   dotActive: { backgroundColor: COLORS.purpleVibrant, width: 8 },
-  footer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  footer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  footerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   btnGhost: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: COLORS.border },
   btnGhostText: { fontFamily: 'Montserrat-SemiBold', color: COLORS.textPrimary },
+  btnGhostTextOff: { color: '#9CA3AF' },
   btnPrimary: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, backgroundColor: COLORS.purpleVibrant },
   btnPrimaryText: { fontFamily: 'Montserrat-SemiBold', color: '#FFF' },
 });

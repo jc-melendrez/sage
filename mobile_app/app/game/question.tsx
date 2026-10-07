@@ -1039,7 +1039,11 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
 
     const tick = () => {
       const elapsed = (Date.now() - teamStartedAt) / 1000;
-      const left = Math.max(0, Math.ceil(teamTimeLimit - elapsed));
+      // Both bounds: below zero while question 1's stamp is still ahead of the
+      // clock (the countdown/reveal grace) so the badge cannot show MORE than
+      // the limit, and at zero once the round is genuinely over so the tick
+      // below can claim expiry.
+      const left = Math.min(teamTimeLimit, Math.max(0, Math.ceil(teamTimeLimit - elapsed)));
       setTimeLeft(left);
       if (left <= 0 && !teamForceSentRef.current && teamRetryTimerRef.current == null) {
         // The shared clock is the server's to enforce: this claims expiry, and
@@ -1105,7 +1109,18 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   }, [teamMode, teamIndex]);
 
   useEffect(() => {
-    if (questions.length === 0 || showTeamReveal || teamMode) return;
+    // Both lists are required before the clock may start. `questionOrder` is
+    // fetched separately from `questions` (the player doc vs the room doc), and
+    // the render gate below refuses to draw the card until it has both -- so a
+    // clock that only waited on `questions` was already draining while the card
+    // still said "Loading questions...", and the student met a half-spent timer
+    // on the very first question.
+    if (
+      questions.length === 0
+      || questionOrder.length === 0
+      || showTeamReveal
+      || teamMode
+    ) return;
     startTimeRef.current = Date.now();
     setTimeLeft(timePerQuestion);
     timerBarAnim.setValue(1);
@@ -1134,7 +1149,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         timerRef.current = null;
       }
     };
-  }, [currentIndex, questions, showTeamReveal, teamMode, timePerQuestion]);
+  }, [currentIndex, questions, questionOrder, showTeamReveal, teamMode, timePerQuestion]);
 
   useEffect(() => {
     // In team play the shared countdown runs against the ROOM's limit for this
@@ -1172,6 +1187,13 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // `offlineEngine` grades against, so a type that looks typed here is typed
     // there.
     if (!(TYPED_QUESTION_TYPES as readonly string[]).includes(question?.type)) {
+      // Clear rather than early-return: the previous question's row is still in
+      // `wordLengths`, and the typed render gate below keys off the CURRENT
+      // question's type, so a stale row would reappear word-for-word the next
+      // time a typed question came up with a shorter answer.
+      setWordLengths([]);
+      setBoxChars([]);
+      boxRefs.current = [];
       return;
     }
     const raw = String(question?.correctAnswer ?? '').trim();
@@ -1194,11 +1216,17 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // unrenderable and silently shorter than the answer. One array, two views.
     setBoxChars(Array(words.join('').length).fill(''));
     boxRefs.current = [];
-    // `currentIndex` and `questions` are the only inputs `question` derives from,
-    // so they are the whole dependency set. Naming `question` here is impossible:
-    // it is declared further down this render, and the deps array is evaluated
-    // before that declaration is reached.
-  }, [currentIndex, questions]);
+    // `question` is `questions[questionOrder[currentIndex]]`, so ALL THREE are
+    // inputs -- this effect used to list only `currentIndex` and `questions`.
+    // `questionOrder` arrives from a different fetch than `questions` (the
+    // player doc vs the room doc), and when it landed late the effect had
+    // already run against `question = {}`, early-returned, and never re-ran:
+    // the card rendered with no box row at all, or with the previous
+    // question's word split, and the student could not type the full answer.
+    // Naming `question` itself is impossible: it is declared further down this
+    // render, and the deps array is evaluated before that declaration is
+    // reached.
+  }, [currentIndex, questions, questionOrder]);
 
   useEffect(() => {
     if (questions.length === 0 || questionOrder.length === 0) return;
@@ -1442,7 +1470,14 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       const next = {
         ...(prev ?? {}),
         correct: take(prev?.correct, reveal.correct),
-        correctAnswer: take(prev?.correctAnswer, reveal.correctAnswer),
+        // Not `take(...)`: a non-provisional `prev` can carry
+        // `correctAnswer: ''` (the blank verdict the timeout path writes), and
+        // `'' ?? theirs` keeps it because `??` only falls through on null or
+        // undefined -- so the reveal's answer was discarded and the strip
+        // printed an empty line. An empty string here means "I don't have it".
+        correctAnswer: prev?.provisional
+          ? reveal.correctAnswer
+          : (prev?.correctAnswer || reveal.correctAnswer),
         points: take(prev?.points, reveal.points),
         speedBonus: take(prev?.speedBonus, reveal.speedBonus),
         picked: own?.picked ?? prev?.picked ?? selectedRef.current ?? '',
@@ -1644,8 +1679,13 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           answer,
           // Time is measured from the ROOM's start stamp, not from when this
           // screen happened to mount, so a late joiner cannot claim a fast
-          // answer they did not make.
-          timeTaken: teamStartedAt != null ? (Date.now() - teamStartedAt) / 1000 : teamTimeLimit,
+          // answer they did not make. Clamped: question 1's stamp is pushed
+          // past the 3-2-1 and the team reveal, so a pick made inside that
+          // window would otherwise report a NEGATIVE time (and the server
+          // rejects absurd times outright).
+          timeTaken: teamStartedAt != null
+            ? Math.max(0, (Date.now() - teamStartedAt) / 1000)
+            : teamTimeLimit,
           force: force ? 'true' : 'false',
           // Always false. The leader's "Lock in" button is gone from the UI, so
           // nothing in this app ends a round early any more -- `Next` advances
@@ -1863,6 +1903,59 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
    */
   const finishTeamGame = async () => {
     await finishGame();
+  };
+
+  /**
+   * The host cutting a running session short, available on every question.
+   *
+   * `/game/finish/` with `confirm` refuses to settle while anyone is still on a
+   * question (409 + `remaining`), because a student who has not submitted must
+   * not lose the round to a stray tap. `force` is the deliberate override, and
+   * the server only honours it from the room OWNER -- so this is rendered only
+   * for `isRoomOwner`; anyone else would just collect a 403.
+   *
+   * Two confirmations: the button, then the "N of M still answering" sheet.
+   * Navigation is left to the room listener above, exactly as `finishGame`
+   * leaves it -- this call only asks the server to close the room.
+   */
+  const stopSession = async () => {
+    const isOwner = roomOwnerId != null && String(roomOwnerId) === String(userId);
+    if (!isOwner) return;
+
+    const settle = async (force: boolean): Promise<void> => {
+      try {
+        const token = await getToken();
+        const res = await fetch(`${API_BASE_URL}/game/finish/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify(
+            force
+              ? { roomCode, confirm: 'true', force: 'true' }
+              : { roomCode, confirm: 'true' },
+          ),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) return;
+        if (res.status === 409) {
+          const remaining = Number(data.remaining ?? 0);
+          const total = Number(data.participantCount ?? remaining);
+          Alert.alert(
+            'Stop while students are still answering?',
+            `${remaining} of ${total} have not submitted. Everyone goes to the final screen now.`,
+            [
+              { text: 'Keep playing', style: 'cancel' },
+              { text: 'Stop for everyone', style: 'destructive', onPress: () => settle(true) },
+            ],
+          );
+          return;
+        }
+        Alert.alert('Could not stop', data.error || 'Please try again.');
+      } catch {
+        Alert.alert('Could not stop', 'Check your connection and try again.');
+      }
+    };
+
+    await settle(false);
   };
 
   const handleAnswer = async (answer: string | null) => {
@@ -2262,6 +2355,21 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           )}
         </View>
 
+        {/* Host-only escape hatch. Everyone else finishes the round; the owner
+            can stop the session from any question, in either mode. Kept small
+            so it never out-shouts the timer. */}
+        {isRoomOwner && (
+          <TouchableOpacity
+            style={styles.stopSessionBtn}
+            onPress={stopSession}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Stop session"
+          >
+            <Text style={styles.stopSessionBtnText}>■ End</Text>
+          </TouchableOpacity>
+        )}
+
         <TouchableOpacity
           style={[styles.standingsToggle, showStandings && styles.standingsToggleActive]}
           onPress={toggleStandings}
@@ -2316,14 +2424,17 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       {/* ── LIVE STANDINGS ──
           Between the powerup pool and the banners: close enough to the question
           to read at a glance, out of the way of the answer options. Hidden while
-          the reveal is up, so it never competes with the team result. */}
+          the reveal is up, so it never competes with the team result.
+          questionNumber is +1 because both indexes are 0-based and the ticker
+          prints `Q{n}/{total}` as a 1-based position — without it the header
+          said Q2 while the class was answering question 3. */}
       {!showTeamReveal && !result && (
         <StandingsTicker
           teams={teams}
           players={standings}
           teamMode={teamMode}
           myUserId={userId != null ? String(userId) : null}
-          questionNumber={teamMode ? teamIndex : currentIndex}
+          questionNumber={(teamMode ? teamIndex : currentIndex) + 1}
           questionCount={questions.length}
         />
       )}
@@ -2465,8 +2576,13 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   {(result.speedBonus ?? 0) > 0 ? `  (${result.speedBonus} speed)` : ''}
                 </Text>
               ) : (
-                <Text style={styles.resultAnswerLine} numberOfLines={3} ellipsizeMode="tail">
-                  Answer: {result.correctAnswer}
+                // No `numberOfLines`: the whole point of this line is to tell the
+                // student what the answer WAS, and an ellipsis mid-answer ("Gadium
+                // et…") is what made it look shorter than the explanation printed
+                // underneath. `|| question.correctAnswer` is the same string the
+                // letter boxes are built from, so the two can never disagree.
+                <Text style={styles.resultAnswerLine}>
+                  Answer: {result.correctAnswer || question.correctAnswer}
                 </Text>
               )}
             </View>
@@ -2974,6 +3090,22 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.extraBold,
   },
 
+  /* host-only stop button (header) */
+  stopSessionBtn: {
+    borderWidth: 1,
+    borderColor: 'rgba(239,68,68,0.45)',
+    backgroundColor: 'rgba(239,68,68,0.14)',
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginLeft: 8,
+  },
+  stopSessionBtnText: {
+    color: COLORS.danger,
+    fontSize: 12,
+    fontFamily: FONTS.extraBold,
+  },
+
   /* timer badge */
   timerBadge: {
     backgroundColor: COLORS.accentBright,
@@ -3169,10 +3301,11 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: 6,
   },
-  // Bounded height. An identification answer can be a full sentence, and the
-  // strip sits directly above the answer area, so an uncapped block pushed the
-  // explanation off the screen. Three lines covers every answer the question
-  // bank produces; the full text is in the explanation below.
+  // Not clamped. An identification answer can be a full sentence, so this used
+  // to carry `numberOfLines={3}` + a "three lines covers every answer" rule --
+  // which is exactly how a student ended up reading a shortened answer next to
+  // a complete explanation. Typed answers are capped at 5 words by the
+  // generation prompt, so the strip stays a couple of lines tall in practice.
   resultAnswerLine: {
     flexShrink: 1,
     fontSize: 13,

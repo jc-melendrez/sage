@@ -200,6 +200,12 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
     return () => sub.remove();
   }, [exitToPlay, isLAN]);
 
+  // Latched so the room listener fires the countdown exactly once. It re-fires
+  // on every room-document update, and status stays 'active' for the whole
+  // game, so a plain `if (status === 'active')` restarted the 3-2-1 from 3
+  // mid-game and pushed a second navigation to the question screen.
+  const countdownStartedRef = useRef(false);
+
   useEffect(() => {
     if (isLAN) return;
     const unsub = firestore()
@@ -230,7 +236,11 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
           setRoomTeamCount(d?.teamCount ?? null);
           setQuizPending(!!d?.quizPending);
           if (d?.pickStartedAt) setPickStartedAt(d.pickStartedAt);
-          if (d?.status === 'active') {
+          if (d?.status !== 'active') {
+            // Back to the lobby (reset / rematch): the next run counts down.
+            countdownStartedRef.current = false;
+          } else if (!countdownStartedRef.current) {
+            countdownStartedRef.current = true;
             startJoinerCountdown();
           }
         },
