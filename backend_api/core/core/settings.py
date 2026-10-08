@@ -234,11 +234,13 @@ EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD')
 DEFAULT_FROM_EMAIL = os.environ.get('EMAIL_HOST_USER', 'noreply@sage.app')
 
-# Email API (Resend) — Render blocks direct SMTP outbound (connect fails with
-# Errno 101 "Network is unreachable"), so prod OTP mail goes through Resend's
-# HTTP API instead. When RESEND_API_KEY is set, OTP emails skip SMTP entirely.
-RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
-RESEND_FROM = os.environ.get('RESEND_FROM', 'SAGE <sage.app.io@gmail.com>')
+# Email API (Brevo) — Render's free tier drops outbound SMTP (IPv6 → Errno 101,
+# IPv4 → timeout), so prod OTP mail goes over HTTPS to Brevo's API instead.
+# When BREVO_API_KEY is set, OTP emails skip SMTP entirely. The sender address
+# must be verified as a Sender in the Brevo dashboard.
+BREVO_API_KEY = os.environ.get('BREVO_API_KEY')
+BREVO_SENDER_EMAIL = os.environ.get('BREVO_SENDER_EMAIL', 'sage.app.io@gmail.com')
+BREVO_SENDER_NAME = os.environ.get('BREVO_SENDER_NAME', 'SAGE')
 
 # Email settings can be overridden for dev (e.g. EMAIL_BACKEND=console to print OTPs)
 if os.environ.get('EMAIL_BACKEND'):

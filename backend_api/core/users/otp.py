@@ -69,11 +69,11 @@ def send_otp_email(user, otp: str) -> None:
         f"If you didn't try to sign in, you can ignore this email.\n\n"
         f"— SAGE Learning"
     )
-    if getattr(settings, 'RESEND_API_KEY', None):
-        # Render blocks SMTP egress (Errno 101), so prod OTP mail goes through
-        # Resend's HTTP API. `from` must be a sender verified in the Resend
-        # dashboard; errors raise so the login view can answer a clean 503.
-        _send_via_resend(subject, body, [user.email])
+    if getattr(settings, 'BREVO_API_KEY', None):
+        # Render free drops outbound SMTP entirely, so prod OTP mail goes over
+        # HTTPS to Brevo's API. The sender must be verified as a Sender in the
+        # Brevo dashboard; errors raise so the login view can answer a clean 503.
+        _send_via_brevo(subject, body, [user.email])
         return
     try:
         send_mail(
@@ -88,21 +88,24 @@ def send_otp_email(user, otp: str) -> None:
         raise
 
 
-def _send_via_resend(subject: str, text: str, recipients) -> None:
-    """Deliver a plain-text email through Resend's HTTP API."""
+def _send_via_brevo(subject: str, text: str, recipients) -> None:
+    """Deliver a plain-text email through Brevo's HTTPS API."""
     response = requests.post(
-        'https://api.resend.com/emails',
-        headers={'Authorization': f'Bearer {settings.RESEND_API_KEY}'},
+        'https://api.brevo.com/v3/smtp/email',
+        headers={'api-key': settings.BREVO_API_KEY},
         json={
-            'from': settings.RESEND_FROM,
-            'to': recipients,
+            'sender': {
+                'email': settings.BREVO_SENDER_EMAIL,
+                'name': settings.BREVO_SENDER_NAME,
+            },
+            'to': [{'email': email} for email in recipients],
             'subject': subject,
-            'text': text,
+            'textContent': text,
         },
         timeout=settings.EMAIL_TIMEOUT,
     )
     if response.status_code >= 400:
         logger.error(
-            'Resend send failed (%s): %s', response.status_code, response.text,
+            'Brevo send failed (%s): %s', response.status_code, response.text,
         )
-        raise RuntimeError(f'Resend send failed ({response.status_code})')
+        raise RuntimeError(f'Brevo send failed ({response.status_code})')

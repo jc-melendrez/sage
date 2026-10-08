@@ -404,11 +404,11 @@ class HealthzEndpointTests(TestCase):
             response = self.client.get(reverse('healthz'))
             self.assertIs(response.json()['email_configured'], True)
             self.assertEqual(response.json()['otp_delivery'], 'smtp')
-        with override_settings(RESEND_API_KEY='re_test_123'):
+        with override_settings(BREVO_API_KEY='xkeysib_test_123'):
             response = self.client.get(reverse('healthz'))
             self.assertIs(response.json()['email_configured'], True)
-            self.assertEqual(response.json()['otp_delivery'], 'resend')
-        with override_settings(EMAIL_HOST_USER='', EMAIL_HOST_PASSWORD='', RESEND_API_KEY=''):
+            self.assertEqual(response.json()['otp_delivery'], 'brevo')
+        with override_settings(EMAIL_HOST_USER='', EMAIL_HOST_PASSWORD='', BREVO_API_KEY=''):
             response = self.client.get(reverse('healthz'))
             self.assertIs(response.json()['email_configured'], False)
             self.assertEqual(response.json()['otp_delivery'], 'none')
