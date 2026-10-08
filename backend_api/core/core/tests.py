@@ -1,6 +1,7 @@
 """Project-level tests that don't belong to any single Django app."""
 import json
-from unittest.mock import patch
+import socket
+from unittest.mock import Mock, patch
 
 from django.conf import settings
 from django.core.cache import cache
@@ -310,6 +311,67 @@ class ThrottleCacheBackendTests(SimpleTestCase):
                 'createcachetable', commands[command],
                 f'The {command!r} command must create the cache table: {commands[command]}',
             )
+
+
+class Ipv4EmailBackendTests(SimpleTestCase):
+    """Gmail egress on Render fails with `Errno 101 Network is unreachable`
+    because smtp.gmail.com resolves to an IPv6 address the box cannot route;
+    the production backend must pin the SMTP connection to IPv4."""
+
+    databases = ['default']
+
+    def test_backend_imports_and_healthz_reports_it(self):
+        from django.core.mail.backends.smtp import EmailBackend as SmtpEmailBackend
+
+        backend = import_string('core.email_backend.Ipv4EmailBackend')
+        self.assertTrue(issubclass(backend, SmtpEmailBackend))
+        with override_settings(EMAIL_BACKEND='core.email_backend.Ipv4EmailBackend'):
+            response = self.client.get(reverse('healthz'))
+            self.assertEqual(response.json()['email_backend'], 'Ipv4EmailBackend')
+
+    def test_connection_class_is_the_ipv4_smtp(self):
+        from core.email_backend import Ipv4EmailBackend, Ipv4SMTP
+
+        backend = Ipv4EmailBackend(host='smtp.example.com', port=587)
+        self.assertIs(backend.connection_class, Ipv4SMTP)
+
+    def test_resolution_only_asks_for_ipv4(self):
+        from core.email_backend import _ipv4_addresses
+
+        with patch('core.email_backend.socket.getaddrinfo') as mock_gai:
+            mock_gai.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('203.0.113.1', 587)),
+            ]
+            self.assertEqual(
+                _ipv4_addresses('smtp.example.com', 587),
+                [('203.0.113.1', 587)],
+            )
+        mock_gai.assert_called_once_with(
+            'smtp.example.com', 587, socket.AF_INET, socket.SOCK_STREAM,
+        )
+
+    def test_connect_uses_the_resolved_ipv4_sockaddr(self):
+        from core.email_backend import Ipv4SMTP
+
+        fake_sock = Mock()
+        with patch('core.email_backend.socket.getaddrinfo', return_value=[
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('203.0.113.9', 587)),
+        ]), patch('core.email_backend.socket.socket', return_value=fake_sock):
+            smtp = Ipv4SMTP.__new__(Ipv4SMTP)
+            result = smtp._get_socket('smtp.example.com', 587, timeout=None)
+        self.assertIs(result, fake_sock)
+        fake_sock.connect.assert_called_once_with(('203.0.113.9', 587))
+
+    def test_all_addresses_failing_reports_the_last_error(self):
+        from core.email_backend import Ipv4SMTP
+
+        with patch('core.email_backend.socket.getaddrinfo', return_value=[
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('203.0.113.9', 587)),
+        ]), patch('core.email_backend.socket.socket') as mock_socket:
+            mock_socket.return_value.connect.side_effect = OSError('no route')
+            smtp = Ipv4SMTP.__new__(Ipv4SMTP)
+            with self.assertRaisesRegex(OSError, 'no route'):
+                smtp._get_socket('smtp.example.com', 587, timeout=None)
 
 
 class HealthzEndpointTests(TestCase):

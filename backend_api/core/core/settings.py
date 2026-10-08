@@ -220,15 +220,15 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024
 AUTH_USER_MODEL = 'users.User'
 
 # --- Email (OTP delivery) ---
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+# Renders boxes can resolve smtp.gmail.com to an IPv6 address they have no
+# route for (`OSError: [Errno 101] Network is unreachable`); the custom backend
+# pins the connection to IPv4. It still applies EMAIL_* below and the timeout.
+EMAIL_BACKEND = 'core.email_backend.Ipv4EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
-# Bound the SMTP connect so a dead egress path fails over to the next address
-# (and surfaces 503) instead of hanging a gunicorn worker until it is killed.
-# socket.create_connection tries smtp.gmail.com's addresses in order (IPv6
-# first); with no timeout an unroutable family stalls forever and never falls
-# through to IPv4, which is how a worker-abort SystemExit became a 500.
+# Bound the SMTP connect so a dead egress path fails fast (surfaces 503)
+# instead of hanging a gunicorn worker until it is killed.
 EMAIL_TIMEOUT = int(os.environ.get('EMAIL_TIMEOUT', '10'))
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD')
