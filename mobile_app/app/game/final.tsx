@@ -3,13 +3,16 @@ import { View, Text, FlatList, TouchableOpacity, StyleSheet, Animated, ScrollVie
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getCurrentUser, getToken } from '@/services/authService';
+import { leaveGameRoom } from '@/services/gameRoomService';
 import { getLanFinalStandings, lanGame } from '@/services/lanSession';
 import { API_BASE_URL } from '@/config/api';
 import TeamResultCard from '@/components/game/TeamResultCard';
 import SessionSummary, { type TeamNameLookup } from '@/components/game/SessionSummary';
+import PlayerInsights from '@/components/game/PlayerInsights';
 import { getOfflineGameSession } from '@/services/offlineGameService';
 import {
   buildBreakdown,
+  buildPlayerInsights,
   mergeSettledRank,
   orderTeamsForResults,
 } from '@/services/gameBreakdown';
@@ -20,12 +23,6 @@ import {
   type TeamEntry,
   type TeamMember,
 } from '@/types/game';
-
-const PLACEMENT_XP: Record<number, number> = { 1: 100, 2: 60, 3: 40 };
-
-function placementXpFor(rank: number) {
-  return PLACEMENT_XP[rank] ?? 25;
-}
 
 /**
  * A team that has not finished yet.
@@ -77,7 +74,7 @@ export default function FinalScreen() {
   // the breakdown has to come from here and be merged onto the live entries.
   const [teamResults, setTeamResults] = useState<Record<string, TeamMember[]>>({});
   // The same `teamResults` array, kept for its ranking fields. The settled
-  // rankScore is what the placement XP was actually paid from, so the ordering
+  // rankScore is what the placement was actually computed from, so the ordering
   // below follows it instead of recomputing and risking a different order.
   const [settledRank, setSettledRank] = useState<any[]>([]);
   const podiumAnim = useState(new Animated.Value(0))[0];
@@ -96,6 +93,13 @@ export default function FinalScreen() {
   // room over (HostClaimView) and the new host has to see the button too.
   const [isHost, setIsHost] = useState(false);
   const [rematching, setRematching] = useState(false);
+  // Read inside the room subscription below without making it a dependency, so
+  // the listener is not torn down and re-attached every time host identity lands.
+  const isHostRef = useRef(false);
+  useEffect(() => { isHostRef.current = isHost; }, [isHost]);
+  // The room's prior status, so a rematch (finished -> waiting) can be told
+  // apart from the first 'finished' frame that armed the screen.
+  const prevStatusRef = useRef<string | null>(null);
   /**
    * True once the owner has actually closed the room.
    *
@@ -118,16 +122,43 @@ export default function FinalScreen() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       // Back to the lobby with the SAME code -- that is the whole point of a
-      // rematch, so the students never have to re-enter anything. `isHost` is
-      // passed explicitly because the button is host-only, so the lobby can be
-      // relied on for its host controls immediately rather than after it
-      // re-derives that from Firestore.
-      router.replace(`/game/lobby?roomCode=${roomCode}&isHost=true`);
+      // rematch, so the students never have to re-enter anything.
+      //
+      // A team game still needs the real /game/lobby (team boxes, invite code,
+      // quiz picker). A classic game has none of that: the Play tab already
+      // shows the roster and its START reuses the room code, so the host lands
+      // there instead. `rematchHost=1` keeps START on screen for them.
+      if (teamMode) {
+        // `isHost` is passed explicitly because the button is host-only, so the
+        // lobby can be relied on for its host controls immediately rather than
+        // after it re-derives that from Firestore.
+        router.replace(`/game/lobby?roomCode=${roomCode}&isHost=true`);
+      } else {
+        router.replace({
+          pathname: '/(tabs)/games',
+          params: { rematchRoom: roomCode, rematchHost: '1' },
+        } as any);
+      }
     } catch (e: any) {
       Alert.alert('Rematch failed', e?.message ?? 'Could not start the rematch');
       setRematching(false);
     }
-  }, [roomCode, router]);
+  }, [roomCode, router, teamMode]);
+
+  /**
+   * Leave the room and return to the Play tab.
+   *
+   * "Back to Game Center" used to just navigate, which left the player on the
+   * roster -- so a later rematch pulled them back into a game they had already
+   * walked away from. Leaving first (team, player doc, host handover) makes it
+   * a real exit. Offline and LAN sessions have no server-side room to leave.
+   */
+  const backToGameCenter = useCallback(async () => {
+    if (!isOffline && !isLan) {
+      await leaveGameRoom(roomCode, myUserId);
+    }
+    router.replace('/(tabs)/games');
+  }, [isOffline, isLan, roomCode, myUserId, router]);
 
   useEffect(() => {
     if (isOffline || isLan) return;
@@ -175,10 +206,23 @@ export default function FinalScreen() {
         setTeamMode(!!data?.teamMode);
         setQuestions((data?.questions ?? []) as GameQuestion[]);
         setSettledRank(data?.teamResults ?? []);
-        setSettled(data?.status === 'finished');
+        const status = data?.status ?? null;
+        setSettled(status === 'finished');
         if (myUserId && data?.hostId != null) {
           setIsHost(String(data.hostId) === myUserId);
         }
+        // A non-host follows a classic rematch back to the Play tab. The host
+        // navigates itself out of startRematch; doing it here as well would
+        // fire the route twice. Guarded on `data` so a deleted room is not
+        // mistaken for a rematch.
+        if (data && !isHostRef.current
+            && prevStatusRef.current === 'finished' && status !== 'finished') {
+          router.replace({
+            pathname: '/(tabs)/games',
+            params: { rematchRoom: roomCode, rematchHost: '0' },
+          } as any);
+        }
+        prevStatusRef.current = status;
         // The server keys members by `userId`; the client expects `id`, so
         // normalise here rather than patching every consumer.
         const byTeam: Record<string, TeamMember[]> = {};
@@ -203,7 +247,7 @@ export default function FinalScreen() {
     // myUserId is a dependency so the subscription re-attaches once, and only
     // once, after the identity lookup lands. Without it the closure would keep
     // the initial null and never resolve the viewer's own row.
-  }, [myUserId]);
+  }, [myUserId, roomCode, router]);
 
   useEffect(() => {
     if (!teamMode) {
@@ -288,6 +332,14 @@ const breakdown = useMemo(() => buildBreakdown({
   }),
   [sessionQuestions, sessionPlayers, isOffline, isLan, params.playerId, myUserId]);
 
+  // The room-wide counterpart to the viewer review: what each player was good
+  // at and weak at. Built from the same inputs, so it works for online, offline
+  // and LAN alike.
+  const playerInsights = useMemo(
+    () => buildPlayerInsights({ questions: sessionQuestions, players: sessionPlayers }),
+    [sessionQuestions, sessionPlayers],
+  );
+
   const teamNames: Record<string, TeamNameLookup> = useMemo(() => {
     const out: Record<string, TeamNameLookup> = {};
     for (const t of teams) out[String(t.id)] = { name: t.name, color: t.color };
@@ -319,7 +371,7 @@ const breakdown = useMemo(() => buildBreakdown({
   // In team mode the player ranks with their team, not with themselves. The
   // individual score is still shown — inside the team card as a contribution.
   // Indexed into `rankedTeams`, not the raw subscription order, so every rank
-  // on this screen comes from the same ordering the XP was paid on.
+  // on this screen comes from the same ordering the settlement used.
   const rankOf = (t: TeamEntry) => rankedTeams.findIndex(x => x.id === t.id) + 1;
   const myTeamIndex = rankedTeams.findIndex(t => sameTeamId(t.id, myTeamId));
   const myTeam = myTeamIndex >= 0 ? rankedTeams[myTeamIndex] : null;
@@ -466,9 +518,9 @@ const breakdown = useMemo(() => buildBreakdown({
             ) : isLan ? (
               <>You finished <Text style={styles.youBannerRank}>#{finalRank}</Text> with <Text style={styles.youBannerRank}>{lanMyScore.toLocaleString()}</Text> pts · saved locally</>
             ) : teamMode ? (
-              <>{myTeam?.name ?? 'Your team'} placed <Text style={styles.youBannerRank}>#{finalRank}</Text> · +{placementXpFor(finalRank)} XP each</>
+              <>{myTeam?.name ?? 'Your team'} placed <Text style={styles.youBannerRank}>#{finalRank}</Text></>
             ) : (
-              <>You finished <Text style={styles.youBannerRank}>#{finalRank}</Text> · +{placementXpFor(finalRank)} XP</>
+              <>You finished <Text style={styles.youBannerRank}>#{finalRank}</Text></>
             )}
           </Text>
         </View>
@@ -593,7 +645,10 @@ const breakdown = useMemo(() => buildBreakdown({
           room saved before this existed still gets a working screen. */}
       <SessionSummary breakdown={breakdown} teams={teamNames} />
 
-      <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(tabs)/games')}>
+      {/* Room-wide strengths/weaknesses, visible to everyone at the table. */}
+      <PlayerInsights insights={playerInsights} />
+
+      <TouchableOpacity style={styles.btn} onPress={backToGameCenter}>
         <Text style={styles.btnText}>Back to Game Center</Text>
       </TouchableOpacity>
 

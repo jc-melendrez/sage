@@ -242,3 +242,156 @@ export function buildBreakdown(input: {
     mineAnswered,
   };
 }
+
+/* ── per-player strengths & weaknesses ─────────────────────────────────────
+   The viewer-centric breakdown above answers "how did I do". Educators asked
+   for the other half: what each player was good at and weak at across the whole
+   session. Questions carry no topic field, so the two signals available are the
+   question TYPE and the specific questions a player missed. */
+
+export type QuestionTypeKey = 'mcq' | 'true_false' | 'identification' | 'fill_in_blank';
+
+export const QUESTION_TYPE_LABELS: Record<QuestionTypeKey, string> = {
+  mcq: 'Multiple choice',
+  true_false: 'True / False',
+  identification: 'Identification',
+  fill_in_blank: 'Fill-in-the-blank',
+};
+
+/** Collapse every spelling of a question type to one key (mirrors the server). */
+export function normaliseQuestionType(raw?: string | null): QuestionTypeKey {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (['true_false', 'tf', 'true/false', 'true false', 'truefalse', 'boolean', 't/f'].includes(value)) {
+    return 'true_false';
+  }
+  if (['identification', 'identify', 'sa', 'short answer', 'short_answer'].includes(value)) {
+    return 'identification';
+  }
+  if (['fill_in_blank', 'fib', 'fill in the blank', 'fill-in-the-blank', 'fillblank'].includes(value)) {
+    return 'fill_in_blank';
+  }
+  return 'mcq';
+}
+
+export interface TypeSkill {
+  type: QuestionTypeKey;
+  label: string;
+  correct: number;
+  answered: number;
+  /** 0-100. */
+  accuracy: number;
+}
+
+export interface MissedQuestion {
+  index: number;
+  question: string;
+  /** The expected answer. Already public -- the room review shows it too. */
+  correctAnswer: string;
+}
+
+export interface PlayerInsight {
+  id: string;
+  displayName: string;
+  avatar?: string;
+  /** True when the player never logged an answer (a spectator or a no-show). */
+  didNotPlay: boolean;
+  correct: number;
+  answered: number;
+  accuracy: number;
+  bestStreak: number;
+  /** Types this player actually answered, at least one question each. */
+  skills: TypeSkill[];
+  /** Highest-accuracy type, or null when it is not a meaningful distinction. */
+  strongest: TypeSkill | null;
+  /** Lowest-accuracy type, or null when it is not a meaningful distinction. */
+  weakest: TypeSkill | null;
+  /** The questions this player answered incorrectly, in room order. */
+  missed: MissedQuestion[];
+}
+
+/**
+ * Break the room down by player, for the "what was everyone good at" panel.
+ *
+ * Type-based strengths are withheld unless the quiz contains at least two
+ * distinct types AND the player answered at least two of them: on an all-MCQ
+ * quiz "strong at multiple choice" is not a finding, it is a restatement of the
+ * quiz. A perfect tie across a player's types is likewise dropped, because
+ * picking one at random would invent a distinction the data does not support.
+ *
+ * Only the fact that a question was missed is surfaced, never what a peer
+ * picked -- the same privacy line the viewer review holds.
+ */
+export function buildPlayerInsights(input: {
+  questions: GameQuestion[];
+  players: PlayerEntry[];
+}): PlayerInsight[] {
+  const { questions = [], players = [] } = input;
+
+  const quizTypes = new Set<QuestionTypeKey>();
+  for (const q of questions) quizTypes.add(normaliseQuestionType(q?.type));
+  const multiType = quizTypes.size >= 2;
+
+  return players.map((player) => {
+    const log = answerLog(player);
+    const byType = new Map<QuestionTypeKey, { correct: number; answered: number }>();
+    const missed: MissedQuestion[] = [];
+    let correct = 0;
+    let answered = 0;
+
+    questions.forEach((q, index) => {
+      const entry = log[String(index)];
+      if (!entry) return;
+      answered += 1;
+      if (entry.correct) correct += 1;
+      else {
+        missed.push({
+          index,
+          question: q?.question ?? '',
+          correctAnswer: q?.correctAnswer ?? '',
+        });
+      }
+      const key = normaliseQuestionType(q?.type);
+      const bucket = byType.get(key) ?? { correct: 0, answered: 0 };
+      bucket.answered += 1;
+      if (entry.correct) bucket.correct += 1;
+      byType.set(key, bucket);
+    });
+
+    const skills: TypeSkill[] = [...byType.entries()].map(([type, v]) => ({
+      type,
+      label: QUESTION_TYPE_LABELS[type],
+      correct: v.correct,
+      answered: v.answered,
+      accuracy: accuracyPct(v.correct, v.answered),
+    }));
+
+    let strongest: TypeSkill | null = null;
+    let weakest: TypeSkill | null = null;
+    if (multiType && skills.length >= 2) {
+      const sorted = [...skills].sort(
+        (a, b) => b.accuracy - a.accuracy || b.correct - a.correct,
+      );
+      const best = sorted[0];
+      const worst = sorted[sorted.length - 1];
+      if (best.accuracy !== worst.accuracy) {
+        strongest = best;
+        weakest = worst;
+      }
+    }
+
+    return {
+      id: String(player.id),
+      displayName: player.displayName ?? 'Player',
+      avatar: player.avatar,
+      didNotPlay: answered === 0,
+      correct,
+      answered,
+      accuracy: accuracyPct(correct, answered),
+      bestStreak: player.bestStreak ?? 0,
+      skills,
+      strongest,
+      weakest,
+      missed,
+    };
+  });
+}

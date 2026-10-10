@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Modal, LayoutAnimation, Platform, UIManager, Alert, StatusBar } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { getToken, getCachedUserId } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
@@ -236,6 +237,7 @@ function mapHistoryRow(row: any): Message {
 }
 
 export default function AIAssistantScreen({ variant }: { variant: AIAssistantVariant }) {
+  const insets = useSafeAreaInsets();
   const scrollViewRef = useRef<ScrollView>(null);
   const userScrolledRef = useRef(false);
   // Set by loadHistory before it commits the populated message list. Opening a
@@ -747,7 +749,7 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
         colors={[COLORS.purpleDeep, COLORS.purpleDark]}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
-        style={styles.header}
+        style={[styles.header, { paddingTop: insets.top + 20 }]}
       >
         <View style={styles.headerContent}>
           <TouchableOpacity 
@@ -1116,11 +1118,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: Platform.OS === 'ios' ? 60 : 40,
-    paddingBottom: 20,
-    paddingHorizontal: 20,
-    borderBottomLeftRadius: 28,
-    borderBottomRightRadius: 28,
+    paddingBottom: 32,
+    paddingHorizontal: 24,
+    borderBottomLeftRadius: 32,
+    borderBottomRightRadius: 32,
     shadowColor: COLORS.purpleDeep,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,

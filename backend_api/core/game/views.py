@@ -14,7 +14,7 @@ from django.utils.dateparse import parse_datetime
 from core.firebase import get_firestore
 from firebase_admin import firestore as fs
 from users.utils.file_parser import extract_text_from_file
-from users.gamification import award_xp, log_activity, record_game_finish
+from users.gamification import log_activity, record_game_finish
 from users.models import User
 from users.ai_usage import charge, record_tokens
 from core.question_types import (
@@ -114,11 +114,6 @@ STREAK_BONUS_TIERS = (
 # same quiz always pays the same way -- a player who can see that question 10 is
 # the big one can plan for it, which is the entire point of pacing a quiz.
 DOUBLE_POINT_EVERY = 5
-
-# XP for one correct answer, shared by the solo and team paths. Named so the team
-# resolver cannot quietly pay a different amount from the solo endpoint for the
-# same correct answer.
-XP_PER_CORRECT = 10
 
 # Grace period before the server accepts an expired team question. Clients run
 # their own countdown off `teamStartedAt`, so they expire a moment before the
@@ -707,10 +702,10 @@ def snapshot_team_results(room_ref, room_data):
             'color': d.get('color'),
             'score': d.get('score', 0),
             # `score` stays the raw team total because that is what the player
-            # actually banked; `rankScore` is what the team is RANKED on, and it is
-            # the value the placement XP above was computed from. Both are
+            # actually banked; `rankScore` is what the team is RANKED on, and it
+            # is the value the placement above was computed from. Both are
             # persisted together so the results screen can never sort on a
-            # different number than the one that was paid out.
+            # different number than the one that was settled.
             'rankScore': team_rank_value(d, active.get(str(t.id), 0)),
             'activeMembers': active.get(str(t.id), 0),
             'correctCount': d.get('correctCount', 0),
@@ -724,9 +719,9 @@ def snapshot_team_results(room_ref, room_data):
         })
     results.sort(key=lambda r: r['rankScore'], reverse=True)
     # The finishing position is persisted rather than left for each client to
-    # re-derive: ties have to share a place (1,2,2,4) or the podium and the XP
-    # that was just paid will not agree. Same competition ranking as
-    # `_award_placement_xp` uses, on the same number.
+    # re-derive: ties have to share a place (1,2,2,4) or the podium and the
+    # placement the client is told about will not agree. Same competition
+    # ranking as `_settle_results` uses, on the same number.
     prev_score = prev_rank = None
     for i, row in enumerate(results):
         if row['rankScore'] != prev_score:
@@ -926,8 +921,8 @@ class CreateGameView(APIView):
             'hostId': request.user.id,
             # The educator who created the room. `hostId` moves if they leave
             # (HostClaimView) so the session stays manageable, but only the owner
-            # can settle it and pay out XP -- a handover is a custodian change,
-            # not a transfer of ownership.
+            # can settle it -- a handover is a custodian change, not a transfer
+            # of ownership.
             'ownerId': request.user.id,
             'hostName': get_display_name(request.user),
             'hostIsStudent': request.user.role == 'student',
@@ -1851,10 +1846,6 @@ class AnswerQuestionView(APIView):
             # Execute Transaction
             result = answer_in_transaction(db.transaction(), player_ref, team_ref)
 
-            # Award XP in Django (goes through the gamification service)
-            if result['scored'] and result['correct']:
-                award_xp(request.user, 10, source='game_answer')
-
             return Response({
                 'correct': result['correct'],
                 'correctAnswer': result['correctAnswer'],
@@ -1882,7 +1873,7 @@ class FinishGameView(APIView):
       * a player POSTs with no `confirm` -- they are recorded as finished and
         told how many others are still going. This does NOT settle anything.
       * the host POSTs with `confirm: true` -- only then is the room closed,
-        placement XP paid and team results snapshotted.
+        the placement settled and team results snapshotted.
 
     Previously the host settled the room instantly on their own tap, which meant
     one educator tapping "end session" mid-game skipped every remaining question
@@ -1927,7 +1918,7 @@ class FinishGameView(APIView):
                     # Deliberately compares against ownerId, not hostId: a
                     # student promoted by HostClaimView to keep the room
                     # manageable must not also gain the power to end the game
-                    # and pay out everyone's XP.
+                    # and settle everyone's results.
                     return Response({
                         'error': 'Only the room owner can end the game',
                         'hostId': room_data.get('hostId'),
@@ -2053,7 +2044,7 @@ class FinishGameView(APIView):
             'status': 'finished',
             'finishedAt': fs.SERVER_TIMESTAMP,
         })
-        results = self._award_placement_xp(room_ref, room_code, team_mode)
+        results = self._settle_results(room_ref, room_code, team_mode)
         # `results` is the same snapshot that was just written onto every
         # player's activity row, so the course Games tab and the student's
         # Recent Activity render identical results for the same game.
@@ -2119,8 +2110,8 @@ class FinishGameView(APIView):
         Teams are ranked on average points per *active* member rather than on
         their raw total, so a five-person team is not automatically ahead of a
         two-person one just by having more seats to fill. `rank_score` is the
-        same number `_award_placement_xp` ranks and pays on, so the placement
-        the client is told about can never disagree with the XP paid.
+        same number `_settle_results` ranks on, so the placement the client is
+        told about can never disagree with the settlement.
         """
         active = _active_members_by_team(room_ref)
         teams = [{
@@ -2142,7 +2133,7 @@ class FinishGameView(APIView):
         return {
             # In team mode there is no individual placement to report, so both
             # keys carry the team's finishing position. This is what the final
-            # screen and the placement XP both key off.
+            # screen and the placement both key off.
             'rank': team_rank,
             'teamRank': team_rank,
             'teamId': mine['team_id'] if mine else None,
@@ -2152,8 +2143,8 @@ class FinishGameView(APIView):
     @staticmethod
     def _competition_ranks(scores):
         """Standard competition ranking: 1,2,2,4. Ties share a rank and the
-        next rank skips accordingly, so the XP a client is told about and the
-        XP actually paid can never disagree."""
+        next rank skips accordingly, so the placement a client is told about
+        and the one that was settled can never disagree."""
         ranks = []
         prev_score = None
         prev_rank = 0
@@ -2164,12 +2155,13 @@ class FinishGameView(APIView):
             ranks.append(prev_rank)
         return ranks
 
-    def _award_placement_xp(self, room_ref, room_code, team_mode=False):
-        """Award XP to every participant based on final placement.
+    def _settle_results(self, room_ref, room_code, team_mode=False):
+        """Build the settled `results` snapshot for a finished room.
 
         In team mode placement is the TEAM's finishing position, and every
-        member is paid that team's placement. Ranking players individually
-        here is what made team mode still read as an individual game.
+        member is recorded with that team's placement. Ranking players
+        individually here is what made team mode still read as an individual
+        game.
 
         Returns the settled `results` snapshot (the same one written to each
         player's activity row) so the caller can archive it. Callers must not
@@ -2253,7 +2245,7 @@ class FinishGameView(APIView):
                 team_id = str(data['teamId'])
                 if team_id not in team_rank:
                     continue
-                self._pay(user_id=p.id, rank=team_rank[team_id], room_code=room_code,
+                self._record_finish(user_id=p.id, rank=team_rank[team_id], room_code=room_code,
                           label=f"#{team_rank[team_id]} with {team_doc[team_id].get('name') or f'Team {team_id}'}",
                           results=results, team_id=team_id, topic=room_data.get('topic'))
             return results
@@ -2291,11 +2283,11 @@ class FinishGameView(APIView):
             'participants': participants,
         }
         for entry, rank in zip(standings, ranks):
-            self._pay(user_id=entry['user_id'], rank=rank, room_code=room_code, label=f'#{rank}',
+            self._record_finish(user_id=entry['user_id'], rank=rank, room_code=room_code, label=f'#{rank}',
                       results=results, topic=room_data.get('topic'))
         return results
 
-    def _pay(self, user_id, rank, room_code, label, results=None, team_id=None, topic=None):
+    def _record_finish(self, user_id, rank, room_code, label, results=None, team_id=None, topic=None):
         user = User.objects.filter(id=user_id).first()
         if not user:
             return
@@ -2342,7 +2334,7 @@ class FinishGameView(APIView):
                                title=f'{name} · {score:,} pts',
                                description=f'{label} · {score:,} pts')
         except Exception as e:
-            print(f'[FinishGame XP Award Error] user {user_id}: {e}')
+            print(f'[FinishGame Record Error] user {user_id}: {e}')
 
 
 class RematchView(APIView):
@@ -3134,18 +3126,6 @@ class TeamPickView(APIView):
         if settled.get('pending'):
             return Response(settled)
 
-        # Every member earned the answer XP, not just whoever happened to submit
-        # last. Awarding it in the transaction is impossible -- it is a Django
-        # write -- so it is best-effort here and never blocks the response: the
-        # Firestore score is the source of truth and it is already committed.
-        xp = settled.get('xpAwarded') or 0
-        if xp:
-            for uid in members:
-                try:
-                    award_xp(User.objects.get(id=int(uid)), xp, source='game_answer')
-                except Exception as exc:  # noqa: BLE001 - never fail a scored answer
-                    print(f'[TeamPick XP Award Error] user {uid}: {exc}')
-
         return Response(settled)
 
 
@@ -3469,10 +3449,6 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             'speedBonus': speed_bonus,
             'doublePoint': is_double_point_question(question_index),
             'powerupEarned': powerup_earned,
-            # Everyone played the same question, so every member earned the same
-            # answer XP the solo endpoint pays. The caller awards it to all of
-            # them; paying only the last member to submit would reward being slow.
-            'xpAwarded': XP_PER_CORRECT if is_correct else 0,
         }
 
     return run(db.transaction())

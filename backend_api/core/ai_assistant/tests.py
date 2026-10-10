@@ -1357,6 +1357,64 @@ class GenerateQuizReliabilityTests(APITestCase):
         prompt = mock_call.call_args[0][0]['messages'][1]['content']
         self.assertIn('exactly 2 options', prompt)
 
+    # -- the correct option must not always sit first --
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_mcq_shuffles_options_so_the_answer_is_not_always_first(self, mock_call):
+        # The model chronically put the correct answer first, which is why every
+        # generated multiple-choice quiz read as "A is right". The stored order
+        # has to carry no signal, so the generator shuffles after resolving.
+        mock_call.return_value = _deepseek_response(_quiz_payload(1))
+        with patch('ai_assistant.views.random.shuffle',
+                   side_effect=lambda opts: opts.reverse()):
+            resp = self.post_quiz(count=1)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        question = Quiz.objects.get(user=self.educator, title='Generated').questions.get()
+        self.assertEqual(list(question.options), ['D', 'C', 'B', 'A'])
+        self.assertEqual(question.correct_answer, 'A')
+        self.assertNotEqual(question.options[0], question.correct_answer)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_mcq_letter_or_index_answer_is_resolved_to_the_option_text(self, mock_call):
+        # A model that answers with the option's letter or zero-based index
+        # (the schema the topic/lesson generators use) must still store the
+        # option text, because that -- not a position -- is what grades.
+        questions = json.loads(_quiz_payload(2))
+        questions['questions'][0]['correct_answer'] = 'C'
+        questions['questions'][1]['correct_answer'] = '1'
+        mock_call.return_value = _deepseek_response(json.dumps(questions))
+        resp = self.post_quiz(count=2)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        stored = list(
+            Quiz.objects.get(user=self.educator, title='Generated')
+            .questions.order_by('id'))
+        self.assertEqual(stored[0].correct_answer, 'C')
+        self.assertEqual(stored[1].correct_answer, 'B')
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_mcq_answer_not_among_the_options_is_rejected(self, mock_call):
+        # An answer that resolves to nothing is ungradable, so the batch is
+        # rejected rather than saved. This matches the quiz-package import rule.
+        questions = json.loads(_quiz_payload(1))
+        questions['questions'][0]['options'] = ['Apple', 'Banana', 'Cherry', 'Date']
+        questions['questions'][0]['correct_answer'] = 'E'
+        mock_call.return_value = _deepseek_response(json.dumps(questions))
+        resp = self.post_quiz(count=1)
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn('not one of its options', resp.data['error'])
+        self.assertEqual(Quiz.objects.count(), 0)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_mcq_prompt_asks_the_model_to_vary_the_correct_position(self, mock_call):
+        mock_call.return_value = _deepseek_response(_quiz_payload(3))
+        self.post_quiz(count=3, type='Multiple Choice')
+        prompt = mock_call.call_args[0][0]['messages'][1]['content']
+        self.assertIn('Vary where the correct option sits', prompt)
+
     # -- request shape --
 
     @override_settings(DEEPSEEK_API_KEY='test-key')

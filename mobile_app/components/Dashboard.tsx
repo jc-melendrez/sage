@@ -18,6 +18,10 @@ import Animated, {
   useAnimatedScrollHandler,
   useAnimatedStyle,
   interpolate,
+  withRepeat,
+  withSequence,
+  withTiming,
+  cancelAnimation,
   type SharedValue,
 } from 'react-native-reanimated';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -34,6 +38,7 @@ import { isRateLimitError } from '@/services/aiLimits';
 import { dailyCheckIn } from '@/services/gamificationService';
 import TutorialModal from './TutorialModal';
 import BottomSheet from './BottomSheet';
+import { useTutorialSeen } from '@/hooks/useTutorialSeen';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -216,6 +221,10 @@ export default function Dashboard() {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showTutorial, setShowTutorial] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
+  // `seen === false` means this device has never opened the tour, so the header
+  // button pulses and shows a badge until they do. `null` (still loading) and
+  // `true` both render the button quietly.
+  const { seen: tutorialSeen, markSeen: markTutorialSeen } = useTutorialSeen();
 
   // Carousel state
   const [currentPage, setCurrentPage] = useState(0);
@@ -228,6 +237,32 @@ export default function Dashboard() {
   
   // Animation value for smooth dot transition
   const scrollX = useSharedValue(0);
+
+  // Gentle attention pulse for the tutorial button while it is still unseen.
+  // One shared value, no layout work, so it is cheap enough to run on the Home
+  // screen; it is cancelled the moment the user opens the tour.
+  const tutorialPulse = useSharedValue(1);
+
+  useEffect(() => {
+    if (tutorialSeen === false) {
+      tutorialPulse.value = withRepeat(
+        withSequence(
+          withTiming(1.12, { duration: 650 }),
+          withTiming(1, { duration: 650 }),
+        ),
+        -1,
+        false,
+      );
+    } else {
+      cancelAnimation(tutorialPulse);
+      tutorialPulse.value = withTiming(1, { duration: 150 });
+    }
+    return () => cancelAnimation(tutorialPulse);
+  }, [tutorialSeen, tutorialPulse]);
+
+  const tutorialPulseStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: tutorialPulse.value }],
+  }));
 
   const onScroll = useAnimatedScrollHandler({
     onScroll: (event) => {
@@ -571,14 +606,25 @@ export default function Dashboard() {
             >
               <Ionicons name="book" size={22} color={COLORS.textSecondary} />
             </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.headerIconBtn}
-              activeOpacity={0.7}
-              onPress={() => setShowTutorial(true)}
-              accessibilityLabel="Open tutorial"
-            >
-              <Ionicons name="help-circle-outline" size={22} color={COLORS.textSecondary} />
-            </TouchableOpacity>
+            <Animated.View style={tutorialPulseStyle}>
+              <TouchableOpacity
+                style={[styles.headerIconBtn, styles.tutorialBtn]}
+                activeOpacity={0.85}
+                onPress={() => {
+                  markTutorialSeen();
+                  setShowTutorial(true);
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={tutorialSeen === false ? 'Open tutorial, new' : 'Open tutorial'}
+              >
+                <Ionicons name="help-circle" size={24} color={COLORS.purpleDeep} />
+                {tutorialSeen === false && (
+                  <View style={styles.tutorialBadge}>
+                    <Text style={styles.tutorialBadgeText}>!</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            </Animated.View>
             <TouchableOpacity
               style={styles.headerIconBtn}
               activeOpacity={0.7}
@@ -942,6 +988,7 @@ export default function Dashboard() {
         visible={showNotifications}
         onClose={() => setShowNotifications(false)}
         onOpenHref={(href) => router.push(href as any)}
+        onOpenActivity={() => setSheet('activities')}
         onUnreadChange={setUnreadCount}
         activities={activities}
         badges={badges}
@@ -1252,6 +1299,37 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 9,
     lineHeight: 12,
+    fontFamily: 'Montserrat-ExtraBold',
+    fontWeight: '900',
+  },
+  // The tutorial entry is a primary CTA, not a utility icon: amber fill and a
+  // dark glyph so it reads differently from the Book and Bell beside it.
+  tutorialBtn: {
+    backgroundColor: '#FBBF24',
+    shadowColor: '#FBBF24',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  tutorialBadge: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    minWidth: 16,
+    height: 16,
+    paddingHorizontal: 3,
+    borderRadius: 8,
+    backgroundColor: '#EF4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: '#FBBF24',
+  },
+  tutorialBadgeText: {
+    color: 'white',
+    fontSize: 11,
+    lineHeight: 13,
     fontFamily: 'Montserrat-ExtraBold',
     fontWeight: '900',
   },

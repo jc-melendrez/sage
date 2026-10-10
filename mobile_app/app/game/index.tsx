@@ -38,6 +38,8 @@ import TeamColumns from '@/components/game/TeamColumns';
 import { sameTeamId, type PlayerEntry, type TeamEntry } from '@/types/game';
 import { useCurrentUser } from '@/contexts/UserContext';
 import { useTutorialTarget } from '@/components/TutorialSpotlight';
+import { initialsOf } from '@/services/courseRoster';
+import { leaveGameRoom } from '@/services/gameRoomService';
 
 /**
  * busyTeamId sentinel for the spectator column. Team ids are numeric strings,
@@ -142,8 +144,19 @@ const EDUCATOR_GAME_MODES = new Set(['classic', 'group']);
 
 export default function GameCenterScreen() {
   const router = useRouter();
-  const { leftLobby: leftLobbyParam, courseId: courseIdParam, courseName: courseNameParam } =
-    useLocalSearchParams<{ leftLobby?: string; courseId?: string; courseName?: string }>();
+  const {
+    leftLobby: leftLobbyParam,
+    courseId: courseIdParam,
+    courseName: courseNameParam,
+    rematchRoom: rematchRoomParam,
+    rematchHost: rematchHostParam,
+  } = useLocalSearchParams<{
+    leftLobby?: string;
+    courseId?: string;
+    courseName?: string;
+    rematchRoom?: string;
+    rematchHost?: string;
+  }>();
   const insets = useSafeAreaInsets();
 
   // Highlighted by the guided tutorial — the INVITE/JOIN/START bar is the one
@@ -351,13 +364,24 @@ const lobbyTokenRef = useRef(0);
     return () => unsub();
   }, []);
 
+  // Read the avatar/initial off the shared profile context instead of a one-shot
+  // getCurrentUser() local state, so saving a new name or avatar in edit-profile
+  // (which publishes setUser) is reflected here the moment the Play tab mounts.
   useEffect(() => {
-    getCurrentUser().then(u => {
-      setCurrentUserId(u?.id ?? null);
-      setCurrentUserAvatar(u?.avatar ?? '');
-      setCurrentUserInitial((u?.first_name || u?.username || '?').charAt(0).toUpperCase());
-    });
-  }, []);
+    if (currentProfile) {
+      setCurrentUserId(currentProfile.id ?? null);
+      setCurrentUserAvatar(currentProfile.avatar ?? '');
+      const name =
+        [currentProfile.first_name, currentProfile.last_name].filter(Boolean).join(' ') ||
+        currentProfile.username ||
+        '?';
+      setCurrentUserInitial(initialsOf(name));
+    } else {
+      setCurrentUserId(null);
+      setCurrentUserAvatar('');
+      setCurrentUserInitial('?');
+    }
+  }, [currentProfile]);
 
   // Listen for players joining the online room so the top avatar slots update live.
   useEffect(() => {
@@ -566,6 +590,29 @@ const lobbyTokenRef = useRef(0);
     setIsCreatingRoom(false);
     router.setParams({ leftLobby: undefined });
   }, [leftLobbyParam, router]);
+
+  /**
+   * Coming back from a completed classic game's "Play Again".
+   *
+   * The rematch endpoint has already reset the room to 'waiting' and kept the
+   * whole roster, so this only has to adopt the same code again: the host's
+   * START reuses it (the `!roomCode` branch in handleStartPress is skipped) and
+   * the joiners land in the waiting-lobby view. `rematchHost` keeps the two
+   * roles apart -- the host stays out of `joinedRoom` so START is on screen,
+   * everyone else is a joiner waiting on the host.
+   */
+  useEffect(() => {
+    if (!rematchRoomParam) return;
+    lobbyTokenRef.current += 1;
+    setRoomCode(rematchRoomParam);
+    setRoomTopic('');
+    setRoomMode('classic');
+    setSelectedMode('classic');
+    setRoomStatus('waiting');
+    setJoinedRoom(rematchHostParam !== '1');
+    setActiveTab('presets');
+    router.setParams({ rematchRoom: undefined, rematchHost: undefined });
+  }, [rematchRoomParam, rematchHostParam, router]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -1283,27 +1330,10 @@ const lobbyTokenRef = useRef(0);
           text: 'Leave',
           style: 'destructive',
           onPress: async () => {
-            if (roomCode && currentUserId) {
-              const roomRef = firestore().collection('gameRooms').doc(roomCode);
-              const playerRef = roomRef.collection('players').doc(String(currentUserId));
-              // Get current teamId if any, then remove from team memberIds
-              try {
-                const playerSnap = await playerRef.get();
-                const myTeamId = playerSnap.data()?.teamId;
-                if (myTeamId) {
-                  const teamRef = roomRef.collection('teams').doc(myTeamId);
-                  await teamRef.update({ memberIds: firestore.FieldValue.arrayRemove(String(currentUserId)) });
-                }
-              } catch {}
-              // Delete own player doc
-              await playerRef.delete().catch(() => {});
-              // Hand the room over if we were hosting it. The endpoint is a
-              // no-op while the host is still present, so it is safe to call
-              // unconditionally: a student leaving must not disturb the host.
-              // Without this the room would sit permanently unhosted whenever
-              // the host used LEAVE rather than closing the app.
-              await post('host/claim/', { roomCode }).catch(() => {});
-            }
+            // Removes us from our team, deletes our player document and hands
+            // the room over if we were hosting it. Shared with the final
+            // screen's Back to Game Center so both teardown paths match.
+            await leaveGameRoom(roomCode, currentUserId);
             // Reset joined room state
             setJoinedRoom(false);
             setRoomCode(null);
@@ -1511,7 +1541,7 @@ const lobbyTokenRef = useRef(0);
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ width: '100%' }}
+              contentContainerStyle={{ flexGrow: 1 }}
               style={{ width: '100%' }}
             >
             <View style={styles.avatarRow}>
@@ -1540,7 +1570,7 @@ const lobbyTokenRef = useRef(0);
                             {pfpSource(lanHostInfo.avatar) ? (
                                 <Image source={pfpSource(lanHostInfo.avatar)!} style={styles.avatarImage} resizeMode="cover" />
                             ) : (
-                                <Text style={styles.avatarCircleJoinedText}>{(lanHostInfo.name || 'H').charAt(0).toUpperCase()}</Text>
+                                <Text style={styles.avatarCircleJoinedText}>{initialsOf(lanHostInfo.name || 'H')}</Text>
                             )}
                         </View>
                         <View style={styles.hostBadges}>
@@ -1551,13 +1581,13 @@ const lobbyTokenRef = useRef(0);
                 )}
 
                 {/* Joined Players */}
-                {joinedPlayers.slice(0, 4).map((p) => (
+                {joinedPlayers.map((p) => (
                     <View key={p.id} style={styles.avatarContainer}>
                         <View style={styles.avatarCircleJoined}>
                             {pfpSource(p.avatar) ? (
                                 <Image source={pfpSource(p.avatar)!} style={styles.avatarImage} resizeMode="cover" />
                             ) : (
-                                <Text style={styles.avatarCircleJoinedText}>{(p.displayName || '?').charAt(0).toUpperCase()}</Text>
+                                <Text style={styles.avatarCircleJoinedText}>{initialsOf(p.displayName || '?')}</Text>
                             )}
                         </View>
                         {joinedRoom && String(p.id) === String(roomHostId) && (
@@ -2101,9 +2131,10 @@ const styles = StyleSheet.create({
   avatarRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    width: '100%',
+    minWidth: '100%',
     marginBottom: 20,
     paddingHorizontal: 10,
+    gap: 8,
   },
   avatarContainer: {
     alignItems: 'center',
@@ -2113,7 +2144,7 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: COLORS.surface,
+    backgroundColor: COLORS.purpleVibrant,
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 3,

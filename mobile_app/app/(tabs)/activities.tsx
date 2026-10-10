@@ -740,7 +740,7 @@ export default function ActivitiesScreen() {
         colors={[COLORS.purpleDeep, COLORS.purpleDark]}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
-        style={[styles.header, { paddingTop: insets.top + 24 }]}
+        style={[styles.header, { paddingTop: insets.top + 20 }]}
       >
         <Text style={styles.headerTitle}>Activities</Text>
         <Text style={styles.headerSubtitle}>Courses, quizzes, and study groups</Text>

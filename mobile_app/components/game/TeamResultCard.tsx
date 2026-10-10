@@ -104,15 +104,18 @@ export default function TeamResultCard({ team, rank, expanded, isMyTeam }: Props
                 </View>
 
                 <View style={styles.agreeWrap}>
-                  <View style={styles.shareTrack}>
-                    <View
-                      style={[
-                        styles.shareFill,
-                        { width: `${Math.max(2, Math.min(100, agree))}%`, backgroundColor: team.color },
-                      ]}
-                    />
+                  <View style={styles.shareRow}>
+                    <View style={styles.shareTrack}>
+                      <View
+                        style={[
+                          styles.shareFill,
+                          { width: `${Math.max(2, Math.min(100, agree))}%`, backgroundColor: team.color },
+                        ]}
+                      />
+                    </View>
+                    <Text style={styles.shareText}>{agree}%</Text>
                   </View>
-                  <Text style={styles.shareText}>{agree}%</Text>
+                  <Text style={styles.shareLabel} numberOfLines={1}>agreed w/ team</Text>
                 </View>
               </View>
             );
@@ -184,11 +187,16 @@ const styles = StyleSheet.create({
   memberMain: { flex: 1, minWidth: 0 },
   memberName: { fontSize: 11, fontFamily: FONTS.semiBold, color: COLORS.textPrimary },
   memberMeta: { fontSize: 9, fontFamily: FONTS.medium, color: COLORS.textMuted, marginTop: 1 },
-  agreeWrap: { flexDirection: 'row', alignItems: 'center', gap: 5, width: 74 },
+  agreeWrap: { width: 86, gap: 3 },
+  shareRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   shareTrack: {
     flex: 1, height: 6, borderRadius: 3,
     backgroundColor: 'rgba(255,255,255,0.09)', overflow: 'hidden',
   },
   shareFill: { height: 6, borderRadius: 3 },
   shareText: { fontSize: 10, fontFamily: FONTS.bold, color: COLORS.textMuted, width: 28, textAlign: 'right' },
+  shareLabel: {
+    fontSize: 8, fontFamily: FONTS.bold, color: COLORS.textMuted,
+    letterSpacing: 0.2, textAlign: 'right',
+  },
 });
