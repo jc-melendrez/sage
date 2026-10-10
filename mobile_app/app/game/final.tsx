@@ -3,6 +3,7 @@ import { View, Text, FlatList, TouchableOpacity, StyleSheet, Animated, ScrollVie
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getCurrentUser, getToken } from '@/services/authService';
+import { leaveGameRoom } from '@/services/gameRoomService';
 import { getLanFinalStandings, lanGame } from '@/services/lanSession';
 import { API_BASE_URL } from '@/config/api';
 import TeamResultCard from '@/components/game/TeamResultCard';
@@ -92,6 +93,13 @@ export default function FinalScreen() {
   // room over (HostClaimView) and the new host has to see the button too.
   const [isHost, setIsHost] = useState(false);
   const [rematching, setRematching] = useState(false);
+  // Read inside the room subscription below without making it a dependency, so
+  // the listener is not torn down and re-attached every time host identity lands.
+  const isHostRef = useRef(false);
+  useEffect(() => { isHostRef.current = isHost; }, [isHost]);
+  // The room's prior status, so a rematch (finished -> waiting) can be told
+  // apart from the first 'finished' frame that armed the screen.
+  const prevStatusRef = useRef<string | null>(null);
   /**
    * True once the owner has actually closed the room.
    *
@@ -114,16 +122,43 @@ export default function FinalScreen() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       // Back to the lobby with the SAME code -- that is the whole point of a
-      // rematch, so the students never have to re-enter anything. `isHost` is
-      // passed explicitly because the button is host-only, so the lobby can be
-      // relied on for its host controls immediately rather than after it
-      // re-derives that from Firestore.
-      router.replace(`/game/lobby?roomCode=${roomCode}&isHost=true`);
+      // rematch, so the students never have to re-enter anything.
+      //
+      // A team game still needs the real /game/lobby (team boxes, invite code,
+      // quiz picker). A classic game has none of that: the Play tab already
+      // shows the roster and its START reuses the room code, so the host lands
+      // there instead. `rematchHost=1` keeps START on screen for them.
+      if (teamMode) {
+        // `isHost` is passed explicitly because the button is host-only, so the
+        // lobby can be relied on for its host controls immediately rather than
+        // after it re-derives that from Firestore.
+        router.replace(`/game/lobby?roomCode=${roomCode}&isHost=true`);
+      } else {
+        router.replace({
+          pathname: '/(tabs)/games',
+          params: { rematchRoom: roomCode, rematchHost: '1' },
+        } as any);
+      }
     } catch (e: any) {
       Alert.alert('Rematch failed', e?.message ?? 'Could not start the rematch');
       setRematching(false);
     }
-  }, [roomCode, router]);
+  }, [roomCode, router, teamMode]);
+
+  /**
+   * Leave the room and return to the Play tab.
+   *
+   * "Back to Game Center" used to just navigate, which left the player on the
+   * roster -- so a later rematch pulled them back into a game they had already
+   * walked away from. Leaving first (team, player doc, host handover) makes it
+   * a real exit. Offline and LAN sessions have no server-side room to leave.
+   */
+  const backToGameCenter = useCallback(async () => {
+    if (!isOffline && !isLan) {
+      await leaveGameRoom(roomCode, myUserId);
+    }
+    router.replace('/(tabs)/games');
+  }, [isOffline, isLan, roomCode, myUserId, router]);
 
   useEffect(() => {
     if (isOffline || isLan) return;
@@ -171,10 +206,23 @@ export default function FinalScreen() {
         setTeamMode(!!data?.teamMode);
         setQuestions((data?.questions ?? []) as GameQuestion[]);
         setSettledRank(data?.teamResults ?? []);
-        setSettled(data?.status === 'finished');
+        const status = data?.status ?? null;
+        setSettled(status === 'finished');
         if (myUserId && data?.hostId != null) {
           setIsHost(String(data.hostId) === myUserId);
         }
+        // A non-host follows a classic rematch back to the Play tab. The host
+        // navigates itself out of startRematch; doing it here as well would
+        // fire the route twice. Guarded on `data` so a deleted room is not
+        // mistaken for a rematch.
+        if (data && !isHostRef.current
+            && prevStatusRef.current === 'finished' && status !== 'finished') {
+          router.replace({
+            pathname: '/(tabs)/games',
+            params: { rematchRoom: roomCode, rematchHost: '0' },
+          } as any);
+        }
+        prevStatusRef.current = status;
         // The server keys members by `userId`; the client expects `id`, so
         // normalise here rather than patching every consumer.
         const byTeam: Record<string, TeamMember[]> = {};
@@ -199,7 +247,7 @@ export default function FinalScreen() {
     // myUserId is a dependency so the subscription re-attaches once, and only
     // once, after the identity lookup lands. Without it the closure would keep
     // the initial null and never resolve the viewer's own row.
-  }, [myUserId]);
+  }, [myUserId, roomCode, router]);
 
   useEffect(() => {
     if (!teamMode) {
@@ -600,7 +648,7 @@ const breakdown = useMemo(() => buildBreakdown({
       {/* Room-wide strengths/weaknesses, visible to everyone at the table. */}
       <PlayerInsights insights={playerInsights} />
 
-      <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(tabs)/games')}>
+      <TouchableOpacity style={styles.btn} onPress={backToGameCenter}>
         <Text style={styles.btnText}>Back to Game Center</Text>
       </TouchableOpacity>
 

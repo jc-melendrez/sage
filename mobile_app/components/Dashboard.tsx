@@ -988,6 +988,7 @@ export default function Dashboard() {
         visible={showNotifications}
         onClose={() => setShowNotifications(false)}
         onOpenHref={(href) => router.push(href as any)}
+        onOpenActivity={() => setSheet('activities')}
         onUnreadChange={setUnreadCount}
         activities={activities}
         badges={badges}

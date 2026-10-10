@@ -72,6 +72,14 @@ export interface AppNotification {
   href?: string;
   urgent?: boolean;
   /**
+   * The source activity's own `kind` ('game', 'offline_game', ...). Set only on
+   * activity rows, so the tap handler can route game sessions to the Recent
+   * Activity history instead of following `href`.
+   */
+  activityKind?: string;
+  /** The source activity's id, handed to `onOpenActivity` on tap. */
+  activityId?: string;
+  /**
    * Epoch ms the underlying record was created, for rows whose identity is
    * their creation. Feeds the read watermark; omit it for rows that represent
    * a change in state (a deadline inside a day, a pending join request).
@@ -84,6 +92,12 @@ interface Props {
   onClose: () => void;
   /** Route to open when a notification is tapped. */
   onOpenHref?: (href: string) => void;
+  /**
+   * Opens the Recent Activity history for a game-session activity. When
+   * provided, game rows use this instead of `onOpenHref` so a tap does not
+   * yank the student to the Play tab.
+   */
+  onOpenActivity?: (activityId: string) => void;
   activities?: any[];
   badges?: any[];
   recommendations?: any[];
@@ -124,6 +138,7 @@ export default function NotificationSheet({
   visible,
   onClose,
   onOpenHref,
+  onOpenActivity,
   activities = [],
   badges = [],
   recommendations = [],
@@ -317,6 +332,8 @@ export default function NotificationSheet({
         ].filter(Boolean).join(' · ') || a.description || 'Keep it up.',
         time: relativeTime(a.created_at),
         href: a.payload?.route || '/(tabs)/activities',
+        activityKind: a.kind,
+        activityId: String(a.id),
         createdAt: toEpoch(a.created_at),
       });
     }
@@ -418,7 +435,17 @@ export default function NotificationSheet({
                     // forever unless the user pressed "mark all".
                     markRead(n.id);
                     onClose();
-                    if (n.href && onOpenHref) onOpenHref(n.href);
+                    // A finished game is history, not a live game. Following
+                    // its route dropped the student on the Play tab as if a
+                    // session were waiting; open the Recent Activity list
+                    // instead, where the result actually lives.
+                    const isGameActivity =
+                      n.activityKind === 'game' || n.activityKind === 'offline_game';
+                    if (isGameActivity && onOpenActivity) {
+                      onOpenActivity(n.activityId ?? '');
+                    } else if (n.href && onOpenHref) {
+                      onOpenHref(n.href);
+                    }
                   }}
                 >
                   <View style={[styles.iconBox, { backgroundColor: n.color + '1A' }]}>

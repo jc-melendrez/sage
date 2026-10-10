@@ -1,5 +1,6 @@
 import os
 import json
+import random
 import re
 import requests
 import traceback
@@ -800,6 +801,9 @@ class GenerateQuizView(APIView):
                 "- question: at most 20 words\n"
                 f"- exactly {option_count} options, each at most 10 words\n"
                 "- correct_answer: copy the chosen option text exactly\n"
+                "- Vary where the correct option sits between questions. Do NOT "
+                "always put it first; spread the correct answer across every "
+                "position so a student cannot pass by picking the first option.\n"
                 "- explanation: ONE sentence, at most 20 words. Never more than one.\n"
                 "- no markdown, no numbering, no commentary outside the JSON\n"
             )
@@ -994,6 +998,34 @@ class GenerateQuizView(APIView):
                         {"error": f"AI returned question {i + 1} with no correct answer."},
                         status=502)
                 q['correct_answer'] = correct
+                if canonical_type == 'mcq':
+                    # The model is told to echo the correct option's text, but it
+                    # sometimes returns the option's letter ("A") or its
+                    # zero-based index ("0") instead -- the same schema the
+                    # topic/lesson generators ask for. Resolve either to the
+                    # option text; if it still matches nothing the question is
+                    # ungradable, so reject the batch (the rule the quiz-package
+                    # import already applies).
+                    resolved = correct
+                    if resolved not in q['options']:
+                        letter = resolved.upper()
+                        idx = None
+                        if len(letter) == 1 and 'A' <= letter <= 'Z':
+                            idx = ord(letter) - ord('A')
+                        elif resolved.isdigit():
+                            idx = int(resolved)
+                        if idx is not None and 0 <= idx < len(q['options']):
+                            resolved = q['options'][idx]
+                    if resolved not in q['options']:
+                        return Response(
+                            {"error": f"AI returned question {i + 1} whose correct "
+                                      "answer is not one of its options."},
+                            status=502)
+                    q['correct_answer'] = resolved
+                    # Shuffle only after resolving: correct_answer is the option
+                    # text, so it follows the move, and the stored order stops
+                    # being a tell for "the first one is right".
+                    random.shuffle(q['options'])
                 if typed:
                     # The cap in the prompt is a ceiling on WHICH answer to
                     # test, and a model sometimes reads it as an instruction to
