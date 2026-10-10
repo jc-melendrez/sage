@@ -59,16 +59,27 @@ export interface AnswerLogEntry {
   pickers?: number;
 }
 
-/**
- * Firestore map keys are always strings, so a log is keyed by
- * `String(questionIndex)` even though the numbers arrive as keys of `q0`,
- * `q1`, ... from the server.
- */
+/** Firestore map keys are always strings, so a log is keyed by `String(questionIndex)`. */
 export type PlayerAnswerLog = Record<string, AnswerLogEntry>;
 
-/** Pull a player's log out defensively -- it is absent on older rooms. */
+/**
+ * Pull a player's log out defensively -- it is absent on older rooms -- and
+ * normalize its keys to `String(questionIndex)`.
+ *
+ * The server writes online logs with a `q` prefix (`q0`, `q1`, ...) while the
+ * offline/LAN path builds them from numeric keys (`"0"`, `"1"`). Consumers index
+ * by `String(index)`, so strip the prefix here or every online summary reads an
+ * empty log.
+ */
 export function answerLog(player?: Pick<PlayerEntry, 'answers'> | null): PlayerAnswerLog {
-  return player?.answers ?? {};
+  const raw = player?.answers;
+  if (!raw) return {};
+  const out: PlayerAnswerLog = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    const stripped = key.startsWith('q') ? key.slice(1) : key;
+    out[/^\d+$/.test(stripped) ? stripped : key] = entry;
+  }
+  return out;
 }
 
 export interface PlayerEntry {

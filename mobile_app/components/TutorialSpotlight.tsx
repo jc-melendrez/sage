@@ -96,6 +96,10 @@ export function TutorialProvider({ children }: { children: React.ReactNode }) {
   const [frame, setFrame] = useState<Frame | null>(null);
 
   const nodes = useRef(new Map<string, any>());
+  // Measures the overlay's own window origin so the target's `measureInWindow`
+  // coordinates can be re-based to it. The two live in the same window, so the
+  // status-bar / inset offset cancels out instead of shifting every hole.
+  const overlayRef = useRef<View>(null);
 
   const topic = getTutorialTopic(topicKey);
   const stepCount = topic?.steps.length ?? 0;
@@ -156,13 +160,26 @@ export function TutorialProvider({ children }: { children: React.ReactNode }) {
 
     const attempt = () => {
       if (cancelled) return;
-      const node = step.targetId ? nodes.current.get(step.targetId) : null;
-      if (node && typeof node.measureInWindow === 'function') {
-        node.measureInWindow((x: number, y: number, width: number, height: number) => {
-          if (cancelled) return;
-          if (width > 0 && height > 0) setFrame({ x, y, width, height });
-        });
+      // The overlay is absolute-fill but its top-left is not necessarily the
+      // window's top-left (a non-translucent status bar, an inset window). The
+      // target's measureInWindow reports window coordinates, so ask the overlay
+      // where it sits and subtract that -- anything both share then cancels.
+      const base = overlayRef.current;
+      if (!base || typeof base.measureInWindow !== 'function') {
+        tries += 1;
+        if (tries < MAX_TRIES) timer = setTimeout(attempt, 200);
+        return;
       }
+      base.measureInWindow((ox: number, oy: number, _ow: number, _oh: number) => {
+        if (cancelled) return;
+        const node = step.targetId ? nodes.current.get(step.targetId) : null;
+        if (node && typeof node.measureInWindow === 'function') {
+          node.measureInWindow((x: number, y: number, width: number, height: number) => {
+            if (cancelled) return;
+            if (width > 0 && height > 0) setFrame({ x: x - ox, y: y - oy, width, height });
+          });
+        }
+      });
       tries += 1;
       if (tries < MAX_TRIES) timer = setTimeout(attempt, 200);
     };
@@ -189,6 +206,7 @@ export function TutorialProvider({ children }: { children: React.ReactNode }) {
           stepIndex={stepIndex}
           stepCount={stepCount}
           frame={frame}
+          overlayRef={overlayRef}
           isLast={isLast}
           onNext={next}
           onBack={back}
@@ -207,6 +225,8 @@ interface SpotlightProps {
   stepIndex: number;
   stepCount: number;
   frame: Frame | null;
+  /** The overlay's root view, measured to re-base target frames. */
+  overlayRef: React.RefObject<View | null>;
   isLast: boolean;
   onNext: () => void;
   onBack: () => void;
@@ -221,6 +241,7 @@ function Spotlight({
   stepIndex,
   stepCount,
   frame,
+  overlayRef,
   isLast,
   onNext,
   onBack,
@@ -246,7 +267,7 @@ function Spotlight({
     : { top: Math.max(insets.top + 8, winH * 0.34) };
 
   return (
-    <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+    <View ref={overlayRef} style={StyleSheet.absoluteFill} pointerEvents="box-none">
       {/* Tap sink. Painted first so the dim and the bubble sit above it; it
           exists to stop a stray press falling through the dim onto whatever
           control happens to be underneath. */}

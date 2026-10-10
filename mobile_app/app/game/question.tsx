@@ -455,7 +455,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   /** This member's own answer log, so "did I agree with my team?" can be shown
    * for a question that resolved without this client making the last pick. */
   const [ownAnswers, setOwnAnswers] = useState<PlayerAnswerLog>({});
-  /** The room's creator. Only they can settle the game and pay placement XP;
+  /** The room's creator. Only they can settle the game;
    * `hostId` can move to a student who is merely running the room. */
   const [roomOwnerId, setRoomOwnerId] = useState<string | null>(null);
   /** Latches once a forced pick has been sent for this question. */
@@ -822,10 +822,10 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         // it used to sit inside it, so a classic room -- which has no `teamMode`
         // field at all -- left `roomOwnerId` null forever. `isOwner` was then
         // always false, the client never sent `confirm`, and `_settle` (whose
-        // only caller is the confirm branch) never ran: no XP, no Recent
-        // Activity row, and `status` never reached 'finished' so the results
-        // screen never settled either. It read as a missing feature rather than
-        // a request that was never made.
+        // only caller is the confirm branch) never ran: no settlement, no
+        // Recent Activity row, and `status` never reached 'finished' so the
+        // results screen never settled either. It read as a missing feature
+        // rather than a request that was never made.
         setRoomOwnerId(String(data.ownerId ?? data.hostId ?? ''));
         // The shared question state is re-read on EVERY snapshot, not just at
         // boot: the host advances the room, and a member who is behind has to
@@ -1955,7 +1955,80 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       }
     };
 
-    await settle(false);
+    // Confirm before closing the room. The 409 branch above ("N of M still
+    // answering") is a SECOND confirm for the case that actually loses work;
+    // this one guards the ordinary tap, which previously ended everybody's game
+    // on a single press with no way back.
+    Alert.alert(
+      'End session for everyone?',
+      'This closes the game for every player and sends everyone to the final scores now.',
+      [
+        { text: 'Keep playing', style: 'cancel' },
+        { text: 'End session', style: 'destructive', onPress: () => { void settle(false); } },
+      ],
+    );
+  };
+
+  /**
+   * A player walking out of a game that is already running.
+   *
+   * The host's "End" closes the room for everyone; this is the other direction
+   * -- a participant leaving for themselves. The game keeps running for the
+   * rest of the room, so this only removes this player: their seat in a team
+   * and their player document, exactly as the pre-game LEAVE does. The
+   * `host/claim/` call is a no-op while the owner is still present, so a
+   * student leaving can never disturb the host (and a leaving host hands the
+   * room over rather than stranding it).
+   *
+   * Only offered for real online rooms -- offline practice and LAN have their
+   * own exits and no Firestore room to clean up.
+   */
+  const leaveSession = () => {
+    if (isOffline || isLan) return;
+    const isOwner = roomOwnerId != null && String(roomOwnerId) === String(userId);
+    // The host uses End, which closes the room; there is nothing meaningful for
+    // them to "leave" that is not just ending it for everyone.
+    if (isOwner) return;
+
+    const doLeave = async () => {
+      try {
+        if (roomCode && userId != null) {
+          const roomRef = firestore().collection('gameRooms').doc(roomCode);
+          const playerRef = roomRef.collection('players').doc(String(userId));
+          try {
+            const playerSnap = await playerRef.get();
+            const myTeamId = playerSnap.data()?.teamId;
+            if (myTeamId) {
+              const teamRef = roomRef.collection('teams').doc(myTeamId);
+              await teamRef.update({ memberIds: firestore.FieldValue.arrayRemove(String(userId)) });
+            }
+          } catch {}
+          await playerRef.delete().catch(() => {});
+          // Hand the room over if this player was hosting it. Same endpoint the
+          // pre-game LEAVE calls; harmless when the owner is still present.
+          const token = await getToken();
+          await fetch(`${API_BASE_URL}/game/host/claim/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ roomCode }),
+          }).catch(() => {});
+        }
+      } catch {
+        // The server-side cleanup is best-effort; never strand the player on a
+        // dead card. They asked to leave, so leave.
+      }
+      if (!claimNav()) return;
+      router.replace('/(tabs)/games' as any);
+    };
+
+    Alert.alert(
+      'Leave game?',
+      "Your answers so far won't be scored. The game continues for everyone else.",
+      [
+        { text: 'Stay', style: 'cancel' },
+        { text: 'Leave', style: 'destructive', onPress: () => { void doLeave(); } },
+      ],
+    );
   };
 
   const handleAnswer = async (answer: string | null) => {
@@ -2367,6 +2440,21 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             accessibilityLabel="Stop session"
           >
             <Text style={styles.stopSessionBtnText}>■ End</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Non-host participants can walk out of a running online game. The
+            host's counterpart is End above (closes for everyone), so this is
+            never shown to the owner. Offline and LAN have their own exits. */}
+        {!isRoomOwner && !isOffline && !isLan && (
+          <TouchableOpacity
+            style={styles.leaveSessionBtn}
+            onPress={leaveSession}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Leave game"
+          >
+            <Text style={styles.leaveSessionBtnText}>Leave</Text>
           </TouchableOpacity>
         )}
 
@@ -3102,6 +3190,22 @@ const styles = StyleSheet.create({
   },
   stopSessionBtnText: {
     color: COLORS.danger,
+    fontSize: 12,
+    fontFamily: FONTS.extraBold,
+  },
+
+  /* non-host leave button (header) */
+  leaveSessionBtn: {
+    borderWidth: 1,
+    borderColor: 'rgba(148,163,184,0.45)',
+    backgroundColor: 'rgba(148,163,184,0.14)',
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginLeft: 8,
+  },
+  leaveSessionBtnText: {
+    color: COLORS.textSecondary,
     fontSize: 12,
     fontFamily: FONTS.extraBold,
   },

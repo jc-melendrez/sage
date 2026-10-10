@@ -12,8 +12,6 @@ QUIZ_XP_PER_QUESTION = 5
 QUIZ_PASS_BONUS = 25
 LESSON_PASS_XP = 25
 CHECKIN_XP = 5
-GAME_PLACEMENT_XP = {1: 100, 2: 60, 3: 40}
-GAME_DEFAULT_XP = 25
 
 
 def _has_badge(user, name):
@@ -323,7 +321,10 @@ def record_daily_checkin(user):
 
 
 def record_game_finish(user, rank, room_code=None, context=None, results=None, label=None, payload=None, title=None, description=None, detail=None):
-    """Award placement XP after a multiplayer game finishes.
+    """Log a finished multiplayer game on the student's activity feed.
+
+    Games award no XP -- only the placement badge for a win -- but the settled
+    result is still recorded so the answer history keeps the game.
 
     `context` is a human-readable placement label. In team mode the rank is
     the team's finishing position, so the activity feed says e.g.
@@ -348,10 +349,7 @@ def record_game_finish(user, rank, room_code=None, context=None, results=None, l
     the full result without a second Firestore round trip that may no longer
     have a live room to read.
     """
-    xp = GAME_PLACEMENT_XP.get(rank, GAME_DEFAULT_XP)
-    result = award_xp(user, xp, source='game')
-
-    badges = list(result['badges'])
+    badges = []
     if rank == 1:
         champ = award_badge(user, 'Game Champion', '🏆')
         if champ:
@@ -383,15 +381,15 @@ def record_game_finish(user, rank, room_code=None, context=None, results=None, l
         # scans the list for -- which quiz it was, and how they did.
         title=title or (placement + (f" ({room_code})" if room_code else "")),
         description=detail_description or description or 'Multiplayer game finished',
-        xp=result['xp'],
+        xp=0,
         payload=activity_payload,
     )
 
     return {
-        'xp': result['xp'],
+        'xp': 0,
         'rank': rank,
-        'level': result['level'],
-        'leveled_up': result['leveled_up'],
+        'level': user.level,
+        'leveled_up': False,
         'badges': badges,
     }
 

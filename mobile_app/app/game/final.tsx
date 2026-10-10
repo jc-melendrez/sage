@@ -7,9 +7,11 @@ import { getLanFinalStandings, lanGame } from '@/services/lanSession';
 import { API_BASE_URL } from '@/config/api';
 import TeamResultCard from '@/components/game/TeamResultCard';
 import SessionSummary, { type TeamNameLookup } from '@/components/game/SessionSummary';
+import PlayerInsights from '@/components/game/PlayerInsights';
 import { getOfflineGameSession } from '@/services/offlineGameService';
 import {
   buildBreakdown,
+  buildPlayerInsights,
   mergeSettledRank,
   orderTeamsForResults,
 } from '@/services/gameBreakdown';
@@ -20,12 +22,6 @@ import {
   type TeamEntry,
   type TeamMember,
 } from '@/types/game';
-
-const PLACEMENT_XP: Record<number, number> = { 1: 100, 2: 60, 3: 40 };
-
-function placementXpFor(rank: number) {
-  return PLACEMENT_XP[rank] ?? 25;
-}
 
 /**
  * A team that has not finished yet.
@@ -77,7 +73,7 @@ export default function FinalScreen() {
   // the breakdown has to come from here and be merged onto the live entries.
   const [teamResults, setTeamResults] = useState<Record<string, TeamMember[]>>({});
   // The same `teamResults` array, kept for its ranking fields. The settled
-  // rankScore is what the placement XP was actually paid from, so the ordering
+  // rankScore is what the placement was actually computed from, so the ordering
   // below follows it instead of recomputing and risking a different order.
   const [settledRank, setSettledRank] = useState<any[]>([]);
   const podiumAnim = useState(new Animated.Value(0))[0];
@@ -288,6 +284,14 @@ const breakdown = useMemo(() => buildBreakdown({
   }),
   [sessionQuestions, sessionPlayers, isOffline, isLan, params.playerId, myUserId]);
 
+  // The room-wide counterpart to the viewer review: what each player was good
+  // at and weak at. Built from the same inputs, so it works for online, offline
+  // and LAN alike.
+  const playerInsights = useMemo(
+    () => buildPlayerInsights({ questions: sessionQuestions, players: sessionPlayers }),
+    [sessionQuestions, sessionPlayers],
+  );
+
   const teamNames: Record<string, TeamNameLookup> = useMemo(() => {
     const out: Record<string, TeamNameLookup> = {};
     for (const t of teams) out[String(t.id)] = { name: t.name, color: t.color };
@@ -319,7 +323,7 @@ const breakdown = useMemo(() => buildBreakdown({
   // In team mode the player ranks with their team, not with themselves. The
   // individual score is still shown — inside the team card as a contribution.
   // Indexed into `rankedTeams`, not the raw subscription order, so every rank
-  // on this screen comes from the same ordering the XP was paid on.
+  // on this screen comes from the same ordering the settlement used.
   const rankOf = (t: TeamEntry) => rankedTeams.findIndex(x => x.id === t.id) + 1;
   const myTeamIndex = rankedTeams.findIndex(t => sameTeamId(t.id, myTeamId));
   const myTeam = myTeamIndex >= 0 ? rankedTeams[myTeamIndex] : null;
@@ -466,9 +470,9 @@ const breakdown = useMemo(() => buildBreakdown({
             ) : isLan ? (
               <>You finished <Text style={styles.youBannerRank}>#{finalRank}</Text> with <Text style={styles.youBannerRank}>{lanMyScore.toLocaleString()}</Text> pts · saved locally</>
             ) : teamMode ? (
-              <>{myTeam?.name ?? 'Your team'} placed <Text style={styles.youBannerRank}>#{finalRank}</Text> · +{placementXpFor(finalRank)} XP each</>
+              <>{myTeam?.name ?? 'Your team'} placed <Text style={styles.youBannerRank}>#{finalRank}</Text></>
             ) : (
-              <>You finished <Text style={styles.youBannerRank}>#{finalRank}</Text> · +{placementXpFor(finalRank)} XP</>
+              <>You finished <Text style={styles.youBannerRank}>#{finalRank}</Text></>
             )}
           </Text>
         </View>
@@ -592,6 +596,9 @@ const breakdown = useMemo(() => buildBreakdown({
           LAN. Renders its own empty state when no answers were logged, so a
           room saved before this existed still gets a working screen. */}
       <SessionSummary breakdown={breakdown} teams={teamNames} />
+
+      {/* Room-wide strengths/weaknesses, visible to everyone at the table. */}
+      <PlayerInsights insights={playerInsights} />
 
       <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(tabs)/games')}>
         <Text style={styles.btnText}>Back to Game Center</Text>

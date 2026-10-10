@@ -393,7 +393,7 @@ export default function StudyScreen() {
           <View style={styles.statsRow}>
             {RATINGS.map((rating) => (
               <View key={rating} style={styles.statCard}>
-                <Text style={[styles.statValue, { color: RATING_STYLE[rating].color }]}>{counts[rating]}</Text>
+                <Text style={[styles.statValue, { color: RATING_STYLE[rating].bg }]}>{counts[rating]}</Text>
                 <Text style={styles.statLabel}>{RATING_LABELS[rating].toUpperCase()}</Text>
               </View>
             ))}
@@ -404,11 +404,11 @@ export default function StudyScreen() {
               <Ionicons
                 name={RATING_STYLE[topRating.rating].icon}
                 size={16}
-                color={RATING_STYLE[topRating.rating].color}
+                color={RATING_STYLE[topRating.rating].bg}
               />
               <Text style={styles.topRatingText}>
                 Most picked:{' '}
-                <Text style={{ color: RATING_STYLE[topRating.rating].color, fontFamily: FONTS.bold }}>
+                <Text style={{ color: RATING_STYLE[topRating.rating].bg, fontFamily: FONTS.bold }}>
                   {RATING_LABELS[topRating.rating]}
                 </Text>
                 {' · '}

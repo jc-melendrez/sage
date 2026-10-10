@@ -328,7 +328,16 @@ export default function NotificationSheet({
     () => items.map((n) => ({ id: n.id, createdAt: n.createdAt })),
     [items],
   );
-  const { isUnread, markAllRead, markRead, unreadCount } = useNotificationReadState(keys);
+  const { isUnread, isHidden, markAllRead, markRead, clearRead, unreadCount, hydrated } =
+    useNotificationReadState(keys);
+
+  // "Clear all" only sweeps read rows, so the list is what remains once the
+  // hidden (already-cleared) ids are dropped.
+  const visibleItems = useMemo(() => items.filter((n) => !isHidden(n.id)), [items, isHidden]);
+  const hasReadRows = useMemo(
+    () => hydrated && visibleItems.some((n) => !isUnread(n.id, n.createdAt)),
+    [hydrated, visibleItems, isUnread],
+  );
 
   // The bell badge lives in the Dashboard header, outside this sheet. Report
   // the count up rather than recomputing it there: this sheet is the only
@@ -354,11 +363,13 @@ export default function NotificationSheet({
         <View style={styles.header}>
           <Text style={styles.title}>Notifications</Text>
           <View style={styles.headerActions}>
-            {/* Hidden while fetching: the button marks the list that is ON
-                SCREEN, so pressing it mid-load cleared only the half that had
-                arrived -- and when the rest landed a moment later the badge
-                re-lit with the leftovers, which read as "it did nothing". */}
-            {!loading && unreadCount > 0 && (
+            {/* No `!loading` gate: it used to hide the button until every lazy
+                source (quizzes, groups, courses, tasks) had resolved, which is
+                why it took a beat to appear. The hook reports 0 until storage
+                hydrates, and the `clearedAt` watermark keeps late-arriving
+                createdAt rows from re-lighting, so showing it as soon as there
+                is an unread row is honest. */}
+            {unreadCount > 0 && (
               <TouchableOpacity
                 onPress={markAllRead}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -368,25 +379,35 @@ export default function NotificationSheet({
                 <Text style={styles.clearAll}>Mark all as read</Text>
               </TouchableOpacity>
             )}
+            {hasReadRows && (
+              <TouchableOpacity
+                onPress={clearRead}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                accessibilityRole="button"
+                accessibilityLabel="Clear read notifications"
+              >
+                <Text style={styles.clearAll}>Clear all</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Ionicons name="close" size={22} color={COLORS.textMuted} />
             </TouchableOpacity>
           </View>
         </View>
 
-        {loading && items.length === 0 ? (
+        {loading && visibleItems.length === 0 ? (
           <View style={styles.loadingBox}>
             <ActivityIndicator color={COLORS.purpleVibrant} />
           </View>
-        ) : items.length === 0 ? (
+        ) : visibleItems.length === 0 ? (
           <View style={styles.emptyBox}>
             <Ionicons name="notifications-off-outline" size={40} color={COLORS.textMuted} />
             <Text style={styles.emptyText}>Nothing new right now.</Text>
           </View>
         ) : (
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.list}>
-            {items.map((n) => {
-              const unread = isUnread(n.id);
+            {visibleItems.map((n) => {
+              const unread = isUnread(n.id, n.createdAt);
               return (
                 <TouchableOpacity
                   key={n.id}

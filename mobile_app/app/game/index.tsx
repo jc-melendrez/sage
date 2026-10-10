@@ -38,6 +38,7 @@ import TeamColumns from '@/components/game/TeamColumns';
 import { sameTeamId, type PlayerEntry, type TeamEntry } from '@/types/game';
 import { useCurrentUser } from '@/contexts/UserContext';
 import { useTutorialTarget } from '@/components/TutorialSpotlight';
+import { initialsOf } from '@/services/courseRoster';
 
 /**
  * busyTeamId sentinel for the spectator column. Team ids are numeric strings,
@@ -351,13 +352,24 @@ const lobbyTokenRef = useRef(0);
     return () => unsub();
   }, []);
 
+  // Read the avatar/initial off the shared profile context instead of a one-shot
+  // getCurrentUser() local state, so saving a new name or avatar in edit-profile
+  // (which publishes setUser) is reflected here the moment the Play tab mounts.
   useEffect(() => {
-    getCurrentUser().then(u => {
-      setCurrentUserId(u?.id ?? null);
-      setCurrentUserAvatar(u?.avatar ?? '');
-      setCurrentUserInitial((u?.first_name || u?.username || '?').charAt(0).toUpperCase());
-    });
-  }, []);
+    if (currentProfile) {
+      setCurrentUserId(currentProfile.id ?? null);
+      setCurrentUserAvatar(currentProfile.avatar ?? '');
+      const name =
+        [currentProfile.first_name, currentProfile.last_name].filter(Boolean).join(' ') ||
+        currentProfile.username ||
+        '?';
+      setCurrentUserInitial(initialsOf(name));
+    } else {
+      setCurrentUserId(null);
+      setCurrentUserAvatar('');
+      setCurrentUserInitial('?');
+    }
+  }, [currentProfile]);
 
   // Listen for players joining the online room so the top avatar slots update live.
   useEffect(() => {
@@ -1511,7 +1523,7 @@ const lobbyTokenRef = useRef(0);
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ width: '100%' }}
+              contentContainerStyle={{ flexGrow: 1 }}
               style={{ width: '100%' }}
             >
             <View style={styles.avatarRow}>
@@ -1540,7 +1552,7 @@ const lobbyTokenRef = useRef(0);
                             {pfpSource(lanHostInfo.avatar) ? (
                                 <Image source={pfpSource(lanHostInfo.avatar)!} style={styles.avatarImage} resizeMode="cover" />
                             ) : (
-                                <Text style={styles.avatarCircleJoinedText}>{(lanHostInfo.name || 'H').charAt(0).toUpperCase()}</Text>
+                                <Text style={styles.avatarCircleJoinedText}>{initialsOf(lanHostInfo.name || 'H')}</Text>
                             )}
                         </View>
                         <View style={styles.hostBadges}>
@@ -1551,13 +1563,13 @@ const lobbyTokenRef = useRef(0);
                 )}
 
                 {/* Joined Players */}
-                {joinedPlayers.slice(0, 4).map((p) => (
+                {joinedPlayers.map((p) => (
                     <View key={p.id} style={styles.avatarContainer}>
                         <View style={styles.avatarCircleJoined}>
                             {pfpSource(p.avatar) ? (
                                 <Image source={pfpSource(p.avatar)!} style={styles.avatarImage} resizeMode="cover" />
                             ) : (
-                                <Text style={styles.avatarCircleJoinedText}>{(p.displayName || '?').charAt(0).toUpperCase()}</Text>
+                                <Text style={styles.avatarCircleJoinedText}>{initialsOf(p.displayName || '?')}</Text>
                             )}
                         </View>
                         {joinedRoom && String(p.id) === String(roomHostId) && (
@@ -2101,9 +2113,10 @@ const styles = StyleSheet.create({
   avatarRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    width: '100%',
+    minWidth: '100%',
     marginBottom: 20,
     paddingHorizontal: 10,
+    gap: 8,
   },
   avatarContainer: {
     alignItems: 'center',
@@ -2113,7 +2126,7 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: COLORS.surface,
+    backgroundColor: COLORS.purpleVibrant,
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 3,

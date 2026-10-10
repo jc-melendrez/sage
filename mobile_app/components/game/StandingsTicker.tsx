@@ -140,9 +140,9 @@ function Row({ row }: { row: TickerRow }) {
 /**
  * Ranked rows for the strip.
  *
- * Teams are ranked on the same average-per-active-member value the server pays
- * placement XP from, so a member who joined late does not push their team down
- * the board for playing fewer questions.
+ * Teams are ranked on the same average-per-active-member value the server
+ * settles placement from, so a member who joined late does not push their team
+ * down the board for playing fewer questions.
  */
 function buildRows({
   teams = [],

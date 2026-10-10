@@ -891,10 +891,11 @@ class ActivityFeedTests(TestCase):
         self.assertEqual(Activity.objects.filter(user=self.user, kind='checkin').count(), 1)
 
     def test_game_finish_logs_activity(self):
+        # Games award no XP: the row is the record, the payout is gone.
         gamification.record_game_finish(self.user, 1, room_code='ABC123')
         activity = Activity.objects.get(user=self.user)
         self.assertEqual(activity.kind, 'game')
-        self.assertEqual(activity.xp_earned, 100)
+        self.assertEqual(activity.xp_earned, 0)
         self.assertIn('ABC123', activity.title)
 
     def test_game_finish_payload_identifies_the_game(self):
