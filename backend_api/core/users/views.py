@@ -2262,6 +2262,28 @@ class MyGamesView(APIView):
         })
 
 
+class GameRoomDetailView(APIView):
+    """Delete one archived game the caller hosted.
+
+    Owner-only rather than course-scoped: the archive row is the educator's
+    own history, and a room hosted from the FAB has no course to scope
+    against. Deleting it removes the history entry only -- student activity
+    rows, XP and the Firestore room are separate records.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, game_id):
+        room = GameRoom.objects.filter(id=game_id).first()
+        if room is None:
+            return Response({"error": "Game not found"}, status=404)
+        if room.owner_id != request.user.id:
+            return Response(
+                {"error": "Only the host can delete this game"}, status=403)
+        room.delete()
+        return Response(status=204)
+
+
 def _store_activity_attachments(request, activity):
     """Attach every uploaded `attachments` file to `activity`.
 

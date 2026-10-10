@@ -471,7 +471,7 @@ export default function EducatorDashboardScreen() {
             ) : (
               <>
                 {games.slice(0, GAMES_PREVIEW).map(g => (
-                  <GameHistoryRow key={g.id} game={g} showCourse />
+                  <GameHistoryRow key={g.id} game={g} showCourse onDelete={loadGames} />
                 ))}
                 {games.length > GAMES_PREVIEW && (
                   <TouchableOpacity

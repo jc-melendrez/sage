@@ -4,13 +4,12 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
   ActivityIndicator,
   RefreshControl,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { COLORS, FONTS, RADIUS, CARD_SHADOW, tint, SPACE, TYPE } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import {
@@ -44,8 +43,6 @@ function countNodes(topics: Awaited<ReturnType<typeof getCoursePath>>): number {
 }
 
 export default function AnalyticsScreen() {
-  const router = useRouter();
-
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [coursesLoading, setCoursesLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -395,23 +392,6 @@ export default function AnalyticsScreen() {
                     ))}
                   </View>
                 </View>
-
-                <TouchableOpacity
-                  style={styles.linkCard}
-                  activeOpacity={0.8}
-                  onPress={() => router.push('/educator/ai-insights' as any)}
-                  accessibilityRole="button"
-                  accessibilityLabel="AI Insights"
-                >
-                  <View style={[styles.linkIconBg, { backgroundColor: tint(COLORS.accent) }]}>
-                    <Ionicons name="sparkles" size={18} color={COLORS.accent} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.linkTitle}>AI Insights</Text>
-                    <Text style={styles.linkSub}>Review how students use the AI helper</Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-                </TouchableOpacity>
               </>
             )}
           </>
@@ -548,38 +528,5 @@ const styles = StyleSheet.create({
     fontFamily: FONTS.bold,
     fontWeight: '700',
     color: COLORS.textPrimary,
-  },
-
-  linkCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACE.md,
-    backgroundColor: COLORS.surface,
-    borderRadius: RADIUS.lg,
-    padding: SPACE.md,
-    marginTop: SPACE.xxl,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    ...CARD_SHADOW,
-    minHeight: 44,
-  },
-  linkIconBg: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  linkTitle: {
-    fontSize: TYPE.body,
-    fontFamily: FONTS.semiBold,
-    fontWeight: '600',
-    color: COLORS.textPrimary,
-    marginBottom: 2,
-  },
-  linkSub: {
-    fontSize: TYPE.meta,
-    fontFamily: FONTS.regular,
-    color: COLORS.textSecondary,
   },
 });

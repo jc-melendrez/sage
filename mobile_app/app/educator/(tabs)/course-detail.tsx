@@ -25,7 +25,6 @@ import { QuizDetailModal } from '@/components/educator/QuizDetailModal';
 import { QuizOverflowButton, QuizOverflowMenu } from '@/components/educator/QuizOverflowMenu';
 import { QuizEditorSheet } from '@/components/educator/QuizEditorSheet';
 import { QuizGeneratorSheet } from '@/components/educator/QuizGeneratorSheet';
-import { HostGameCard } from '@/components/educator/HostGameCard';
 import { CourseGamesSection } from '@/components/educator/CourseGamesSection';
 import { TopicOverflowButton, TopicOverflowMenu } from '@/components/educator/TopicOverflowMenu';
 import { getCoursePath, createTopic, updateTopic, deleteTopic, createNode, generateTopic, GenerateTopicResponse, getCourseLeaderboard, CourseLeaderboard, getCourseClassChat, createCourseClassChat, deleteCourseClassChat, CourseClassChat, getCourse, CourseRoster } from '@/services/courseService';
@@ -886,11 +885,6 @@ export default function CourseDetailScreen() {
         {section === 'quizzes' && (
           <>
             <SectionHeader title="Quizzes" actionLabel="Generate" onAction={openQuizGenerator} />
-            {/* Above the list, not in the header: hosting needs a quiz to have
-                happened first, so this doubles as the answer to "no games yet". */}
-            <View style={{ marginBottom: 16 }}>
-              <HostGameCard courseId={cid} courseName={courseName} />
-            </View>
             {quizzes.length > 0 ? (
               <View style={{ gap: 12 }}>
                 {quizzes.map((quiz) => (

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS, RADIUS } from '@/constants/educatorTheme';
@@ -8,7 +8,6 @@ import {
   CourseGame,
   getCourseGames,
   getMyGames,
-  isGameLive,
 } from '@/services/gameHistoryService';
 
 interface CourseGamesSectionProps {
@@ -28,12 +27,13 @@ interface CourseGamesSectionProps {
 }
 
 /**
- * A list of archived games, newest first, grouped live vs finished.
+ * A list of archived games, newest first.
  *
  * Backed by the backend's GameRoom archive rather than the Firestore room, which
  * is keyed only by room code and therefore cannot answer "what did this class
- * play". In-progress games are listed too -- filtering to finished-only would
- * hide the game the teacher is running until the moment it ended.
+ * play". Every archived row is rendered as history: there is no live/in-progress
+ * presentation, so a room whose finish call was never recorded still reads as a
+ * past game rather than one that is still running.
  *
  * With a `courseId` it reads `GET /users/courses/<id>/games/`; without one it
  * reads `GET /users/games/mine/`. Everything below the fetch is shared.
@@ -44,18 +44,18 @@ export function CourseGamesSection({
   title = 'Games',
   showCourse = false,
 }: CourseGamesSectionProps) {
-  const [games, setGames] = useState<CourseGame[] | null>(null);
+  const [allGames, setAllGames] = useState<CourseGame[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
       const data = courseId != null ? await getCourseGames(courseId) : await getMyGames();
-      setGames(data.games);
+      setAllGames(data.games);
     } catch (e: any) {
       // Deliberately still shown as an empty list below, with this as the
       // reason. "No games yet" and "could not load games" must not look alike.
-      setGames([]);
+      setAllGames([]);
       setError(e?.message || 'Could not load games');
     }
   }, [courseId]);
@@ -67,9 +67,8 @@ export function CourseGamesSection({
     load();
   }, [load]);
 
-  const finished = useMemo(() => (games ?? []).filter(g => !isGameLive(g)), [games]);
-  const live = useMemo(() => (games ?? []).filter(isGameLive), [games]);
-  const loading = games === null;
+  const games = allGames ?? [];
+  const loading = allGames === null;
 
   if (loading) {
     return (
@@ -79,14 +78,14 @@ export function CourseGamesSection({
     );
   }
 
-  const hasGames = finished.length > 0 || live.length > 0;
+  const hasGames = games.length > 0;
 
   const emptyText = error
     ? courseName
       ? `We could not load ${courseName}’s games.`
       : 'We could not load your hosted games.'
     : courseName
-      ? `Host a live game from ${courseName}’s Quizzes tab and it will appear here with its full results.`
+      ? `Host a game for ${courseName} and it will appear here with its full results.`
       : 'Host a game from the create button and it will appear here with its full results.';
 
   return (
@@ -110,22 +109,14 @@ export function CourseGamesSection({
           text={emptyText}
         />
       ) : (
-        <>
-          {live.length > 0 && (
-            <View style={styles.group}>
-              <Text style={styles.groupLabel}>IN PROGRESS</Text>
-              {live.map(g => <GameHistoryRow key={g.id} game={g} showCourse={showCourse} />)}
-            </View>
-          )}
-          {finished.length > 0 && (
-            <View style={styles.group}>
-              <Text style={styles.groupLabel}>
-                {live.length > 0 ? 'FINISHED' : `${finished.length} GAME${finished.length === 1 ? '' : 'S'}`}
-              </Text>
-              {finished.map(g => <GameHistoryRow key={g.id} game={g} showCourse={showCourse} />)}
-            </View>
-          )}
-        </>
+        <View style={styles.group}>
+          <Text style={styles.groupLabel}>
+            {`${games.length} GAME${games.length === 1 ? '' : 'S'}`}
+          </Text>
+          {games.map(g => (
+            <GameHistoryRow key={g.id} game={g} showCourse={showCourse} onDelete={load} />
+          ))}
+        </View>
       )}
     </View>
   );

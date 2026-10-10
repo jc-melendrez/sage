@@ -61,6 +61,8 @@ urlpatterns = [
     # Owner-wide archive: includes course-less rooms (hosted from the FAB),
     # which the per-course endpoint above can never return.
     path('games/mine/', views.MyGamesView.as_view(), name='my_games'),
+    # DELETE one archived game from the host's own history.
+    path('games/<int:game_id>/', views.GameRoomDetailView.as_view(), name='game_detail'),
     path('activities/', views.MyClassActivitiesView.as_view(), name='my_activities'),
     path('activities/<int:activity_id>/', views.ClassActivityDetailView.as_view(), name='activity_detail'),
 

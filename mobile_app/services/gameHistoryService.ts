@@ -1,4 +1,5 @@
 import { apiCall } from './apiClient';
+import { invalidateCachePrefix } from './apiCache';
 import type { ActivityResults } from '@/components/ActivityResultsView';
 
 /**
@@ -49,7 +50,7 @@ export interface CourseGamesResponse {
   /** Absent from /users/games/mine/, which is not scoped to a class. */
   course_id?: number;
   course_name?: string;
-  /** Newest first, including in-progress rooms so the tab can show them live. */
+  /** Newest first. */
   games: CourseGame[];
 }
 
@@ -75,9 +76,16 @@ export async function getMyGames(): Promise<CourseGamesResponse> {
   return apiCall<CourseGamesResponse>('/users/games/mine/');
 }
 
-/** True for a game still running, which is what the row's status pill keys off. */
-export function isGameLive(game: CourseGame): boolean {
-  return game.status === 'waiting' || game.status === 'active';
+/**
+ * Remove one archived game from the host's history (owner-only server-side).
+ *
+ * The per-course list is SWR-cached (it matches the `/api/users/courses`
+ * rule), so the cache is invalidated here too — otherwise the deleted row
+ * would come back from cache the next time the Games tab mounted.
+ */
+export async function deleteGame(gameId: number): Promise<void> {
+  await apiCall<void>(`/users/games/${gameId}/`, { method: 'DELETE', noCache: true });
+  invalidateCachePrefix('/games/');
 }
 
 /**

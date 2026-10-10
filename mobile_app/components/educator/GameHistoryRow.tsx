@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { View, Text, StyleSheet, Pressable, TouchableOpacity, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS, RADIUS, CARD_SHADOW } from '@/constants/educatorTheme';
 import { Pill } from './EducatorPrimitives';
 import ActivityResultsView from '@/components/ActivityResultsView';
-import { CourseGame, isGameLive, resultsFor, roundCount } from '@/services/gameHistoryService';
+import { CourseGame, resultsFor, roundCount, deleteGame } from '@/services/gameHistoryService';
+import { notify } from '@/services/notify';
 
 type Round = 'current' | 'previous';
 
@@ -30,7 +31,12 @@ function formatWhen(iso: string | null): string {
  * class and the pill would be noise; the owner-wide lists turn it on because
  * there the class is the thing that distinguishes the rows.
  */
-export function GameHistoryRow({ game, showCourse = false }: { game: CourseGame; showCourse?: boolean }) {
+export function GameHistoryRow({ game, showCourse = false, onDelete }: {
+  game: CourseGame;
+  showCourse?: boolean;
+  /** Called after a successful delete so the owning list can reload. */
+  onDelete?: () => void | Promise<void>;
+}) {
   // A rematched room has round one's results moved to `previous_round`, so the
   // row opens on whichever round actually has results rather than on an empty
   // "current" one.
@@ -38,7 +44,6 @@ export function GameHistoryRow({ game, showCourse = false }: { game: CourseGame;
   const [round, setRound] = useState<Round>('current');
 
   const rounds = roundCount(game);
-  const live = isGameLive(game);
   const shown = resultsFor(game, round);
   // Which round the toggle should offer next.
   const otherRound: Round = round === 'current' ? 'previous' : 'current';
@@ -47,19 +52,45 @@ export function GameHistoryRow({ game, showCourse = false }: { game: CourseGame;
     || formatWhen(game.finished_at)
     || formatWhen(game.created_at);
 
+  // stopPropagation so the tap never also toggles the row's expand state.
+  const confirmDelete = (event: { stopPropagation?: () => void }) => {
+    event.stopPropagation?.();
+    Alert.alert(
+      'Delete Game',
+      `Remove "${game.topic || 'Untitled game'}" from your game history? This can't be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteGame(game.id);
+              await onDelete?.();
+              notify('Game deleted', 'The game was removed from your history.');
+            } catch (err) {
+              console.error('Delete Game Error:', err);
+              notify('Delete Failed', err instanceof Error ? err.message : 'Something went wrong.');
+            }
+          },
+        },
+      ],
+    );
+  };
+
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
       onPress={() => setExpanded(v => !v)}
       accessibilityRole="button"
-      accessibilityLabel={`${game.topic || 'Game'} ${live ? 'in progress' : ''}. ${expanded ? 'Hide results' : 'Show results'}`}
+      accessibilityLabel={`${game.topic || 'Game'}. ${expanded ? 'Hide results' : 'Show results'}`}
     >
       <View style={styles.rowHeader}>
         <View style={styles.iconBox}>
           <Ionicons
-            name={live ? 'radio-outline' : 'game-controller-outline'}
+            name="game-controller-outline"
             size={18}
-            color={live ? COLORS.success : COLORS.purpleVibrant}
+            color={COLORS.purpleVibrant}
           />
         </View>
 
@@ -74,16 +105,19 @@ export function GameHistoryRow({ game, showCourse = false }: { game: CourseGame;
         </View>
 
         <View style={styles.rowRight}>
-          {live ? (
-            <Pill label="LIVE" color={COLORS.success} icon="radio-outline" />
-          ) : (
-            <>
-              <Text style={styles.count}>{game.player_count}</Text>
-              <Text style={styles.countLabel}>
-                {game.player_count === 1 ? 'player' : 'players'}
-              </Text>
-            </>
-          )}
+          <Text style={styles.count}>{game.player_count}</Text>
+          <Text style={styles.countLabel}>
+            {game.player_count === 1 ? 'player' : 'players'}
+          </Text>
+          <TouchableOpacity
+            style={styles.deleteBtn}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={`Delete ${game.topic || 'game'}`}
+            onPress={confirmDelete}
+          >
+            <Ionicons name="trash-outline" size={16} color={COLORS.danger} />
+          </TouchableOpacity>
           <Ionicons
             name={expanded ? 'chevron-up' : 'chevron-down'}
             size={16}
@@ -133,9 +167,7 @@ export function GameHistoryRow({ game, showCourse = false }: { game: CourseGame;
             </>
           ) : (
             <Text style={styles.noResults}>
-              {live
-                ? 'This game is still running. Results appear once it ends.'
-                : 'No results were recorded for this game.'}
+              No results were recorded for this game.
             </Text>
           )}
         </View>
@@ -168,6 +200,7 @@ const styles = StyleSheet.create({
   topic: { fontSize: 15, fontFamily: FONTS.bold, color: COLORS.textPrimary },
   meta: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 2 },
   rowRight: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  deleteBtn: { padding: 6 },
   count: { fontSize: 15, fontFamily: FONTS.bold, color: COLORS.textPrimary },
   countLabel: { fontSize: 11, fontFamily: FONTS.regular, color: COLORS.textMuted, marginRight: 4 },
   tags: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10, alignItems: 'center' },

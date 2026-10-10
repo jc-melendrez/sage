@@ -61,6 +61,19 @@ export async function signUpWithEmail(email: string, password: string): Promise<
 }
 
 /**
+ * Send a password reset email to the given address using the native Firebase SDK.
+ * Firebase hosts the reset page, so no backend endpoint is involved.
+ */
+export async function sendPasswordResetEmail(email: string): Promise<void> {
+  try {
+    await auth().sendPasswordResetEmail(email);
+  } catch (error) {
+    console.error('Firebase password reset failed:', error);
+    throw error;
+  }
+}
+
+/**
  * Sign in with Google using the native Google account picker.
  * Returns the Firebase ID Token.
  */

@@ -10,9 +10,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../hooks/useAuth';
 import { roleHomePath } from '../services/authService';
-import { initFirebaseAuth } from '../services/firebaseAuthService';
+import { initFirebaseAuth, sendPasswordResetEmail } from '../services/firebaseAuthService';
 
-type Step = 'form' | 'otp';
+type Step = 'form' | 'otp' | 'forgot';
 
 const COLORS = {
   bg: '#baaeda',
@@ -107,6 +107,10 @@ export default function LoginScreen() {
   const [otpCode, setOtpCode] = useState('');
   const [otpEmail, setOtpEmail] = useState('');
 
+  // Password reset state (pure Firebase — no backend call)
+  const [resetSending, setResetSending] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
+
   useEffect(() => {
     initFirebaseAuth();
   }, []);
@@ -194,10 +198,28 @@ export default function LoginScreen() {
     }
   };
 
+  const handleForgotPassword = async () => {
+    const target = email.trim();
+    if (!target) {
+      Alert.alert('Error', 'Please enter your email address');
+      return;
+    }
+    setResetSending(true);
+    try {
+      await sendPasswordResetEmail(target);
+      setResetSent(true);
+    } catch (err) {
+      Alert.alert('Reset Failed', messageFor(err, 'Could not send the reset email. Please try again'));
+    } finally {
+      setResetSending(false);
+    }
+  };
+
   const backToForm = () => {
     setStep('form');
     setChallengeToken(null);
     setOtpCode('');
+    setResetSent(false);
     clearError();
   };
 
@@ -287,6 +309,73 @@ export default function LoginScreen() {
                     <TouchableOpacity onPress={backToForm} style={styles.otpBackLink} disabled={loading}>
                       <Ionicons name="arrow-back" size={12} color={COLORS.purplePrimary} />
                       <Text style={styles.otpBackText}>Use a different account</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : step === 'forgot' ? (
+                  <>
+                    <View style={styles.otpHeader}>
+                      <View style={styles.otpIconCircle}>
+                        <Ionicons name="lock-closed-outline" size={22} color={COLORS.purplePrimary} />
+                      </View>
+                      <Text style={styles.otpTitle}>
+                        {resetSent ? 'Check your email' : 'Reset your password'}
+                      </Text>
+                      <Text style={styles.otpSubtitle}>
+                        {resetSent ? (
+                          <>
+                            We sent a reset link to{' '}
+                            <Text style={styles.otpEmailText}>{email.trim()}</Text>. Open it to choose
+                            a new password.
+                          </>
+                        ) : (
+                          'Enter the email tied to your account and we will send you a link to set a new password.'
+                        )}
+                      </Text>
+                    </View>
+
+                    {!resetSent && (
+                      <>
+                        <View style={styles.inputWrapper}>
+                          <Ionicons name="mail-outline" size={14} color={COLORS.purpleDeep} style={styles.inputIcon} />
+                          <TextInput
+                            placeholder="Email Address"
+                            keyboardType="email-address"
+                            autoCapitalize="none"
+                            style={styles.input}
+                            value={email}
+                            onChangeText={setEmail}
+                            autoFocus
+                            placeholderTextColor="#9CA3AF"
+                          />
+                        </View>
+
+                        <TouchableOpacity
+                          style={[styles.submitButton, resetSending && styles.submitButtonDisabled]}
+                          onPress={handleForgotPassword}
+                          disabled={resetSending}
+                        >
+                          <LinearGradient
+                            colors={[COLORS.purplePrimary, COLORS.purpleVibrant]}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 0 }}
+                            style={styles.submitButtonGradient}
+                          >
+                            {resetSending ? (
+                              <ActivityIndicator color="white" size="small" />
+                            ) : (
+                              <>
+                                <Text style={styles.submitButtonText}>Send Reset Link</Text>
+                                <Ionicons name="send-outline" size={16} color="white" />
+                              </>
+                            )}
+                          </LinearGradient>
+                        </TouchableOpacity>
+                      </>
+                    )}
+
+                    <TouchableOpacity onPress={backToForm} style={styles.otpBackLink} disabled={resetSending}>
+                      <Ionicons name="arrow-back" size={12} color={COLORS.purplePrimary} />
+                      <Text style={styles.otpBackText}>Back to log in</Text>
                     </TouchableOpacity>
                   </>
                 ) : (
@@ -398,7 +487,11 @@ export default function LoginScreen() {
                 </View>
 
                 {!isSignUp && (
-                  <TouchableOpacity style={styles.forgotPassword}>
+                  <TouchableOpacity
+                    style={styles.forgotPassword}
+                    onPress={() => setStep('forgot')}
+                    disabled={loading}
+                  >
                     <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
                   </TouchableOpacity>
                 )}

@@ -3,7 +3,7 @@ import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { getCoursePath, getCourseClassChat, type CourseClassChat } from '@/services/courseService';
+import { getCoursePath } from '@/services/courseService';
 import { CoursePathTopic, NODE_TYPE_CONFIG, LearningNode } from '@/types/learning';
 import ProgressRing from '@/components/courses/ProgressRing';
 import { getCourseActivities, ClassActivity } from '@/services/activityService';
@@ -83,10 +83,6 @@ export default function CourseDetailScreen() {
   // Course badges
   const [badges, setBadges] = useState<any[]>([]);
 
-  // Class chat, if the educator has enabled one. Students have no create or
-  // delete controls: membership follows the roster.
-  const [chat, setChat] = useState<CourseClassChat | null>(null);
-
   // Active category tab
   const [section, setSection] = useState<SectionKey>('topics');
 
@@ -106,14 +102,12 @@ export default function CourseDetailScreen() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [topicsData, activitiesData, quizzesData, userData, chatData] = await Promise.all([
+        const [topicsData, activitiesData, quizzesData, userData] = await Promise.all([
           getCoursePath(Number(courseId)),
           getCourseActivities(Number(courseId)).catch(() => [] as ClassActivity[]),
           getQuizzes(Number(courseId)).catch(() => [] as Quiz[]),
           getCurrentUser().catch(() => null),
-          getCourseClassChat(Number(courseId)).catch(() => null),
         ]);
-        setChat(chatData);
         setTopics(topicsData);
         setActivities(activitiesData.filter((a) => a.status === 'published'));
         setQuizzes(quizzesData);
@@ -250,23 +244,6 @@ export default function CourseDetailScreen() {
         <Text style={styles.headerTitle} numberOfLines={1}>Course Topics</Text>
         <View style={{ width: 32 }} />
       </LinearGradient>
-
-      {/* Only shown once the educator has enabled a chat; students can't turn it
-          on themselves, so there's nothing to show otherwise. */}
-      {chat?.has_class_chat && (
-        <TouchableOpacity
-          style={styles.chatBar}
-          activeOpacity={0.7}
-          onPress={() => router.push(`/chat/${chat.chat_group_id}`)}
-        >
-          <Ionicons name="chatbubbles" size={18} color={COLORS.purpleVibrant} />
-          <Text style={styles.chatBarText}>Class chat</Text>
-          <View style={styles.chatBarBadge}>
-            <Text style={styles.chatBarBadgeText}>{chat.member_count}</Text>
-          </View>
-          <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-        </TouchableOpacity>
-      )}
 
       <View style={styles.tabsContainer}>
         {SECTIONS.map((s) => {
@@ -535,18 +512,6 @@ const styles = StyleSheet.create({
   activeTabIndicatorInactive: { backgroundColor: 'transparent' },
   tabText: { fontSize: 14, color: COLORS.textMuted, fontFamily: FONTS.semiBold, fontWeight: '600' },
   tabTextActive: { color: '#3a107a', fontFamily: FONTS.bold, fontWeight: '800' },
-  chatBar: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    marginHorizontal: 20, marginTop: 12, paddingHorizontal: 14, paddingVertical: 12,
-    backgroundColor: COLORS.bg, borderRadius: 14,
-    borderWidth: 1, borderColor: COLORS.border,
-  },
-  chatBarText: { flex: 1, fontSize: 14, color: COLORS.textPrimary, fontFamily: FONTS.semiBold, fontWeight: '600' },
-  chatBarBadge: {
-    minWidth: 22, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 11,
-    backgroundColor: COLORS.purpleGhost, alignItems: 'center',
-  },
-  chatBarBadgeText: { fontSize: 12, color: COLORS.purpleDark, fontFamily: FONTS.bold, fontWeight: '700' },
   quizCard: {
     backgroundColor: COLORS.surface,
     borderRadius: 16,

@@ -4301,3 +4301,70 @@ class MyGamesHistoryTests(TestCase):
                    'participants': [{'user_id': 1, 'name': 'pupil', 'score': 900}]}
         self.archive('PAID', self.educator, final_payload=payload)
         self.assertEqual(self.get().json()['games'][0]['final_payload'], payload)
+
+class GameRoomDeleteTests(TestCase):
+    """DELETE /users/games/<id>/ -- removing one game from the host's history."""
+
+    def setUp(self):
+        self.educator = User.objects.create_user(
+            username='teacher', password='pass', role='educator')
+        self.rival = User.objects.create_user(
+            username='rival', password='pass', role='educator')
+        self.student = User.objects.create_user(
+            username='pupil', password='pass', role='student')
+        self.course = Course.objects.create(
+            name='Year 9 Biology', educator=self.educator, description='c')
+        self.client = APIClient()
+
+    def archive(self, code, owner=None, **kwargs):
+        owner = owner or self.educator
+        defaults = {
+            'topic': f'{code} topic',
+            'status': GameRoom.STATUS_FINISHED,
+            'player_count': 2,
+            'finished_at': timezone.now(),
+            'host_name': owner.username,
+        }
+        defaults.update(kwargs)
+        return GameRoom.objects.create(
+            room_code=code, owner=owner, course=self.course, **defaults)
+
+    def delete(self, game_id, user=None):
+        self.client.force_authenticate(user=user or self.educator)
+        return self.client.delete(reverse('game_detail', kwargs={'game_id': game_id}))
+
+    def test_the_host_can_delete_their_own_game(self):
+        room = self.archive('GONE1')
+        resp = self.delete(room.id)
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(GameRoom.objects.filter(id=room.id).exists())
+
+    def test_the_deleted_game_disappears_from_both_lists(self):
+        gone = self.archive('GONE2')
+        self.archive('KEPT')
+        self.delete(gone.id)
+        mine = self.client.get(reverse('my_games')).json()['games']
+        self.assertEqual([g['room_code'] for g in mine], ['KEPT'])
+        course = self.client.get(
+            reverse('course_games', kwargs={'course_id': self.course.id})
+        ).json()['games']
+        self.assertEqual([g['room_code'] for g in course], ['KEPT'])
+
+    def test_another_educator_cannot_delete_it(self):
+        room = self.archive('SAFE1')
+        resp = self.delete(room.id, user=self.rival)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(GameRoom.objects.filter(id=room.id).exists())
+
+    def test_a_student_cannot_delete_it(self):
+        room = self.archive('SAFE2')
+        self.assertEqual(self.delete(room.id, user=self.student).status_code, 403)
+        self.assertTrue(GameRoom.objects.filter(id=room.id).exists())
+
+    def test_anonymous_is_rejected(self):
+        room = self.archive('SAFE3')
+        resp = self.client.delete(reverse('game_detail', kwargs={'game_id': room.id}))
+        self.assertEqual(resp.status_code, 401)
+
+    def test_a_missing_game_is_a_404(self):
+        self.assertEqual(self.delete(999999).status_code, 404)
