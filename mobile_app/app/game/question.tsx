@@ -702,9 +702,18 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     const myId = getLanPlayerId();
     const list = [...lanPlayersRef.current];
     if (game) {
+      const meName = lanGame.playerName || 'You';
+      // The host relays our own row back in the final leaderboard, already
+      // carrying the answers we submitted and our team. Rebuilding it from
+      // scratch dropped both, which left the viewer with no review of their own
+      // play and no team placement on the results screen.
+      const existing = myId
+        ? list.find(p => p.id === myId)
+        : list.find(p => p.name === meName);
       const me = {
+        ...(existing ?? {}),
         id: myId || 'me',
-        name: lanGame.playerName || 'You',
+        name: meName,
         avatar: lanGame.playerAvatar || undefined,
         connected: true,
         finished: true,
@@ -712,10 +721,10 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         correctCount: game.correctCount,
         answeredCount: game.answeredCount,
         totalQuestions: game.totalQuestions,
+        answers: answerLogFromOutcomes(game.outcomeLog),
+        teamId: existing?.teamId,
       };
-      const idx = myId
-        ? list.findIndex(p => p.id === myId)
-        : list.findIndex(p => p.name === me.name);
+      const idx = existing ? list.indexOf(existing) : -1;
       if (idx >= 0) list[idx] = me;
       else list.push(me);
     }

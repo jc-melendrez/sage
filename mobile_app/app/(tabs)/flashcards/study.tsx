@@ -216,6 +216,27 @@ export default function StudyScreen() {
     return best ? { rating: best, count: bestCount } : null;
   }, [counts]);
 
+  // The game's results screen pairs the score with a "Good at & needs work"
+  // panel, so the flashcard recap grows the same section for consistency. The
+  // final rating per card comes from `history` (last entry wins, and undo pops
+  // it), which mirrors the stat cards above exactly.
+  const sessionInsights = useMemo(() => {
+    const finalRating = new Map<number, Rating>();
+    for (const entry of history) finalRating.set(entry.cardId, entry.rating);
+    const seen = new Set<number>();
+    const good: Card[] = [];
+    const needsWork: Card[] = [];
+    for (const c of cards) {
+      if (seen.has(c.id)) continue;
+      seen.add(c.id);
+      const rating = finalRating.get(c.id);
+      if (!rating) continue;
+      if (rating === 'good' || rating === 'easy') good.push(c);
+      else needsWork.push(c);
+    }
+    return { good, needsWork };
+  }, [cards, history]);
+
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
@@ -428,6 +449,53 @@ export default function StudyScreen() {
               <Text style={styles.againNoteText}>
                 {counts.again} {counts.again === 1 ? 'card' : 'cards'} need another look.
               </Text>
+            </View>
+          )}
+
+          {(sessionInsights.good.length > 0 || sessionInsights.needsWork.length > 0) && (
+            <View style={styles.insightsWrap}>
+              <Text style={styles.insightsHeading}>Good at &amp; needs work</Text>
+              <Text style={styles.insightsSub}>What you nailed and what to revisit this session.</Text>
+
+              {sessionInsights.good.length > 0 ? (
+                <View style={[styles.insightsCard, styles.insightsCardGood]}>
+                  <View style={styles.insightsCardHead}>
+                    <Ionicons name="trending-up" size={15} color={COLORS.success} />
+                    <Text style={[styles.insightsCardTitle, { color: COLORS.success }]}>Good at</Text>
+                    <View style={styles.insightsHeadSpacer} />
+                    <Text style={styles.insightsCount}>
+                      {sessionInsights.good.length} {sessionInsights.good.length === 1 ? 'card' : 'cards'}
+                    </Text>
+                  </View>
+                  {sessionInsights.good.map((c) => (
+                    <Text key={c.id} style={styles.insightsRow} numberOfLines={2}>{c.front}</Text>
+                  ))}
+                </View>
+              ) : null}
+
+              {sessionInsights.needsWork.length > 0 ? (
+                <View style={[styles.insightsCard, styles.insightsCardBad]}>
+                  <View style={styles.insightsCardHead}>
+                    <Ionicons name="refresh" size={15} color={COLORS.warning} />
+                    <Text style={[styles.insightsCardTitle, { color: COLORS.warning }]}>Needs work</Text>
+                    <View style={styles.insightsHeadSpacer} />
+                    <Text style={styles.insightsCount}>
+                      {sessionInsights.needsWork.length} {sessionInsights.needsWork.length === 1 ? 'card' : 'cards'}
+                    </Text>
+                  </View>
+                  {sessionInsights.needsWork.map((c) => (
+                    <Text key={c.id} style={styles.insightsRow} numberOfLines={2}>{c.front}</Text>
+                  ))}
+                </View>
+              ) : (
+                <View style={[styles.insightsCard, styles.insightsCardGood]}>
+                  <View style={styles.insightsCardHead}>
+                    <Ionicons name="checkmark-circle" size={15} color={COLORS.success} />
+                    <Text style={[styles.insightsCardTitle, { color: COLORS.success }]}>Needs work</Text>
+                  </View>
+                  <Text style={styles.insightsPerfect}>Nothing to revisit — a clean sweep.</Text>
+                </View>
+              )}
             </View>
           )}
 
@@ -764,6 +832,36 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   againNoteText: { color: COLORS.warning, fontSize: 13, fontFamily: FONTS.semiBold },
+  insightsWrap: { marginBottom: 16 },
+  insightsHeading: { color: COLORS.textPrimary, fontSize: 16, fontFamily: FONTS.extraBold },
+  insightsSub: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontFamily: FONTS.medium,
+    marginTop: 4,
+    marginBottom: 12,
+  },
+  insightsCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    backgroundColor: COLORS.surface,
+    padding: 13,
+    marginBottom: 10,
+  },
+  insightsCardGood: { borderColor: 'rgba(16,185,129,0.4)' },
+  insightsCardBad: { borderColor: 'rgba(245,158,11,0.45)' },
+  insightsCardHead: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  insightsCardTitle: { fontSize: 13, fontFamily: FONTS.extraBold },
+  insightsHeadSpacer: { flex: 1 },
+  insightsCount: { fontSize: 11, fontFamily: FONTS.bold, color: COLORS.textMuted },
+  insightsRow: {
+    fontSize: 13,
+    lineHeight: 19,
+    fontFamily: FONTS.medium,
+    color: COLORS.textSecondary,
+    marginTop: 4,
+  },
+  insightsPerfect: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.success },
   resultsActions: { flexDirection: 'row', gap: 12, paddingTop: 6 },
   actionBtn: {
     flex: 1,
