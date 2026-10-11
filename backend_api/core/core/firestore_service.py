@@ -392,7 +392,7 @@ def upload_group_attachment(group_id: str, upload, filename: str) -> dict:
     }
 
 
-def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '', sender_avatar: str = '', attachments=None, quiz_embed=None) -> str:
+def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '', sender_avatar: str = '', attachments=None, quiz_embed=None, deck_embed=None) -> str:
     db = get_db()
     payload = {
         'sender_uid': sender_uid,
@@ -409,8 +409,120 @@ def send_message(group_id: str, sender_uid: str, text: str, sender_name: str = '
     # dict on the thousands of plain messages already stored.
     if quiz_embed:
         payload['quiz_embed'] = quiz_embed
+    if deck_embed:
+        payload['deck_embed'] = deck_embed
     msg_ref = db.collection('studyGroups').document(group_id).collection('messages').add(payload)
     return msg_ref[1].id
+
+
+def send_system_message(group_id: str, text: str, actor_uid: str = '') -> str:
+    """Post a centered, non-interactive system line (join / leave / etc.).
+
+    `type='system'` is what the mobile client keys off to render it as a muted
+    centered row instead of a chat bubble. It carries no sender name so no
+    avatar or bubble is drawn, and `reactions` stays empty because there is
+    nothing to react to.
+    """
+    db = get_db()
+    payload = {
+        'sender_uid': actor_uid or '',
+        'sender_name': '',
+        'sender_avatar': '',
+        'text': text,
+        'type': 'system',
+        'attachments': [],
+        'reactions': {},
+        'created_at': firestore.SERVER_TIMESTAMP,
+        'is_synced': True,
+    }
+    msg_ref = db.collection('studyGroups').document(group_id).collection('messages').add(payload)
+    return msg_ref[1].id
+
+
+def get_message(group_id: str, message_id: str) -> dict | None:
+    """Fetch one raw message doc, or None if it does not exist."""
+    db = get_db()
+    doc = (db.collection('studyGroups').document(group_id)
+           .collection('messages').document(message_id).get())
+    if not doc.exists:
+        return None
+    data = doc.to_dict() or {}
+    return {'id': doc.id, **data}
+
+
+def update_message_text(group_id: str, message_id: str, text: str) -> bool:
+    """Rewrite a message's text and flag it as edited.
+
+    Returns True when a document was updated, False when the id is unknown.
+    Ownership is enforced by the caller (it has the Django request user, this
+    layer only talks to Firestore).
+    """
+    db = get_db()
+    ref = (db.collection('studyGroups').document(group_id)
+           .collection('messages').document(message_id))
+    if not ref.get().exists:
+        return False
+    ref.update({'text': text, 'edited': True})
+    return True
+
+
+def delete_message(group_id: str, message_id: str) -> bool:
+    """Soft-delete a message: leave a tombstone every reader agrees on.
+
+    A hard delete raced the clients' Firestore snapshot listeners -- the DELETE
+    removed the doc and the optimist's local list dropped it, but the snapshot
+    kept the message for the rest of the group, so the people who had already
+    seen it and the people who had not could disagree about whether it existed.
+    Keeping the doc with ``deleted=True`` gives every reader the same answer:
+    this message existed and is gone. The content is redacted in the same write
+    (text, embeds, attachments and reactions) because a deleted message must not
+    leak itself through the REST history page, and a pinned tombstone unpins
+    itself so the pinned slot does not point at a ghost.
+
+    Returns False when the id is unknown.
+    """
+    db = get_db()
+    ref = (db.collection('studyGroups').document(group_id)
+           .collection('messages').document(message_id))
+    if not ref.get().exists:
+        return False
+    ref.update({
+        'deleted': True,
+        'text': '',
+        'quiz_embed': None,
+        'deck_embed': None,
+        'attachments': [],
+        'reactions': {},
+        'pinned': False,
+        'edited': False,
+    })
+    return True
+
+
+def set_message_pinned(group_id: str, message_id: str, pinned: bool) -> bool:
+    """Pin or unpin a message. Pinning clears any other pinned message first.
+
+    The mobile app draws a single banner from wherever ``pinned`` is true, and
+    two banners disagreeing with each other -- or a banner pointing at a ghost --
+    looked like lost input instead of an honest constraint. Enforcing one pin
+    per group here, server-side, keeps every client on the same page even if a
+    pin and a pin race each other.
+
+    Returns False when the id is unknown.
+    """
+    db = get_db()
+    ref = (db.collection('studyGroups').document(group_id)
+           .collection('messages').document(message_id))
+    if not ref.get().exists:
+        return False
+    if pinned:
+        # Any other message carrying a pin loses it. Messages without the field
+        # are unaffected (the 'pinned' == True query cannot match them).
+        for doc in ref.parent.where('pinned', '==', True).stream():
+            if doc.id != message_id:
+                doc.reference.update({'pinned': False})
+    ref.update({'pinned': bool(pinned)})
+    return True
 
 
 def get_messages(group_id: str, limit: int = 50, resolve_users: callable = None) -> list:
@@ -446,8 +558,13 @@ def get_messages(group_id: str, limit: int = 50, resolve_users: callable = None)
             'sender_name': data.get('sender_name') or 'Member',
             'sender_avatar': data.get('sender_avatar') or '',
             'text': data.get('text'),
+            'type': data.get('type') or 'user',
             'attachments': data.get('attachments') or [],
             'quiz_embed': data.get('quiz_embed') or {},
+            'deck_embed': data.get('deck_embed') or {},
+            'edited': bool(data.get('edited')),
+            'pinned': bool(data.get('pinned')),
+            'deleted': bool(data.get('deleted')),
             'created_at': created_at,
             'reactions': data.get('reactions') or {},
         })

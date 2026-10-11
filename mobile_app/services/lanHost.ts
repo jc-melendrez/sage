@@ -141,6 +141,70 @@ export class LanHostServer {
     this.timePerQuestion = timePerQuestion;
   }
 
+  /** Question the room is on, and when the host opened its shared clock. */
+  private currentIndex = 0;
+  private questionStartedAt: number | null = null;
+  /** Which players have marked each question read, keyed by question index. */
+  private readonly readyByIndex = new Map<number, Set<string>>();
+  /** Group play: reported picks per question, keyed by player id. */
+  private readonly picksByIndex = new Map<number, Record<string, string>>();
+
+  /**
+   * Open `index` on the shared clock and tell every client.
+   *
+   * The host is the timekeeper: `startedAt` is this device's clock, and every
+   * client derives its countdown from it, so all screens agree on the seconds
+   * left instead of each one running a timer from the moment it received the
+   * quiz.
+   */
+  broadcastQuestion(index: number) {
+    this.currentIndex = index;
+    this.questionStartedAt = Date.now();
+    this.broadcast({
+      t: 'question',
+      index,
+      startedAt: this.questionStartedAt,
+      timeLimit: this.timePerQuestion,
+    });
+  }
+
+  /** Host-forced advance: the escape hatch for a player who never readies up. */
+  advanceQuestion() {
+    const total = this.quiz?.questions?.length ?? 0;
+    if (this.currentIndex + 1 < total) {
+      this.broadcastQuestion(this.currentIndex + 1);
+    } else {
+      this.endGame('The host moved past the last question');
+    }
+  }
+
+  /** A player marked question `index` read. Advance once everyone has. */
+  markReady(playerId: string, index: number) {
+    if (!playerId) return;
+    const set = this.readyByIndex.get(index) ?? new Set<string>();
+    set.add(playerId);
+    this.readyByIndex.set(index, set);
+    const active = this.players.filter(p => p.connected);
+    const ready = active.filter(p => set.has(p.id)).length;
+    this.broadcast({ t: 'ready-count', index, ready, expected: active.length });
+    if (active.length > 0 && ready >= active.length && index === this.currentIndex) {
+      this.advanceQuestion();
+    }
+  }
+
+  /**
+   * Group play: remember a member's pick for `index` and echo the whole tally
+   * back, so live "who picked what on my team" is the host's view of the room
+   * rather than each client guessing. Mirrors the online team doc's `livePicks`.
+   */
+  recordPick(playerId: string, index: number, answer: string) {
+    if (!playerId) return;
+    const picks = this.picksByIndex.get(index) ?? {};
+    picks[playerId] = answer;
+    this.picksByIndex.set(index, picks);
+    this.broadcast({ t: 'picks', index, picks });
+  }
+
   get isStarted() {
     return this.started;
   }
@@ -184,6 +248,10 @@ export class LanHostServer {
     this.players = [];
     this.teams = [];
     this.teamMode = false;
+    this.currentIndex = 0;
+    this.questionStartedAt = null;
+    this.readyByIndex.clear();
+    this.picksByIndex.clear();
     try {
       this.server?.close();
     } catch {}
@@ -203,6 +271,10 @@ export class LanHostServer {
     this.broadcast({ t: 'teams', teams: this.teams });
     this.broadcast({ t: 'quiz', quiz: this.quiz, order: this.order, timePerQuestion: this.timePerQuestion });
     this.broadcast({ t: 'start' });
+    // Open question one on the shared clock immediately, so the first countdown
+    // is host-driven like every later one rather than starting when each
+    // client's `start` handler happened to run.
+    this.broadcastQuestion(0);
   }
 
   endGame(reason = 'The host ended the game') {
@@ -306,6 +378,14 @@ export class LanHostServer {
       this.renameTeam(msg.teamId, msg.name);
       this.broadcast({ t: 'roster', players: this.players });
       this.broadcast({ t: 'teams', teams: this.teams });
+      return;
+    }
+    if (msg.t === 'ready') {
+      this.markReady(conn.id, msg.index);
+      return;
+    }
+    if (msg.t === 'pick') {
+      this.recordPick(conn.id, msg.index, msg.answer);
       return;
     }
     if (msg.t === 'result') {

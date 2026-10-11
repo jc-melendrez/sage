@@ -84,6 +84,26 @@ export type LanMessage =
   | { t: 'team-rename'; teamId: string; name: string }
   | { t: 'quiz'; quiz: QuizPayload; order: number[]; timePerQuestion: number }
   | { t: 'start' }
+  /**
+   * The host owns the shared clock. Sent when a question opens (right after the
+   * quiz and again on every advance): `startedAt` is the host's epoch ms and
+   * every client derives its countdown from it, so all devices show the same
+   * seconds left instead of each running its own independent timer from the
+   * moment it happened to receive the quiz.
+   */
+  | { t: 'question'; index: number; startedAt: number; timeLimit: number }
+  /** A player has read the current question and is ready for the next one. */
+  | { t: 'ready'; playerId: string; index: number }
+  /** What the host counted this round: how many are ready of how many active. */
+  | { t: 'ready-count'; index: number; ready: number; expected: number }
+  /**
+   * Group play: a player reports the option they picked for `index`. The host
+   * tallies these and echoes them back so every member can see what their own
+   * teammates chose while the question is still open (and after, on the reveal).
+   */
+  | { t: 'pick'; playerId: string; index: number; answer: string }
+  /** The host's tally for `index`: every reported pick, keyed by player id. */
+  | { t: 'picks'; index: number; picks: Record<string, string> }
   | { t: 'leaderboard'; players: LanPlayer[]; final: boolean }
   | { t: 'end'; reason: string }
   | { t: 'error'; message: string };

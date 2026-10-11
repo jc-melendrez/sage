@@ -86,6 +86,7 @@ from core.firestore_service import (
     get_study_group, update_study_group, leave_study_group,
     remove_group_member, approve_join_request, reject_join_request,
     send_message, get_messages, generate_join_code,
+    send_system_message, get_message, update_message_text, delete_message, set_message_pinned,
     toggle_reaction, ALLOWED_REACTIONS,
     upload_group_attachment, ATTACHMENT_MAX_SIZE,
     create_course_chat_group, sync_course_chat_members,
@@ -1279,6 +1280,10 @@ class JoinGroupView(APIView):
                 "group_id": group['id'],
                 "name": group['name'],
             }, status=200)
+        display_name = request.user.get_full_name() or request.user.username
+        _post_system_message(
+            group['id'], f"{display_name} joined the group.", request.user.firebase_uid,
+        )
         return Response({
             "message": f"Successfully joined {group['name']}!",
             "status": "joined",
@@ -1412,6 +1417,81 @@ def _validate_quiz_embed(user, payload):
     }, None
 
 
+DECK_EMBED_MAX_CARDS = 300
+DECK_EMBED_MAX_BYTES = 200 * 1024
+
+
+def _validate_deck_embed(payload):
+    """Validate a `deck_embed` posted alongside a group chat message.
+
+    Flashcard decks live only on the device, so unlike a quiz share there is no
+    server row to re-derive the card from -- the deck travels *inside* the
+    message. That means the client is the only source of truth and the job here
+    is to bound it: a non-empty title, a sane card cap, per-field length limits,
+    and a total serialized size comfortably under Firestore's 1 MiB document
+    limit (a chat message also carries text, sender fields, etc).
+
+    Returns ``(embed, error_response)``; exactly one is ever non-None.
+    """
+    if payload is None:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, Response({"error": "deck_embed must be an object"}, status=400)
+
+    title = str(payload.get('title') or '').strip()
+    if not title:
+        return None, Response({"error": "deck_embed.title is required"}, status=400)
+
+    raw_cards = payload.get('cards')
+    if not isinstance(raw_cards, list) or not raw_cards:
+        return None, Response({"error": "deck_embed.cards must be a non-empty list"}, status=400)
+    if len(raw_cards) > DECK_EMBED_MAX_CARDS:
+        return None, Response(
+            {"error": f"deck_embed.cards must have at most {DECK_EMBED_MAX_CARDS} items"},
+            status=400,
+        )
+
+    cards = []
+    for card in raw_cards:
+        if not isinstance(card, dict):
+            return None, Response({"error": "Each deck card must be an object"}, status=400)
+        front = str(card.get('front') or '').strip()[:600]
+        back = str(card.get('back') or '').strip()[:600]
+        if not front or not back:
+            return None, Response({"error": "Each deck card needs a front and a back"}, status=400)
+        entry = {'front': front, 'back': back}
+        explanation = str(card.get('explanation') or '').strip()[:600]
+        if explanation:
+            entry['explanation'] = explanation
+        cards.append(entry)
+
+    embed = {
+        'title': title[:180],
+        'subject': str(payload.get('subject') or '').strip()[:80],
+        'color': str(payload.get('color') or '').strip()[:32],
+        'card_count': len(cards),
+        'cards': cards,
+    }
+    if len(json.dumps(embed)) > DECK_EMBED_MAX_BYTES:
+        return None, Response(
+            {"error": "Deck is too large to share. Reduce the number of cards."},
+            status=413,
+        )
+    return embed, None
+
+
+def _post_system_message(group_id, text, actor_uid=''):
+    """Best-effort system line for join/leave. Never blocks the action.
+
+    A Firestore hiccup must not roll back a membership change that has already
+    happened in the primary store, so failures are logged and swallowed.
+    """
+    try:
+        send_system_message(str(group_id), text, actor_uid)
+    except Exception as exc:
+        logger.warning("System message to group %s failed: %s", group_id, exc)
+
+
 class GroupChatView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1430,10 +1510,11 @@ class GroupChatView(APIView):
     def post(self, request, group_id):
         text = request.data.get('text')
         has_attachments = 'attachments' in request.data
-        # A message can be a bare quiz card with no text, so the embed counts
-        # as content on its own.
+        # A message can be a bare quiz/deck card with no text, so the embed
+        # counts as content on its own.
         has_quiz_embed = request.data.get('quiz_embed') is not None
-        if not text and not has_attachments and not has_quiz_embed:
+        has_deck_embed = request.data.get('deck_embed') is not None
+        if not text and not has_attachments and not has_quiz_embed and not has_deck_embed:
             return Response({"error": "Message text is required"}, status=400)
 
         group = get_study_group(group_id)
@@ -1469,6 +1550,10 @@ class GroupChatView(APIView):
         if embed_error:
             return embed_error
 
+        deck_embed, deck_error = _validate_deck_embed(request.data.get('deck_embed'))
+        if deck_error:
+            return deck_error
+
         # Snapshot the source while it is still guaranteed to exist. The share
         # row keeps this package so the card survives the quiz being deleted.
         quiz_snapshot = None
@@ -1480,7 +1565,7 @@ class GroupChatView(APIView):
         msg_id = send_message(
             group_id, request.user.firebase_uid, text or '',
             sender_name, sender_avatar, attachments=attachments,
-            quiz_embed=quiz_embed,
+            quiz_embed=quiz_embed, deck_embed=deck_embed,
         )
 
         if quiz_embed:
@@ -1509,6 +1594,7 @@ class GroupChatView(APIView):
             "text": text,
             "attachments": attachments or [],
             "quiz_embed": quiz_embed or {},
+            "deck_embed": deck_embed or {},
             "reactions": {},
             # Server timestamp resolves in Firestore moments later; give the
             # client an instant ISO timestamp to render with.
@@ -1557,6 +1643,66 @@ class GroupChatReactionView(APIView):
         except LookupError:
             return Response({"error": "Message not found"}, status=404)
         return Response({"id": message_id, "reactions": reactions})
+
+
+class GroupChatMessageView(APIView):
+    """Edit or delete one group message.
+
+    Only the original sender may change their own message -- an admin editing
+    someone else's words is deliberately out of scope. Deletion is a soft
+    delete: the document survives as a tombstone (`deleted: true`, content
+    redacted) so the Firestore snapshot listeners and the REST history page
+    agree that the message is gone instead of racing about whether it still
+    exists.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, group_id, message_id):
+        if not request.user.firebase_uid:
+            return Response({"error": "Account has no linked Firebase profile"}, status=400)
+        message = get_message(group_id, message_id)
+        if not message:
+            return Response({"error": "Message not found"}, status=404)
+        if message.get('sender_uid') != request.user.firebase_uid:
+            return Response({"error": "You can only edit your own messages"}, status=403)
+        if message.get('type') == 'system':
+            return Response({"error": "System messages cannot be edited"}, status=400)
+
+        text = (request.data.get('text') or '').strip()
+        if not text:
+            return Response({"error": "Message text is required"}, status=400)
+        update_message_text(group_id, message_id, text)
+        return Response({"id": message_id, "text": text, "edited": True})
+
+    def delete(self, request, group_id, message_id):
+        if not request.user.firebase_uid:
+            return Response({"error": "Account has no linked Firebase profile"}, status=400)
+        message = get_message(group_id, message_id)
+        if not message:
+            return Response({"error": "Message not found"}, status=404)
+        if message.get('sender_uid') != request.user.firebase_uid:
+            return Response({"error": "You can only delete your own messages"}, status=403)
+        if message.get('type') == 'system':
+            return Response({"error": "System messages cannot be deleted"}, status=400)
+        delete_message(group_id, message_id)
+        return Response(status=204)
+
+
+class GroupChatPinView(APIView):
+    """Pin or unpin a message. Any group member may pin (a member only needs
+    to be able to reach the chat for a pin to make sense)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, group_id, message_id):
+        group = get_study_group(group_id)
+        if not group:
+            return Response({"error": "Group not found"}, status=404)
+        if request.user.firebase_uid not in (group.get('members') or []):
+            return Response({"error": "You must be a member of this group"}, status=403)
+        pinned = bool(request.data.get('pinned', True))
+        if not set_message_pinned(group_id, message_id, pinned):
+            return Response({"error": "Message not found"}, status=404)
+        return Response({"id": message_id, "pinned": pinned})
 
 
 class GroupMembersView(APIView):
@@ -1670,6 +1816,10 @@ class GroupLeaveView(APIView):
 
         if not leave_study_group(group_id, request.user.firebase_uid):
             return Response({"error": "Group not found"}, status=404)
+        display_name = request.user.get_full_name() or request.user.username
+        _post_system_message(
+            group_id, f"{display_name} left the group.", request.user.firebase_uid,
+        )
         return Response({"message": "Left the group."})
 
 
@@ -1715,6 +1865,14 @@ class GroupJoinRequestView(APIView):
             ok = reject_join_request(group_id, target_uid)
         if not ok:
             return Response({"error": "No pending request from this user"}, status=400)
+        if action == 'approve':
+            member = User.objects.filter(firebase_uid=target_uid).first()
+            member_name = (
+                (member.get_full_name() or member.username) if member else 'Someone'
+            )
+            _post_system_message(
+                group_id, f"{member_name} joined the group.", target_uid,
+            )
         return Response({
             "message": "Request approved." if action == 'approve' else "Request rejected.",
         })
@@ -1976,6 +2134,13 @@ class JoinCourseView(APIView):
         if request.user != course.educator and not course.students.filter(id=request.user.id).exists():
             course.students.add(request.user)
             _sync_course_chat_roster(course)
+            if course.chat_group_id and request.user.firebase_uid:
+                display_name = request.user.get_full_name() or request.user.username
+                _post_system_message(
+                    course.chat_group_id,
+                    f"{display_name} joined the class chat.",
+                    request.user.firebase_uid,
+                )
 
         return Response(CourseRosterSerializer(course).data)
 
@@ -2028,6 +2193,12 @@ class AddStudentToCourseView(APIView):
                     logger.warning(
                         "Class chat add-member failed for course %s: %s", course.id, exc
                     )
+                student_name = student.get_full_name() or student.username
+                _post_system_message(
+                    course.chat_group_id,
+                    f"{student_name} joined the class chat.",
+                    student.firebase_uid,
+                )
 
         return Response(CourseRosterSerializer(course).data)
 
@@ -2047,11 +2218,11 @@ class RemoveStudentFromCourseView(APIView):
         if not user_id:
             return Response({"error": "user_id is required"}, status=400)
 
-        # Read the uid before dropping the student: afterwards there is no
-        # roster row left to look it up from.
-        removed_uid = User.objects.filter(id=user_id).values_list(
-            'firebase_uid', flat=True
-        ).first()
+        # Read the uid and name before dropping the student: afterwards there
+        # is no roster row left to look them up from.
+        removed = User.objects.filter(id=user_id).first()
+        removed_uid = removed.firebase_uid if removed else None
+        removed_name = (removed.get_full_name() or removed.username) if removed else 'A student'
 
         course.students.remove(user_id)
 
@@ -2064,6 +2235,11 @@ class RemoveStudentFromCourseView(APIView):
                 logger.warning(
                     "Class chat remove-member failed for course %s: %s", course.id, exc
                 )
+            _post_system_message(
+                course.chat_group_id,
+                f"{removed_name} left the class chat.",
+                removed_uid,
+            )
 
         return Response(CourseRosterSerializer(course).data)
 

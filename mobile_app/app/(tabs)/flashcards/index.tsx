@@ -10,7 +10,8 @@ import {
   TextInput,
   Modal,
   Platform,
-  } from 'react-native';
+  Alert,
+} from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -31,8 +32,11 @@ import {
   searchCards,
   CardSearchMatch,
   importDeckFromQuiz,
+  getCards,
   QuizPayload,
 } from '@/services/flashcardService';
+import { shareDeckToGroup, type DeckEmbed } from '@/services/chatService';
+import { getCachedQuizzes, cacheQuizzes } from '@/services/offlineGameService';
 
 export default function FlashcardsHome() {
   const router = useRouter();
@@ -57,6 +61,11 @@ export default function FlashcardsHome() {
   const [quizzes, setQuizzes] = useState<QuizPayload[]>([]);
   const [importLoading, setImportLoading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+
+  const [shareGroups, setShareGroups] = useState<{ id: string; name: string }[]>([]);
+  const [shareTarget, setShareTarget] = useState<Deck | null>(null);
+  const [isShareOpen, setIsShareOpen] = useState(false);
+  const [isSharing, setIsSharing] = useState<string | null>(null);
 
   const [banner, setBanner] = useState<{ message: string; type: BannerType } | null>(null);
 
@@ -116,9 +125,16 @@ export default function FlashcardsHome() {
       });
       if (!res.ok) throw new Error('Failed to load quizzes');
       const data = await res.json();
-      setQuizzes(Array.isArray(data) ? data : []);
+      const list: QuizPayload[] = Array.isArray(data) ? data : [];
+      setQuizzes(list);
+      if (list.length > 0) cacheQuizzes(list);
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Something went wrong.');
+      const cached = getCachedQuizzes();
+      if (cached.length > 0) {
+        setQuizzes(cached);
+      } else {
+        setImportError(err instanceof Error ? err.message : 'Something went wrong.');
+      }
     } finally {
       setImportLoading(false);
     }
@@ -132,7 +148,8 @@ export default function FlashcardsHome() {
     }
     setImportOpen(false);
     refresh();
-    setBanner({ message: `Imported "${deck.name}" with ${deck ? getDeckSummary(deck.id).total : 0} cards.`, type: 'success' });
+    const total = deck ? getDeckSummary(deck.id).total : 0;
+    setBanner({ message: `Imported "${deck.name}" with ${total} cards.`, type: 'success' });
   };
 
   const filteredDecks = useMemo(() => {
@@ -145,6 +162,49 @@ export default function FlashcardsHome() {
         (matches.some((m) => m.deckId === d.id))
     );
   }, [decks, query, matches]);
+
+
+  const handleShareDeck = async (deck: Deck) => {
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const res = await fetch(`${API_BASE_URL}/users/groups/mine/`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('Failed to load groups');
+      const groups = await res.json();
+      setShareGroups(groups.map((g: any) => ({ id: String(g.id), name: g.name })));
+      setShareTarget(deck);
+      setIsShareOpen(true);
+    } catch (err) {
+      Alert.alert('Error', err instanceof Error ? err.message : 'Failed to load groups');
+    }
+  };
+
+  const handleShareDeckToGroup = async (groupId: string, groupName?: string) => {
+    if (!shareTarget) return;
+    const groupLabel = groupName ? groupName : 'the group chat';
+    try {
+      setIsSharing(groupId);
+      const cards = getCards(shareTarget.id);
+      const embed: DeckEmbed = {
+        title: shareTarget.name,
+        subject: shareTarget.subject,
+        color: shareTarget.color,
+        card_count: cards.length,
+        cards: cards.map((c) => ({ front: c.front, back: c.back, explanation: c.explanation })),
+      };
+      const token = await getToken();
+      if (!token) throw new Error('Please sign in again');
+      await shareDeckToGroup(groupId, token, embed);
+      setIsShareOpen(false);
+      setBanner({ message: `Shared "${shareTarget.name}" to ${groupLabel}.`, type: 'success' });
+    } catch (err) {
+      setBanner({ message: err instanceof Error ? err.message : 'Failed to share deck.', type: 'error' });
+    } finally {
+      setIsSharing(null);
+    }
+  };
 
   const totalCards = decks.reduce((sum, d) => sum + (summaries[d.id]?.total ?? 0), 0);
 
@@ -315,8 +375,11 @@ export default function FlashcardsHome() {
                           <Ionicons name="play" size={12} color={COLORS.purplePrimary} />
                           <Text style={styles.studyBadgeText}>Study</Text>
                         </View>
-                        <TouchableOpacity onPress={() => openEdit(deck.id)} activeOpacity={0.7} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                          <Ionicons name="create-outline" size={20} color={COLORS.textMuted} />
+                        <TouchableOpacity onPress={() => openEdit(deck.id)} activeOpacity={0.7} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }} accessibilityLabel="Edit deck">
+                          <Ionicons name="create-outline" size={18} color={COLORS.textMuted} />
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => handleShareDeck(deck)} activeOpacity={0.7} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }} accessibilityLabel="Share deck">
+                          <Ionicons name="share-outline" size={18} color={COLORS.purpleVibrant} />
                         </TouchableOpacity>
                       </View>
                     </TouchableOpacity>
@@ -441,6 +504,49 @@ export default function FlashcardsHome() {
                       </Text>
                     </View>
                     <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
+      {/* SHARE DECK MODAL */}
+      <Modal visible={isShareOpen} transparent animationType="fade" onRequestClose={() => setIsShareOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, styles.importCard]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Share deck</Text>
+              <TouchableOpacity onPress={() => setIsShareOpen(false)} activeOpacity={0.7}>
+                <Ionicons name="close" size={22} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.inputLabel}>SHARE "{shareTarget?.name || ''}" TO A GROUP</Text>
+            {shareGroups.length === 0 ? (
+              <View style={styles.importEmpty}>
+                <Text style={styles.emptyDesc}>You're not in any groups yet. Join a group to share decks with classmates.</Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.quizList} showsVerticalScrollIndicator={false}>
+                {shareGroups.map((g) => (
+                  <TouchableOpacity
+                    key={g.id}
+                    style={styles.quizRow}
+                    onPress={() => handleShareDeckToGroup(g.id, g.name)}
+                    activeOpacity={0.8}
+                    disabled={isSharing === g.id}
+                  >
+                    <View style={styles.quizIconWrap}>
+                      <Ionicons name="people" size={20} color={COLORS.accentBright} />
+                    </View>
+                    <View style={styles.quizInfo}>
+                      <Text style={styles.quizTitle} numberOfLines={1}>{g.name}</Text>
+                    </View>
+                    {isSharing === g.id ? (
+                      <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
+                    ) : (
+                      <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                    )}
                   </TouchableOpacity>
                 ))}
               </ScrollView>

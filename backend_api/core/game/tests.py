@@ -100,6 +100,79 @@ class MedianTeamSpeedTests(TestCase):
         self.assertFalse(split)
 
 
+class TeamTallyTests(TestCase):
+    """The 1-1 rule: two votes, one random winner -- never knowledge.
+
+    The tie-break used to be deterministic (the correct answer won, or the
+    question voided), which is exactly what made it feel rigged: the game
+    picked the winner for the team. A coin flip keeps both votes equally live.
+    """
+
+    def tally(self, picks, typed=False, correct_answer='A. yes'):
+        return tally_team_picks(picks, typed=typed, correct_answer=correct_answer)
+
+    def test_a_majority_still_wins(self):
+        t = self.tally({'a': 'A. yes', 'b': 'A. yes', 'c': 'B. no'})
+        self.assertEqual((t.choice, t.agreed, t.pickers, t.void, t.split),
+                         ('A. yes', 2, 3, False, False))
+
+    def test_one_picker_answers_for_the_team(self):
+        t = self.tally({'a': 'B. no'})
+        self.assertEqual((t.choice, t.pickers, t.void, t.split), ('B. no', 1, False, False))
+
+    def test_no_picker_voids_the_question(self):
+        t = self.tally({})
+        self.assertEqual((t.choice, t.pickers, t.void, t.split), ('', 0, True, False))
+        # Blank and None picks are not votes, so they cannot resolve anything.
+        t2 = self.tally({'a': '', 'b': None})
+        self.assertTrue(t2.void)
+        self.assertTrue(t2.split == False)
+
+    def test_a_1_1_split_picks_one_of_the_two_votes_at_random(self):
+        # Whether the tie resolves to the correct side or not, the resolved
+        # answer is always one of the two members' picks -- never the third.
+        for expected in ('A. yes', 'B. no'):
+            with patch('game.views.rng.choice', return_value=expected):
+                t = self.tally({'a': 'A. yes', 'b': 'B. no'})
+            self.assertEqual(t.choice, expected)
+            self.assertFalse(t.void)
+            self.assertTrue(t.split)
+            self.assertEqual(t.pickers, 2)
+        t = self.tally({'a': 'A. yes', 'b': 'B. no'})
+        self.assertIn(t.choice, ('A. yes', 'B. no'))
+
+    def test_a_1_1_split_does_not_need_the_correct_answer(self):
+        # The old rule voided a wrong-vs-wrong split; the coin flip resolves it
+        # just the same, so a split never scorches a two-person team.
+        with patch('game.views.rng.choice', return_value='A. yes'):
+            t = self.tally({'a': 'A. yes', 'b': 'B. no'}, correct_answer='C. maybe')
+        self.assertFalse(t.void)
+        self.assertEqual(t.choice, 'A. yes')
+
+    def test_a_larger_even_split_still_voids(self):
+        t = self.tally({'a': 'A. yes', 'b': 'A. yes', 'c': 'B. no', 'd': 'B. no'})
+        self.assertTrue(t.void)
+        self.assertTrue(t.split)
+        self.assertEqual(t.choice, '')
+        t3 = self.tally({'a': 'A. yes', 'b': 'B. no', 'c': 'C. maybe'})
+        self.assertTrue(t3.void)
+        self.assertEqual(t3.choice, '')
+
+    def test_typed_split_counts_casefolded_equivalents_as_one(self):
+        # Two members typing the same term with different capitalisation are one
+        # leader, not an automatic split -- the tally must agree with grading.
+        t = self.tally({'a': 'Chlorophyll', 'b': 'chlorophyll'}, typed=True,
+                       correct_answer='Chlorophyll')
+        self.assertEqual((t.choice, t.agreed, t.void, t.split), ('Chlorophyll', 2, False, False))
+
+    def test_typed_1_1_outcome_is_a_member_answer_not_a_normalised_key(self):
+        with patch('game.views.rng.choice', return_value='chlorophyll'):
+            t = self.tally({'a': 'Chlorophyll', 'b': 'photosynthesis'}, typed=True)
+        self.assertIn(t.choice, ('Chlorophyll', 'photosynthesis'))
+        self.assertFalse(t.void)
+        self.assertTrue(t.split)
+
+
 class TeamModeGameTests(TestCase):
     def setUp(self):
         self.host = User.objects.create_user(username='host', password='pass')
@@ -2849,19 +2922,18 @@ class AnswerLogTests(TestCase):
 
         The team's own answer is public -- it has to be, it is what scored --
         but who voted for it is not, so the log for one member must never
-        contain the other member's choice.
-
-        a and b split 1-1 with a holding the right answer, so knowledge breaks
-        the tie and the question scores. That is the case where exposing both
-        picks would be most tempting, which is why it is asserted here: both
-        members read the shared outcome, each sees only their own vote.
+        contain the other member's choice. These two disagree, so a coin flip
+        decides between their two picks; `rng.choice` is pinned so the resolved
+        side is deterministic. The outcome is shared, the vote is not.
         """
-        self.settle(0, 'A. yes', 'B. no')
+        with patch('game.views.rng.choice', return_value='A. yes'):
+            resp = self.settle(0, 'A. yes', 'B. no')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self.team()['reveals']['q0']['answer'], 'A. yes')
         self.assertEqual(self.answers(self.a)['q0']['picked'], 'A. yes')
         self.assertEqual(self.answers(self.b)['q0']['picked'], 'B. no')
-        # One correct pick against one wrong pick resolves to the correct one,
-        # so the whole team is graded on it -- the outcome is shared, the vote
-        # is not.
+        # One side of the coin flip graded the whole team -- the outcome is
+        # shared, the vote is not.
         self.assertTrue(self.answers(self.a)['q0']['correct'])
         self.assertTrue(self.answers(self.b)['q0']['correct'])
         self.assertTrue(self.answers(self.a)['q0']['agreed'])
@@ -3807,6 +3879,16 @@ class QuestionTypeNormalisationTests(TestCase):
         self.assertEqual(normalise_question_type(''), 'mcq')
         self.assertEqual(normalise_question_type('nonsense'), 'mcq')
 
+    def test_true_false_spellings_all_resolve_including_the_runtime_name(self):
+        # The AI generator posts display labels; the quiz-package importer can
+        # post short ids; and the room builder itself stores 'true_false' on the
+        # quiz when the mix-in writes questions back. The runtime name is the one
+        # that matters most, and it was the one the normaliser rejected, so a
+        # quiz storing it collapsed into a lettered MCQ.
+        for raw in ('True/False', 'true/false', 'TF', 'tf', 'boolean',
+                    'true_false', 'true false'):
+            self.assertEqual(normalise_question_type(raw), 'true_false', raw)
+
     def test_a_fill_in_the_blank_quiz_serialises_as_such(self):
         host = User.objects.create_user(username='fibhost', password='pass')
         quiz = Quiz.objects.create(user=host, title='Gaps', quiz_type='Fill-in-the-Blank')
@@ -3817,6 +3899,36 @@ class QuestionTypeNormalisationTests(TestCase):
         self.assertEqual(questions[0]['type'], 'fill_in_blank')
         # Grading does not care which of the two it is.
         self.assertIn(questions[0]['type'], TYPED_QUESTION_TYPES)
+
+    def test_true_false_options_are_canonical_and_the_answer_follows(self):
+        """The buttons are always True/False and the answer is whichever side.
+
+        This pins the "always the same side" bug: the room-builder fell back to
+        `choices[0]` whenever the stored answer matched no option, so a True/False
+        quiz ended up testing one side only. The stored side must be honoured
+        regardless of option order or casing.
+        """
+        host = User.objects.create_user(username='tfhost', password='pass')
+
+        # Stored options in either order, correct side 'True' (even lowercase).
+        for options in (['True', 'False'], ['False', 'True']):
+            quiz = Quiz.objects.create(user=host, title='T/F', quiz_type='True/False')
+            QuizQuestion.objects.create(
+                quiz=quiz, question_text='Water boils at 100C', options=options,
+                correct_answer='true',
+            )
+            q = build_questions_from_quiz(quiz)[0]
+            self.assertEqual(q['type'], 'true_false')
+            self.assertEqual(q['choices'], ['True', 'False'])
+            self.assertEqual(q['correctAnswer'], 'True')
+
+        # The other side is honoured too, and a garbage answer does not cascade.
+        quiz = Quiz.objects.create(user=host, title='T/F', quiz_type='true_false')
+        QuizQuestion.objects.create(
+            quiz=quiz, question_text='Fish breathe air', options=['True', 'False'],
+            correct_answer='False',
+        )
+        self.assertEqual(build_questions_from_quiz(quiz)[0]['correctAnswer'], 'False')
 
 
 class TvLeaderboardTests(TestCase):

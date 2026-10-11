@@ -19,9 +19,72 @@ from .serializers import RecommendationSerializer, BadgeSerializer
 from .authentication import SAGERefreshToken
 from . import gamification
 from . import views as users_views
+from core import firestore_service
 from ai_assistant.models import Quiz, QuizGroupShare
 
 User = get_user_model()
+
+
+class _FirestoreMessagesQuery:
+    """Stands in for a Firestore Query's where()->stream() chain."""
+    def __init__(self, docs):
+        self._docs = docs
+    def where(self, *args, **kwargs):
+        return self
+    def stream(self):
+        return list(self._docs)
+
+
+class _FirestoreMsgCollection:
+    def __init__(self, updates, pinned_docs):
+        self._updates = updates
+        self._pinned_docs = pinned_docs
+    def document(self, message_id):
+        return _FirestoreMsgRef(self._updates, self._pinned_docs)
+    def where(self, *args, **kwargs):
+        return _FirestoreMessagesQuery(self._pinned_docs)
+
+
+class _FirestoreMsgDoc:
+    exists = True
+
+
+class _FirestoreMsgRef:
+    def __init__(self, updates, pinned_docs):
+        self._updates = updates
+        self._pinned_docs = pinned_docs
+    @property
+    def parent(self):
+        return _FirestoreMsgCollection(self._updates, self._pinned_docs)
+    def collection(self, name):
+        return _FirestoreMsgCollection(self._updates, self._pinned_docs)
+    def get(self):
+        return _FirestoreMsgDoc()
+    def update(self, payload):
+        self._updates.append(payload)
+
+
+class _FirestoreMsgStub:
+    def __init__(self, updates, pinned_docs):
+        self._updates = updates
+        self._pinned_docs = pinned_docs
+    def collection(self, name):
+        return _FirestoreMsgCollection(self._updates, self._pinned_docs)
+
+
+class _PinnedMessageDoc:
+    def __init__(self, message_id, updates):
+        self.id = message_id
+        self.reference = _PinnedMessageRef(self)
+        self.unpinned = []
+
+
+class _PinnedMessageRef:
+    def __init__(self, doc):
+        self._doc = doc
+    def update(self, payload):
+        if payload.get('pinned') is False:
+            self._doc.unpinned.append(self._doc.id)
 
 
 class CourseAPITests(APITestCase):
@@ -2122,6 +2185,7 @@ class GroupChatMessageTests(APITestCase):
             'group-abc', 'fb-uid-chat', 'hello world', 'Chat Person', '',
             attachments=None,
             quiz_embed=None,
+            deck_embed=None,
         )
 
     def test_post_requires_text(self):
@@ -2178,6 +2242,7 @@ class GroupChatMessageTests(APITestCase):
             'group-abc', 'fb-uid-chat', 'see pic', 'Chat Person', '',
             attachments=atts,
             quiz_embed=None,
+            deck_embed=None,
         )
 
     def test_post_attachment_must_come_from_group_upload(self):
@@ -2347,6 +2412,155 @@ class GroupChatMessageTests(APITestCase):
         res = self.client.get(reverse('current_user_profile'))
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data['firebase_uid'], 'fb-uid-chat')
+
+    # -- edit --
+
+    def test_edit_own_message_changes_text_and_marks_edited(self):
+        fake_msg = {'id': 'm1', 'sender_uid': 'fb-uid-chat', 'type': 'user', 'text': 'old'}
+        with patch.object(users_views, 'get_message', return_value=fake_msg), \
+             patch.object(users_views, 'update_message_text') as mock_update:
+            res = self.client.patch(
+                reverse('group_chat_message', args=['group-abc', 'm1']),
+                {'text': 'new words'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data, {'id': 'm1', 'text': 'new words', 'edited': True})
+        mock_update.assert_called_once_with('group-abc', 'm1', 'new words')
+
+    def test_edit_requires_ownership(self):
+        fake_msg = {'id': 'm1', 'sender_uid': 'fb-other', 'type': 'user', 'text': 'theirs'}
+        with patch.object(users_views, 'get_message', return_value=fake_msg), \
+             patch.object(users_views, 'update_message_text') as mock_update:
+            res = self.client.patch(
+                reverse('group_chat_message', args=['group-abc', 'm1']),
+                {'text': 'hacked'}, format='json')
+        self.assertEqual(res.status_code, 403)
+        mock_update.assert_not_called()
+
+    def test_edit_system_message_forbidden(self):
+        fake_msg = {'id': 'm1', 'sender_uid': 'fb-uid-chat', 'type': 'system', 'text': 'X joined'}
+        with patch.object(users_views, 'get_message', return_value=fake_msg):
+            res = self.client.patch(
+                reverse('group_chat_message', args=['group-abc', 'm1']),
+                {'text': 'no'}, format='json')
+        self.assertEqual(res.status_code, 400)
+
+    def test_edit_unknown_message_404(self):
+        with patch.object(users_views, 'get_message', return_value=None):
+            res = self.client.patch(
+                reverse('group_chat_message', args=['group-abc', 'ghost']),
+                {'text': 'x'}, format='json')
+        self.assertEqual(res.status_code, 404)
+
+    # -- delete --
+
+    def test_delete_own_message_returns_204(self):
+        fake_msg = {'id': 'm1', 'sender_uid': 'fb-uid-chat', 'type': 'user', 'text': 'bye'}
+        with patch.object(users_views, 'get_message', return_value=fake_msg), \
+             patch.object(users_views, 'delete_message') as mock_delete:
+            res = self.client.delete(reverse('group_chat_message', args=['group-abc', 'm1']))
+        self.assertEqual(res.status_code, 204)
+        mock_delete.assert_called_once_with('group-abc', 'm1')
+
+    def test_delete_requires_ownership(self):
+        fake_msg = {'id': 'm1', 'sender_uid': 'fb-other', 'type': 'user', 'text': 'theirs'}
+        with patch.object(users_views, 'get_message', return_value=fake_msg), \
+             patch.object(users_views, 'delete_message') as mock_delete:
+            res = self.client.delete(reverse('group_chat_message', args=['group-abc', 'm1']))
+        self.assertEqual(res.status_code, 403)
+        mock_delete.assert_not_called()
+
+    def test_delete_system_message_forbidden(self):
+        fake_msg = {'id': 'm1', 'sender_uid': 'fb-uid-chat', 'type': 'system', 'text': 'X left'}
+        with patch.object(users_views, 'get_message', return_value=fake_msg):
+            res = self.client.delete(reverse('group_chat_message', args=['group-abc', 'm1']))
+        self.assertEqual(res.status_code, 400)
+
+    # -- pin --
+
+    def _member_group(self):
+        return {'id': 'group-abc', 'created_by': 'someone-else', 'members': ['fb-uid-chat']}
+
+    def test_pin_returns_pinned_state(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._member_group()), \
+             patch.object(users_views, 'set_message_pinned', return_value=True) as mock_pin:
+            res = self.client.post(reverse('group_chat_pin', args=['group-abc', 'm1']),
+                                   {'pinned': True}, format='json')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data, {'id': 'm1', 'pinned': True})
+        mock_pin.assert_called_once_with('group-abc', 'm1', True)
+
+    def test_unpin_returns_pinned_false(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._member_group()), \
+             patch.object(users_views, 'set_message_pinned', return_value=True) as mock_pin:
+            res = self.client.post(reverse('group_chat_pin', args=['group-abc', 'm1']),
+                                   {'pinned': False}, format='json')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data, {'id': 'm1', 'pinned': False})
+        mock_pin.assert_called_once_with('group-abc', 'm1', False)
+
+    def test_pin_unknown_message_404(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._member_group()), \
+             patch.object(users_views, 'set_message_pinned', return_value=False):
+            res = self.client.post(reverse('group_chat_pin', args=['group-abc', 'ghost']),
+                                   {'pinned': True}, format='json')
+        self.assertEqual(res.status_code, 404)
+
+    def test_pin_denied_for_non_member(self):
+        group = {'id': 'group-abc', 'created_by': 'someone-else', 'members': ['fb-other']}
+        with patch.object(users_views, 'get_study_group', return_value=group), \
+             patch.object(users_views, 'set_message_pinned') as mock_pin:
+            res = self.client.post(reverse('group_chat_pin', args=['group-abc', 'm1']),
+                                   {'pinned': True}, format='json')
+        self.assertEqual(res.status_code, 403)
+        mock_pin.assert_not_called()
+
+
+class FirestoreMessageServiceTests(TestCase):
+    """The tombstone and one-pin rules live in the Firestore layer, patched far
+    below the Django views -- these tests pin the writes those views trigger."""
+
+    def setUp(self):
+        self.updates = []
+        self.pinned_docs = []
+
+    def _db(self):
+        return _FirestoreMsgStub(self.updates, self.pinned_docs)
+
+    def test_delete_leaves_a_redacted_tombstone(self):
+        with patch.object(firestore_service, 'get_db', return_value=self._db()):
+            ok = firestore_service.delete_message('group-abc', 'm1')
+        self.assertTrue(ok)
+        payload = self.updates[0]
+        self.assertTrue(payload['deleted'])
+        self.assertEqual(payload['text'], '')
+        self.assertFalse(payload['pinned'])
+        self.assertFalse(payload['edited'])
+        self.assertEqual(payload['attachments'], [])
+        self.assertIn('quiz_embed', payload)
+        self.assertIn('deck_embed', payload)
+
+    def test_pinning_clears_any_other_pin(self):
+        other = _PinnedMessageDoc('m2', self.updates)
+        self.pinned_docs.append(other)
+        with patch.object(firestore_service, 'get_db', return_value=self._db()):
+            ok = firestore_service.set_message_pinned('group-abc', 'm1', True)
+        self.assertTrue(ok)
+        self.assertIn('m2', other.unpinned)
+        self.assertEqual(self.updates[-1], {'pinned': True})
+
+    def test_pinning_digit_keeps_the_target_pin(self):
+        # m2 is pinned; pinning m1 again must not unpin m1 itself.
+        other = _PinnedMessageDoc('m1', self.updates)
+        self.pinned_docs.append(other)
+        with patch.object(firestore_service, 'get_db', return_value=self._db()):
+            firestore_service.set_message_pinned('group-abc', 'm1', True)
+        self.assertEqual(other.unpinned, [])
+
+    def test_unpin_does_not_touch_anything_else(self):
+        with patch.object(firestore_service, 'get_db', return_value=self._db()):
+            ok = firestore_service.set_message_pinned('group-abc', 'm1', False)
+        self.assertTrue(ok)
+        self.assertEqual(self.updates, [{'pinned': False}])
 
 
 class GroupAttachmentLinkTests(APITestCase):

@@ -6,6 +6,33 @@ const POWERUP_KEYS: PowerupKey[] = ['freeze', 'hint', 'doublePoints', 'shield'];
 export const STREAK_REWARD_INTERVAL = 3;
 
 /**
+ * Streak bonus multipliers, applied in order (highest threshold first). Keep in
+ * sync with `STREAK_BONUS_TIERS` in `backend_api/core/game/views.py`. The bonus
+ * rewards the *current run*, so it is lost the moment the run breaks.
+ */
+export const STREAK_BONUS_TIERS: ReadonlyArray<readonly [number, number]> = [
+  [7, 1.5],
+  [5, 1.25],
+  [3, 1.1],
+];
+
+/** Every Nth question pays double. Mirrors `DOUBLE_POINT_EVERY` in the backend. */
+export const DOUBLE_POINT_EVERY = 5;
+
+/** Points multiplier earned by the current run of correct answers. */
+export function streakBonusMultiplier(streak: number): number {
+  for (const [threshold, multiplier] of STREAK_BONUS_TIERS) {
+    if (streak >= threshold) return multiplier;
+  }
+  return 1.0;
+}
+
+/** True when `index` (position in the shared question list) is worth double. */
+export function isDoublePointQuestion(index: number): boolean {
+  return (index + 1) % DOUBLE_POINT_EVERY === 0;
+}
+
+/**
  * Question types the player types out rather than picking. Both are graded the
  * same way, so both use the same rule. Mirrors `TYPED_QUESTION_TYPES` in
  * `backend_api/core/game/views.py`.
@@ -75,29 +102,59 @@ export interface AnswerOutcome {
 
 const LETTERS = ['A', 'B', 'C', 'D'];
 
+/**
+ * Collapse every spelling of a question type to one canonical value.
+ *
+ * The backend stores the AI generator's display labels ('True/False',
+ * 'Fill-in-the-Blank'), while older payloads and the upload flow carry short ids
+ * ('tf', 'sa'). Comparing against one exact string meant a 'True/False' quiz
+ * quietly fell through to the multiple-choice branch and rendered its two options
+ * as lettered buttons. Mirrors `normalise_question_type` in
+ * `backend_api/core/core/question_types.py`.
+ */
+export function normaliseQuestionType(raw: unknown): GameQuestion['type'] {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (value === 'sa' || value === 'short answer' || value === 'short_answer'
+    || value === 'identification' || value === 'identify') {
+    return 'identification';
+  }
+  if (value === 'fib' || value === 'fill in the blank' || value === 'fill-in-the-blank'
+    || value === 'fill_in_blank' || value === 'fillblank') {
+    return 'fill_in_blank';
+  }
+  if (value === 'tf' || value === 'true/false' || value === 'true false'
+    || value === 'truefalse' || value === 'boolean' || value === 't/f'
+    || value === 'true_false') {
+    return 'true_false';
+  }
+  return 'mcq';
+}
+
 export function buildQuestions(quiz: QuizPayload): GameQuestion[] {
   const out: GameQuestion[] = [];
-  const quizType = (quiz.quiz_type || '').trim().toLowerCase();
+  const quizType = normaliseQuestionType(quiz.quiz_type);
   for (const q of quiz.questions ?? []) {
     if (!q || !q.question_text) continue;
     const opts = Array.isArray(q.options) && q.options.length > 0 ? q.options : [];
     if (quizType === 'true_false') {
-      const raw = opts.map(o => String(o).trim()).filter(Boolean);
-      const choices = raw.length >= 2 ? raw.slice(0, 2) : ['True', 'False'];
-      let correctIdx = 0;
-      choices.forEach((c, i) => {
-        if (answerMatches(q.correct_answer, c)) correctIdx = i;
-      });
+      // The two buttons are EXACTLY True and False, never the stored tail of a
+      // 4-option prompt or a stray duplicate, and the correct answer is snapped
+      // to a canonical side -- otherwise the fallback answered "always the first
+      // option" and a True/False quiz quietly tested one side only.
+      const choices = ['True', 'False'];
+      let correctAnswer = 'True';
+      if (answerMatches(q.correct_answer, 'True')) correctAnswer = 'True';
+      else if (answerMatches(q.correct_answer, 'False')) correctAnswer = 'False';
       out.push({
         type: 'true_false',
         question: q.question_text,
         choices,
-        correctAnswer: choices[correctIdx],
+        correctAnswer,
         explanation: q.explanation ?? null,
       });
       continue;
     }
-    if (quizType === 'fill-in-the-blank' || quizType === 'fill_in_blank') {
+    if (quizType === 'fill_in_blank') {
       out.push({
         type: 'fill_in_blank',
         question: q.question_text,
@@ -106,7 +163,7 @@ export function buildQuestions(quiz: QuizPayload): GameQuestion[] {
       });
       continue;
     }
-    if (quizType === 'identification' || quizType === 'sa' || quizType === 'short answer') {
+    if (quizType === 'identification') {
       out.push({
         type: 'identification',
         question: q.question_text,
@@ -131,13 +188,8 @@ export function buildQuestions(quiz: QuizPayload): GameQuestion[] {
         explanation: q.explanation ?? null,
       });
     } else {
-      // Same rule as the backend's `build_questions_from_quiz`: a quiz-level
-      // type picks the label, and the absence of options only tells us it is a
-      // typed question.
       out.push({
-        type: (quiz.quiz_type || '').trim().toLowerCase() === 'fill-in-the-blank'
-          ? 'fill_in_blank'
-          : 'identification',
+        type: 'identification',
         question: q.question_text,
         correctAnswer: String(q.correct_answer || ''),
         explanation: q.explanation ?? null,
@@ -240,12 +292,23 @@ export class OfflineGame {
 
     if (isCorrect) {
       this.correctCount += 1;
-      // Mirrors the server exactly, so an offline score is the score the same
-      // answers would have earned online.
-      const basePoints = Math.max(Math.floor(1000 * (1 - (timeTaken / this.timePerQuestion) * 0.5)), 500);
-      const speedBonus = basePoints - 500;
-      const earned = flags.useDoublePoints ? basePoints * 2 : basePoints;
       const newStreak = this.streak + 1;
+      // Mirrors the server exactly, so an offline score is the score the same
+      // answers would have earned online. The server clamps client-reported
+      // `timeTaken` into [0, timePerQuestion] before scoring; without the same
+      // clamp a fast (or clock-skewed) report would inflate the base score here
+      // while the online run paid the capped amount.
+      const clampedTime = Math.min(Math.max(timeTaken, 0), this.timePerQuestion);
+      const basePoints = Math.max(Math.floor(1000 * (1 - (clampedTime / this.timePerQuestion) * 0.5)), 500);
+      const speedBonus = basePoints - 500;
+      // Order matches the backend: speed-decayed base -> streak bonus ->
+      // doubled question -> player 2x. Getting this order wrong changes the
+      // payout of a run, not just its label.
+      let earned = basePoints;
+      const bonus = streakBonusMultiplier(newStreak);
+      if (bonus !== 1.0) earned = Math.round(earned * bonus);
+      if (isDoublePointQuestion(questionIndex)) earned *= 2;
+      if (flags.useDoublePoints) earned *= 2;
       this.streak = newStreak;
       this.bestStreak = Math.max(this.bestStreak, newStreak);
       this.score += earned;

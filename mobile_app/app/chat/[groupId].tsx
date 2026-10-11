@@ -21,9 +21,10 @@ import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser, getCachedUserId } from '@/services/authService';
 import { getFirebaseUid } from '@/services/firebaseAuthService';
 import { getChatCache, setChatCache, clearChatCache, setCacheUserId, invalidateCachePrefix } from '@/services/apiCache';
-import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName, QuizEmbed } from '@/services/chatService';
+import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName, QuizEmbed, DeckEmbed, editGroupMessage, deleteGroupMessage, setGroupMessagePinned } from '@/services/chatService';
 import { pfpSource } from '@/constants/pfps';
 import QuizShareSheet from '@/components/QuizShareSheet';
+import DeckShareSheet from '@/components/DeckShareSheet';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 
 // Presigned attachment links live ~30 min; only hydrate cached URLs while
@@ -55,6 +56,14 @@ interface GroupMessage {
   attachments: Attachment[];
   /** Quiz card shared into the chat, when this message carries one. */
   quiz_embed?: QuizEmbed | null;
+  /** Flashcard deck shared into the chat, when this message carries one. */
+  deck_embed?: DeckEmbed | null;
+  /** 'system' renders as a centered muted line (join/leave), not a bubble. */
+  type?: string;
+  edited?: boolean;
+  pinned?: boolean;
+  /** True on a soft-deleted message: content was redacted, render a tombstone. */
+  deleted?: boolean;
   local?: boolean; // true while this is an unsent optimistic echo
 }
 
@@ -64,12 +73,13 @@ const ALLOWED_REACTIONS = ['👍', '❤️', '😂', '😮', '😢'];
 const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 const MAX_ATTACHMENTS = 5;
 
-type RawMessage = Partial<Omit<GroupMessage, 'created_at' | 'reactions' | 'attachments' | 'quiz_embed'>> & {
+type RawMessage = Partial<Omit<GroupMessage, 'created_at' | 'reactions' | 'attachments' | 'quiz_embed' | 'deck_embed'>> & {
   id: string | number;
   created_at?: GroupMessage['created_at'];
   reactions?: Record<string, string[]> | null;
   attachments?: Attachment[] | null;
   quiz_embed?: QuizEmbed | null;
+  deck_embed?: DeckEmbed | null;
 };
 
 // Firestore may deliver ms or µs depending on platform; REST delivers ISO strings.
@@ -130,6 +140,11 @@ function mapMessage(raw: RawMessage): GroupMessage {
     attachments: raw.attachments ?? [],
     // Older messages predate the field, and Firestore omits keys entirely.
     quiz_embed: raw.quiz_embed ?? null,
+    deck_embed: raw.deck_embed ?? null,
+    type: raw.type || 'user',
+    edited: raw.edited ?? false,
+    pinned: raw.pinned ?? false,
+    deleted: raw.deleted ?? false,
     local: raw.local,
   };
 }
@@ -158,12 +173,20 @@ function mergeMessages(prev: GroupMessage[], incoming: GroupMessage[]): GroupMes
   const merged = incoming.map(msg => {
     const existing = prevById.get(msg.id);
     if (!existing) return msg;
+    // None of the three writers reliably carries an embed: REST normalizes a
+    // missing one to null and Firestore omits the key entirely, so an incoming
+    // copy that lacks an embed must never overwrite the one a different writer
+    // supplied. Strip the empty embed keys before merging so only a real
+    // object can overwrite one.
+    const patch: Partial<GroupMessage> = { ...msg };
+    if (!patch.quiz_embed) delete patch.quiz_embed;
+    if (!patch.deck_embed) delete patch.deck_embed;
     // React needs identity stability for list items, so preserve the old object
     // when nothing actually changed.
-    const changed = (Object.keys(msg) as (keyof GroupMessage)[]).some(
-      k => !Object.is(msg[k], existing[k]),
+    const changed = (Object.keys(patch) as (keyof GroupMessage)[]).some(
+      k => !Object.is(patch[k], existing[k]),
     );
-    return changed ? { ...existing, ...msg } : existing;
+    return changed ? { ...existing, ...patch } : existing;
   });
 
   // An incoming page can be a strict subset of what is loaded (Firestore has no
@@ -279,6 +302,9 @@ export default function GroupChatScreen() {
    * save instead, all of which work for anyone the quiz was shared to.
    */
   const [sharedQuiz, setSharedQuiz] = useState<QuizEmbed | null>(null);
+  const [sharedDeck, setSharedDeck] = useState<DeckEmbed | null>(null);
+  const [editingMessage, setEditingMessage] = useState<GroupMessage | null>(null);
+  const [editMessageText, setEditMessageText] = useState('');
   const linkCacheRef = useRef<Record<string, string>>({});
   const mintAtRef = useRef<Record<string, number>>({});
 
@@ -449,6 +475,10 @@ export default function GroupChatScreen() {
               // on every new message, so cards appeared and vanished as people
               // typed.
               quiz_embed: data?.quiz_embed,
+              deck_embed: data?.deck_embed,
+              type: data?.type,
+              edited: data?.edited,
+              pinned: data?.pinned,
             });
           });
 
@@ -918,7 +948,144 @@ export default function GroupChatScreen() {
     );
   };
 
+  const handleEditMessage = () => {
+    if (!reactionTarget) return;
+    setEditingMessage(reactionTarget);
+    setEditMessageText(reactionTarget.text);
+    setReactionTarget(null);
+  };
+
+  const saveMessageEdit = async () => {
+    if (!editingMessage) return;
+    const text = editMessageText.trim();
+    if (!text) {
+      Alert.alert('Message Required', 'A message cannot be empty.');
+      return;
+    }
+    const target = editingMessage;
+    // Optimistic: show the new text immediately; the Firestore snapshot and
+    // REST fetch both carry `edited` so the marker self-corrects.
+    setMessages(prev => prev.map(m => (m.id === target.id ? { ...m, text, edited: true } : m)));
+    setEditingMessage(null);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await editGroupMessage(String(groupId), token, target.id, text);
+    } catch (err) {
+      setMessages(prev => prev.map(m => (m.id === target.id ? { ...m, text: target.text, edited: target.edited } : m)));
+      Alert.alert('Edit Failed', err instanceof Error ? err.message : 'Please try again.');
+    }
+  };
+
+  const handleDeleteMessage = () => {
+    if (!reactionTarget) return;
+    const target = reactionTarget;
+    Alert.alert('Delete Message', 'Delete this message for everyone?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          setReactionTarget(null);
+          // Soft delete: keep the row as a tombstone. A hard remove raced the
+          // Firestore snapshot's "here is the message" delivery and *appeared*
+          // to undelete it; the server redacts the doc and this marks the same
+          // story locally, so both paths agree this message is gone.
+          setMessages(prev => prev.map(m => (
+            m.id === target.id
+              ? { ...m, deleted: true, text: '', pinned: false, quiz_embed: null, deck_embed: null }
+              : m
+          )));
+          try {
+            const token = await getToken();
+            if (!token) return;
+            await deleteGroupMessage(String(groupId), token, target.id);
+          } catch (err) {
+            Alert.alert('Delete Failed', err instanceof Error ? err.message : 'Please try again.');
+          }
+        },
+      },
+    ]);
+  };
+
+  const handleTogglePin = async (targetOverride?: GroupMessage) => {
+    // The pinned banner's unpin button has no reactionTarget, so it passes the
+    // pinned message explicitly -- otherwise `if (!reactionTarget) return`
+    // silently did nothing and the banner could never be dismissed.
+    const target = targetOverride ?? reactionTarget;
+    if (!target) return;
+    const next = !target.pinned;
+    if (!targetOverride) setReactionTarget(null);
+    // One pin per group: pinning this message drops any other pin, so the
+    // banner can never reference two messages (or a just-deleted ghost).
+    setMessages(prev => prev.map(m => (
+      m.id === target.id ? { ...m, pinned: next } : next ? { ...m, pinned: false } : m
+    )));
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await setGroupMessagePinned(String(groupId), token, target.id, next);
+    } catch (err) {
+      setMessages(prev => prev.map(m => (m.id === target.id ? { ...m, pinned: target.pinned } : m)));
+      Alert.alert('Pin Failed', err instanceof Error ? err.message : 'Please try again.');
+    }
+  };
+
   const renderMessage = (msg: GroupMessage, index: number) => {
+    // Join/leave and other system lines render as a centered muted row, with
+    // no bubble, avatar or long-press actions.
+    if (msg.type === 'system') {
+      const prev = messages[index - 1];
+      const showDayDivider = isNewDay(prev, msg.created_at);
+      const dayLabel = formatDayLabel(msg.created_at);
+      return (
+        <Fragment key={msg.id}>
+          {showDayDivider && dayLabel && (
+            <View style={styles.dayDivider}>
+              <View style={styles.dayDividerLine} />
+              <Text style={styles.dayDividerText}>{dayLabel}</Text>
+              <View style={styles.dayDividerLine} />
+            </View>
+          )}
+          <View style={styles.systemRow}>
+            <Text style={styles.systemText}>{msg.text}</Text>
+          </View>
+        </Fragment>
+      );
+    }
+    if (msg.deleted) {
+      // A soft-deleted message: the server redacted the content and this row is
+      // the agreed-upon tombstone. Nothing to react to, edit, or embed.
+      const prev = messages[index - 1];
+      const showDayDivider = isNewDay(prev, msg.created_at);
+      const dayLabel = formatDayLabel(msg.created_at);
+      const isMe = msg.sender_uid != null && msg.sender_uid === myUid;
+      const senderMember = msg.sender_uid ? memberMap[msg.sender_uid] : undefined;
+      return (
+        <Fragment key={msg.id}>
+          {showDayDivider && dayLabel && (
+            <View style={styles.dayDivider}>
+              <View style={styles.dayDividerLine} />
+              <Text style={styles.dayDividerText}>{dayLabel}</Text>
+              <View style={styles.dayDividerLine} />
+            </View>
+          )}
+          <View style={[styles.messageWrapper, isMe ? styles.messageMe : styles.messageOther]}>
+            {!isMe && (
+              <View style={styles.avatarColumn}>
+                <MemberAvatar member={senderMember} name={msg.sender_name} size={34} />
+              </View>
+            )}
+            <View style={styles.messageColumn}>
+              {!isMe && <Text style={styles.senderName}>{msg.sender_name}</Text>}
+              <View style={[styles.messageBubble, styles.bubbleDeleted]}>
+                <Text style={styles.deletedText}>This message was deleted</Text>
+              </View>
+            </View>
+          </View>
+        </Fragment>
+      );
+    }
     const isMe = msg.sender_uid != null && msg.sender_uid === myUid;
     const prev = messages[index - 1];
     const next = messages[index + 1];
@@ -971,6 +1138,34 @@ const renderQuizCard = () => {
       </View>
       <View style={styles.quizEmbedAction}>
         <Text style={styles.quizEmbedActionText}>Preview or add to my quizzes</Text>
+        <Ionicons name="chevron-forward" size={16} color={COLORS.purplePrimary} />
+      </View>
+    </TouchableOpacity>
+  );
+};
+
+const renderDeckCard = () => {
+  const embed = msg.deck_embed;
+  if (!embed || !embed.card_count) return null;
+  return (
+    <TouchableOpacity
+      style={styles.quizEmbedCard}
+      onPress={() => setSharedDeck(embed)}
+      activeOpacity={0.85}
+      accessibilityLabel={`Flashcards shared: ${embed.title}. Opens deck actions.`}
+    >
+      <View style={styles.quizEmbedHeader}>
+        <Ionicons name="albums-outline" size={24} color={COLORS.purplePrimary} />
+        <Text style={styles.quizEmbedTitle} numberOfLines={2}>{embed.title || 'Flashcards'}</Text>
+      </View>
+      <View style={styles.quizEmbedMeta}>
+        <Text style={styles.quizEmbedMetaText}>
+          {embed.card_count} {embed.card_count === 1 ? 'card' : 'cards'}
+          {embed.subject ? ` · ${embed.subject}` : ''}
+        </Text>
+      </View>
+      <View style={styles.quizEmbedAction}>
+        <Text style={styles.quizEmbedActionText}>Preview or add to my flashcards</Text>
         <Ionicons name="chevron-forward" size={16} color={COLORS.purplePrimary} />
       </View>
     </TouchableOpacity>
@@ -1088,10 +1283,13 @@ const renderAttachments = () => {
                 the previous version rendered it inside the message bubble as
                 a fake attachment, which the server had already stripped. */}
             {renderQuizCard()}
+            {renderDeckCard()}
             {renderPills()}
             {isGroupEnd && (
               <Text style={[styles.messageTime, isMe && styles.timeMe]}>
+                {msg.pinned ? '📌 ' : ''}
                 {msg.local ? 'Sending…' : formatTime(msg.created_at)}
+                {msg.edited && !msg.local ? ' · edited' : ''}
               </Text>
             )}
           </View>
@@ -1099,6 +1297,8 @@ const renderAttachments = () => {
       </Fragment>
     );
   };
+
+  const pinnedMessage = messages.find(m => m.pinned && !m.local && !m.deleted) ?? null;
 
   return (
       <KeyboardSafeView
@@ -1131,6 +1331,29 @@ const renderAttachments = () => {
           </TouchableOpacity>
         </View>
       </LinearGradient>
+
+      {pinnedMessage && (
+        <TouchableOpacity
+          style={styles.pinnedBanner}
+          activeOpacity={0.8}
+          onPress={() => setReactionTarget(pinnedMessage)}
+          accessibilityLabel={`Pinned message: ${pinnedMessage.text}. Tap for options.`}
+        >
+          <Ionicons name="pin" size={15} color={COLORS.purplePrimary} />
+          <View style={styles.pinnedBannerBody}>
+            <Text style={styles.pinnedBannerLabel}>Pinned message</Text>
+            <Text style={styles.pinnedBannerText} numberOfLines={1}>
+              {pinnedMessage.deck_embed?.title
+                || pinnedMessage.quiz_embed?.title
+                || pinnedMessage.text
+                || 'Attachment'}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={() => handleTogglePin(pinnedMessage)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} accessibilityLabel="Unpin message">
+            <Ionicons name="close" size={16} color={COLORS.textMuted} />
+          </TouchableOpacity>
+        </TouchableOpacity>
+      )}
 
       <ScrollView
         ref={scrollViewRef}
@@ -1472,9 +1695,84 @@ const renderAttachments = () => {
                   </TouchableOpacity>
                 );
               })}
-</View>
+            </View>
+            <View style={styles.messageActionRow}>
+              <TouchableOpacity
+                style={styles.messageActionBtn}
+                onPress={() => handleTogglePin()}
+                accessibilityLabel={reactionTarget?.pinned ? 'Unpin message' : 'Pin message'}
+              >
+                <Ionicons
+                  name={reactionTarget?.pinned ? 'pin-outline' : 'pin'}
+                  size={18}
+                  color={COLORS.purplePrimary}
+                />
+                <Text style={styles.messageActionText}>
+                  {reactionTarget?.pinned ? 'Unpin' : 'Pin'}
+                </Text>
+              </TouchableOpacity>
+              {reactionTarget != null && reactionTarget.sender_uid === myUid && (
+                <>
+                  <TouchableOpacity
+                    style={styles.messageActionBtn}
+                    onPress={handleEditMessage}
+                    accessibilityLabel="Edit message"
+                  >
+                    <Ionicons name="create-outline" size={18} color={COLORS.purplePrimary} />
+                    <Text style={styles.messageActionText}>Edit</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.messageActionBtn}
+                    onPress={handleDeleteMessage}
+                    accessibilityLabel="Delete message"
+                  >
+                    <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
+                    <Text style={[styles.messageActionText, { color: COLORS.danger }]}>Delete</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
           </TouchableOpacity>
         </TouchableOpacity>
+      </Modal>
+
+      {/* Edit Message */}
+      <Modal
+        visible={editingMessage != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setEditingMessage(null)}
+      >
+        <KeyboardSafeView style={styles.reactionOverlay}>
+          <View style={styles.editMessageCard}>
+            <Text style={styles.editMessageTitle}>Edit message</Text>
+            <TextInput
+              style={styles.editMessageInput}
+              value={editMessageText}
+              onChangeText={setEditMessageText}
+              multiline
+              autoFocus
+              placeholder="Message"
+              placeholderTextColor={COLORS.textMuted}
+            />
+            <View style={styles.editMessageActions}>
+              <TouchableOpacity
+                style={styles.editMessageCancel}
+                onPress={() => setEditingMessage(null)}
+                accessibilityLabel="Cancel edit"
+              >
+                <Text style={styles.editMessageCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.editMessageSave}
+                onPress={saveMessageEdit}
+                accessibilityLabel="Save edit"
+              >
+                <Text style={styles.editMessageSaveText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardSafeView>
       </Modal>
 
       {/* Attach Sheet */}
@@ -1549,6 +1847,12 @@ const renderAttachments = () => {
         questionCount={sharedQuiz?.question_count}
         quizType={sharedQuiz?.quiz_type}
       />
+
+      <DeckShareSheet
+        visible={sharedDeck != null}
+        onClose={() => setSharedDeck(null)}
+        deck={sharedDeck}
+      />
     </KeyboardSafeView>
   );
 }
@@ -1578,6 +1882,8 @@ const styles = StyleSheet.create({
   messageBubble: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 20 },
   bubbleMe: { backgroundColor: COLORS.purplePrimary, borderBottomRightRadius: 4 },
   bubbleOther: { backgroundColor: COLORS.surface, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: COLORS.border },
+  bubbleDeleted: { backgroundColor: COLORS.surface, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: COLORS.border, opacity: 0.75 },
+  deletedText: { fontSize: 13.5, fontFamily: FONTS.regular, fontStyle: 'italic', color: COLORS.textMuted },
   bubbleMedia: { backgroundColor: 'transparent', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(76, 29, 149, 0.15)', borderRadius: 12, paddingHorizontal: 0, paddingVertical: 0 },
   messageText: { fontSize: 15, lineHeight: 22, fontFamily: FONTS.regular },
   messageTime: { fontSize: 10, color: COLORS.textMuted, marginTop: 4, fontFamily: FONTS.medium },
@@ -1607,6 +1913,82 @@ const styles = StyleSheet.create({
   reactionOption: { width: 48, height: 48, borderRadius: 24, justifyContent: 'center', alignItems: 'center' },
   reactionOptionMine: { backgroundColor: 'rgba(139, 92, 246, 0.15)' },
   reactionOptionEmoji: { fontSize: 26 },
+
+  systemRow: { alignItems: 'center', marginVertical: 8, paddingHorizontal: 24 },
+  systemText: {
+    fontSize: 12,
+    fontFamily: FONTS.medium,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    backgroundColor: COLORS.bgSecondary,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    overflow: 'hidden',
+  },
+
+  pinnedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(139, 92, 246, 0.08)',
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  pinnedBannerBody: { flex: 1, minWidth: 0 },
+  pinnedBannerLabel: { fontSize: 10, fontFamily: FONTS.bold, color: COLORS.purplePrimary, textTransform: 'uppercase', letterSpacing: 0.4 },
+  pinnedBannerText: { fontSize: 13, fontFamily: FONTS.medium, color: COLORS.textDark, marginTop: 1 },
+
+  messageActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    width: '100%',
+  },
+  messageActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(139, 92, 246, 0.08)',
+  },
+  messageActionText: { fontSize: 14, fontFamily: FONTS.semiBold, color: COLORS.purplePrimary },
+
+  editMessageCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    width: '100%',
+  },
+  editMessageTitle: { fontSize: 18, fontFamily: FONTS.bold, color: COLORS.textDark, marginBottom: 12 },
+  editMessageInput: {
+    backgroundColor: COLORS.bg,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 15,
+    fontFamily: FONTS.regular,
+    color: COLORS.textDark,
+    maxHeight: 160,
+  },
+  editMessageActions: { flexDirection: 'row', gap: 12, marginTop: 16 },
+  editMessageCancel: { flex: 1, height: 46, borderRadius: 12, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: COLORS.border },
+  editMessageCancelText: { fontSize: 14, fontFamily: FONTS.bold, color: COLORS.textMuted },
+  editMessageSave: { flex: 1, height: 46, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.purplePrimary },
+  editMessageSaveText: { fontSize: 14, fontFamily: FONTS.bold, color: 'white' },
 
   inputShell: { backgroundColor: COLORS.surface },
   attachButton: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center', marginRight: 2 },

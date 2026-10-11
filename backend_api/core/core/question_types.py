@@ -44,7 +44,8 @@ def normalise_question_type(raw):
         return 'identification'
     if value in ('fib', 'fill in the blank', 'fill-in-the-blank', 'fill_in_blank', 'fillblank'):
         return 'fill_in_blank'
-    if value in ('tf', 'true/false', 'true false', 'truefalse', 'boolean', 't/f'):
+    if value in ('tf', 'true/false', 'true false', 'truefalse', 'boolean', 't/f',
+                 'true_false'):
         return 'true_false'
     return 'mcq'
 

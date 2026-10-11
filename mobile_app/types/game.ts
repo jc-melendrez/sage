@@ -186,6 +186,16 @@ export interface TeamEntry {
    */
   pickCount?: number;
   /**
+   * Live, per-member votes for the CURRENT shared question, keyed by player id
+   * and valued with the answer they picked (`{ [playerId]: answer }`). Written
+   * on every pick and frozen into the resolve so the vote stays readable after
+   * the clock stops. Answers only: pick times stay in the server-only
+   * `_server` collection. The reader maps ids to names from the room roster and
+   * tallies each option, which is what the live count badges and their
+   * tap-to-see-names list are built from. Empty once the question advances.
+   */
+  livePicks?: Record<string, string>;
+  /**
    * Every member of this team has pressed Finish.
    *
    * Rolled up server-side when the last member finishes, because the final
@@ -215,6 +225,8 @@ export interface TeamReveal {
   correct: boolean;
   /** A tie has no majority: nobody scores, and the answer is shown anyway. */
   void: boolean;
+  /** A two-way split with no majority -- nobody scored; used for UI copy. */
+  split?: boolean;
   /** How many members backed the winning answer. Never who they were. */
   agreed: number;
   /** Distinct answers that were actually offered. */

@@ -279,17 +279,18 @@ def median_pick_time(picks):
 class TeamTally(NamedTuple):
     """Resolved state of one round of private team picks."""
 
-    #: The team's answer. '' when there is none (no picks at all, or a split
-    #: that knowledge could not resolve).
+    #: The team's answer. '' when there is none (no picks at all, or a larger
+    #: split that could not be reduced to one answer).
     choice: str
     #: How many pickers chose `choice`.
     agreed: int
     #: How many members picked at all.
     pickers: int
-    #: The vote was even and knowledge could not break it: the question voids.
+    #: The vote was even and could not be reduced to one answer: the question
+    #: voids.
     void: bool
-    #: The vote was even. Knowledge may have resolved it (`choice` set and
-    #: `void` False) or not (`void` True).
+    #: The vote was even. A pure 1-1 was resolved by a coin flip (`choice` set
+    #: and `void` False); any larger split voids (`void` True).
     split: bool
 
 
@@ -303,17 +304,18 @@ def tally_team_picks(picks, typed=False, correct_answer=''):
 
     Returns a `TeamTally`.
 
-    The rule is plain majority: most-picked wins. An even split -- two members
-    of a 2-seat team picking A and B, a 2-2 among four, a 1-1-1 -- has no
-    majority, so KNOWLEDGE breaks the tie: when exactly one of the tied
-    answers is the correct one, that answer becomes the team's. It is
-    deterministic and order-independent (letting the first pick win would make
-    tap latency decide the round and render the slower teammate's vote
-    meaningless), and it stops a two-person team from voiding every question
-    the two of them simply disagreed about. When neither tied answer is
-    correct the question voids, exactly as a tie always did -- zero points
-    either way, but the "split decision" display and the honest `agreed: None`
-    stat stay.
+    The rule is plain majority: most-picked wins. A pure 1-1 disagreement (two
+    members, two different answers) has no majority, so ONE OF THE TWO IS CHOSEN
+    AT RANDOM -- never a third answer, and never by knowledge. Resolving it by
+    knowledge made the slower teammate's vote meaningless and let the game pick
+    the winner for the team; a coin flip keeps both votes equally live and stops
+    a two-person team from voiding every question they simply disagreed about.
+    Any larger even split (a 2-2 among four, a 1-1-1) still voids: there is no
+    honest way to reduce three-plus positions to one. A void scores zero points,
+    but the "split decision" display and the honest `agreed: None` stat stay.
+
+    `correct_answer` is accepted for call-site compatibility and is no longer
+    consulted: the tie-break is random, not knowledge-based.
 
     `typed` turns on case/whitespace-normalised counting so two members who
     typed the same answer with different capitalisation are one leader rather
@@ -332,26 +334,22 @@ def tally_team_picks(picks, typed=False, correct_answer=''):
         counts[key] = counts.get(key, 0) + 1
         sample.setdefault(key, raw)
     if not counts:
-        return TeamTally('', 0, 0, False, False)
+        # Nobody voted: nothing can be resolved, so this is a void reveal, and
+        # it scores zero, which is what "the team did not answer" means.
+        return TeamTally('', 0, 0, True, False)
     top = max(counts.values())
     leaders = [key for key, count in counts.items() if count == top]
     pickers = len([c for c in (picks or {}).values() if pick_answer(c)])
     if len(leaders) == 1:
         return TeamTally(sample[leaders[0]], top, pickers, False, False)
-    # Even split. Knowledge breaks a tie only for a pure 1-1 disagreement
-    # (exactly two pickers, two different answers) where exactly one of the
-    # answers is the correct answer. Any larger split with no majority, or a
-    # 1-1 where neither is correct, must void the question.
+    # Even split. A pure 1-1 disagreement (exactly two pickers, two different
+    # answers) has no majority, so one of the two is chosen at random. The
+    # choice is between the two leaders only -- a third answer can never win --
+    # and drawing at random keeps both teammates' votes equally live instead of
+    # letting knowledge settle it for them. Any larger split still voids.
     if len(leaders) == 2 and pickers == 2:
-        winners = [
-            key for key in leaders
-            if str(correct_answer or '').strip() and answer_matches(sample[key], correct_answer)
-        ]
-        if len(winners) == 1:
-            winner = winners[0]
-            return TeamTally(sample[winner], counts[winner], pickers, False, True)
-        # 1-1 wrong vs wrong: void
-        return TeamTally('', top, pickers, True, True)
+        winner = rng.choice(leaders)
+        return TeamTally(sample[winner], counts[winner], pickers, False, True)
     return TeamTally('', top, pickers, True, True)
 
 
@@ -823,15 +821,20 @@ def build_questions_from_quiz(quiz):
         explanation = getattr(q, 'explanation', None) or None
 
         if canonical_quiz_type == 'true_false':
-            # Never lettered. The two options ARE the answer buttons, and a
-            # fallback of True/False keeps a question that lost its options
-            # answerable instead of rendering nothing at all.
-            raw_options = [str(o).strip() for o in (q.options or []) if str(o).strip()]
-            choices = raw_options[:2] if len(raw_options) >= 2 else ['True', 'False']
-            correct_answer = next(
-                (c for c in choices if answer_matches(q.correct_answer, c)),
-                choices[0],
-            )
+            # Never lettered. The two buttons are EXACTLY True and False, not the
+            # stored tail of a 4-option prompt or a stray duplicate, so the
+            # buttons and the lenient grader can never disagree about which side
+            # is which. The correct answer is snapped to a canonical side too: the
+            # old `choices[0]` fallback answered "always the first option", which
+            # made a True/False quiz quietly testing one side only.
+            choices = ['True', 'False']
+            raw_correct = str(q.correct_answer or '').strip()
+            if answer_matches(raw_correct, 'True'):
+                correct_answer = 'True'
+            elif answer_matches(raw_correct, 'False'):
+                correct_answer = 'False'
+            else:
+                correct_answer = 'True'
             questions.append({
                 'type': 'true_false',
                 'question': q.question_text,
@@ -3231,9 +3234,15 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             # picks for the first time, and the full tally is in hand here.
             transaction.set(picks_ref, {'questionIndex': question_index, 'picks': picks})
             # The count is safe to publish: it is how the shared quorum strip
-            # knows to say "3 of 4 in" without saying anything about what was
-            # picked. The votes themselves stay in `_server`.
-            transaction.update(team_ref, {'pickCount': pickers})
+            # knows to say "3 of 4 in". The live per-member picks are published
+            # too, so the team can watch the vote form in real time and see who
+            # backed which option -- deliberate: teammates agree on one answer,
+            # so the split has to be visible while it happens, not only after the
+            # fact. Times stay in `_server`; only the answers travel.
+            transaction.update(team_ref, {
+                'pickCount': pickers,
+                'livePicks': {pid: pick_answer(p) for pid, p in picks.items() if pick_answer(p)},
+            })
             return {
                 'pending': True,
                 'questionIndex': question_index,
@@ -3246,10 +3255,10 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
         question = questions[question_index]
         correct_answer = question.get('correctAnswer', '')
         q_type = question.get('type', 'mcq')
-        # Plain majority; an even split is broken by knowledge, not by dict
-        # order (see `tally_team_picks`). Typed picks are counted
-        # case/whitespace-insensitively so the tally agrees with how they are
-        # graded.
+        # Plain majority; a pure 1-1 split is settled by a coin flip between the
+        # two votes, never by knowledge or dict order (see `tally_team_picks`).
+        # Typed picks are counted case/whitespace-insensitively so the tally
+        # agrees with how they are graded.
         tally = tally_team_picks(
             picks,
             typed=q_type in TYPED_QUESTION_TYPES,
@@ -3265,9 +3274,9 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
         team_time = median_pick_time(picks)
         if team_time is None:
             team_time = time_taken
-        # A split knowledge could not resolve voids the question: with no
-        # majority, awarding it to either side would make the result depend on
-        # dict ordering.
+        # A larger split that could not be reduced to one answer voids the
+        # question: with no majority, awarding it to either side would make the
+        # result depend on dict ordering.
         is_correct = (not tie) and (
             answer_matches(choice, correct_answer)
             if q_type in GRADED_LENIENTLY else choice == correct_answer
@@ -3378,17 +3387,20 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             team_updates['boostQuestion'] = fs.DELETE_FIELD
             team_updates['boostedBy'] = fs.DELETE_FIELD
 
-        # The reveal every member reads. `agreed` is a count only -- who voted
-        # what stays on the server, so the results screen cannot be used to work
-        # out how a specific teammate answered.
+        # Freeze the live vote into the resolve payload so the "who picked what"
+        # view survives past the timer, then the reveal every member reads.
+        team_updates['livePicks'] = {
+            pid: pick_answer(p) for pid, p in picks.items() if pick_answer(p)
+        }
         team_updates[f'reveals.q{question_index}'] = {
             'index': question_index,
             'answer': choice,
             'correctAnswer': correct_answer,
             'correct': bool(is_correct),
             'void': bool(tie),
-            # The vote was even. `void` says knowledge could not break it;
-            # `split` alone says the team disagreed even when knowledge did.
+            # The vote was even. `void` says the split could not be reduced to
+            # one answer; `split` alone says the team disagreed but a coin flip
+            # (or the vote itself) still produced a team answer.
             'split': bool(tally.split),
             'agreed': agreed,
             'pickers': distinct,
@@ -3479,6 +3491,69 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
     return run(db.transaction())
 
 
+class TeamReadyView(APIView):
+    """Mark a member as ready to move off the current team question.
+
+    Part of the ready-up gate: `TeamAdvanceView` refuses to move the room until
+    every non-spectator has marked the same question read (unless the host
+    forces it). Readiness lives on the player document as `readyQuestionIndex`,
+    so it is per-question and needs no cleanup when the room advances -- an
+    index that is not the current one simply does not count as ready.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        raw_index = request.data.get('questionIndex')
+        try:
+            question_index = int(request.data.get('questionIndex'))
+        except (TypeError, ValueError):
+            return Response({'error': 'questionIndex must be a number'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+        room_data = room.to_dict() or {}
+        if room_data.get('status') != 'active':
+            return Response({'error': 'Game is not in progress'}, status=400)
+        if not room_data.get('teamMode'):
+            return Response({'error': 'This room is not a team game'}, status=400)
+
+        player_ref = room_ref.collection('players').document(str(request.user.id))
+        player_data = player_ref.get().to_dict() or {}
+        if not player_data:
+            return Response({'error': 'You are not in this room'}, status=403)
+        if not player_data.get('teamId'):
+            return Response({'error': 'Spectators cannot ready up', 'spectator': True},
+                            status=403)
+
+        current_index = int(room_data.get('teamQuestionIndex') or 0)
+        if question_index != current_index:
+            return Response({
+                'error': 'That is not the current question',
+                'questionIndex': current_index,
+            }, status=409)
+
+        player_ref.update({'readyQuestionIndex': question_index})
+
+        ready = 0
+        expected = 0
+        for player in room_ref.collection('players').stream():
+            pdata = player.to_dict() or {}
+            if not pdata.get('teamId') or pdata.get('isFinished'):
+                continue
+            expected += 1
+            if int(pdata.get('readyQuestionIndex', -1) or -1) == question_index:
+                ready += 1
+        return Response({
+            'questionIndex': question_index,
+            'ready': ready,
+            'expected': expected,
+        })
+
+
 class TeamAdvanceView(APIView):
     """Move the whole room to the next shared question.
 
@@ -3567,11 +3642,36 @@ class TeamAdvanceView(APIView):
                 'waitingTeams': waiting_teams,
             }, status=409)
 
+        # Ready-up gate: once every team has resolved, the room no longer moves
+        # on by itself -- each member marks the question read, and the advance
+        # waits until everyone has. The host can force it, so one quiet or
+        # disconnected member cannot freeze the class forever.
+        force = str(request.data.get('force', 'false')).lower() == 'true'
+        is_host = str(room_data.get('hostId')) == str(request.user.id)
+        ready = 0
+        expected_ready = 0
+        for player in room_ref.collection('players').stream():
+            pdata = player.to_dict() or {}
+            if not pdata.get('teamId') or pdata.get('isFinished'):
+                continue
+            expected_ready += 1
+            if int(pdata.get('readyQuestionIndex', -1) or -1) == current_index:
+                ready += 1
+        if ready < expected_ready and not (force and is_host):
+            return Response({
+                'error': 'Not everyone is ready',
+                'questionIndex': current_index,
+                'ready': ready,
+                'expected': expected_ready,
+            }, status=409)
+
         for team in team_refs:
             # Only the shared count lives on the team document now; the votes
             # themselves are in `_server`. Both have to be cleared together, or a
             # question nobody answered would inherit the previous one's tally.
-            team.reference.update({'pickCount': 0})
+            # `livePicks` is cleared here too, so the previous question's vote
+            # does not bleed into the next one's badges.
+            team.reference.update({'pickCount': 0, 'livePicks': {}})
             room_ref.collection('_server').document(
                 f"teamPicks_{team.id}").set({'questionIndex': current_index, 'picks': {}})
         room_ref.update({

@@ -1357,6 +1357,49 @@ class GenerateQuizReliabilityTests(APITestCase):
         prompt = mock_call.call_args[0][0]['messages'][1]['content']
         self.assertIn('exactly 2 options', prompt)
 
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_true_false_correct_answer_is_snapped_to_a_canonical_side(self, mock_call):
+        # The model echoes the answer in whatever form it pleases -- 'T', '0',
+        # 'false', the tail of a 4-option schema -- so it must be resolved to the
+        # same True/False that the room-builder and the lenient grader compare
+        # against. Left unsnapped, a lettered answer misses both buttons and the
+        # fallback answered "always the first option": a True/False quiz quietly
+        # testing one side only.
+        for raw, expected in (('T', 'True'), ('0', 'True'), ('1', 'False'),
+                              ('false', 'False'), ('False', 'False'), ('true', 'True')):
+            mock_call.return_value = _deepseek_response(
+                _quiz_payload(1, options=['True', 'False'], correct_answer=raw)
+            )
+            resp = self.post_quiz(count=1, type='True/False')
+            self.assertEqual(resp.status_code, 200, resp.data)
+            stored = Quiz.objects.filter(user=self.educator, title='Generated').latest('id')
+            question = stored.questions.get()
+            self.assertEqual(question.correct_answer, expected, f'raw={raw!r}')
+            self.assertEqual(list(question.options), ['True', 'False'])
+            self.assertEqual(stored.quiz_type, 'True/False')
+
+        # The options are forced to the canonical pair regardless of order, and
+        # the stored side still follows the (lowercased) answer, not the order.
+        mock_call.return_value = _deepseek_response(
+            _quiz_payload(1, options=['False', 'True'], correct_answer='true')
+        )
+        resp = self.post_quiz(count=1, type='True/False')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        stored = Quiz.objects.filter(user=self.educator, title='Generated').latest('id')
+        question = stored.questions.get()
+        self.assertEqual(list(question.options), ['True', 'False'])
+        self.assertEqual(question.correct_answer, 'True')
+
+        # An answer that is neither true nor false is a generation failure, not
+        # something to quietly funnel onto the first option.
+        mock_call.return_value = _deepseek_response(
+            _quiz_payload(1, options=['True', 'False'], correct_answer='maybe')
+        )
+        resp = self.post_quiz(count=1, type='True/False')
+        self.assertEqual(resp.status_code, 502, resp.data)
+        self.assertIn('neither True nor False', resp.data['error'])
+
     # -- the correct option must not always sit first --
 
     @override_settings(DEEPSEEK_API_KEY='test-key')

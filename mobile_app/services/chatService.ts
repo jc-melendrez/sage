@@ -63,6 +63,22 @@ export interface LocalAttachment {
   size: number;
 }
 
+export interface DeckEmbedCard {
+  front: string;
+  back: string;
+  explanation?: string;
+}
+
+// Flashcard decks live only on the device, so a shared deck travels inside the
+// message (unlike a quiz, which is a server row referenced by id).
+export interface DeckEmbed {
+  title: string;
+  subject?: string;
+  color?: string;
+  card_count: number;
+  cards: DeckEmbedCard[];
+}
+
 export function safeFileName(name: string): string {
   const base = (name || 'file').split('/').pop() || 'file';
   return base.replace(/[^\w.\- ]+/g, '_').replace(/\s+/g, ' ').trim() || 'file';
@@ -167,5 +183,72 @@ export async function leaveGroup(groupId: string, token: string): Promise<void> 
   if (!res.ok) {
     const error = await res.json().catch(() => ({}));
     throw new Error(error.error || 'Failed to leave group');
+  }
+}
+
+export async function editGroupMessage(
+  groupId: string,
+  token: string,
+  messageId: string,
+  text: string,
+): Promise<{ id: string; text: string; edited: boolean }> {
+  const res = await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/${messageId}/`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to edit message');
+  }
+  return res.json();
+}
+
+export async function deleteGroupMessage(
+  groupId: string,
+  token: string,
+  messageId: string,
+): Promise<void> {
+  const res = await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/${messageId}/`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok && res.status !== 404) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to delete message');
+  }
+}
+
+export async function setGroupMessagePinned(
+  groupId: string,
+  token: string,
+  messageId: string,
+  pinned: boolean,
+): Promise<{ id: string; pinned: boolean }> {
+  const res = await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/${messageId}/pin/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ pinned }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to update pin');
+  }
+  return res.json();
+}
+
+export async function shareDeckToGroup(
+  groupId: string,
+  token: string,
+  deck: DeckEmbed,
+): Promise<void> {
+  const res = await fetch(`${API_BASE_URL}/users/groups/${groupId}/chat/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ text: `📇 Flashcards: "${deck.title}"`, deck_embed: deck }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to share deck');
   }
 }

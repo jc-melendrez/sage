@@ -35,6 +35,8 @@ urlpatterns = [
     path('groups/<str:group_id>/attachments/', views.GroupAttachmentUploadView.as_view(), name='group_attachments'),
     path('groups/<str:group_id>/attachments/<path:key>/link/', views.GroupAttachmentLinkView.as_view(), name='group_attachment_link'),
     path('groups/<str:group_id>/chat/<str:message_id>/reactions/', views.GroupChatReactionView.as_view(), name='group_chat_reactions'),
+    path('groups/<str:group_id>/chat/<str:message_id>/pin/', views.GroupChatPinView.as_view(), name='group_chat_pin'),
+    path('groups/<str:group_id>/chat/<str:message_id>/', views.GroupChatMessageView.as_view(), name='group_chat_message'),
     path('groups/<str:group_id>/', views.GroupUpdateView.as_view(), name='group_update'),
 
     path('courses/create/', views.CreateCourseView.as_view(), name='create_course'),

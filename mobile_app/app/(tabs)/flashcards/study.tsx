@@ -10,6 +10,7 @@ import {
   Platform,
   TextInput,
   Modal,
+  ActivityIndicator,
   } from 'react-native';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -32,8 +33,14 @@ import {
   deleteReviewLog,
   deleteCard,
   getCard,
+  getCards,
   updateCard,
 } from '@/services/flashcardService';
+import { shareDeckToGroup, type DeckEmbed } from '@/services/chatService';
+import { getToken } from '@/services/authService';
+import { API_BASE_URL } from '@/config/api';
+
+interface ShareGroup { id: string; name: string; }
 
 type Phase = 'setup' | 'study' | 'results';
 
@@ -75,6 +82,60 @@ export default function StudyScreen() {
   const [editExplanation, setEditExplanation] = useState('');
 
   const [banner, setBanner] = useState<{ message: string; type: BannerType } | null>(null);
+
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareGroups, setShareGroups] = useState<ShareGroup[]>([]);
+  const [shareLoading, setShareLoading] = useState(false);
+  const [sharingTo, setSharingTo] = useState<string | null>(null);
+
+  const openShare = async () => {
+    setShareOpen(true);
+    setShareLoading(true);
+    try {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/users/groups/mine/`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = res.ok ? await res.json() : [];
+      setShareGroups(Array.isArray(data) ? data.map((g: any) => ({ id: String(g.id), name: g.name })) : []);
+    } catch {
+      setShareGroups([]);
+    } finally {
+      setShareLoading(false);
+    }
+  };
+
+  const shareDeck = async (group: ShareGroup) => {
+    if (!deck) return;
+    setSharingTo(group.id);
+    try {
+      const cards = getCards(deck.id);
+      if (cards.length === 0) {
+        setBanner({ message: 'Add a card before sharing this deck.', type: 'error' });
+        return;
+      }
+      const embed: DeckEmbed = {
+        title: deck.name,
+        subject: deck.subject || '',
+        color: deck.color || '',
+        card_count: cards.length,
+        cards: cards.map((c) => ({
+          front: c.front,
+          back: c.back,
+          ...(c.explanation ? { explanation: c.explanation } : {}),
+        })),
+      };
+      const token = await getToken();
+      if (!token) throw new Error('Not signed in');
+      await shareDeckToGroup(group.id, token, embed);
+      setShareOpen(false);
+      setBanner({ message: `Shared "${deck.name}" to ${group.name}.`, type: 'success' });
+    } catch (err) {
+      setBanner({ message: err instanceof Error ? err.message : 'Could not share deck.', type: 'error' });
+    } finally {
+      setSharingTo(null);
+    }
+  };
 
   useEffect(() => {
     initFlashcardDb();
@@ -331,6 +392,14 @@ export default function StudyScreen() {
 
           {/* FLIP CARD */}
           <View style={styles.cardStage}>
+            <TouchableOpacity
+              style={styles.cardShareBtn}
+              onPress={openShare}
+              activeOpacity={0.7}
+              accessibilityLabel="Share these flashcards to a group"
+            >
+              <Ionicons name="share-social-outline" size={18} color={COLORS.textSecondary} />
+            </TouchableOpacity>
             <TouchableOpacity style={styles.flipCardTouch} onPress={flipCard} activeOpacity={1}>
               <Animated.View
                 style={[styles.flashCard, styles.faceFront, { transform: [{ perspective: 1200 }, { rotateY: frontRotate }] }]}
@@ -514,6 +583,47 @@ export default function StudyScreen() {
         </ScrollView>
       ) : null}
 
+      {/* SHARE MODAL */}
+      <Modal visible={shareOpen} transparent animationType="fade" onRequestClose={() => setShareOpen(false)}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShareOpen(false)}>
+          <TouchableOpacity style={styles.modalCard} activeOpacity={1} onPress={() => {}}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Share deck</Text>
+              <TouchableOpacity onPress={() => setShareOpen(false)} activeOpacity={0.7}>
+                <Ionicons name="close" size={22} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+            {shareLoading ? (
+              <ActivityIndicator color={COLORS.purpleVibrant} style={{ marginVertical: 24 }} />
+            ) : shareGroups.length === 0 ? (
+              <Text style={styles.shareEmpty}>
+                You&apos;re not in any groups yet. Join a group to share decks with classmates.
+              </Text>
+            ) : (
+              <ScrollView style={{ maxHeight: 320 }}>
+                {shareGroups.map(g => (
+                  <TouchableOpacity
+                    key={g.id}
+                    style={styles.shareGroupRow}
+                    onPress={() => shareDeck(g)}
+                    disabled={sharingTo !== null}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="people-circle-outline" size={22} color={COLORS.purpleVibrant} />
+                    <Text style={styles.shareGroupName} numberOfLines={1}>{g.name}</Text>
+                    {sharingTo === g.id ? (
+                      <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
+                    ) : (
+                      <Ionicons name="send" size={16} color={COLORS.textMuted} />
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
+
       {/* EDIT MODAL */}
       <Modal visible={editOpen} transparent animationType="fade" onRequestClose={() => setEditOpen(false)}>
         <KeyboardSafeView style={styles.modalOverlay}>
@@ -662,6 +772,41 @@ const styles = StyleSheet.create({
   progressFill: { height: '100%', borderRadius: 3, backgroundColor: COLORS.purpleVibrant },
   progressPct: { color: COLORS.textMuted, fontSize: 12, fontFamily: FONTS.bold },
   cardStage: { flex: 1, justifyContent: 'center', paddingBottom: 10 },
+  cardShareBtn: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    zIndex: 2,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  shareEmpty: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    fontFamily: FONTS.medium,
+    lineHeight: 19,
+    paddingVertical: 12,
+  },
+  shareGroupRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  shareGroupName: { flex: 1, minWidth: 0, fontSize: 15, fontFamily: FONTS.semiBold, color: COLORS.textPrimary },
   flipCardTouch: { flex: 1, minHeight: 320 },
   flashCard: {
     flex: 1,

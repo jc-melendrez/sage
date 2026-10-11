@@ -37,7 +37,11 @@ from core.llm import (
     deepseek_chat_completion,
     safe_json_parse,
 )
-from core.question_types import TYPED_QUESTION_TYPES, normalise_question_type
+from core.question_types import (
+    TYPED_QUESTION_TYPES,
+    answer_matches,
+    normalise_question_type,
+)
 from core.throttling import AIChatThrottle, AIQuizThrottle
 from users.ai_usage import charge, record_tokens
 
@@ -999,7 +1003,38 @@ class GenerateQuizView(APIView):
                         {"error": f"AI returned question {i + 1} with no correct answer."},
                         status=502)
                 q['correct_answer'] = correct
-                if canonical_type == 'mcq':
+                if canonical_type == 'true_false':
+                    # True/False options ARE the buttons, so they are fixed to
+                    # exactly True and False -- never the model's order, a stray
+                    # duplicate, or the tail of a 4-option schema. The model is
+                    # told to echo the chosen option's text, but it sometimes
+                    # returns a letter ("T") or an index ("0") instead, which
+                    # would then match neither button and push the room-builder's
+                    # fallback onto whichever side came first -- the "always the
+                    # same side" bug. Resolve every one of those forms to a
+                    # canonical 'True'/'False' and reject anything that is not.
+                    resolved = correct
+                    if not (answer_matches(resolved, 'True') or answer_matches(resolved, 'False')):
+                        letter = resolved.upper()
+                        idx = None
+                        if len(letter) == 1 and letter in ('T', 'F'):
+                            idx = 0 if letter == 'T' else 1
+                        elif resolved.isdigit():
+                            idx = int(resolved)
+                        if idx is not None and 0 <= idx < 2:
+                            resolved = ['True', 'False'][idx]
+                    if answer_matches(resolved, 'True'):
+                        resolved = 'True'
+                    elif answer_matches(resolved, 'False'):
+                        resolved = 'False'
+                    else:
+                        return Response(
+                            {"error": f"AI returned question {i + 1} whose correct "
+                                      "answer is neither True nor False."},
+                            status=502)
+                    q['correct_answer'] = resolved
+                    q['options'] = ['True', 'False']
+                elif canonical_type == 'mcq':
                     # The model is told to echo the correct option's text, but it
                     # sometimes returns the option's letter ("A") or its
                     # zero-based index ("0") instead -- the same schema the

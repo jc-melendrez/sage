@@ -509,8 +509,9 @@ export interface QuizPayload {
   questions?: Array<{
     id?: number;
     question_text?: string;
+    options?: string[];
     correct_answer?: string;
-    explanation?: string;
+    explanation?: string | null;
   }>;
 }
 

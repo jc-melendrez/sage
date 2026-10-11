@@ -9,6 +9,7 @@ urlpatterns = [
     path('answer/', views.AnswerQuestionView.as_view(), name='answer-question'),
     path('teams/pick/', views.TeamPickView.as_view(), name='team-pick'),
     path('teams/advance/', views.TeamAdvanceView.as_view(), name='team-advance'),
+    path('teams/ready/', views.TeamReadyView.as_view(), name='team-ready'),
     path('finish/', views.FinishGameView.as_view(), name='finish-game'),
     path('rematch/', views.RematchView.as_view(), name='rematch'),
     path('teams/assign/', views.AssignTeamView.as_view(), name='assign-team'),

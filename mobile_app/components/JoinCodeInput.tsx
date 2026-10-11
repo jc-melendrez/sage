@@ -19,6 +19,13 @@
  * so a single backspace could run the "clear the previous box" step twice and
  * drag focus two boxes left, leaving the user pressing backspace at a slot they
  * had not typed into. onChangeText now only ever writes the current slot.
+ *
+ * A pasted code used to die on the `maxLength={1}` of whichever box had focus:
+ * the field kept one character and `.slice(-1)` threw away the rest, so a
+ * six-character code arrived as a single letter. There is no maxLength now;
+ * the handler tells a one-character replacement (keystroke) from a multi-
+ * character one (paste) and distributes the latter across the boxes from the
+ * slot the user was in, landing focus on the first box still empty.
  */
 
 import React, { useRef } from 'react';
@@ -62,13 +69,13 @@ export default function JoinCodeInput({
   };
 
   const handleChangeText = (text: string, index: number) => {
-    // Android can deliver the whole replacement string ("7") rather than a
-    // single keystroke, so take the last character and treat anything with
-    // more than one as a paste into the current slot.
-    const char = text.replace(/[^a-zA-Z0-9]/g, '').slice(-1).toUpperCase();
+    // Android can deliver the whole replacement string rather than a single
+    // keystroke, so strip everything that is not letters/digits and then tell a
+    // one-character replacement from a multi-character paste.
+    const chars = text.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().split('');
     const next = [...slots];
 
-    if (!char) {
+    if (chars.length === 0) {
       // The slot was cleared (backspace, or the user selected its character
       // and deleted it). Just empty this slot -- deliberately no focus change,
       // because backspace navigation is owned by handleKeyPress below.
@@ -77,9 +84,28 @@ export default function JoinCodeInput({
       return;
     }
 
-    next[index] = char;
+    if (chars.length === 1) {
+      // Ordinary keystroke (or a one-character replacement): write this slot.
+      next[index] = chars[0];
+      onChange(next);
+      if (index < JOIN_CODE_LENGTH - 1) focusSlot(index + 1);
+      return;
+    }
+
+    // A pasted code. `maxLength={1}` used to truncate this to a single
+    // character and `.slice(-1)` kept only the last one, so pasting a full
+    // code entered one letter. Distribute the characters across the boxes
+    // starting at the slot the user was in (overwriting anything there), then
+    // land on the first box still empty so they can add any missing digits.
+    let i = 0;
+    while (i < chars.length && index + i < JOIN_CODE_LENGTH) {
+      next[index + i] = chars[i];
+      i += 1;
+    }
     onChange(next);
-    if (index < JOIN_CODE_LENGTH - 1) focusSlot(index + 1);
+    let focus = index + i;
+    while (focus < JOIN_CODE_LENGTH && next[focus]) focus += 1;
+    focusSlot(focus >= JOIN_CODE_LENGTH ? JOIN_CODE_LENGTH - 1 : focus);
   };
 
   const handleKeyPress = (event: any, index: number) => {
@@ -111,7 +137,6 @@ export default function JoinCodeInput({
           value={slots[index] || ''}
           onChangeText={(text) => handleChangeText(text, index)}
           onKeyPress={(event) => handleKeyPress(event, index)}
-          maxLength={1}
           autoCapitalize="characters"
           autoComplete="off"
           autoCorrect={false}
