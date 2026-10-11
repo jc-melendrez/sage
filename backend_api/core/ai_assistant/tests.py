@@ -1377,6 +1377,32 @@ class GenerateQuizReliabilityTests(APITestCase):
 
     @override_settings(DEEPSEEK_API_KEY='test-key')
     @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_mcq_forces_the_correct_option_off_position_zero(self, mock_call):
+        # The model chronically writes the correct answer first. Even if the
+        # shuffle happens to leave that order untouched, the correct option must
+        # not sit at index 0, or every question reads as "A is right".
+        mock_call.return_value = _deepseek_response(_quiz_payload(3))
+        with patch('ai_assistant.views.random.shuffle', side_effect=lambda opts: None):
+            resp = self.post_quiz(count=3)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        stored = Quiz.objects.get(user=self.educator, title='Generated').questions.all()
+        for question in stored:
+            self.assertEqual(question.correct_answer, 'A')
+            self.assertNotEqual(question.options[0], question.correct_answer)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
+    def test_mcq_prompt_avoids_option_letters_as_the_example(self, mock_call):
+        # "Option A"/"Option B" in the schema is what the model echoed back as
+        # literal choices and answers. The example must not use option letters.
+        mock_call.return_value = _deepseek_response(_quiz_payload(1))
+        self.post_quiz(count=1, type='Multiple Choice')
+        system_prompt = mock_call.call_args[0][0]['messages'][0]['content']
+        self.assertNotIn('"options": ["Option A"', system_prompt)
+        self.assertIn('text of the first choice', system_prompt)
+
+    @override_settings(DEEPSEEK_API_KEY='test-key')
+    @patch('ai_assistant.views.deepseek_chat_completion')
     def test_mcq_letter_or_index_answer_is_resolved_to_the_option_text(self, mock_call):
         # A model that answers with the option's letter or zero-based index
         # (the schema the topic/lesson generators use) must still store the

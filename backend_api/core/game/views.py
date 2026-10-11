@@ -436,6 +436,61 @@ def get_display_name(user):
     return f"{user.first_name} {user.last_name}".strip() or user.username
 
 
+def _competition_ranks(scores):
+    """Standard competition ranking: 1,2,2,4. Ties share a rank and the next
+    rank skips accordingly, so the placement a client is told about and the one
+    that was settled can never disagree."""
+    ranks = []
+    prev_score = None
+    prev_rank = 0
+    for i, score in enumerate(scores):
+        if score != prev_score:
+            prev_rank = i + 1
+            prev_score = score
+        ranks.append(prev_rank)
+    return ranks
+
+
+def _rank_classic_participants(entries):
+    """Rank solo participants and enrich them into an activity snapshot.
+
+    Shared by the live settle (`FinishGameView._settle_results`) and the
+    offline/LAN sync (`OfflineResultsView`), so a replayed offline game lands in
+    Recent Activity with exactly the fields a live one does: rank, accuracy, the
+    MVP flag and the early-finisher flag. `entries` are dicts carrying at least
+    `score`, `correct` and `answered` (and optionally `bestStreak`); every other
+    key is preserved. Returns a new list ordered best-first; the input is not
+    mutated.
+    """
+    ordered = sorted(entries, key=lambda e: (e.get('score') or 0), reverse=True)
+    ranks = _competition_ranks([(e.get('score') or 0) for e in ordered])
+    participants = []
+    for entry, rank in zip(ordered, ranks):
+        item = dict(entry)
+        item['rank'] = rank
+        answered = item.get('answered') or 0
+        correct = item.get('correct') or 0
+        item['accuracy'] = round(correct / answered * 100) if answered else 0
+        # `isFinished` alone cannot separate "raced the clock" from "waited for
+        # everyone else", so it is paired with having actually answered -- the
+        # same rule the team settle applies to its own early finishers. Popped
+        # afterwards so the live detail does not outlive the game.
+        item['earlyFinisher'] = bool(item.pop('isFinished', False)) and answered > 0
+        participants.append(item)
+    # One MVP for the room. Solo play has no team agreement to rank on, so this
+    # is accuracy among the players who actually answered, with the best run
+    # breaking a tie and score after that. Nobody who skipped can win it, and
+    # `max` returns exactly one name even on a full tie.
+    mvp = max(
+        (p for p in participants if (p.get('answered') or 0) > 0),
+        key=lambda p: (p['accuracy'], p.get('bestStreak') or 0, p.get('score') or 0),
+        default=None,
+    )
+    for entry in participants:
+        entry['isMvp'] = bool(mvp and entry.get('user_id') == mvp.get('user_id'))
+    return participants
+
+
 def _is_teacher_host(room_data):
     """Return True when the host is an educator/superadmin (i.e. not a student)."""
     host_id = room_data.get('hostId')
@@ -2142,18 +2197,9 @@ class FinishGameView(APIView):
 
     @staticmethod
     def _competition_ranks(scores):
-        """Standard competition ranking: 1,2,2,4. Ties share a rank and the
-        next rank skips accordingly, so the placement a client is told about
-        and the one that was settled can never disagree."""
-        ranks = []
-        prev_score = None
-        prev_rank = 0
-        for i, score in enumerate(scores):
-            if score != prev_score:
-                prev_rank = i + 1
-                prev_score = score
-            ranks.append(prev_rank)
-        return ranks
+        """Standard competition ranking: 1,2,2,4. See the module-level helper,
+        which is the single implementation shared with the offline settle."""
+        return _competition_ranks(scores)
 
     def _settle_results(self, room_ref, room_code, team_mode=False):
         """Build the settled `results` snapshot for a finished room.
@@ -2252,39 +2298,18 @@ class FinishGameView(APIView):
 
         room_data = room_ref.get().to_dict() or {}
         standings = self._get_standings(room_ref, room_data)
-        ranks = self._competition_ranks([e['score'] for e in standings])
-        participants = []
-        for entry, rank in zip(standings, ranks):
-            entry['rank'] = rank
-            entry['accuracy'] = round(entry['correct'] / entry['answered'] * 100) if entry['answered'] else 0
-            # `isFinished` on its own cannot separate "raced the clock" from
-            # "waited for everyone else", so it is paired with having actually
-            # answered -- the same rule the team settle applies to its own early
-            # finishers. Popped afterwards so the live detail does not outlive
-            # the game in the activity history.
-            entry['earlyFinisher'] = bool(entry['isFinished']) and entry['answered'] > 0
-            entry.pop('isFinished', None)
-            participants.append(entry)
-        # One MVP for the room. Solo play has no team agreement to rank on, so
-        # this is accuracy among the players who actually answered, with the best
-        # run breaking a tie and score after that. Nobody who skipped the quiz can
-        # win it, and `max` returns exactly one name even on a full tie.
-        mvp = max(
-            (p for p in participants if p['answered'] > 0),
-            key=lambda p: (p['accuracy'], p['bestStreak'], p['score']),
-            default=None,
-        )
-        for entry in participants:
-            entry['isMvp'] = bool(mvp and entry['user_id'] == mvp['user_id'])
+        # Ranking, accuracy and the MVP/early-finisher flags are shared with the
+        # offline settle so a replayed offline game reads exactly like a live one.
+        participants = _rank_classic_participants(standings)
         results = {
             'mode': 'classic',
             'roomCode': room_code,
             'questionCount': room_data.get('questionCount') or 0,
             'participants': participants,
         }
-        for entry, rank in zip(standings, ranks):
-            self._record_finish(user_id=entry['user_id'], rank=rank, room_code=room_code, label=f'#{rank}',
-                      results=results, topic=room_data.get('topic'))
+        for entry in participants:
+            self._record_finish(user_id=entry['user_id'], rank=entry['rank'], room_code=room_code,
+                      label=f"#{entry['rank']}", results=results, topic=room_data.get('topic'))
         return results
 
     def _record_finish(self, user_id, rank, room_code, label, results=None, team_id=None, topic=None):
@@ -4075,15 +4100,7 @@ class OfflineResultsView(APIView):
                 payload={
                     'route': '/game/classic',
                     'sessionKey': record.session_key,
-                    'results': {
-                        'mode': 'offline',
-                        'score': record.score,
-                        'correct': record.correct_count,
-                        'answered': record.answered_count,
-                        'total': record.total_questions,
-                        'timePerQuestion': record.time_per_question,
-                        'quizType': record.quiz_type,
-                    },
+                    'results': self._results_payload(request, record),
                     'score': record.score,
                     'correct': record.correct_count,
                 },
@@ -4094,3 +4111,56 @@ class OfflineResultsView(APIView):
             'created': created,
             'id': record.id,
         })
+
+    @staticmethod
+    def _as_int(value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _results_payload(self, request, record):
+        """Build the activity snapshot for a synced offline/LAN session.
+
+        When the client sends the per-player standings for a LAN game, rank
+        them into the same shape the live online settle writes (`mode:
+        'classic'` with `participants`), so a replayed LAN game in Recent
+        Activity shows the online "Final standings" screen students already
+        know. Falls back to the legacy single-player `offline` summary when no
+        participants are sent, which keeps solo play and older clients working.
+        """
+        raw = request.data.get('participants')
+        if not isinstance(raw, list):
+            return self._offline_summary(record)
+        entries = []
+        for p in raw:
+            if not isinstance(p, dict):
+                continue
+            entries.append({
+                'user_id': p.get('user_id'),
+                'name': str(p.get('name') or 'Player')[:120],
+                'avatar': p.get('avatar') or None,
+                'score': self._as_int(p.get('score')),
+                'correct': self._as_int(p.get('correct')),
+                'answered': self._as_int(p.get('answered')),
+                'bestStreak': self._as_int(p.get('bestStreak')),
+            })
+        if not entries:
+            return self._offline_summary(record)
+        return {
+            'mode': 'classic',
+            'questionCount': record.total_questions,
+            'participants': _rank_classic_participants(entries),
+        }
+
+    @staticmethod
+    def _offline_summary(record):
+        return {
+            'mode': 'offline',
+            'score': record.score,
+            'correct': record.correct_count,
+            'answered': record.answered_count,
+            'total': record.total_questions,
+            'timePerQuestion': record.time_per_question,
+            'quizType': record.quiz_type,
+        }

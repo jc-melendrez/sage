@@ -467,6 +467,56 @@ class TeamModeGameTests(TestCase):
         self.client.post(reverse('offline-results'), payload, format='json')
         self.assertEqual(Activity.objects.filter(user=self.host, kind='offline_game').count(), 1)
 
+    def test_offline_results_with_participants_become_classic_standings(self):
+        """A LAN session syncs the whole roster, so Recent Activity replays the
+        same "Final standings" a live classic game does rather than a bare
+        single-player summary."""
+        self.client.force_authenticate(user=self.host)
+        self.client.post(reverse('offline-results'), {
+            'sessionKey': 'lan-1',
+            'quizTitle': 'LAN Quiz',
+            'score': 400,
+            'correctCount': 4,
+            'totalQuestions': 4,
+            'participants': [
+                {'user_id': self.host.id, 'name': 'Host', 'score': 400,
+                 'correct': 4, 'answered': 4, 'bestStreak': 3},
+                {'user_id': 'lan-2', 'name': 'Guest', 'score': 200,
+                 'correct': 2, 'answered': 4, 'bestStreak': 1},
+            ],
+        }, format='json')
+
+        activity = Activity.objects.get(user=self.host, kind='offline_game')
+        results = activity.payload['results']
+        self.assertEqual(results['mode'], 'classic')
+        self.assertEqual(results['questionCount'], 4)
+        participants = results['participants']
+        # Best-first, with competition ranks and accuracy derived server-side.
+        self.assertEqual([p['name'] for p in participants], ['Host', 'Guest'])
+        self.assertEqual([p['rank'] for p in participants], [1, 2])
+        self.assertEqual(participants[0]['accuracy'], 100)
+        self.assertEqual(participants[1]['accuracy'], 50)
+        self.assertTrue(participants[0]['isMvp'])
+        self.assertFalse(participants[1]['isMvp'])
+
+    def test_offline_results_without_participants_stay_single_player(self):
+        """Solo play and older clients send no roster; the payload must keep the
+        `offline` summary the client already renders."""
+        self.client.force_authenticate(user=self.host)
+        self.client.post(reverse('offline-results'), {
+            'sessionKey': 'solo-1',
+            'quizTitle': 'Solo Quiz',
+            'score': 30,
+            'correctCount': 1,
+            'totalQuestions': 3,
+        }, format='json')
+
+        activity = Activity.objects.get(user=self.host, kind='offline_game')
+        results = activity.payload['results']
+        self.assertEqual(results['mode'], 'offline')
+        self.assertEqual(results['score'], 30)
+        self.assertNotIn('participants', results)
+
 
 class PowerupRewardTests(TestCase):
     """Classic-mode streak rewards: a powerup is guaranteed on every

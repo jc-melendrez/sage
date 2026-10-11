@@ -34,9 +34,25 @@ export interface OfflineGameRow {
    * JSON GameQuestion[] as served, including `explanation`. Stored because the
    * results screen needs the wording and the teaching text, and neither is
    * reachable from the quiz id without a network call the practice screen does
-   * not otherwise make.
+   * not make.
    */
   questions: string | null;
+  /**
+   * JSON OfflineParticipant[] for a LAN session, so the synced activity row
+   * can replay the online "Final standings". Null on solo play and on rows
+   * written before the column existed.
+   */
+  participants: string | null;
+}
+
+export interface OfflineParticipant {
+  user_id: number | string;
+  name: string;
+  score: number;
+  correct: number;
+  answered: number;
+  bestStreak?: number;
+  avatar?: string | null;
 }
 
 let currentOfflineGame: OfflineGame | null = null;
@@ -64,7 +80,8 @@ export function initOfflineGameDb() {
       completed_at TEXT NOT NULL,
       is_synced INTEGER DEFAULT 0,
       answer_log TEXT,
-      questions TEXT
+      questions TEXT,
+      participants TEXT
     );
   `);
 
@@ -73,7 +90,7 @@ export function initOfflineGameDb() {
   // added and the insert below would fail. Migrate them in explicitly.
   const cols = d.getAllSync<{ name: string }>('PRAGMA table_info(offline_games)');
   if (cols.length) {
-    for (const name of ['answer_log', 'questions']) {
+    for (const name of ['answer_log', 'questions', 'participants']) {
       if (!cols.some(c => c.name === name)) {
         d.execSync(`ALTER TABLE offline_games ADD COLUMN ${name} TEXT`);
       }
@@ -151,15 +168,24 @@ export function clearCurrentOfflineGame() {
   currentOfflineGame = null;
 }
 
-export function saveOfflineGameResult(game: OfflineGame): number {
+/**
+ * Persist a finished offline/LAN session.
+ *
+ * `participants` is optional and only passed for a LAN game: the roster is what
+ * lets the synced activity row replay the online "Final standings" instead of a
+ * bare single-player summary. Solo play and any caller that omits it store
+ * null, and the server keeps the legacy `offline` summary for those.
+ */
+export function saveOfflineGameResult(game: OfflineGame, participants?: OfflineParticipant[]): number {
   const d = getDb();
   if (!d) return 0;
   const sessionKey = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const roster = participants && participants.length ? JSON.stringify(participants) : null;
   d.runSync(
     `INSERT INTO offline_games (
        session_key, quiz_id, quiz_title, quiz_type, time_per_question,
-       score, correct_count, answered_count, total_questions, completed_at, is_synced, answer_log, questions
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+       score, correct_count, answered_count, total_questions, completed_at, is_synced, answer_log, questions, participants
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
     [
       sessionKey,
       game.quizId,
@@ -173,6 +199,7 @@ export function saveOfflineGameResult(game: OfflineGame): number {
       new Date().toISOString(),
       JSON.stringify(answerLogFromOutcomes(game.outcomeLog)),
       JSON.stringify(game.questions ?? []),
+      roster,
     ]
   );
   const id = d.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;

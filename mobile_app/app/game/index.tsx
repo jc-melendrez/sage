@@ -27,7 +27,7 @@ import firestore from '@react-native-firebase/firestore';
 import { cacheQuizzes, getCachedQuizzes, createOfflineGame } from '@/services/offlineGameService';
 import * as Clipboard from 'expo-clipboard';
 import { LanClientSession } from '@/services/lanClient';
-import { lanGame, setLanClient, setLanHost, resetLanState, getLanClient, getLanHostInfo, setLanHostInfo, setLastLanRoster, setLanPlayerId } from '@/services/lanSession';
+import { lanGame, setLanClient, setLanHost, resetLanState, getLanClient, getLanHostInfo, setLanHostInfo, setLastLanRoster, setLanPlayerId, getLanPlayerId, setLanTeams } from '@/services/lanSession';
 import { LanHostServer, makeOrder } from '@/services/lanHost';
 import { LanMessage, LanPlayer, generateRoomCode } from '@/services/lanProtocol';
 import { startScanning, stopScanning, startAdvertising, stopAdvertising, DiscoveredRoom } from '@/services/lanDiscovery';
@@ -277,6 +277,8 @@ const lobbyTokenRef = useRef(0);
       setLanPlayerCount(connected.length);
       setLanJoined(connected);
       setLastLanRoster(connected);
+    } else if (msg.t === 'teams') {
+      setLanTeams(msg.teams);
     } else if (msg.t === 'error') {
       Alert.alert('LAN Error', msg.message || 'Unexpected error');
     }
@@ -928,6 +930,15 @@ const lobbyTokenRef = useRef(0);
       return;
     }
 
+    // Offline/LAN GROUP: team rooms belong to the lobby, exactly like the
+    // online Play tab. Without this the group selection fell straight into the
+    // solo countdown (offline) or a teamless LAN broadcast, so the team boxes
+    // never appeared. Classic offline/LAN keep their existing behavior below.
+    if (selectedMode === 'group' && (isOffline || usingCachedQuizzes)) {
+      await startLanGroupLobby();
+      return;
+    }
+
     const host = lanHostRef.current;
     // If players have joined over LAN, START must always broadcast to them,
     // regardless of the internet/offline state toggling between INVITE and START.
@@ -1076,6 +1087,92 @@ const lobbyTokenRef = useRef(0);
     }
   };
 
+  /**
+   * Open a LAN team lobby from the offline Play tab.
+   *
+   * Mirrors the online group path (create host -> /game/lobby) but over the
+   * peer-to-peer LAN layer: create the host server and advertise the code,
+   * bind the quiz so the lobby's START can broadcast it, and seat the host as
+   * a player up front so it can claim a team like everyone else. Classic mode
+   * never reaches this -- it keeps the solo/broadcast shortcuts below.
+   */
+  const startLanGroupLobby = async () => {
+    const quiz = requirePlaySelections();
+    if (!quiz) return;
+    if (teamCount == null) {
+      Alert.alert('Almost There', 'Please choose the number of teams before starting a game.');
+      return;
+    }
+
+    let hostName = lanGame.playerName || 'Host';
+    let hostAvatar = currentUserAvatar;
+    try {
+      const user = await getCurrentUser();
+      if (user?.first_name) hostName = user.first_name;
+      hostAvatar = user?.avatar ?? currentUserAvatar;
+    } catch {}
+
+    let host = lanHostRef.current;
+    const code = host?.roomCode || generateRoomCode();
+    if (!host) {
+      host = new LanHostServer(code, { name: hostName || 'Host', avatar: hostAvatar });
+      host.onMessage(msg => lanHostMsgRef.current(msg));
+      try {
+        host.start();
+      } catch {}
+      lanHostRef.current = host;
+      startAdvertising(code, quiz.title || 'LAN Quiz', () => lanPlayerCountRef.current);
+    }
+    setLanHost(host);
+    host.setTeams(teamCount);
+
+    const count = buildQuestions(quiz).length;
+    const time = parseInt(timePerQuestion, 10) || 15;
+    const order = makeOrder(count);
+    host.setQuiz(quiz, order, time);
+    lanGame.quiz = quiz;
+    lanGame.order = order;
+    lanGame.timePerQuestion = time;
+    lanGame.playerName = hostName;
+    lanGame.playerAvatar = hostAvatar;
+    lanGame.role = 'student';
+    lanGame.selfPlay = true;
+    lanGame.hostIp = '';
+    lanGame.roomCode = code;
+    setRoomCode(code);
+    setRoomTopic(quiz.title || 'LAN Quiz');
+
+    // Seat the host as a real player BEFORE the lobby mounts, so it shows up
+    // in the roster and can claim a team. The lobby's own quiz/countdown
+    // handling then drives host and joiners through the same broadcast.
+    let myId = getLanPlayerId();
+    if (!getLanClient()?.connected) {
+      setLanJoined([]);
+      let hostJoined = false;
+      const client = new LanClientSession(msg => {
+        if (msg.t === 'welcome') {
+          hostJoined = true;
+          myId = msg.playerId;
+          setLanPlayerId(msg.playerId);
+        }
+      });
+      setLanClient(client);
+      try {
+        await client.connect('127.0.0.1');
+        client.join(code, hostName, hostAvatar);
+        const deadline = Date.now() + 3000;
+        while (!hostJoined && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 25));
+        }
+      } catch {}
+    }
+
+    router.push({
+      pathname: '/game/lobby',
+      params: { roomCode: code, isHost: 'true', teamMode: 'true', lan: 'true', topic: quiz.title || 'LAN Quiz', myId: String(myId) },
+    } as any);
+  };
+
   const startGameSequence = async (code: string) => {
     setIsCreatingRoom(true);
     console.log('[game/index] START path: online-firestore');
@@ -1169,14 +1266,25 @@ const lobbyTokenRef = useRef(0);
       setLanPlayerId(msg.playerId);
       setIsJoinedLan(true);
       setLanHostInfo({ name: msg.hostName, avatar: msg.hostAvatar });
-      // Stay on the Play tab (like online joins) — the waiting/LEAVE bar and
-      // roster slots render here in the joined-LAN view.
+      // A team room is owned by /game/lobby (same as online). Staying on the
+      // Play tab would leave the joiner without the team boxes while the host
+      // sits in the real lobby, so both views would disagree about the roster.
+      if (msg.teamMode) {
+        setShowJoinModal(false);
+        setJoinCode(Array(JOIN_CODE_LENGTH).fill(''));
+        router.push({
+          pathname: '/game/lobby',
+          params: { roomCode: lanGame.roomCode, isHost: 'false', teamMode: 'true', lan: 'true', myId: msg.playerId },
+        } as any);
+      }
     } else if (msg.t === 'roster') {
       const connected = msg.players.filter(p => p.connected);
       lanPlayerCountRef.current = connected.length;
       setLanPlayerCount(connected.length);
       setLanJoined(connected);
       setLastLanRoster(connected);
+    } else if (msg.t === 'teams') {
+      setLanTeams(msg.teams);
     } else if (msg.t === 'quiz') {
       lanGame.quiz = msg.quiz;
       lanGame.order = msg.order;

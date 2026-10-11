@@ -789,8 +789,9 @@ class GenerateQuizView(APIView):
                 "{"
                 "  \"id\": 1,"
                 "  \"question\": \"The question text\","
-                "  \"options\": [\"Option A\", \"Option B\", \"Option C\", \"Option D\"],"
-                "  \"correct_answer\": \"The exact string of the correct option\","
+                "  \"options\": [\"text of the first choice\", \"text of the second choice\", "
+                "\"text of the third choice\", \"text of the fourth choice\"],"
+                "  \"correct_answer\": \"The exact text of the correct choice, copied from options\","
                 "  \"explanation\": \"Brief explanation why\""
                 "}"
                 "]"
@@ -1026,6 +1027,16 @@ class GenerateQuizView(APIView):
                     # text, so it follows the move, and the stored order stops
                     # being a tell for "the first one is right".
                     random.shuffle(q['options'])
+                    # A single shuffle still leaves the correct option in first
+                    # place about 1-in-`len(options)` of the time, and the model
+                    # keeps writing the correct answer first, so "the answer is
+                    # always A" could survive a run of unlucky shuffles. Force the
+                    # correct option off position 0, swapping in a randomly chosen
+                    # later option, so the pattern cannot hold.
+                    if len(q['options']) > 1 and q['options'][0] == q['correct_answer']:
+                        swap_with = random.randrange(1, len(q['options']))
+                        q['options'][0], q['options'][swap_with] = (
+                            q['options'][swap_with], q['options'][0])
                 if typed:
                     # The cap in the prompt is a ceiling on WHICH answer to
                     # test, and a model sometimes reads it as an instruction to

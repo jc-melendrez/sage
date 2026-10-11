@@ -44,6 +44,18 @@ export interface LanPlayer {
    * breakdown to show for a player that did not send one.
    */
   answers?: LanAnswerLog;
+  /**
+   * Team this player is seated in. Absent means the player is a spectator
+   * (or the host has not enabled teams). Kept optional so an older client
+   * build keeps interoperating with a team-mode host.
+   */
+  teamId?: string;
+}
+
+export interface LanTeam {
+  id: string;
+  name: string;
+  color: string;
 }
 
 export interface LanResultPayload {
@@ -64,8 +76,12 @@ export type LanMessage =
   | { t: 'hello'; code: string; name: string; avatar?: string }
   | { t: 'ping' }
   | { t: 'result'; data: LanResultPayload }
-  | { t: 'welcome'; roomCode: string; playerId: string; hostName?: string; hostAvatar?: string }
+  | { t: 'welcome'; roomCode: string; playerId: string; hostName?: string; hostAvatar?: string; teamMode?: boolean }
   | { t: 'roster'; players: LanPlayer[] }
+  | { t: 'teams'; teams: LanTeam[] }
+  | { t: 'team-join'; teamId: string | null }
+  | { t: 'team-add'; name?: string }
+  | { t: 'team-rename'; teamId: string; name: string }
   | { t: 'quiz'; quiz: QuizPayload; order: number[]; timePerQuestion: number }
   | { t: 'start' }
   | { t: 'leaderboard'; players: LanPlayer[]; final: boolean }

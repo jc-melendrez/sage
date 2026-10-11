@@ -12,6 +12,17 @@ async function flushOfflineGames() {
   const token = await getToken();
   if (!token) return;
   for (const game of pending) {
+    // A LAN session stores the full roster as JSON; send it through so the
+    // activity row replays the online "Final standings". Solo rows have no
+    // roster and omit the key, and the server falls back to the summary.
+    let participants: unknown;
+    if (game.participants) {
+      try {
+        participants = JSON.parse(game.participants);
+      } catch {
+        participants = undefined;
+      }
+    }
     try {
       const res = await fetch(`${API_BASE_URL}/game/offline-results/`, {
         method: 'POST',
@@ -27,6 +38,7 @@ async function flushOfflineGames() {
           answeredCount: game.answered_count,
           totalQuestions: game.total_questions,
           completedAt: game.completed_at,
+          ...(Array.isArray(participants) && participants.length ? { participants } : {}),
         }),
       });
       if (res.ok) markOfflineGameSynced(game.id);

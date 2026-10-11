@@ -30,9 +30,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import firestore from '@react-native-firebase/firestore';
 import * as Haptics from 'expo-haptics';
 import { getToken, getCurrentUser } from '@/services/authService';
-import { createOfflineGame, getCurrentOfflineGame, saveOfflineGameResult, clearCurrentOfflineGame } from '@/services/offlineGameService';
-import { getLanClient, lanGame, getLanPlayerId, setLanPlayerId, setLanFinalStandings, getLastLanRoster } from '@/services/lanSession';
-import type { LanMessage, LanPlayer } from '@/services/lanProtocol';
+import { createOfflineGame, getCurrentOfflineGame, saveOfflineGameResult, clearCurrentOfflineGame, type OfflineParticipant } from '@/services/offlineGameService';
+import { getLanClient, lanGame, getLanPlayerId, setLanPlayerId, setLanFinalStandings, getLastLanRoster, getLanHostServer, getLanTeams, setLanTeams, resetLanState } from '@/services/lanSession';
+import type { LanMessage, LanPlayer, LanTeam } from '@/services/lanProtocol';
+import { useCurrentUser } from '@/contexts/UserContext';
 import { API_BASE_URL } from '@/config/api';
 import TeamRevealOverlay from '@/components/TeamRevealOverlay';
 import { Ionicons } from '@expo/vector-icons';
@@ -327,6 +328,52 @@ const isMyLanPlayer = (p: LanPlayer) => {
   return myId ? p.id === myId : p.name === lanGame.playerName;
 };
 
+/** Longest run of consecutive correct answers in a LAN player's log. */
+function bestStreakFromAnswers(answers?: LanPlayer['answers']): number {
+  if (!answers) return 0;
+  const indices = Object.keys(answers)
+    .map(Number)
+    .filter((n) => Number.isFinite(n))
+    .sort((a, b) => a - b);
+  let best = 0;
+  let run = 0;
+  for (const index of indices) {
+    if (answers[String(index)]?.correct) {
+      run += 1;
+      if (run > best) best = run;
+    } else {
+      run = 0;
+    }
+  }
+  return best;
+}
+
+/**
+ * Map a LAN roster into the participant rows the offline sync stores.
+ *
+ * Your own row carries your Django user id (the app's identity everywhere else)
+ * rather than the LAN player id, so the activity detail can tag it "(you)". A
+ * peer's LAN id is all the host knows, so it is sent as-is and simply renders as
+ * another player.
+ */
+function buildLanParticipants(
+  players: LanPlayer[],
+  opts: { myLanId: string; myUserId: number | string | null; myName: string; myAvatar?: string | null },
+): OfflineParticipant[] {
+  return players.map((p) => {
+    const isMe = opts.myLanId ? p.id === opts.myLanId : p.name === opts.myName;
+    return {
+      user_id: isMe && opts.myUserId != null ? opts.myUserId : p.id,
+      name: p.name || 'Player',
+      score: p.score ?? 0,
+      correct: p.correctCount ?? 0,
+      answered: p.answeredCount ?? 0,
+      bestStreak: bestStreakFromAnswers(p.answers),
+      avatar: (isMe ? opts.myAvatar : p.avatar) ?? null,
+    };
+  });
+}
+
 export default function QuestionScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -334,6 +381,11 @@ export default function QuestionScreen() {
   const roomCode = params.roomCode;
   const isOffline = params.offline === 'true';
   const isLan = params.lan === 'true';
+  // The signed-in profile carries the Django id the activity snapshot keys
+  // "you" off, and the name/avatar an offline solo result is attributed with.
+  const { user: currentUser } = useCurrentUser();
+  const meName = [currentUser?.first_name, currentUser?.last_name].filter(Boolean).join(' ')
+    || currentUser?.username || 'You';
   const [questions, setQuestions] = useState<any[]>([]);
   const [questionOrder, setQuestionOrder] = useState<number[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -528,6 +580,10 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const bootedRef = useRef(false);
   const navigatedRef = useRef(false);
   const lanPlayersRef = useRef<LanPlayer[]>([]);
+  // LAN team list for the header pill. Kept in state so a `teams` broadcast
+  // re-renders the pill, while the session copy (`setLanTeams`) is what the
+  // results screen reads at the very end.
+  const [lanTeamList, setLanTeamList] = useState<LanTeam[]>([]);
   const lanPrevStandingsRef = useRef<Record<string, { rank: number; score: number }>>({});
   const lanSubmittedRef = useRef(false);
   // Row id of the saved offline/LAN session, handed to the results screen so it
@@ -666,7 +722,15 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     setLanFinalStandings(list);
     if (game) {
       try {
-        lanSavedIdRef.current = saveOfflineGameResult(game);
+        // Persist the whole roster, not just this device's line, so the synced
+        // activity row replays the online "Final standings" for a LAN game.
+        const participants = buildLanParticipants(list, {
+          myLanId: myId,
+          myUserId: currentUser?.id ?? null,
+          myName: lanGame.playerName || 'You',
+          myAvatar: lanGame.playerAvatar || null,
+        });
+        lanSavedIdRef.current = saveOfflineGameResult(game, participants);
       } catch {}
       clearCurrentOfflineGame();
     }
@@ -677,6 +741,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         lan: 'true',
         playerId: myId || '',
         offlineId: String(lanSavedIdRef.current),
+        ...(getLanTeams().length > 0 ? { teamMode: 'true' } : {}),
       },
     } as any);
   };
@@ -733,10 +798,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           }]);
         } else {
           const roster = getLastLanRoster();
-          // Seed the LAN player list so the final standings show everyone,
-          // even if no leaderboard broadcast has been received yet. Your own
-          // row is seeded with the real local score/streak, remapped to id
-          // 'me' so the drawer tags it "(You)".
+          // Seed the LAN player list (and team names) so the final standings
+          // show everyone, even if no leaderboard broadcast has arrived yet.
+          // Your own row is seeded with the real local score/streak, remapped
+          // to id 'me' so the drawer tags it "(You)".
+          const seedTeams = getLanTeams();
+          if (seedTeams.length > 0) setLanTeamList(seedTeams);
           lanPlayersRef.current = roster;
           setStandings(roster.length
             ? roster.map(p => {
@@ -789,6 +856,10 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   setEngineError(e instanceof Error ? e.message : String(e));
                 }
               }
+            } else if (msg.t === 'teams') {
+              const list = msg.teams ?? [];
+              setLanTeams(list);
+              setLanTeamList(list);
             } else if (msg.t === 'leaderboard') {
               applyLanLeaderboardRef.current(msg.players);
             } else if (msg.t === 'end') {
@@ -2031,6 +2102,73 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     );
   };
 
+  /**
+   * LAN host ending the session mid-game.
+   *
+   * `endGame` broadcasts `{t:'end'}` to every player AND to this device's own
+   * loopback client, so the existing `end` handler finalizes each run (saving
+   * the answers so far) and routes everyone to the results screen -- the host
+   * included. No separate navigation is needed here.
+   */
+  const endLanSession = () => {
+    const host = getLanHostServer();
+    if (!host) return;
+    Alert.alert(
+      'End game for everyone?',
+      'This closes the game for every player and shows the final scores now.',
+      [
+        { text: 'Keep playing', style: 'cancel' },
+        {
+          text: 'End game',
+          style: 'destructive',
+          onPress: () => { host.endGame('The host ended the game'); },
+        },
+      ],
+    );
+  };
+
+  /** A LAN player walking out. There is no server room to clean up. */
+  const leaveLanSession = () => {
+    Alert.alert(
+      'Leave game?',
+      "Your answers so far won't be scored.",
+      [
+        { text: 'Stay', style: 'cancel' },
+        {
+          text: 'Leave',
+          style: 'destructive',
+          onPress: () => {
+            if (!claimNav()) return;
+            getLanClient()?.disconnect();
+            clearCurrentOfflineGame();
+            resetLanState();
+            router.replace('/(tabs)/games' as any);
+          },
+        },
+      ],
+    );
+  };
+
+  /** Abandon a solo offline run. Nothing is persisted until the end. */
+  const quitOffline = () => {
+    Alert.alert(
+      'Quit game?',
+      "Your progress won't be saved.",
+      [
+        { text: 'Keep playing', style: 'cancel' },
+        {
+          text: 'Quit',
+          style: 'destructive',
+          onPress: () => {
+            if (!claimNav()) return;
+            clearCurrentOfflineGame();
+            router.replace('/(tabs)/games' as any);
+          },
+        },
+      ],
+    );
+  };
+
   const handleAnswer = async (answer: string | null) => {
     // The latch, not the answer text: a timeout submits '' and a second
     // submission for the same index is answered from the server's cache with
@@ -2271,8 +2409,18 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       if (isOffline) {
         const game = getCurrentOfflineGame();
         // The results screen reads the questions and the answer log back out of
-        // this row, so the id has to travel with the navigation.
-        const savedId = game ? saveOfflineGameResult(game) : 0;
+        // this row, so the id has to travel with the navigation. A one-row
+        // roster is stored too, so the synced activity detail can show the same
+        // "Final standings" a live game does and tag the row "(you)".
+        const savedId = game ? saveOfflineGameResult(game, [{
+          user_id: currentUser?.id ?? 'me',
+          name: meName,
+          score: game.score,
+          correct: game.correctCount,
+          answered: game.answeredCount,
+          bestStreak: game.bestStreak,
+          avatar: currentUser?.avatar ?? null,
+        }]) : 0;
         clearCurrentOfflineGame();
         if (!claimNav()) return;
         router.replace({
@@ -2378,6 +2526,13 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const question = questions[actualIndex] || {};
   const playerRank = standings.findIndex(p => String(p.id) === String(userId)) + 1;
   const isDanger = !isFrozen && timeLeft <= 5;
+  // LAN team display. LAN play is asynchronous, so this is presentational only:
+  // it never routes into the online team engine (shared question + voting).
+  const lanIsHost = isLan && getLanHostServer() != null;
+  const lanMyPlayer = isLan ? lanPlayersRef.current.find(isMyLanPlayer) : undefined;
+  const lanTeam = isLan
+    ? (lanTeamList.find(t => t.id === lanMyPlayer?.teamId) ?? null)
+    : null;
   const isChoiceQuestion = question.type === 'mcq' || question.type === 'true_false' || question.type === 'tf';
   // Anything choice-shaped that isn't a plain MCQ is a True/False round: it
   // renders as two letter-less buttons rather than "A / B" chips.
@@ -2426,6 +2581,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               <Text style={[styles.teamPillScore, { color: myTeam.color }]}>{(myTeam.score ?? 0).toLocaleString()}</Text>
             </View>
           )}
+          {!myTeam && lanTeam && (
+            <View style={[styles.teamPill, { borderColor: lanTeam.color + '66', backgroundColor: lanTeam.color + '14' }]}>
+              <View style={[styles.teamPillDot, { backgroundColor: lanTeam.color }]} />
+              <Text style={styles.teamPillName} numberOfLines={1}>{lanTeam.name}</Text>
+            </View>
+          )}
         </View>
 
         {/* Host-only escape hatch. Everyone else finishes the round; the owner
@@ -2443,6 +2604,19 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           </TouchableOpacity>
         )}
 
+        {/* LAN host: end for everyone. Mirrors the online host's stop button. */}
+        {lanIsHost && (
+          <TouchableOpacity
+            style={styles.stopSessionBtn}
+            onPress={endLanSession}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="End game"
+          >
+            <Text style={styles.stopSessionBtnText}>■ End</Text>
+          </TouchableOpacity>
+        )}
+
         {/* Non-host participants can walk out of a running online game. The
             host's counterpart is End above (closes for everyone), so this is
             never shown to the owner. Offline and LAN have their own exits. */}
@@ -2455,6 +2629,32 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             accessibilityLabel="Leave game"
           >
             <Text style={styles.leaveSessionBtnText}>Leave</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* LAN player: walk out of the ad-hoc game. There is no room to close. */}
+        {isLan && !lanIsHost && (
+          <TouchableOpacity
+            style={styles.leaveSessionBtn}
+            onPress={leaveLanSession}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Leave game"
+          >
+            <Text style={styles.leaveSessionBtnText}>Leave</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Solo offline run: abandon it. Nothing is saved until the end. */}
+        {isOffline && (
+          <TouchableOpacity
+            style={styles.leaveSessionBtn}
+            onPress={quitOffline}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Quit game"
+          >
+            <Text style={styles.leaveSessionBtnText}>Quit</Text>
           </TouchableOpacity>
         )}
 

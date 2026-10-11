@@ -155,7 +155,7 @@ export default function FlashcardsHome() {
       <LinearGradient colors={PURPLE_HEADER_GRADIENT} style={styles.headerBand}>
         <StatusBar barStyle="light-content" backgroundColor={COLORS.purpleDeep} translucent={false} />
         <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.7}>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.replace('/(tabs)/games' as any)} activeOpacity={0.7}>
             <Ionicons name="chevron-back" size={22} color="#fff" />
           </TouchableOpacity>
           <View style={styles.headerTitleWrap}>

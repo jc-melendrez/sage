@@ -4,6 +4,7 @@ import {
   LanMessage,
   LanPlayer,
   LanResultPayload,
+  LanTeam,
   LineBuffer,
   encodeMessage,
 } from './lanProtocol';
@@ -17,9 +18,17 @@ interface Connection {
   buffer: LineBuffer;
 }
 
+/**
+ * Reused across every team the host creates so LAN team rooms read as the same
+ * visual language as the online lobby's team columns.
+ */
+const TEAM_COLORS = ['#22D3EE', '#F59E0B', '#34D399', '#F472B6', '#A78BFA', '#FB7185'];
+
 export class LanHostServer {
   readonly roomCode: string;
   players: LanPlayer[] = [];
+  teams: LanTeam[] = [];
+  teamMode = false;
   private hostInfo: { name?: string; avatar?: string };
   private connections = new Map<string, Connection>();
   private nameSet = new Set<string>();
@@ -30,7 +39,7 @@ export class LanHostServer {
   private started = false;
   private stopped = false;
   private endedOnce = false;
-  private listener: ((msg: LanMessage) => void) | null = null;
+  private listeners = new Set<(msg: LanMessage) => void>();
 
   constructor(roomCode: string, hostInfo?: { name?: string; avatar?: string }) {
     this.roomCode = roomCode;
@@ -42,8 +51,88 @@ export class LanHostServer {
     this.hostInfo = { ...this.hostInfo, ...info };
   }
 
+  /** Replace every message listener (legacy single-listener contract). */
   onMessage(fn: (msg: LanMessage) => void) {
-    this.listener = fn;
+    this.listeners.clear();
+    this.listeners.add(fn);
+  }
+
+  /**
+   * Add a message listener without replacing existing ones. Returns an
+   * unsubscribe function. Screens that mount while a host already exists
+   * (the lobby under the Game Center) must use this -- `onMessage` would
+   * otherwise cut off the screen that created the host.
+   */
+  addMessageListener(fn: (msg: LanMessage) => void): () => void {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  }
+
+  setTeamMode(on: boolean) {
+    this.teamMode = on;
+  }
+
+  /** Create the initial `count` teams. Idempotent against an existing set. */
+  setTeams(count: number) {
+    this.teamMode = count > 0;
+    while (this.teams.length < count) {
+      const i = this.teams.length;
+      this.teams.push({
+        id: String(i + 1),
+        name: `Team ${i + 1}`,
+        color: TEAM_COLORS[i % TEAM_COLORS.length],
+      });
+    }
+    if (this.teams.length > count) {
+      const keep = new Set(this.teams.slice(0, count).map(t => t.id));
+      this.players.forEach(p => {
+        if (p.teamId && !keep.has(p.teamId)) p.teamId = undefined;
+      });
+      this.teams = this.teams.slice(0, count);
+    }
+  }
+
+  addTeam(name?: string): LanTeam {
+    const team: LanTeam = {
+      id: String(this.teams.length + 1),
+      name: (name || '').trim().slice(0, 24) || `Team ${this.teams.length + 1}`,
+      color: TEAM_COLORS[this.teams.length % TEAM_COLORS.length],
+    };
+    this.teams.push(team);
+    this.teamMode = true;
+    return team;
+  }
+
+  renameTeam(teamId: string, name: string) {
+    const team = this.teams.find(t => t.id === String(teamId));
+    if (!team) return;
+    const clean = (name || '').trim().slice(0, 24);
+    if (clean) team.name = clean;
+  }
+
+  assignTeam(playerId: string, teamId: string | null) {
+    const p = this.players.find(x => x.id === playerId);
+    if (!p) return;
+    const target = teamId == null ? null : this.teams.find(t => t.id === String(teamId));
+    if (teamId != null && !target) return;
+    p.teamId = target ? target.id : undefined;
+  }
+
+  /** Deal every connected unassigned player into teams round-robin. */
+  autoAssignTeams() {
+    if (this.teams.length === 0) return;
+    const unassigned = this.players.filter(p => p.connected && !p.teamId);
+    unassigned.forEach((p, i) => {
+      p.teamId = this.teams[i % this.teams.length].id;
+    });
+  }
+
+  /** Push the current teams + roster to every client (host-side edits). */
+  broadcastTeams() {
+    this.broadcast({ t: 'roster', players: this.players });
+    this.broadcast({ t: 'teams', teams: this.teams });
   }
 
   setQuiz(quiz: QuizPayload, order: number[], timePerQuestion: number) {
@@ -93,6 +182,8 @@ export class LanHostServer {
     this.connections.clear();
     this.nameSet.clear();
     this.players = [];
+    this.teams = [];
+    this.teamMode = false;
     try {
       this.server?.close();
     } catch {}
@@ -109,6 +200,7 @@ export class LanHostServer {
       console.log('[lanHost] startGame: quiz SERIALIZATION error', e);
     }
     this.broadcast({ t: 'roster', players: this.players });
+    this.broadcast({ t: 'teams', teams: this.teams });
     this.broadcast({ t: 'quiz', quiz: this.quiz, order: this.order, timePerQuestion: this.timePerQuestion });
     this.broadcast({ t: 'start' });
   }
@@ -120,10 +212,12 @@ export class LanHostServer {
   }
 
   private emit(msg: LanMessage) {
-    if (!this.listener) return;
-    try {
-      this.listener(msg);
-    } catch {}
+    if (this.listeners.size === 0) return;
+    for (const fn of this.listeners) {
+      try {
+        fn(msg);
+      } catch {}
+    }
   }
 
   private send(conn: Connection, msg: LanMessage) {
@@ -177,8 +271,9 @@ export class LanHostServer {
         answeredCount: 0,
         totalQuestions: 0,
       });
-      this.send(conn, { t: 'welcome', roomCode: this.roomCode, playerId: conn.id, hostName: this.hostInfo.name, hostAvatar: this.hostInfo.avatar });
+      this.send(conn, { t: 'welcome', roomCode: this.roomCode, playerId: conn.id, hostName: this.hostInfo.name, hostAvatar: this.hostInfo.avatar, teamMode: this.teamMode });
       this.broadcast({ t: 'roster', players: this.players });
+      this.broadcast({ t: 'teams', teams: this.teams });
       return;
     }
     if (!conn.name) {
@@ -187,6 +282,30 @@ export class LanHostServer {
     }
     if (msg.t === 'ping') {
       this.send(conn, { t: 'ping' });
+      return;
+    }
+    if (msg.t === 'team-join') {
+      this.assignTeam(conn.id, msg.teamId);
+      this.broadcast({ t: 'roster', players: this.players });
+      this.broadcast({ t: 'teams', teams: this.teams });
+      return;
+    }
+    // Team housekeeping is host-only. The host's own socket is the only one
+    // that can know the host's display name before its hello, so matching on
+    // it keeps joiners from creating/renaming teams. The Game Center's lobby
+    // host lane calls addTeam/renameTeam directly anyway -- this is a mirror
+    // for whatever flows through the loopback socket.
+    const isHostSocket = conn.name === (this.hostInfo.name ?? '');
+    if (msg.t === 'team-add' && isHostSocket) {
+      this.addTeam(msg.name);
+      this.broadcast({ t: 'roster', players: this.players });
+      this.broadcast({ t: 'teams', teams: this.teams });
+      return;
+    }
+    if (msg.t === 'team-rename' && isHostSocket) {
+      this.renameTeam(msg.teamId, msg.name);
+      this.broadcast({ t: 'roster', players: this.players });
+      this.broadcast({ t: 'teams', teams: this.teams });
       return;
     }
     if (msg.t === 'result') {

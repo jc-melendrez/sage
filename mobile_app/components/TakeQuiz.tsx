@@ -328,7 +328,13 @@ const TakeQuiz: React.FC<TakeQuizProps> = ({ quizTitle, questions, onFinish, onC
       // Reporting it is the honest thing to do: swallowing it would leave the
       // student believing an attempt was saved when it was not.
       console.error('Failed to record quiz result:', err);
-      onFinishError?.(err?.message || 'Could not save your result.');
+      const rawError = err instanceof Error ? err : new Error('Could not save your result.');
+      const isNetworkError =
+        rawError.name === 'TypeError' || /Network request failed/i.test(rawError.message);
+      // Offline, grading is entirely local and there is nothing to record
+      // against, so a dropped connection must not look like a broken quiz.
+      // Anything that is not a connection failure is still surfaced.
+      if (!isNetworkError) onFinishError?.(rawError.message || 'Could not save your result.');
     }
   };
 

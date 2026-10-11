@@ -109,7 +109,6 @@ export default function TabLayout() {
         options={{
           title: 'Play',
           tabBarIcon: ({ color }) => <IconDeviceGamepad2 size={24} color={color} />,
-          ...(isOffline ? { tabBarStyle: { display: 'none' as const } } : {}),
         }}
       />
       <Tabs.Screen

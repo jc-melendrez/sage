@@ -566,7 +566,18 @@ export default function ActivitiesScreen() {
     // nothing to guard against here anyway.
     setIsQuizStarting(true);
     try {
-      await startQuizAttempt(quiz.id);
+      try {
+        await startQuizAttempt(quiz.id);
+      } catch (err) {
+        // Grading happens entirely on-device (see TakeQuiz), so a dropped
+        // connection must not block the attempt. The only thing lost offline is
+        // the server-side attempt counter; a genuine "no longer available" error
+        // still surfaces below.
+        const rawError = err instanceof Error ? err : new Error('');
+        const isNetworkError =
+          rawError.name === 'TypeError' || /Network request failed/i.test(rawError.message);
+        if (!isNetworkError) throw err;
+      }
       setQuizToTake({
         id: quiz.id,
         title: quiz.title,

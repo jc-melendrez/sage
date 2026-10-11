@@ -1,7 +1,7 @@
 import { LanHostServer } from './lanHost';
 import { LanClientSession } from './lanClient';
 import type { QuizPayload } from './offlineEngine';
-import type { LanPlayer } from './lanProtocol';
+import type { LanPlayer, LanTeam } from './lanProtocol';
 
 export interface LanGameContext {
   quiz: QuizPayload | null;
@@ -32,6 +32,10 @@ export let lanClient: LanClientSession | null = null;
 
 export function setLanHost(host: LanHostServer | null) {
   lanHost = host;
+}
+
+export function getLanHostServer(): LanHostServer | null {
+  return lanHost;
 }
 
 export function setLanClient(client: LanClientSession | null) {
@@ -77,6 +81,18 @@ export function getLanFinalStandings(): LanPlayer[] {
   return lanFinalStandings;
 }
 
+// The team list for the current LAN game, kept current from every `teams`
+// broadcast so any screen (lobby, question pill, results) can look it up.
+let lanTeams: LanTeam[] = [];
+
+export function setLanTeams(teams: LanTeam[]) {
+  lanTeams = teams;
+}
+
+export function getLanTeams(): LanTeam[] {
+  return lanTeams;
+}
+
 // Host identity received via the `welcome` message, so joiners can show the
 // host in the roster slots even when the host only starts playing at START.
 let lanHostInfo: { name?: string; avatar?: string } = {};
@@ -101,6 +117,7 @@ export function resetLanState() {
   lastLanRoster = [];
   lanPlayerId = '';
   lanFinalStandings = [];
+  lanTeams = [];
   lanHostInfo = {};
   setLanHost(null);
   setLanClient(null);
