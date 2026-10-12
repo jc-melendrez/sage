@@ -27,6 +27,7 @@ import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/
 import ModalScreenHeader from '@/components/ModalScreenHeader';
 import { palette as COLORS, fontFamily as FONTS } from '@/constants/theme';
 import { TabSkeleton } from '@/components/Skeleton';
+import OfflineNotice from '@/components/OfflineNotice';
 
 
 // --- Interfaces ---
@@ -756,6 +757,8 @@ export default function ActivitiesScreen() {
         <Text style={styles.headerTitle}>Activities</Text>
         <Text style={styles.headerSubtitle}>Courses, quizzes, and study groups</Text>
       </LinearGradient>
+
+      <OfflineNotice />
 
       <View
         ref={tabsTargetRef}

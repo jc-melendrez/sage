@@ -11,10 +11,12 @@ import { useNetworkStatus } from '@/hooks/useNetworkStatus';
  * excluded: the game screens already signal offline state themselves, and the
  * TV is a viewer display.
  *
- * Inside the tab navigator it floats at the BOTTOM, just above the tab bar, so
- * it can never land on top of the tab screens' full-bleed purple headers (each
- * starts at `insets.top + 20`). On every other screen it keeps the thin top
- * bar, where there is no tab bar to clear.
+ * The four main tab screens (Home, Activities, AI Assistant, Profile) render
+ * `OfflineNotice` inline right beneath their headers, so this floating banner
+ * is suppressed on those routes to avoid a duplicate. Other tab screens
+ * (courses, flashcards) still float it at the BOTTOM, just above the tab bar,
+ * so it can never land on top of their full-bleed purple headers. On every
+ * other screen it keeps the thin top bar, where there is no tab bar to clear.
  *
  * Tapping it bounces to the Play tab, which is where offline solo play lives.
  */
@@ -33,6 +35,10 @@ export default function OfflineBanner() {
   ) {
     return null;
   }
+
+  // These screens already render `OfflineNotice` inline beneath their headers.
+  const INLINE_ROUTES = ['/', '/index', '/activities', '/ai-assistant', '/profile'];
+  if (INLINE_ROUTES.includes(pathname)) return null;
 
   // Tab screens sit above a 70 + insets.bottom tab bar (see (tabs)/_layout.tsx);
   // other screens have no bar, so the pill just clears the home indicator.

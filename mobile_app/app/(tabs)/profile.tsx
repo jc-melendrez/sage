@@ -7,6 +7,7 @@ import { useRouter, useFocusEffect, type Href } from 'expo-router';
 import { useAuth } from '@/hooks/useAuth';
 import { useCurrentUser } from '@/contexts/UserContext';
 import { pfpSource } from '@/constants/pfps';
+import OfflineNotice from '@/components/OfflineNotice';
 
 // 🎨 Exact same tokens as Dashboard for a unified Design System
 const COLORS = {
@@ -144,6 +145,8 @@ export default function ProfileScreen() {
           </View>
         </View>
       </LinearGradient>
+
+      <OfflineNotice />
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
         <View style={styles.section}>

@@ -28,6 +28,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import ActivityResultsView from '@/components/ActivityResultsView';
+import OfflineNotice from '@/components/OfflineNotice';
 import LessonDisplay from './LessonDisplay';
 import LessonGenerator from './LessonGenerator';
 import NotificationSheet from './NotificationSheet';
@@ -648,6 +649,8 @@ export default function Dashboard() {
           </View>
         </View>
       </LinearGradient>
+
+      <OfflineNotice />
 
       {/* SCROLLABLE CONTENT */}
       <ScrollView

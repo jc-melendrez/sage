@@ -21,7 +21,7 @@ import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser, getCachedUserId } from '@/services/authService';
 import { getFirebaseUid } from '@/services/firebaseAuthService';
 import { getChatCache, setChatCache, clearChatCache, setCacheUserId, invalidateCachePrefix } from '@/services/apiCache';
-import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName, QuizEmbed, DeckEmbed, editGroupMessage, deleteGroupMessage } from '@/services/chatService';
+import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName, QuizEmbed, DeckEmbed } from '@/services/chatService';
 import { pfpSource } from '@/constants/pfps';
 import QuizShareSheet from '@/components/QuizShareSheet';
 import DeckShareSheet from '@/components/DeckShareSheet';
@@ -1024,14 +1024,19 @@ export default function GroupChatScreen() {
       return;
     }
     const target = editingMessage;
-    // Optimistic: show the new text immediately; the Firestore snapshot and
-    // REST fetch both carry `edited` so the marker self-corrects.
+    // Optimistic: show the new text immediately. The write goes straight to
+    // Firestore -- the same path the snapshot listener reads -- because the old
+    // REST call updated a doc the reading path did not always observe, so the
+    // edit was silently lost on the next visit.
     setMessages(prev => prev.map(m => (m.id === target.id ? { ...m, text, edited: true } : m)));
     setEditingMessage(null);
     try {
-      const token = await getToken();
-      if (!token) return;
-      await editGroupMessage(String(groupId), token, target.id, text);
+      await firestore()
+        .collection('studyGroups')
+        .doc(String(groupId))
+        .collection('messages')
+        .doc(target.id)
+        .update({ text, edited: true });
     } catch (err) {
       setMessages(prev => prev.map(m => (m.id === target.id ? { ...m, text: target.text, edited: target.edited } : m)));
       Alert.alert('Edit Failed', err instanceof Error ? err.message : 'Please try again.');
@@ -1054,13 +1059,29 @@ export default function GroupChatScreen() {
           // story locally, so both paths agree this message is gone.
           setMessages(prev => prev.map(m => (
             m.id === target.id
-              ? { ...m, deleted: true, text: '', pinned: false, quiz_embed: null, deck_embed: null }
+              ? { ...m, deleted: true, text: '', pinned: false, edited: false, quiz_embed: null, deck_embed: null, attachments: [], reactions: {} }
               : m
           )));
+          // Written straight to Firestore (not via REST) for the same reason as
+          // edits: the reading path does not reliably observe the server's
+          // Admin-SDK writes to an existing message. The field set matches the
+          // server redaction so every reader agrees on the tombstone.
           try {
-            const token = await getToken();
-            if (!token) return;
-            await deleteGroupMessage(String(groupId), token, target.id);
+            await firestore()
+              .collection('studyGroups')
+              .doc(String(groupId))
+              .collection('messages')
+              .doc(target.id)
+              .update({
+                deleted: true,
+                text: '',
+                quiz_embed: null,
+                deck_embed: null,
+                attachments: [],
+                reactions: {},
+                pinned: false,
+                edited: false,
+              });
           } catch (err) {
             Alert.alert('Delete Failed', err instanceof Error ? err.message : 'Please try again.');
           }
@@ -1112,7 +1133,7 @@ export default function GroupChatScreen() {
             sender_uid: myUid ?? '',
             sender_name: '',
             sender_avatar: '',
-            text: `${actor} ${next ? 'pinned' : 'unpinned'}`,
+            text: `${actor} ${next ? 'pinned' : 'unpinned'} a message`,
             type: 'system',
             attachments: [],
             reactions: {},
@@ -1389,7 +1410,7 @@ const renderAttachments = () => {
             {renderQuizCard()}
             {renderDeckCard()}
             {renderPills()}
-            {isGroupEnd && (
+            {(isGroupEnd || msg.edited) && (
               <Text style={[styles.messageTime, isMe && styles.timeMe]}>
                 {msg.pinned ? '📌 ' : ''}
                 {msg.local ? 'Sending…' : formatTime(msg.created_at)}

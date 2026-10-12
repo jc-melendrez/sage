@@ -23,6 +23,7 @@ import {
   type PickedImage,
 } from '@/services/fileUpload';
 import { KeyboardSafeView } from '@/components/KeyboardSafeView';
+import OfflineNotice from '@/components/OfflineNotice';
 import { LinearGradient } from 'expo-linear-gradient';
 import Markdown from '@ronradtke/react-native-markdown-display';
 
@@ -777,6 +778,8 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
           <Ionicons name="create-outline" size={22} color="white" />
         </TouchableOpacity>
       </LinearGradient>
+
+      <OfflineNotice />
 
       {/* 🌟 Sidebar Modal */}
       <Modal visible={isMenuVisible} animationType="fade" transparent={true}>
