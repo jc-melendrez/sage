@@ -1523,17 +1523,19 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // unrenderable and silently shorter than the answer. One array, two views.
     setBoxChars(Array(words.join('').length).fill(''));
     boxRefs.current = [];
-    // `question` is `questions[questionOrder[currentIndex]]`, so ALL THREE are
-    // inputs -- this effect used to list only `currentIndex` and `questions`.
-    // `questionOrder` arrives from a different fetch than `questions` (the
-    // player doc vs the room doc), and when it landed late the effect had
-    // already run against `question = {}`, early-returned, and never re-ran:
-    // the card rendered with no box row at all, or with the previous
-    // question's word split, and the student could not type the full answer.
+    // `question` is `questions[effectiveOrder[currentIndex]]`, so all of
+    // `currentIndex`, `questions`, `questionOrder` and `teamMode` are inputs --
+    // this effect used to list only `currentIndex` and `questions`. `questionOrder`
+    // arrives from a different fetch than `questions` (the player doc vs the room
+    // doc), and when it landed late the effect had already run against
+    // `question = {}`, early-returned, and never re-ran: the card rendered with no
+    // box row at all, or with the previous question's word split, and the student
+    // could not type the full answer. `teamMode` selects whether `questionOrder`
+    // or the identity order (team play) drives `question`.
     // Naming `question` itself is impossible: it is declared further down this
     // render, and the deps array is evaluated before that declaration is
     // reached.
-  }, [currentIndex, questions, questionOrder]);
+  }, [currentIndex, questions, questionOrder, teamMode]);
 
   useEffect(() => {
     if (questions.length === 0 || questionOrder.length === 0) return;
@@ -3138,7 +3140,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     );
   }
 
-  const actualIndex = questionOrder[currentIndex];
+  // The engine grades `effectiveOrder[currentIndex]` (see `handleAnswer`), so the
+  // card MUST render the same index or the verdict is scored against a different
+  // question. In team mode `effectiveOrder` is identity while `questionOrder` is
+  // a per-device shuffle (LAN group hands out a shuffled order from `makeOrder`),
+  // so using `questionOrder` here showed one question and graded another.
+  const actualIndex = effectiveOrder[currentIndex];
   // A `currentIndex` past the end of the order left `question` undefined and the
   // next line threw on `.type`, blanking the screen mid-round. Fall back to an
   // empty object: the card renders empty instead of crashing, and the existing
