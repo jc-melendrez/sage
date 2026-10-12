@@ -1092,6 +1092,36 @@ export default function GroupChatScreen() {
         .collection('messages')
         .doc(target.id)
         .update({ pinned: next });
+      // Announce it as a centered system line, the same shape the server writes
+      // for join/leave. Only after the pin has landed, so a failed pin never
+      // leaves a note behind; and best-effort, so a failed note never reverts a
+      // pin that did land. `Timestamp.fromDate` (not serverTimestamp) keeps
+      // `created_at` a real Timestamp on the local snapshot, or the new row
+      // would sort ahead of every message until the server acked it.
+      const actor =
+        memberMap[myUid ?? '']?.display_name
+        || [currentUser?.first_name, currentUser?.last_name].filter(Boolean).join(' ')
+        || currentUser?.username
+        || 'Someone';
+      try {
+        await firestore()
+          .collection('studyGroups')
+          .doc(String(groupId))
+          .collection('messages')
+          .add({
+            sender_uid: myUid ?? '',
+            sender_name: '',
+            sender_avatar: '',
+            text: `${actor} ${next ? 'pinned' : 'unpinned'}`,
+            type: 'system',
+            attachments: [],
+            reactions: {},
+            created_at: firestore.Timestamp.fromDate(new Date()),
+            is_synced: true,
+          });
+      } catch (noteErr) {
+        console.error('Pin system message failed:', noteErr);
+      }
     } catch (err) {
       setMessages(prev => prev.map(m => (m.id === target.id ? { ...m, pinned: target.pinned } : m)));
       Alert.alert('Pin Failed', err instanceof Error ? err.message : 'Please try again.');
