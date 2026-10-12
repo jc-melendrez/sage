@@ -878,6 +878,16 @@ const lobbyTokenRef = useRef(0);
     if (blockEducatorOffline()) return;
 
     if ((isOffline || usingCachedQuizzes) && !isEducator) {
+      // A host left over from a finished session is not reusable: its server was
+      // stopped, so it holds no listener. Drop it so a fresh one is created (and
+      // the port is released) instead of advertising a dead room.
+      const existingHost = lanHostRef.current;
+      if (existingHost && !existingHost.isAlive) {
+        try {
+          existingHost.stop();
+        } catch {}
+        lanHostRef.current = null;
+      }
       if (!lanHostRef.current) {
         setLanJoined([]);
         const code = generateRoomCode();
@@ -1112,7 +1122,18 @@ const lobbyTokenRef = useRef(0);
       hostAvatar = user?.avatar ?? currentUserAvatar;
     } catch {}
 
+    // Reuse a live host (e.g. players already joined via INVITE), but never a
+    // dead one. A finished session leaves a stopped host in the ref; reusing it
+    // produced a lobby with no players, and letting a fresh host bind LAN_PORT
+    // while its predecessor still listened produced "Server error: undefined".
     let host = lanHostRef.current;
+    if (host && !host.isAlive) {
+      try {
+        host.stop();
+      } catch {}
+      lanHostRef.current = null;
+      host = null;
+    }
     const code = host?.roomCode || generateRoomCode();
     if (!host) {
       host = new LanHostServer(code, { name: hostName || 'Host', avatar: hostAvatar });

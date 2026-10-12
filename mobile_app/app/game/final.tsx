@@ -4,7 +4,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getCurrentUser, getToken } from '@/services/authService';
 import { leaveGameRoom } from '@/services/gameRoomService';
-import { getLanFinalStandings, getLanTeams, lanGame } from '@/services/lanSession';
+import { getLanFinalStandings, getLanTeams, lanGame, resetLanState } from '@/services/lanSession';
 import { API_BASE_URL } from '@/config/api';
 import TeamResultCard from '@/components/game/TeamResultCard';
 import SessionSummary, { type TeamNameLookup } from '@/components/game/SessionSummary';
@@ -159,6 +159,11 @@ export default function FinalScreen() {
     if (!isOffline && !isLan) {
       await leaveGameRoom(roomCode, myUserId);
     }
+    // A LAN session owns real sockets: the host's server (LAN_PORT) and every
+    // player's client. Leaving the results screen must release them, or the next
+    // session reuses a dead host or fails to bind the port. Called on press, so
+    // it cannot wipe the standings this screen is still rendering.
+    if (isLan) resetLanState();
     router.replace('/(tabs)/games');
   }, [isOffline, isLan, roomCode, myUserId, router]);
 

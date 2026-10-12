@@ -106,6 +106,18 @@ export function getLanHostInfo(): { name?: string; avatar?: string } {
 }
 
 export function resetLanState() {
+  // Release the real sockets before dropping the refs. Clearing only the module
+  // refs used to orphan a LanHostServer still listening on LAN_PORT, so the next
+  // session's `start()` failed with EADDRINUSE (rendered "Server error:
+  // undefined") and the host never seated -> a lobby with no players. stop() and
+  // disconnect() are idempotent, so calling this on an already-ended session is
+  // safe.
+  try {
+    lanHost?.stop();
+  } catch {}
+  try {
+    lanClient?.disconnect();
+  } catch {}
   lanGame.quiz = null;
   lanGame.order = [];
   lanGame.timePerQuestion = 30;

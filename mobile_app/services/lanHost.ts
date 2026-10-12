@@ -110,6 +110,8 @@ export class LanHostServer {
   private started = false;
   private stopped = false;
   private endedOnce = false;
+  /** True once the TCP server has actually bound LAN_PORT. */
+  private listening = false;
   private listeners = new Set<(msg: LanMessage) => void>();
 
   constructor(roomCode: string, hostInfo?: { name?: string; avatar?: string }) {
@@ -532,6 +534,18 @@ export class LanHostServer {
     return this.started;
   }
 
+  /**
+   * True only while the server is actually bound and accepting connections.
+   *
+   * The Game Center uses this to decide whether an existing host can be reused
+   * for a new session. A host whose server was stopped (or whose `listen` never
+   * completed) must be treated as absent so a fresh, listening host is created
+   * instead of silently reusing a dead one.
+   */
+  get isAlive() {
+    return this.listening && !this.stopped;
+  }
+
   get playerCount() {
     return this.players.filter(p => p.connected).length;
   }
@@ -540,6 +554,7 @@ export class LanHostServer {
     if (this.server) return;
     this.stopped = false;
     this.endedOnce = false;
+    this.listening = false;
     this.server = TcpSocket.createServer((socket: any) => {
       const conn: Connection = {
         id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -553,7 +568,14 @@ export class LanHostServer {
       socket.on('error', () => this.drop(conn));
       socket.on('close', () => this.drop(conn));
     });
-    this.server.on('error', (e: any) => this.emit({ t: 'error', message: `Server error: ${e.message}` }));
+    this.server.on('listening', () => {
+      this.listening = true;
+    });
+    // `e` is not always an Error here (a bind failure can surface as a plain
+    // object or string), so a bare `e.message` logged as "Server error:
+    // undefined" and hid the actual cause -- usually that the previous session's
+    // listener still held LAN_PORT.
+    this.server.on('error', (e: any) => this.emit({ t: 'error', message: `Server error: ${e?.message || e?.code || String(e)}` }));
     this.server.listen({ port: LAN_PORT, host: '0.0.0.0' });
   }
 
@@ -561,6 +583,7 @@ export class LanHostServer {
     this.stopped = true;
     this.started = false;
     this.endedOnce = false;
+    this.listening = false;
     this.connections.forEach(c => {
       try {
         c.socket.destroy();
@@ -612,6 +635,11 @@ export class LanHostServer {
     if (this.stopped) return;
     this.stopped = true;
     this.broadcast({ t: 'end', reason });
+    // Close the listener once the `end` message has had a moment to flush.
+    // Without this the server kept holding LAN_PORT after a host-ended game (or
+    // any game where not every player submitted a result, so `applyResult`'s
+    // self-stop never ran), and the next session failed to bind.
+    setTimeout(() => this.stop(), 800);
   }
 
   private emit(msg: LanMessage) {
