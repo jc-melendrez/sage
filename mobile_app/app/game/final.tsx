@@ -263,7 +263,12 @@ export default function FinalScreen() {
       const standings = getLanFinalStandings();
       const entries = defs.map(d => {
         const members = standings.filter(p => p.teamId === d.id);
-        const score = members.reduce((sum, p) => sum + Number(p.score ?? 0), 0);
+        // Team play scores ONCE, on the host: every member already carries the
+        // team's total, so summing them would double (triple…) the score.
+        // Classic-style LAN (no host team score) still sums members.
+        const score = typeof d.score === 'number'
+          ? d.score
+          : members.reduce((sum, p) => sum + Number(p.score ?? 0), 0);
         return {
           id: d.id,
           name: d.name,

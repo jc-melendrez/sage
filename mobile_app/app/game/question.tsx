@@ -33,7 +33,7 @@ import * as Haptics from 'expo-haptics';
 import { getToken, getCurrentUser } from '@/services/authService';
 import { createOfflineGame, getCurrentOfflineGame, saveOfflineGameResult, clearCurrentOfflineGame, type OfflineParticipant } from '@/services/offlineGameService';
 import { getLanClient, lanGame, getLanPlayerId, setLanPlayerId, setLanFinalStandings, getLastLanRoster, getLanHostServer, getLanTeams, setLanTeams, resetLanState } from '@/services/lanSession';
-import type { LanMessage, LanPlayer, LanTeam } from '@/services/lanProtocol';
+import type { LanMessage, LanPlayer, LanReveal, LanTeam } from '@/services/lanProtocol';
 import { useCurrentUser } from '@/contexts/UserContext';
 import { API_BASE_URL } from '@/config/api';
 import TeamRevealOverlay from '@/components/TeamRevealOverlay';
@@ -613,6 +613,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // Group play: the host's live pick tally for the open question, keyed by
   // player id, so a member can see what their own team-mates chose.
   const [lanPicks, setLanPicks] = useState<Record<string, string>>({});
+  // Bumped on a `roster` broadcast so the team-quorum strip recomputes against
+  // the live roster (the roster itself is kept in a ref for the event closure).
+  const [lanRosterTick, setLanRosterTick] = useState(0);
   const lanPrevStandingsRef = useRef<Record<string, { rank: number; score: number }>>({});
   const lanSubmittedRef = useRef(false);
   // Row id of the saved offline/LAN session, handed to the results screen so it
@@ -639,6 +642,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // every later one gets a fast spin. Deliberately not reset per question in
   // handleNext — this tracks "has this player already won one", not "this round".
   const hasWonPowerupRef = useRef(false);
+  // Question index whose team reward has already played the roulette on THIS
+  // device. A team reward is granted once but broadcast/echoed more than once
+  // (the host re-sends team-powerups, Firestore re-delivers the team doc), and
+  // the last picker also gets it in their own pick response -- the ref keeps the
+  // animation to one play per question.
+  const rewardShownRef = useRef<number | null>(null);
 
   // ✨ NEW: Timer urgency animation (shake + pulse at ≤5s)
   const urgencyAnim = useSharedValue(0);
@@ -784,6 +793,65 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     } as any);
   };
 
+  /** This device's LAN team id ('' when unseated). Reads the live roster ref. */
+  const myLanTeamId = () => {
+    const myId = getLanPlayerId();
+    const roster = lanPlayersRef.current;
+    const me = roster.find(p => (myId ? p.id === myId : p.name === lanGame.playerName));
+    return me?.teamId != null ? String(me.teamId) : '';
+  };
+
+  /**
+   * Apply the host's resolved reveal for THIS device's team.
+   *
+   * LAN team play has no Firestore team document, so the host's `team-reveal`
+   * broadcast stands in for the online `reveals.q{n}` listener: it publishes the
+   * team's single answer and score, and every member folds in the same points so
+   * the team is scored once. The local engine records the row (for the review
+   * and breakdown) via `applyTeamReveal` rather than re-deriving the score.
+   */
+  const applyLanTeamReveal = (reveal: LanReveal) => {
+    const myPick = selectedRef.current ?? '';
+    setTeamPickCount({ picked: reveal.pickers, expected: reveal.expected });
+    setResult(prev => {
+      const next = {
+        ...(prev ?? {}),
+        correct: reveal.correct,
+        correctAnswer: reveal.correctAnswer,
+        points: reveal.points,
+        speedBonus: reveal.speedBonus,
+        picked: myPick,
+        teamAnswer: reveal.answer,
+        agreed: reveal.agreed,
+        iAgreed: reveal.void ? null : (!!myPick && myPick === reveal.answer),
+        pickers: reveal.pickers,
+        voided: reveal.void,
+        split: reveal.split,
+        provisional: false,
+      };
+      if (prev && sameSnapshot(prev, next)) return prev;
+      return next;
+    });
+    const game = getCurrentOfflineGame();
+    if (game) {
+      game.applyTeamReveal(reveal.index, {
+        answer: reveal.answer,
+        correctAnswer: reveal.correctAnswer,
+        correct: reveal.correct,
+        points: reveal.points,
+        speedBonus: reveal.speedBonus,
+        picked: myPick,
+      });
+      setPowerups({ ...game.powerups });
+      setMyCorrectCount(game.correctCount);
+      setStandings(prev => prev.map(r =>
+        (r.id === 'me' || r.displayName === lanGame.playerName)
+          ? { ...r, id: 'me', score: game.score, streak: game.streak }
+          : r
+      ));
+    }
+  };
+
   applyLanLeaderboardRef.current = applyLanLeaderboard;
   finalizeLanGameRef.current = finalizeLanGame;
 
@@ -916,6 +984,13 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               // question number (the Firestore listener that normally sets it
               // never runs in LAN mode).
               setTeamIndex(msg.index);
+              // Team play counts down against the HOST's clock, so a LAN team
+              // round shows the same seconds as an online one and the host's
+              // timeout is what actually closes it.
+              if (params.teamMode === 'true' || getLanTeams().length > 0) {
+                setTeamStartedAt(msg.startedAt);
+                setTeamTimeLimit(msg.timeLimit || timePerQuestion);
+              }
               setSelected(null);
               markAnswered(false);
               setResult(null);
@@ -938,6 +1013,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               setLanTeamList(prev => {
                 const next = (msg.teams ?? prev) as LanTeam[];
                 lanTeamListRef.current = next;
+                // Persist to the session so the results screen ranks teams by
+                // the host's running score, not a sum of members.
+                setLanTeams(next);
                 return sameSnapshot(prev, next) ? prev : next;
               });
               if (index === lanQuestionIndexRef.current) {
@@ -950,11 +1028,33 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   doublePoints: myArmed.includes('doublePoints'),
                   shield: myArmed.includes('shield'),
                 });
+                // The team earned a streak reward: show the same roulette every
+                // member sees, not just the device whose pick completed the run.
+                if (msg.reward && String(msg.reward.teamId) === myTid
+                    && rewardShownRef.current !== index) {
+                  rewardShownRef.current = index;
+                  setShowRoulette(true);
+                  setRouletteTarget(msg.reward.key);
+                }
               } else {
                 setLanHintChoices([]);
                 setActivePowerups({ hint: false, doublePoints: false, shield: false });
               }
+            } else if (msg.t === 'team-reveal') {
+              // Only this device's own team is ours to show. The broadcast is
+              // keyed by team id, so a member never sees a rival team's reveal.
+              const myTid = myLanTeamId();
+              const reveal = myTid ? msg.reveals?.[myTid] : null;
+              if (reveal) applyLanTeamReveal(reveal);
+            } else if (msg.t === 'roster') {
+              lanPlayersRef.current = msg.players ?? [];
+              setLanRosterTick(t => t + 1);
             } else if (msg.t === 'leaderboard') {
+              if (msg.teams && msg.teams.length > 0) {
+                setLanTeamList(msg.teams);
+                lanTeamListRef.current = msg.teams;
+                setLanTeams(msg.teams);
+              }
               applyLanLeaderboardRef.current(msg.players);
             } else if (msg.t === 'end') {
               finalizeLanGameRef.current();
@@ -1634,7 +1734,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
 
   // The badge renders once, so both engines feed the same view: online team
   // mode uses the roster's `livePicks`, LAN group uses the host's tally.
-  const displayVote = teamMode ? liveVote : lanLiveVote;
+  const displayVote = teamMode && !isLan ? liveVote : lanLiveVote;
 
   /** Show who backed a given option. The badge is the tap target. */
   const showLiveVoters = (choice: string) => {
@@ -1772,7 +1872,35 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       if (prev && sameSnapshot(prev, next)) return prev;
       return next;
     });
+
+    // The team earned a streak reward on this question. The server publishes it
+    // on the shared team document so EVERY member shows the roulette here, not
+    // just the member whose request happened to be the one that scored it.
+    const reward = myTeam.reward;
+    if (reward && reward.q === teamIndex && rewardShownRef.current !== teamIndex) {
+      rewardShownRef.current = teamIndex;
+      setShowRoulette(true);
+      setRouletteTarget(reward.key);
+    }
   }, [teamMode, myTeam, teamIndex, ownAnswers]);
+
+  /* ── LAN team play: the quorum strip ──
+   * There is no team document to read `pickCount` from, so derive it from the
+   * host's live pick tally against this device's own team-mates. Counting only
+   * the roster rows in our team is what keeps the strip showing "2 of 3 in"
+   * rather than the whole room. The reveal (when it lands) overwrites this.
+   */
+  useEffect(() => {
+    if (!(isLan && teamMode)) return;
+    if (result) return;
+    const myTid = myLanTeamId();
+    if (!myTid) return;
+    const members = lanPlayersRef.current.filter(p => String(p.teamId ?? '') === myTid);
+    const expected = members.length;
+    const picked = members.filter(m => String(lanPicks[m.id] ?? '').trim() !== '').length;
+    setTeamPickCount(prev => (prev && prev.picked === picked && prev.expected === expected) ? prev : { picked, expected });
+  }, [isLan, teamMode, lanPicks, lanTeamList, lanRosterTick, result]);
+
   // Classic has no team document to hang the pool HUD on, so synthesize one
   // from the player's own stats. Feeding PowerupPoolHUD the same shape it
   // already renders for a team is what makes the solo pool read identically
@@ -2132,7 +2260,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         voided: !!data.void,
         split: !!data.split,
       });
-      if (data.powerupEarned) {
+      // Only the member who happened to submit last gets the reward in their
+      // response. Show it here for that member (immediate feedback), and record
+      // the question so the shared team marker below does not replay it. The
+      // rest of the team is reached by the team document's `reward` field.
+      if (data.powerupEarned && rewardShownRef.current !== teamIndex) {
+        rewardShownRef.current = teamIndex;
         setShowRoulette(true);
         setRouletteTarget(data.powerupEarned);
       }
@@ -2526,6 +2659,39 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // the blank verdict, so a correct pick could be scored as wrong.
     if (answeredRef.current || spectator) return;
     markAnswered(true);
+    if (teamMode && isLan) {
+      // LAN team play submits a private PICK to the HOST (`submitTeamPick` talks
+      // to the online server, which does not exist here). The host tallies the
+      // majority, scores the team once and broadcasts the reveal; this member
+      // decides nothing locally. Before this branch existed the pick fell
+      // through to the online path, whose `submitTeamPick` returns immediately
+      // for LAN -- so the tap was silently dropped and the strip counted nothing.
+      lockPick(answer || '');
+      if (answer != null) {
+        pendingAnswerRef.current = answer;
+        setPendingAnswer(answer);
+      }
+      setError(null);
+      const myId = getLanPlayerId();
+      const blank = answer == null || !String(answer).trim();
+      const idx = lanQuestionIndexRef.current;
+      if (myId) {
+        // Optimistic local echo so the strip moves on the tap, not on the
+        // round-trip. The host's `picks` broadcast then reconciles it.
+        setLanPicks(prev => ({ ...prev, [myId]: blank ? '' : String(answer) }));
+        if (!blank) {
+          const since = lanQuestionAt != null ? lanQuestionAt : Date.now();
+          getLanClient()?.send({
+            t: 'pick',
+            playerId: myId,
+            index: idx,
+            answer: String(answer),
+            timeTaken: Math.max(0, (Date.now() - since) / 1000),
+          });
+        }
+      }
+      return;
+    }
     if (teamMode) {
       // Team play submits a private PICK, not an answer: the team has one
       // answer and the server tallies it. Nothing here decides the outcome.
@@ -2599,13 +2765,11 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         ));
       }
       if (outcome.powerupEarned) {
+        // Classic/offline: the reward is this device's own. LAN TEAM play never
+        // reaches here -- it is scored by the host -- so a team reward is
+        // delivered by the host's `team-powerups.reward` broadcast instead.
         setShowRoulette(true);
         setRouletteTarget(outcome.powerupEarned);
-        // LAN team play: the pool is shared, so tell the host to add the earned
-        // power-up to the team's pool (online, the server does this itself).
-        if (isLan && teamMode) {
-          getLanClient()?.sendPowerupEarned(outcome.powerupEarned);
-        }
       }
       // LAN group play: report the pick so the host can tally it and echo the
       // room back, letting every member see what their own team-mates chose.
@@ -3291,12 +3455,31 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             {teamMode && !result.voided && !!result.teamAnswer && (
               <Text style={styles.teamAgreementLine}>
                 Team picked: {result.teamAnswer}
-                {typeof result.agreed === 'number' ? `  \u00b7  ${result.agreed} agreed` : ''}
+                {result.split
+                  ? '  \u00b7  split'
+                  : typeof result.agreed === 'number' ? `  \u00b7  ${result.agreed} agreed` : ''}
               </Text>
             )}
-            {teamMode && !result.voided && result.iAgreed === true && (
+            {/* "You agreed" is only honest when the team actually reached a
+                majority AND more than one member voted for it. On a 1-1 coin
+                flip the member whose pick was drawn would otherwise be told they
+                agreed even though nobody agreed with anybody; a sole picker
+                (their teammates timed out) has nobody to have agreed with. */}
+            {teamMode && !result.voided && result.iAgreed === true && result.split && (
+              <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
+                The team split \u2014 your pick was drawn
+              </Text>
+            )}
+            {teamMode && !result.voided && result.iAgreed === true && !result.split
+              && (result.pickers ?? 0) >= 2 && (
               <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
                 You agreed with your team
+              </Text>
+            )}
+            {teamMode && !result.voided && result.iAgreed === true && !result.split
+              && (result.pickers ?? 0) < 2 && (
+              <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
+                You were the only one who answered
               </Text>
             )}
             {/* Three separate verdicts, not two.

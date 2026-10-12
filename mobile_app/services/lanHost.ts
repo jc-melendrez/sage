@@ -4,13 +4,82 @@ import {
   LanMessage,
   LanPlayer,
   LanResultPayload,
+  LanReveal,
   LanTeam,
   LineBuffer,
   encodeMessage,
 } from './lanProtocol';
-import type { QuizPayload } from './offlineEngine';
+import {
+  buildQuestions,
+  answerMatches,
+  TYPED_QUESTION_TYPES,
+  isDoublePointQuestion,
+  streakBonusMultiplier,
+  STREAK_REWARD_INTERVAL,
+} from './offlineEngine';
+import type { QuizPayload, GameQuestion } from './offlineEngine';
 import type { PowerupKey } from '@/types/game';
 import { emptyPowerupPool } from '@/types/game';
+
+/** The four power-up kinds, in the pool's canonical order. */
+const POWERUP_KEYS: PowerupKey[] = ['freeze', 'hint', 'doublePoints', 'shield'];
+
+/**
+ * The host's representative answer time for a team: the median of the recorded
+ * pick times. Mirrors `median_pick_time` in the backend so a LAN team is scored
+ * off the same speed as the same picks made online. Unrecorded times are
+ * dropped rather than defaulted, so a data gap cannot drag the team down.
+ */
+function medianPickTime(values: number[]): number | null {
+  const times = values
+    .filter(t => typeof t === 'number' && isFinite(t) && t >= 0 && t <= 60)
+    .sort((a, b) => a - b);
+  if (times.length === 0) return null;
+  const mid = Math.floor(times.length / 2);
+  if (times.length % 2) return times[mid];
+  return (times[mid - 1] + times[mid]) / 2;
+}
+
+interface TeamTally {
+  choice: string;
+  agreed: number;
+  pickers: number;
+  void: boolean;
+  split: boolean;
+}
+
+/**
+ * Resolve a team's private picks into one answer: plain majority wins. A pure
+ * 1-1 disagreement is settled by a coin flip; any larger even split voids.
+ * Mirrors `tally_team_picks` in the backend, including the lenient
+ * case/whitespace-folding when the question is typed (so two members who typed
+ * "Mitochondria" and "mitochondria" are one vote, not a split).
+ */
+function tallyTeamPicks(values: string[], typed: boolean): TeamTally {
+  const counts = new Map<string, number>();
+  const sample = new Map<string, string>();
+  for (const value of values) {
+    const raw = String(value ?? '');
+    if (!raw.trim()) continue;
+    const key = typed ? raw.trim().replace(/\s+/g, ' ').toLocaleLowerCase() : raw;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (!sample.has(key)) sample.set(key, raw);
+  }
+  const pickers = values.filter(v => String(v ?? '').trim()).length;
+  if (counts.size === 0) {
+    return { choice: '', agreed: 0, pickers: 0, void: true, split: false };
+  }
+  const top = Math.max(...counts.values());
+  const leaders = [...counts.entries()].filter(([, c]) => c === top).map(([k]) => k);
+  if (leaders.length === 1) {
+    return { choice: sample.get(leaders[0]) ?? '', agreed: top, pickers, void: false, split: false };
+  }
+  if (leaders.length === 2 && pickers === 2) {
+    const winner = leaders[Math.floor(Math.random() * leaders.length)];
+    return { choice: sample.get(winner) ?? '', agreed: counts.get(winner) ?? 0, pickers, void: false, split: true };
+  }
+  return { choice: '', agreed: top, pickers, void: true, split: true };
+}
 
 interface Connection {
   id: string;
@@ -143,19 +212,32 @@ export class LanHostServer {
     this.quiz = quiz;
     this.order = order;
     this.timePerQuestion = timePerQuestion;
+    // Canonical question list, in the SAME order every client builds from the
+    // relayed quiz. Team questions are indexed by position (LAN team play uses
+    // identity order, matching the online team path), so `questions[index]` is
+    // the question every member is looking at.
+    this.questions = buildQuestions(quiz);
   }
 
   /** Question the room is on, and when the host opened its shared clock. */
   private currentIndex = 0;
   private questionStartedAt: number | null = null;
+  /** Canonical questions, built from the quiz at setQuiz time. */
+  private questions: GameQuestion[] = [];
   /** Which players have marked each question read, keyed by question index. */
   private readonly readyByIndex = new Map<number, Set<string>>();
   /** Group play: reported picks per question, keyed by player id. */
   private readonly picksByIndex = new Map<number, Record<string, string>>();
+  /** Group play: reported pick times per question, keyed by player id. */
+  private readonly pickTimesByIndex = new Map<number, Record<string, number>>();
+  /** Resolved team reveals per question, keyed by team id. */
+  private readonly revealsByIndex = new Map<number, Record<string, LanReveal>>();
   /** Per-question team power-ups armed, keyed by index then team id. */
   private readonly armedTeamsByIndex = new Map<number, Record<string, PowerupKey[]>>();
   /** Per-question hint choices the host chose, shared by the team. */
   private readonly hintChoicesByIndex = new Map<number, string[]>();
+  /** Resolves a team's stragglers when the shared question timer expires. */
+  private questionTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** The armed power-up keys per team for `index`, for the wire broadcast. */
   private armedForIndex(index: number): Record<string, PowerupKey[]> {
@@ -176,6 +258,8 @@ export class LanHostServer {
     this.readyByIndex.delete(index);
     this.armedTeamsByIndex.delete(index);
     this.hintChoicesByIndex.delete(index);
+    this.picksByIndex.delete(index);
+    this.pickTimesByIndex.delete(index);
     this.broadcast({
       t: 'question',
       index,
@@ -185,6 +269,143 @@ export class LanHostServer {
     if (this.teamMode) {
       this.broadcast({ t: 'team-powerups', index, teams: this.teams, armed: this.armedForIndex(index) });
     }
+    // The host is the timekeeper for team resolution too: when the shared clock
+    // runs out, resolve whichever teams have not settled so a straggler cannot
+    // hold the room on a question past the buzzer.
+    if (this.questionTimer != null) {
+      clearTimeout(this.questionTimer);
+      this.questionTimer = null;
+    }
+    if (this.teamMode) {
+      this.questionTimer = setTimeout(() => {
+        this.questionTimer = null;
+        if (index === this.currentIndex) this.resolveOpenTeams(index);
+      }, (this.timePerQuestion + 0.75) * 1000);
+    }
+  }
+
+  /** Connected players seated on `teamId`. */
+  private teamMembers(teamId: string): LanPlayer[] {
+    return this.players.filter(p => p.connected && String(p.teamId ?? '') === String(teamId));
+  }
+
+  /**
+   * Every team on `index` that has at least one member but has not settled yet.
+   * Used by the shared-clock timeout so a member who never answered does not
+   * leave their team permanently unresolved.
+   */
+  private resolveOpenTeams(index: number) {
+    if (!this.teamMode) return;
+    const resolved = this.revealsByIndex.get(index) ?? {};
+    for (const team of this.teams) {
+      if (resolved[team.id]) continue;
+      if (this.teamMembers(team.id).length === 0) continue;
+      this.resolveTeam(index, team.id);
+    }
+  }
+
+  /**
+   * Resolve one team's answer for `index` and broadcast the reveal.
+   *
+   * The host is the authority here exactly as the server is online: it tallies
+   * the majority vote, scores the team off the median pick time (streak bonus,
+   * doubled question and an armed double-points, in that order), folds the
+   * points into the team's running total and publishes the shared result. Every
+   * member applies the same payload, so the team scores once -- not once per
+   * player -- and the results screen can rank teams without summing members.
+   */
+  private resolveTeam(index: number, teamId: string, fallbackTime?: number) {
+    if (!this.quiz) return;
+    const question = this.questions[index];
+    if (!question) return;
+    const resolved = this.revealsByIndex.get(index) ?? {};
+    if (resolved[teamId]) return;
+    const team = this.teams.find(t => t.id === teamId);
+    if (!team) return;
+
+    const picks = this.picksByIndex.get(index) ?? {};
+    const times = this.pickTimesByIndex.get(index) ?? {};
+    const members = this.teamMembers(teamId);
+    const expected = members.length;
+    const answeredIds = members
+      .map(m => m.id)
+      .filter(id => picks[id] != null && String(picks[id]).trim() !== '');
+    const typed = (TYPED_QUESTION_TYPES as readonly string[]).includes(question.type);
+    const tally = tallyTeamPicks(answeredIds.map(id => picks[id]), typed);
+    const teamTime = medianPickTime(answeredIds.map(id => times[id]).filter((t): t is number => typeof t === 'number'))
+      ?? (typeof fallbackTime === 'number' ? fallbackTime : this.timePerQuestion);
+    let isCorrect = !tally.void
+      && (typed ? answerMatches(tally.choice, question.correctAnswer) : tally.choice === question.correctAnswer);
+    if (!String(question.correctAnswer || '').trim()) isCorrect = false;
+
+    const armedForTeam = (this.armedTeamsByIndex.get(index) ?? {})[teamId] ?? [];
+    const submitted = answeredIds.length > 0;
+    const spentDouble = armedForTeam.includes('doublePoints');
+    const spentShield = armedForTeam.includes('shield') && submitted;
+
+    const priorCorrect = team.correctCount ?? 0;
+    const priorStreak = team.teamStreak ?? 0;
+    let points = 0;
+    let speedBonus = 0;
+    /** Named on the broadcast so every member shows the same reward roulette. */
+    let rewardKey: PowerupKey | null = null;
+
+    if (isCorrect) {
+      const base = Math.max(Math.floor(1000 * (1 - (teamTime / this.timePerQuestion) * 0.5)), 500);
+      points = base;
+      speedBonus = base - 500;
+      const newStreak = priorStreak + 1;
+      const bonus = streakBonusMultiplier(newStreak);
+      if (bonus !== 1.0) points = Math.round(points * bonus);
+      if (isDoublePointQuestion(index)) points *= 2;
+      if (spentDouble) points *= 2;
+      team.score = (team.score ?? 0) + points;
+      team.correctCount = priorCorrect + 1;
+      team.teamCorrect = (team.teamCorrect ?? 0) + 1;
+      team.teamStreak = newStreak;
+      team.bestStreak = Math.max(team.bestStreak ?? 0, newStreak);
+      team.answeredCount = (team.answeredCount ?? 0) + 1;
+      // Guaranteed reward every 3rd consecutive correct team answer, never on
+      // the last question (the game ends immediately after).
+      if (index < this.questions.length - 1
+          && newStreak >= STREAK_REWARD_INTERVAL
+          && newStreak % STREAK_REWARD_INTERVAL === 0) {
+        const p = team.powerups ?? (team.powerups = emptyPowerupPool());
+        const lowest = Math.min(...POWERUP_KEYS.map(k => p[k] ?? 0));
+        const candidates = POWERUP_KEYS.filter(k => (p[k] ?? 0) === lowest);
+        const ptype = candidates[Math.floor(Math.random() * candidates.length)];
+        p[ptype] = (p[ptype] ?? 0) + 1;
+        rewardKey = ptype;
+      }
+    } else {
+      team.answeredCount = (team.answeredCount ?? 0) + 1;
+      if (!spentShield) team.teamStreak = 0;
+    }
+
+    team.memberCount = expected;
+    const reveal: LanReveal = {
+      index,
+      answer: tally.choice,
+      correctAnswer: question.correctAnswer,
+      correct: isCorrect,
+      void: tally.void,
+      split: tally.split,
+      agreed: tally.agreed,
+      pickers: tally.pickers,
+      expected,
+      points,
+      speedBonus,
+    };
+    resolved[teamId] = reveal;
+    this.revealsByIndex.set(index, resolved);
+    this.broadcast({ t: 'team-reveal', index, reveals: resolved });
+    this.broadcast({
+      t: 'team-powerups',
+      index,
+      teams: this.teams,
+      armed: this.armedForIndex(index),
+      ...(rewardKey ? { reward: { key: rewardKey, index, teamId } } : {}),
+    });
   }
 
   /** Host-forced advance: the escape hatch for a player who never readies up. */
@@ -216,12 +437,30 @@ export class LanHostServer {
    * back, so live "who picked what on my team" is the host's view of the room
    * rather than each client guessing. Mirrors the online team doc's `livePicks`.
    */
-  recordPick(playerId: string, index: number, answer: string) {
+  recordPick(playerId: string, index: number, answer: string, timeTaken?: number) {
     if (!playerId) return;
     const picks = this.picksByIndex.get(index) ?? {};
     picks[playerId] = answer;
     this.picksByIndex.set(index, picks);
+    if (typeof timeTaken === 'number' && isFinite(timeTaken)) {
+      const times = this.pickTimesByIndex.get(index) ?? {};
+      times[playerId] = timeTaken;
+      this.pickTimesByIndex.set(index, times);
+    }
     this.broadcast({ t: 'picks', index, picks });
+    // Team play resolves the moment the whole team has locked a pick, rather
+    // than waiting on the clock: the shared clock then only bounds the members
+    // who never answered.
+    if (this.teamMode && index === this.currentIndex) {
+      const player = this.players.find(p => p.id === playerId);
+      const teamId = player?.teamId;
+      if (teamId) {
+        const members = this.teamMembers(teamId);
+        const allPicked = members.length > 0
+          && members.every(m => picks[m.id] != null && String(picks[m.id]).trim() !== '');
+        if (allPicked) this.resolveTeam(index, teamId, timeTaken);
+      }
+    }
   }
 
   /** Add an earned power-up to the member's shared team pool (team mode). */
@@ -233,7 +472,13 @@ export class LanHostServer {
     if (!team) return;
     const p = team.powerups ?? (team.powerups = emptyPowerupPool());
     p[key] = (p[key] ?? 0) + 1;
-    this.broadcast({ t: 'team-powerups', index: this.currentIndex, teams: this.teams, armed: this.armedForIndex(this.currentIndex) });
+    this.broadcast({
+      t: 'team-powerups',
+      index: this.currentIndex,
+      teams: this.teams,
+      armed: this.armedForIndex(this.currentIndex),
+      reward: { key, index: this.currentIndex, teamId: player.teamId },
+    });
   }
 
   recordPowerup(playerId: string, index: number, key: PowerupKey) {
@@ -264,11 +509,13 @@ export class LanHostServer {
       if (existing && existing.length > 0) {
         hintChoices = existing;
       } else {
-        const qIndex = this.order[this.currentIndex];
-        const q = this.quiz.questions?.[qIndex];
-        if (q && Array.isArray(q.options)) {
-          const correct = q.correct_answer ?? '';
-          const wrong = q.options.filter((c: string) => c !== correct);
+        // Read the canonical question the room is actually looking at. Team
+        // play ignores the shuffle order (identity), so pick the same index the
+        // members render; classic play follows `order`.
+        const qIndex = this.teamMode ? index : this.order[this.currentIndex];
+        const q = this.questions[qIndex];
+        if (q && Array.isArray(q.choices) && q.choices.length > 0) {
+          const wrong = q.choices.filter((c: string) => c !== q.correctAnswer);
           for (let i = wrong.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [wrong[i], wrong[j]] = [wrong[j], wrong[i]];
@@ -328,8 +575,14 @@ export class LanHostServer {
     this.questionStartedAt = null;
     this.readyByIndex.clear();
     this.picksByIndex.clear();
+    this.pickTimesByIndex.clear();
+    this.revealsByIndex.clear();
     this.armedTeamsByIndex.clear();
     this.hintChoicesByIndex.clear();
+    if (this.questionTimer != null) {
+      clearTimeout(this.questionTimer);
+      this.questionTimer = null;
+    }
     try {
       this.server?.close();
     } catch {}
@@ -463,7 +716,7 @@ export class LanHostServer {
       return;
     }
     if (msg.t === 'pick') {
-      this.recordPick(conn.id, msg.index, msg.answer);
+      this.recordPick(conn.id, msg.index, msg.answer, msg.timeTaken);
       return;
     }
     if (msg.t === 'powerup') {
@@ -494,7 +747,12 @@ export class LanHostServer {
       p.answers = data.answers;
     }
     p.finished = true;
-    this.broadcast({ t: 'leaderboard', players: this.sortedPlayers(), final: this.allFinished() });
+    this.broadcast({
+      t: 'leaderboard',
+      players: this.sortedPlayers(),
+      final: this.allFinished(),
+      teams: this.teamMode ? this.teams : undefined,
+    });
     if (this.allFinished() && !this.endedOnce) {
       this.endedOnce = true;
       // Let the final leaderboard round-trip, then close the server so a

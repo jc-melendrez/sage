@@ -63,6 +63,38 @@ export interface LanTeam {
    * when a power-up has been armed.
    */
   powerups?: PowerupPool;
+  /**
+   * Host-owned team stats for LAN team play. Online these live on the Firestore
+   * team document; here the host is the single source of truth so every member
+   * sees the same score and the results screen can rank teams without summing
+   * members (which would count a team's score once per player).
+   */
+  score?: number;
+  correctCount?: number;
+  answeredCount?: number;
+  teamCorrect?: number;
+  teamStreak?: number;
+  bestStreak?: number;
+  memberCount?: number;
+}
+
+/**
+ * One team's resolved answer for a question. The LAN twin of the online team
+ * document's `reveals.q{n}` -- every member reads the same payload, so nobody
+ * can see a teammate's individual pick, only the team's decision.
+ */
+export interface LanReveal {
+  index: number;
+  answer: string;
+  correctAnswer: string;
+  correct: boolean;
+  void: boolean;
+  split: boolean;
+  agreed: number;
+  pickers: number;
+  expected: number;
+  points: number;
+  speedBonus: number;
 }
 
 export interface LanResultPayload {
@@ -120,16 +152,38 @@ export type LanMessage =
    * team id, the power-up keys armed for this question; `hintChoices` are the
    * two wrong choices to hide when the hint is active (shared by the team).
    */
-  | { t: 'team-powerups'; index: number; teams: LanTeam[]; armed?: Record<string, PowerupKey[]>; hintChoices?: string[] }
+  | {
+      t: 'team-powerups';
+      index: number;
+      teams: LanTeam[];
+      armed?: Record<string, PowerupKey[]>;
+      hintChoices?: string[];
+      /**
+       * Set only on the question a team earned a streak reward on. The pool
+       * count alone cannot tell a member that a reward was JUST won (it also
+       * moves when a power-up is armed), so the host names the reward here and
+       * every member of that team shows the same roulette -- not just whoever's
+       * device happened to trigger the streak. `teamId` scopes it: the broadcast
+       * is room-wide, so a rival team must not see this team's reward.
+       */
+      reward?: { key: PowerupKey; index: number; teamId: string };
+    }
   /**
    * Group play: a player reports the option they picked for `index`. The host
    * tallies these and echoes them back so every member can see what their own
    * teammates chose while the question is still open (and after, on the reveal).
    */
-  | { t: 'pick'; playerId: string; index: number; answer: string }
+  | { t: 'pick'; playerId: string; index: number; answer: string; timeTaken?: number }
   /** The host's tally for `index`: every reported pick, keyed by player id. */
   | { t: 'picks'; index: number; picks: Record<string, string> }
-  | { t: 'leaderboard'; players: LanPlayer[]; final: boolean }
+  /**
+   * Host broadcast once every member of a team has answered `index` (or the
+   * question times out). Carries the resolved team answer and scoring, keyed by
+   * team id, so each member can render the same reveal the online team path
+   * does and fold the team's points into their own result log.
+   */
+  | { t: 'team-reveal'; index: number; reveals: Record<string, LanReveal> }
+  | { t: 'leaderboard'; players: LanPlayer[]; final: boolean; teams?: LanTeam[] }
   | { t: 'end'; reason: string }
   | { t: 'error'; message: string };
 

@@ -3364,6 +3364,11 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
                 ptype = candidates[rng.randrange(len(candidates))]
                 team_updates[f'powerups.{ptype}'] = fs.Increment(1)
                 powerup_earned = ptype
+                # A team reward belongs to the whole team, but the response only
+                # travels back to whichever member submitted last. Mirror it on
+                # the shared team document so every member shows the same reward
+                # roulette; keyed by question so it cannot replay on a later one.
+                team_updates['reward'] = {'q': question_index, 'key': ptype}
         else:
             # A miss breaks the run, so the streak bonus and the powerup
             # cadence reset.

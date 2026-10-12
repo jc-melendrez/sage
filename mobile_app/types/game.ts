@@ -244,6 +244,15 @@ export interface TeamEntry {
    * to whoever happened to submit last.
    */
   reveals?: Record<string, TeamReveal>;
+  /**
+   * The power-up the team most recently earned on a streak.
+   *
+   * Published on the shared document because the pick response only reaches the
+   * member who submitted last, while the reward belongs to the whole team. Every
+   * member reads it and shows the same roulette. Keyed by `q` (question index) so
+   * a reward from an earlier question cannot replay on a later one.
+   */
+  reward?: { q: number; key: PowerupKey };
 }
 
 export interface TeamReveal {

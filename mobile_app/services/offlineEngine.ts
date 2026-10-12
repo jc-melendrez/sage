@@ -100,6 +100,20 @@ export interface AnswerOutcome {
   speedBonus: number;
 }
 
+/**
+ * A team's resolved outcome, as published by the host in LAN team play (or,
+ * online, read off the team document's `reveals.q{n}`). `points` is the team's
+ * authoritative score for the question -- every member folds in the same value.
+ */
+export interface TeamRevealInput {
+  answer: string;
+  correctAnswer: string;
+  correct: boolean;
+  points: number;
+  speedBonus: number;
+  picked: string;
+}
+
 const LETTERS = ['A', 'B', 'C', 'D'];
 
 /**
@@ -346,6 +360,42 @@ export class OfflineGame {
       newStreak: this.streak,
       picked: answer,
       speedBonus: 0,
+    };
+    this.lastResults[questionIndex] = outcome;
+    return outcome;
+  }
+
+  /**
+   * Fold a host-resolved team reveal into this member's session.
+   *
+   * Team play scores once, on the host (the LAN twin of the online server), so
+   * the member must NOT re-derive points here -- the host's `points` already
+   * carry the median-time base, the streak bonus, the doubled question and any
+   * armed double-points. Applying the same payload on every member keeps their
+   * totals equal (a team has ONE score), which is what lets the results screen
+   * rank teams without summing members. The answer log still gets a row so the
+   * review and breakdown render exactly as they do online.
+   */
+  applyTeamReveal(questionIndex: number, opts: TeamRevealInput): AnswerOutcome {
+    const cached = this.lastResults[questionIndex];
+    if (cached) return cached;
+    this.answeredCount += 1;
+    if (opts.correct) {
+      this.correctCount += 1;
+      this.streak += 1;
+      this.bestStreak = Math.max(this.bestStreak, this.streak);
+      this.score += opts.points;
+    } else {
+      this.streak = 0;
+    }
+    const outcome: AnswerOutcome = {
+      correct: opts.correct,
+      correctAnswer: opts.correctAnswer,
+      pointsAwarded: opts.points,
+      powerupEarned: null,
+      newStreak: this.streak,
+      picked: opts.picked,
+      speedBonus: opts.speedBonus,
     };
     this.lastResults[questionIndex] = outcome;
     return outcome;

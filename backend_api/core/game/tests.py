@@ -3647,6 +3647,37 @@ class TeamMajorityVoteTests(TestCase):
         self.assertEqual(self.advance(0).status_code, 409)
         self.assertEqual(self.room_ref.get().to_dict()['teamQuestionIndex'], 0)
 
+    def test_a_streak_reward_is_published_on_the_team_document(self):
+        # The reward is granted once, but the pick response only travels back to
+        # the member who happened to submit last. Publishing it on the shared
+        # document is what lets every teammate's screen show the same reward
+        # roulette, instead of it appearing on exactly one device.
+
+        def force_advance(target):
+            # The ready-up gate holds the room once every team has answered; the
+            # host can force it, which keeps this test focused on the reward
+            # rather than the ready handshake. The clock is put back so the
+            # question itself is unambiguously over.
+            self.room_ref.update({'teamStartedAt': timezone.now() - timedelta(seconds=120)})
+            self.client.force_authenticate(user=self.host)
+            resp = self.client.post(reverse('team-advance'), {
+                'roomCode': 'MAJ1', 'questionIndex': target, 'force': 'true',
+            }, format='json')
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+        self.close([(u, 'A. yes') for u in self.members])
+        force_advance(1)
+        self.close([(u, 'A. yes') for u in self.members], index=1)
+        # Two correct in a row is below the interval, so nothing is published.
+        self.assertIsNone(self.team().get('reward'))
+        force_advance(2)
+        self.close([(u, 'A. yes') for u in self.members], index=2)
+        reward = self.team().get('reward')
+        self.assertIsNotNone(reward, 'the third consecutive correct answer earns a reward')
+        # Keyed by the question it was earned on, so it cannot replay later.
+        self.assertEqual(reward['q'], 2)
+        self.assertIn(reward['key'], ('freeze', 'hint', 'doublePoints', 'shield'))
+
 
 class TeamSharedPowerupTests(TestCase):
     """Team power-ups are a SHARED act, not a self-asserted request flag.
