@@ -6,15 +6,19 @@ Security notes:
 - Codes are stored HMAC-SHA256 hashed (keyed with SECRET_KEY), never plaintext.
 - Verification uses `secrets.compare_digest` to avoid timing attacks.
 """
+import base64
 import hashlib
 import hmac
 import logging
 import secrets
+from email.mime.text import MIMEText
 
 import requests
 from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 
 from .models import LoginOtpChallenge
 
@@ -69,11 +73,11 @@ def send_otp_email(user, otp: str) -> None:
         f"If you didn't try to sign in, you can ignore this email.\n\n"
         f"— SAGE Learning"
     )
-    if getattr(settings, 'BREVO_API_KEY', None):
-        # Render free drops outbound SMTP entirely, so prod OTP mail goes over
-        # HTTPS to Brevo's API. The sender must be verified as a Sender in the
-        # Brevo dashboard; errors raise so the login view can answer a clean 503.
-        _send_via_brevo(subject, body, [user.email])
+    if _gmail_configured():
+        # Render's free tier drops outbound SMTP, so prod OTP mail goes over
+        # HTTPS to the Gmail API, sent as the account itself so Google signs it
+        # (SPF/DKIM align). Errors raise so the login view can answer a clean 503.
+        _send_via_gmail(subject, body, [user.email])
         return
     try:
         send_mail(
@@ -88,40 +92,70 @@ def send_otp_email(user, otp: str) -> None:
         raise
 
 
-def _send_via_brevo(subject: str, text: str, recipients) -> None:
-    """Deliver a plain-text email through Brevo's HTTPS API."""
+def _gmail_configured() -> bool:
+    """True when every Gmail API setting needed to send is present."""
+    return all(
+        getattr(settings, name, None)
+        for name in (
+            'GMAIL_CLIENT_ID',
+            'GMAIL_CLIENT_SECRET',
+            'GMAIL_REFRESH_TOKEN',
+            'GMAIL_SENDER_EMAIL',
+        )
+    )
+
+
+def _gmail_access_token() -> str:
+    """Exchange the stored refresh token for a short-lived access token."""
+    creds = Credentials(
+        token=None,
+        refresh_token=settings.GMAIL_REFRESH_TOKEN,
+        token_uri='https://oauth2.googleapis.com/token',
+        client_id=settings.GMAIL_CLIENT_ID,
+        client_secret=settings.GMAIL_CLIENT_SECRET,
+        scopes=['https://www.googleapis.com/auth/gmail.send'],
+    )
+    creds.refresh(Request())
+    return creds.token
+
+
+def _send_via_gmail(subject: str, text: str, recipients) -> None:
+    """Deliver an email through the Gmail API as the configured account.
+
+    Google signs the message, so a gmail.com "From" passes SPF/DKIM and lands --
+    unlike relaying that same "From" through a third-party ESP. A 2xx only means
+    the message was ACCEPTED; the returned id can be traced in Gmail if needed.
+    """
+    message = MIMEText(text, 'plain', 'utf-8')
+    message['To'] = ', '.join(recipients)
+    message['From'] = settings.GMAIL_SENDER_EMAIL
+    message['Subject'] = subject
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+    try:
+        access_token = _gmail_access_token()
+    except Exception:
+        logger.exception(
+            'Gmail API token refresh failed for %s', settings.GMAIL_SENDER_EMAIL,
+        )
+        raise
+
     response = requests.post(
-        'https://api.brevo.com/v3/smtp/email',
-        headers={'api-key': settings.BREVO_API_KEY},
-        json={
-            'sender': {
-                'email': settings.BREVO_SENDER_EMAIL,
-                'name': settings.BREVO_SENDER_NAME,
-            },
-            'replyTo': {
-                'email': settings.BREVO_SENDER_EMAIL,
-                'name': settings.BREVO_SENDER_NAME,
-            },
-            'to': [{'email': email} for email in recipients],
-            'subject': subject,
-            'textContent': text,
-        },
+        'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+        headers={'Authorization': f'Bearer {access_token}'},
+        json={'raw': raw},
         timeout=settings.EMAIL_TIMEOUT,
     )
     if response.status_code >= 400:
         logger.error(
-            'Brevo send failed (%s): %s', response.status_code, response.text,
+            'Gmail API send failed (%s): %s', response.status_code, response.text,
         )
-        raise RuntimeError(f'Brevo send failed ({response.status_code})')
-    # A 2xx only means Brevo ACCEPTED the request -- it is not proof of delivery.
-    # A sender that is not verified, or a domain without DKIM/SPF/DMARC, is
-    # accepted here and then blocked/bounced/spam-filed later. Log the messageId
-    # so the event can be traced in the Brevo dashboard (Transactional -> Logs).
+        raise RuntimeError(f'Gmail API send failed ({response.status_code})')
     message_id = None
     try:
-        message_id = response.json().get('messageId')
+        message_id = response.json().get('id')
     except Exception:
         pass
     logger.info(
-        'Brevo accepted OTP email to %s (messageId=%s)', recipients, message_id,
+        'Gmail API accepted OTP email to %s (id=%s)', recipients, message_id,
     )

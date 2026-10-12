@@ -59,10 +59,24 @@ def healthz(request):
         # not worth failing the liveness probe over.
         pass
     body['otp_enabled'] = bool(getattr(settings, 'OTP_ENABLED', False))
-    brevo_configured = bool(getattr(settings, 'BREVO_API_KEY', None))
+    gmail_configured = all(
+        getattr(settings, name, None)
+        for name in (
+            'GMAIL_CLIENT_ID',
+            'GMAIL_CLIENT_SECRET',
+            'GMAIL_REFRESH_TOKEN',
+            'GMAIL_SENDER_EMAIL',
+        )
+    )
     smtp_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
-    body['otp_delivery'] = 'brevo' if brevo_configured else ('smtp' if smtp_configured else 'none')
-    body['email_configured'] = brevo_configured or smtp_configured
+    if gmail_configured:
+        delivery = 'gmail'
+    elif smtp_configured:
+        delivery = 'smtp'
+    else:
+        delivery = 'none'
+    body['otp_delivery'] = delivery
+    body['email_configured'] = gmail_configured or smtp_configured
     body['email_backend'] = settings.EMAIL_BACKEND.rsplit('.', 1)[-1]
     return JsonResponse(body)
 

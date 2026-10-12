@@ -404,11 +404,20 @@ class HealthzEndpointTests(TestCase):
             response = self.client.get(reverse('healthz'))
             self.assertIs(response.json()['email_configured'], True)
             self.assertEqual(response.json()['otp_delivery'], 'smtp')
-        with override_settings(BREVO_API_KEY='xkeysib_test_123'):
+        with override_settings(
+            GMAIL_CLIENT_ID='client-id',
+            GMAIL_CLIENT_SECRET='client-secret',
+            GMAIL_REFRESH_TOKEN='refresh-token',
+            GMAIL_SENDER_EMAIL='sage@example.com',
+        ):
             response = self.client.get(reverse('healthz'))
             self.assertIs(response.json()['email_configured'], True)
-            self.assertEqual(response.json()['otp_delivery'], 'brevo')
-        with override_settings(EMAIL_HOST_USER='', EMAIL_HOST_PASSWORD='', BREVO_API_KEY=''):
+            self.assertEqual(response.json()['otp_delivery'], 'gmail')
+        with override_settings(
+            EMAIL_HOST_USER='', EMAIL_HOST_PASSWORD='',
+            GMAIL_CLIENT_ID='', GMAIL_CLIENT_SECRET='',
+            GMAIL_REFRESH_TOKEN='', GMAIL_SENDER_EMAIL='',
+        ):
             response = self.client.get(reverse('healthz'))
             self.assertIs(response.json()['email_configured'], False)
             self.assertEqual(response.json()['otp_delivery'], 'none')

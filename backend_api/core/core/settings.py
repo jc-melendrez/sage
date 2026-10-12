@@ -234,13 +234,16 @@ EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD')
 DEFAULT_FROM_EMAIL = os.environ.get('EMAIL_HOST_USER', 'noreply@sage.app')
 
-# Email API (Brevo) — Render's free tier drops outbound SMTP (IPv6 → Errno 101,
-# IPv4 → timeout), so prod OTP mail goes over HTTPS to Brevo's API instead.
-# When BREVO_API_KEY is set, OTP emails skip SMTP entirely. The sender address
-# must be verified as a Sender in the Brevo dashboard.
-BREVO_API_KEY = os.environ.get('BREVO_API_KEY')
-BREVO_SENDER_EMAIL = os.environ.get('BREVO_SENDER_EMAIL', 'sage.app.io@gmail.com')
-BREVO_SENDER_NAME = os.environ.get('BREVO_SENDER_NAME', 'SAGE')
+# Email API (Gmail) — Render's free tier drops outbound SMTP (IPv6 → Errno 101,
+# IPv4 → timeout), so prod OTP mail goes over HTTPS to Google's Gmail API
+# instead. Sending as the Gmail account itself (rather than relaying a
+# gmail.com "From" through a third-party ESP) means Google signs the message, so
+# SPF/DKIM align and it is not spam-filed or blocked. Configure with an OAuth
+# client + refresh token for the sender account (scope gmail.send); see AGENTS.md.
+GMAIL_CLIENT_ID = os.environ.get('GMAIL_CLIENT_ID')
+GMAIL_CLIENT_SECRET = os.environ.get('GMAIL_CLIENT_SECRET')
+GMAIL_REFRESH_TOKEN = os.environ.get('GMAIL_REFRESH_TOKEN')
+GMAIL_SENDER_EMAIL = os.environ.get('GMAIL_SENDER_EMAIL') or os.environ.get('EMAIL_HOST_USER')
 
 # Email settings can be overridden for dev (e.g. EMAIL_BACKEND=console to print OTPs)
 if os.environ.get('EMAIL_BACKEND'):

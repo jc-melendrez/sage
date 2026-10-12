@@ -1141,22 +1141,38 @@ class FirebaseLoginOtpTests(APITestCase):
         self.assertIn(self.user.email, mail.outbox[0].to)
         self.assertFalse(LoginOtpChallenge.objects.get().verified)
 
-    @override_settings(BREVO_API_KEY='xkeysib-test_123')
-    def test_otp_delivers_via_brevo_when_configured(self):
-        """With BREVO_API_KEY set, the code goes through Brevo's HTTPS API
+    @override_settings(
+        GMAIL_CLIENT_ID='client-id',
+        GMAIL_CLIENT_SECRET='client-secret',
+        GMAIL_REFRESH_TOKEN='refresh-token',
+        GMAIL_SENDER_EMAIL='sage.app.io@gmail.com',
+    )
+    def test_otp_delivers_via_gmail_when_configured(self):
+        """With the Gmail API configured, the code goes through the Gmail API
         (not the locmem/SMTP path), so nothing lands in mail.outbox."""
+        import base64
+        from email import message_from_bytes
+
         from . import otp as users_otp
-        with patch.object(users_otp.requests, 'post') as mock_post:
-            mock_post.return_value.status_code = 201
+        with patch.object(users_otp, '_gmail_access_token', return_value='access-token'), \
+             patch.object(users_otp.requests, 'post') as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {'id': 'msg-123'}
             res = self._login(provider='password')
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.data['otp_required'])
         self.assertEqual(mock_post.call_count, 1)
-        payload = mock_post.call_args.kwargs['json']
-        self.assertEqual(payload['to'], [{'email': self.user.email}])
-        self.assertEqual(payload['sender']['email'], settings.BREVO_SENDER_EMAIL)
-        self.assertIn('verification code', payload['subject'].lower())
-        self.assertIn('Your SAGE', payload['textContent'])
+        args, kwargs = mock_post.call_args
+        self.assertEqual(
+            args[0],
+            'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+        )
+        self.assertEqual(kwargs['headers']['Authorization'], 'Bearer access-token')
+        message = message_from_bytes(base64.urlsafe_b64decode(kwargs['json']['raw']))
+        self.assertEqual(message['To'], self.user.email)
+        self.assertEqual(message['From'], 'sage.app.io@gmail.com')
+        self.assertIn('verification code', message['Subject'].lower())
+        self.assertIn('Your SAGE', message.get_payload(decode=True).decode())
 
     @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
     def test_otp_verify_issues_jwt(self):
