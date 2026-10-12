@@ -19,7 +19,7 @@ import {
 } from './offlineEngine';
 import type { QuizPayload, GameQuestion } from './offlineEngine';
 import type { PowerupKey } from '@/types/game';
-import { emptyPowerupPool } from '@/types/game';
+import { REACTION_EMOJIS, emptyPowerupPool } from '@/types/game';
 
 /** The four power-up kinds, in the pool's canonical order. */
 const POWERUP_KEYS: PowerupKey[] = ['freeze', 'hint', 'doublePoints', 'shield'];
@@ -727,9 +727,47 @@ export class LanHostServer {
       this.grantTeamPowerup(conn.id, msg.key);
       return;
     }
+    if (msg.t === 'react') {
+      if ((REACTION_EMOJIS as readonly string[]).includes(msg.emoji)) {
+        this.relayReaction(conn.id, msg.emoji);
+      }
+      return;
+    }
     if (msg.t === 'result') {
       this.applyResult(conn, msg.data);
     }
+  }
+
+  /**
+   * Deliver a cheer to the sender's own team-mates only.
+   *
+   * The online bar writes to a room-wide collection, but a LAN classroom cheer
+   * is meant for the team, so the host scopes delivery by team id: a rival team
+   * never sees it. A player with no team (classic, or an unseated spectator)
+   * cheers to themselves only -- there is no team to broadcast to.
+   */
+  private relayReaction(playerId: string, emoji: string) {
+    const sender = this.players.find(p => p.id === playerId);
+    if (!sender) return;
+    const teamId = sender.teamId != null ? String(sender.teamId) : '';
+    const reaction: LanMessage = {
+      t: 'reaction',
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      emoji,
+      playerId: sender.id,
+      displayName: sender.name,
+      teamId: teamId || null,
+      at: Date.now(),
+    };
+    this.connections.forEach(conn => {
+      if (conn.id === sender.id) {
+        this.send(conn, reaction);
+        return;
+      }
+      if (!teamId) return;
+      const p = this.players.find(x => x.id === conn.id);
+      if (p && String(p.teamId ?? '') === teamId) this.send(conn, reaction);
+    });
   }
 
   private applyResult(conn: Connection, data: LanResultPayload) {

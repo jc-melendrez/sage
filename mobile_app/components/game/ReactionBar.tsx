@@ -29,7 +29,7 @@ interface Reaction {
 }
 
 /** What the bar actually renders: a reaction plus a client-side expiry. */
-interface LiveReaction extends Reaction {
+export interface LiveReaction extends Reaction {
   /** ms epoch; the optimistic bubble and the newest server write both carry it. */
   at: number;
 }
@@ -39,6 +39,13 @@ interface Props {
   enabled: boolean;
   myId: string | null;
   teams: TeamEntry[];
+  /**
+   * LAN group mode: send a cheer through the host instead of the backend. When
+   * set the Firestore subscription is skipped and `lanLive` is the source of
+   * teammates' reactions (the host scopes them to your team).
+   */
+  lanSend?: (emoji: string) => void;
+  lanLive?: LiveReaction[];
 }
 
 const WINDOW_MS = 4000;
@@ -51,7 +58,7 @@ const WINDOW_MS = 4000;
  * only shown for a few seconds — this is meant to be a quick "nice one" during
  * a question, not a chat log competing with the quiz for attention.
  */
-export default function ReactionBar({ roomCode, enabled, myId, teams }: Props) {
+export default function ReactionBar({ roomCode, enabled, myId, teams, lanSend, lanLive }: Props) {
   const [live, setLive] = useState<LiveReaction[]>([]);
   const [mine, setMine] = useState<LiveReaction | null>(null);
   const [cooling, setCooling] = useState(false);
@@ -59,9 +66,10 @@ export default function ReactionBar({ roomCode, enabled, myId, teams }: Props) {
   const coolRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Only watch the newest handful; the subcollection is never pruned, so an
-  // unbounded onSnapshot would grow for the whole game.
+  // unbounded onSnapshot would grow for the whole game. LAN skips this entirely
+  // -- the host relays reactions over the socket instead.
   useEffect(() => {
-    if (!enabled || !roomCode) { setLive([]); return; }
+    if (lanSend || !enabled || !roomCode) { setLive([]); return; }
     const unsub = firestore()
       .collection('gameRooms').doc(roomCode)
       .collection('reactions')
@@ -85,18 +93,21 @@ export default function ReactionBar({ roomCode, enabled, myId, teams }: Props) {
           .reverse());
       }, () => { /* listener permissions are optional; bar just stays empty */ });
     return () => unsub();
-  }, [roomCode, enabled]);
+  }, [roomCode, enabled, lanSend]);
+
+  // The reactions to draw: teammates' (LAN) or the room's (online).
+  const remote = lanSend ? (lanLive ?? []) : live;
 
   // Re-filter on a timer as well, so reactions fade out even when no new
   // document is written and Firestore therefore sends no update.
   useEffect(() => {
-    if (!enabled || live.length === 0) return;
+    if (!enabled || remote.length === 0) return;
     const id = setInterval(() => {
       const now = Date.now();
       setLive(prev => prev.filter(r => now - r.at < WINDOW_MS));
     }, 1000);
     return () => clearInterval(id);
-  }, [enabled, live.length]);
+  }, [enabled, remote.length]);
 
   useEffect(() => () => { if (coolRef.current) clearTimeout(coolRef.current); }, []);
 
@@ -118,6 +129,10 @@ export default function ReactionBar({ roomCode, enabled, myId, teams }: Props) {
       Animated.timing(anim, { toValue: 0, duration: 260, easing: Easing.in(Easing.quad), useNativeDriver: true }),
     ]).start(() => setMine(null));
 
+    if (lanSend) {
+      lanSend(emoji);
+      return;
+    }
     try {
       const token = await getToken();
       await fetch(`${API_BASE_URL}/game/react/`, {
@@ -132,7 +147,9 @@ export default function ReactionBar({ roomCode, enabled, myId, teams }: Props) {
 
   if (!enabled) return null;
 
-  const bubbles = mine ? [mine, ...live.slice(0, 3)] : live.slice(0, 4);
+  const now = Date.now();
+  const freshRemote = remote.filter(r => now - r.at < WINDOW_MS);
+  const bubbles = mine ? [mine, ...freshRemote.slice(0, 3)] : freshRemote.slice(0, 4);
   const teamColors = new Map(teams.map(t => [String(t.id), t.color]));
 
   return (

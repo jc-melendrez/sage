@@ -42,8 +42,8 @@ import PowerupPoolHUD from '@/components/game/PowerupPoolHUD';
 import StandingsTicker from '@/components/game/StandingsTicker';
 import { answerLogFromOutcomes } from '@/services/gameBreakdown';
 import { TYPED_QUESTION_TYPES } from '@/services/offlineEngine';
-import ReactionBar from '@/components/game/ReactionBar';
-import { sameTeamId, activeMembersByTeam, teamRankValue, type PowerupKey, type TeamEntry, type PlayerAnswerLog } from '@/types/game';
+import ReactionBar, { type LiveReaction } from '@/components/game/ReactionBar';
+import { sameTeamId, activeMembersByTeam, teamRankValue, emptyPowerupPool, type PowerupKey, type TeamEntry, type PlayerAnswerLog } from '@/types/game';
 import { pfpSource } from '@/constants/pfps';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -613,6 +613,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // Group play: the host's live pick tally for the open question, keyed by
   // player id, so a member can see what their own team-mates chose.
   const [lanPicks, setLanPicks] = useState<Record<string, string>>({});
+  // Group play: teammates' cheers relayed by the host (team-scoped), fed to the
+  // ReactionBar in place of the online Firestore subscription.
+  const [lanReactions, setLanReactions] = useState<LiveReaction[]>([]);
   // Bumped on a `roster` broadcast so the team-quorum strip recomputes against
   // the live roster (the roster itself is kept in a ref for the event closure).
   const [lanRosterTick, setLanRosterTick] = useState(0);
@@ -855,6 +858,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   applyLanLeaderboardRef.current = applyLanLeaderboard;
   finalizeLanGameRef.current = finalizeLanGame;
 
+  /** Send a cheer through the host (LAN group mode). */
+  const handleLanReact = (emoji: string) => {
+    const lc = lcRef.current ?? getLanClient();
+    lc?.sendReaction(emoji);
+  };
+
   /* ── all useEffects below ── */
 
   // ✨ NEW: Trigger shake/pulse when timeLeft <= 5 and not frozen
@@ -1004,6 +1013,20 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               setIAmReady(false);
               setReadyState(null);
               setLanPicks({});
+              setLanReactions([]);
+            } else if (msg.t === 'reaction') {
+              const now = Date.now();
+              setLanReactions(prev => [
+                ...prev.filter(r => now - r.at < 4000),
+                {
+                  id: msg.id,
+                  emoji: msg.emoji,
+                  userId: msg.playerId,
+                  displayName: msg.displayName,
+                  teamId: msg.teamId ?? null,
+                  at: msg.at,
+                },
+              ].slice(-12));
             } else if (msg.t === 'ready-count') {
               setReadyState({ ready: msg.ready, expected: msg.expected });
             } else if (msg.t === 'picks') {
@@ -1232,6 +1255,20 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       });
     return () => { unsub(); };
   }, [teamMode, roomCode]);
+
+  /* ── LAN: adopt this device's team id from the live roster ──
+   * Online, `myTeamId` comes off the player's Firestore doc; LAN has no such
+   * doc, so it is derived from the host's roster broadcasts. It drives the
+   * "(You)" tag on the team standings and the "your team" highlight. */
+  useEffect(() => {
+    if (!isLan || !teamMode) return;
+    const myId = getLanPlayerId();
+    const me = lanPlayersRef.current.find(
+      p => (myId ? p.id === myId : p.name === lanGame.playerName),
+    );
+    const tid = me?.teamId != null ? String(me.teamId) : null;
+    setMyTeamId(prev => (prev === tid ? prev : tid));
+  }, [isLan, teamMode, lanRosterTick]);
 
   /* ── teammates subscription: the boost strip needs names to aim at ── */
   useEffect(() => {
@@ -1668,6 +1705,46 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : null;
+  /**
+   * The team list the standings UI renders.
+   *
+   * Online this is the Firestore `teams` snapshot. LAN has no Firestore teams,
+   * so the host's `lanTeamList` broadcast is mapped into the same shape, with
+   * the roster folded in for member counts. A LAN team carries `rankScore` =
+   * its raw host score, matching the results screen (which scores a team once
+   * rather than averaging members).
+   */
+  const standingsTeams = useMemo<TeamEntry[]>(() => {
+    if (!(teamMode && isLan)) return teams;
+    // The roster lives in a ref; `lanRosterTick` is bumped on every roster
+    // broadcast, so referencing it here forces this memo to recompute when
+    // members join or leave (a ref read alone triggers no render).
+    void lanRosterTick;
+    const roster = lanPlayersRef.current;
+    const active = activeMembersByTeam(
+      roster.map(p => ({ teamId: p.teamId, answeredCount: p.answeredCount })),
+    );
+    return lanTeamList.map(t => {
+      const members = roster.filter(p => String(p.teamId ?? '') === String(t.id));
+      const score = t.score ?? 0;
+      return {
+        id: String(t.id),
+        name: t.name,
+        color: t.color,
+        score,
+        rankScore: score,
+        activeMembers: active[String(t.id)] ?? members.length,
+        correctCount: t.correctCount ?? 0,
+        answeredCount: t.answeredCount ?? 0,
+        memberIds: members.map(p => p.id),
+        memberCount: t.memberCount ?? members.length,
+        teamCorrect: t.teamCorrect ?? t.correctCount ?? 0,
+        teamStreak: t.teamStreak ?? 0,
+        bestStreak: t.bestStreak ?? 0,
+        powerups: t.powerups ?? emptyPowerupPool(),
+      } as TeamEntry;
+    });
+  }, [teamMode, isLan, lanTeamList, teams, lanRosterTick]);
   // Rank by average per active member, matching the server. A teammate who has
   // not answered yet must not push their team up the table.
   //
@@ -1678,7 +1755,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const activeByTeam = activeMembersByTeam(
     (standings as any[]).map(r => ({ teamId: r.teamId, answeredCount: r.answeredCount })),
   );
-  const sortedTeams = [...teams].sort(
+  const sortedTeams = [...standingsTeams].sort(
     (a, b) => teamRankValue(b, activeByTeam[String(b.id)]) - teamRankValue(a, activeByTeam[String(a.id)]),
   );
   const myTeamRank = sortedTeams.findIndex(t => sameTeamId(t.id, myTeamId)) + 1;
@@ -3286,7 +3363,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           said Q2 while the class was answering question 3. */}
       {!showTeamReveal && !result && (
         <StandingsTicker
-          teams={teams}
+          teams={standingsTeams}
           players={standings}
           teamMode={teamMode}
           myUserId={userId != null ? String(userId) : null}
@@ -3749,12 +3826,14 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       {/* Team mode only. Reactions cheer on a shared team, but in classic
           every player is competing alone, so cheering on other players is
           meaningless rather than supportive. */}
-      {!isOffline && !isLan && !result && teamMode && (
+      {!isOffline && !result && teamMode && (
         <ReactionBar
           roomCode={roomCode}
           enabled={roomStatus === 'active'}
           myId={userId != null ? String(userId) : null}
-          teams={teams}
+          teams={standingsTeams}
+          lanSend={isLan ? handleLanReact : undefined}
+          lanLive={isLan ? lanReactions : undefined}
         />
       )}
 

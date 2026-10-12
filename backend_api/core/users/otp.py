@@ -98,6 +98,10 @@ def _send_via_brevo(subject: str, text: str, recipients) -> None:
                 'email': settings.BREVO_SENDER_EMAIL,
                 'name': settings.BREVO_SENDER_NAME,
             },
+            'replyTo': {
+                'email': settings.BREVO_SENDER_EMAIL,
+                'name': settings.BREVO_SENDER_NAME,
+            },
             'to': [{'email': email} for email in recipients],
             'subject': subject,
             'textContent': text,
@@ -109,3 +113,15 @@ def _send_via_brevo(subject: str, text: str, recipients) -> None:
             'Brevo send failed (%s): %s', response.status_code, response.text,
         )
         raise RuntimeError(f'Brevo send failed ({response.status_code})')
+    # A 2xx only means Brevo ACCEPTED the request -- it is not proof of delivery.
+    # A sender that is not verified, or a domain without DKIM/SPF/DMARC, is
+    # accepted here and then blocked/bounced/spam-filed later. Log the messageId
+    # so the event can be traced in the Brevo dashboard (Transactional -> Logs).
+    message_id = None
+    try:
+        message_id = response.json().get('messageId')
+    except Exception:
+        pass
+    logger.info(
+        'Brevo accepted OTP email to %s (messageId=%s)', recipients, message_id,
+    )

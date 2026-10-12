@@ -183,6 +183,22 @@ export type LanMessage =
    * does and fold the team's points into their own result log.
    */
   | { t: 'team-reveal'; index: number; reveals: Record<string, LanReveal> }
+  /**
+   * Group play: a player taps a cheer emoji. Sent client -> host; the host
+   * validates it and re-broadcasts `reaction` to that player's team-mates only
+   * (the online bar is room-wide, but a LAN cheer is meant for your own team).
+   */
+  | { t: 'react'; emoji: string }
+  /** Host delivery of a cheer to the sender's team-mates. */
+  | {
+      t: 'reaction';
+      id: string;
+      emoji: string;
+      playerId: string;
+      displayName: string;
+      teamId?: string | null;
+      at: number;
+    }
   | { t: 'leaderboard'; players: LanPlayer[]; final: boolean; teams?: LanTeam[] }
   | { t: 'end'; reason: string }
   | { t: 'error'; message: string };

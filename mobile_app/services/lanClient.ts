@@ -67,6 +67,10 @@ export class LanClientSession {
     this.send({ t: 'powerup-earned', key });
   }
 
+  sendReaction(emoji: string) {
+    this.send({ t: 'react', emoji });
+  }
+
   disconnect() {
     this.disposed = true;
     try {
