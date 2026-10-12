@@ -1169,6 +1169,12 @@ def user_recommendations(request, user_id):
     # UI also GETs-then-POSTs to escalate, so a provider error must not fail
     # the read. The cooldown below is what stops that escalation from becoming
     # an unbounded retry loop; see users/ai_usage.py and RECS_ATTEMPT_TTL.
+    #
+    # The AIRecommendThrottle on this view now guards the POST only: a GET is a
+    # read (it can auto-generate, but the _claim_recs_attempt marker already
+    # caps that at one attempt per window), so counting every dashboard read
+    # against the burst budget only produced spurious 429s on the Home tab.
+    # See core/throttling.py.
     if request.method == 'POST' or _recommendations_are_stale(user):
         # Auto-generation is the common path (a plain GET on an empty or stale
         # dashboard), so it is rate limited by wall clock rather than by the

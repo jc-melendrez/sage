@@ -60,13 +60,25 @@ class AITopicThrottle(_ScopedUserThrottle):
 
 
 class AIRecommendThrottle(_ScopedUserThrottle):
-    """GET/POST /api/users/<id>/recommendations/ -- Groq recommendations.
+    """POST /api/users/<id>/recommendations/ -- Groq recommendations.
 
-    A ``GET`` here can trigger a paid generation, so it is throttled on the
-    same scope as the explicit ``POST`` refresh.
+    Only the explicit ``POST`` refresh is throttled. A ``GET`` whose cards are
+    stale *can* trigger a paid generation, but that path is already bounded to
+    one attempt per window by ``_claim_recs_attempt`` (users/views.py), which is
+    stricter than this five-per-hour budget. Throttling the GETs as well meant
+    every ordinary dashboard read -- which usually just serves stored cards --
+    spent a slot, so browsing Home tripped a 429 and the app showed the raw
+    "Request was throttled" text. The paid path keeps its guard; the reads,
+    which cost nothing, do not need one.
     """
 
     scope = 'ai_recommend'
+
+    def allow_request(self, request, view):
+        # A read is free and must never be refused; see the class docstring.
+        if request.method != 'POST':
+            return True
+        return super().allow_request(request, view)
 
 
 class AIGameThrottle(_ScopedUserThrottle):

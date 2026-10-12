@@ -178,15 +178,33 @@ class AIThrottleTests(TestCase):
             self.assertEqual(self.generate_lesson_without_file().status_code, 400)
             self.assertEqual(self.generate_lesson_without_file().status_code, 429)
 
-    def test_recommendations_get_is_throttled_because_get_can_spend_money(self):
+    def test_recommendations_get_is_never_throttled(self):
+        """Reads are free, so they must not consume the burst budget.
+
+        Serving stored cards returning 429 is what put a raw "Request was
+        throttled. Expected available in N seconds." banner on ordinary
+        Home-tab visits. Auto-generation on a GET is bounded separately by the
+        _claim_recs_attempt marker, which is stricter than this budget.
+        """
         Recommendation.objects.create(
             user=self.student, title='Rec', description='x',
         )
         url = reverse('user_recommendations', args=[self.student.id])
         with throttled_rate(AIRecommendThrottle, ai_recommend='2/min'):
-            self.assertEqual(self.client.get(url).status_code, 200)
-            self.assertEqual(self.client.get(url).status_code, 200)
-            self.assertEqual(self.client.get(url).status_code, 429)
+            for _ in range(5):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+    def test_recommendations_post_refresh_is_still_throttled(self):
+        """The explicit POST can force a paid generation, so it keeps the guard
+        the GETs no longer need."""
+        Recommendation.objects.create(
+            user=self.student, title='Rec', description='x',
+        )
+        url = reverse('user_recommendations', args=[self.student.id])
+        with throttled_rate(AIRecommendThrottle, ai_recommend='2/min'):
+            self.assertEqual(self.client.post(url).status_code, 200)
+            self.assertEqual(self.client.post(url).status_code, 200)
+            self.assertEqual(self.client.post(url).status_code, 429)
 
     def test_scopes_do_not_share_a_counter(self):
         """Exhausting the chat budget must not block quiz generation -- that
