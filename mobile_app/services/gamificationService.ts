@@ -3,6 +3,8 @@
 import { API_BASE_URL } from '@/config/api';
 import { getToken, refreshAccessToken } from './authService';
 import { invalidateCachePrefix } from './apiCache';
+import { savePendingQuizResult } from './offlineGameService';
+import { requestSyncFlush } from './syncManager';
 
 async function authFetch(path: string, options: RequestInit = {}) {
   const doFetch = async (token: string | null) => {
@@ -73,17 +75,41 @@ export interface LeaderboardEntry {
   is_you: boolean;
 }
 
+/** fetch() rejects with a TypeError (or a platform-shaped message) when the
+ *  request never reached the server -- distinct from an HTTP error response. */
+function isNetworkError(err: unknown): boolean {
+  const raw = err instanceof Error ? err : new Error(String(err));
+  return raw.name === 'TypeError'
+    || /Network request failed|Failed to fetch|NetworkError|network error/i.test(raw.message);
+}
+
 export async function completeQuiz(score: number, total: number, courseId?: number, quizId?: number): Promise<QuizResult> {
-  const result = await postJson('/users/me/complete-quiz/', {
+  const body = {
     score,
     total,
     ...(courseId != null ? { course_id: courseId } : {}),
     ...(quizId != null ? { quiz_id: quizId } : {}),
-  });
-  // The quiz list now reflects the "attempted" flag — drop the cached copy so
-  // the Quizzes tab revalidates instead of showing a stale "Take" button.
-  invalidateCachePrefix('/ai/quizzes');
-  return result;
+  };
+  try {
+    const result = await postJson('/users/me/complete-quiz/', body);
+    // The quiz list now reflects the "attempted" flag — drop the cached copy so
+    // the Quizzes tab revalidates instead of showing a stale "Take" button.
+    invalidateCachePrefix('/ai/quizzes');
+    return result;
+  } catch (err) {
+    // Offline (or a dropped connection): the score was graded locally, so queue
+    // the attempt and replay it on reconnect instead of silently discarding it.
+    // The reward is unknowable until the server scores it, so return a neutral
+    // result rather than pretending the run earned nothing.
+    if (isNetworkError(err)) {
+      try {
+        savePendingQuizResult(body);
+        requestSyncFlush();
+      } catch {}
+      return { xp: 0, level: 0, leveled_up: false, perfect: false, badges: [] };
+    }
+    throw err;
+  }
 }
 
 export async function completeLesson(

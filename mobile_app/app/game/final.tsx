@@ -4,12 +4,13 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import { getCurrentUser, getToken } from '@/services/authService';
 import { leaveGameRoom } from '@/services/gameRoomService';
-import { getLanFinalStandings, getLanTeams, lanGame, resetLanState } from '@/services/lanSession';
+import { getLanFinalStandings, getLanTeams, getLanClient, getLanHostServer, lanGame, resetLanState } from '@/services/lanSession';
+import type { LanMessage } from '@/services/lanProtocol';
 import { API_BASE_URL } from '@/config/api';
 import TeamResultCard from '@/components/game/TeamResultCard';
 import SessionSummary, { type TeamNameLookup } from '@/components/game/SessionSummary';
 import PlayerInsights from '@/components/game/PlayerInsights';
-import { getOfflineGameSession } from '@/services/offlineGameService';
+import { createOfflineGame, getCachedQuiz, getOfflineGameMeta, getOfflineGameSession } from '@/services/offlineGameService';
 import {
   buildBreakdown,
   buildPlayerInsights,
@@ -123,29 +124,20 @@ export default function FinalScreen() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      // Back to the lobby with the SAME code -- that is the whole point of a
-      // rematch, so the students never have to re-enter anything.
-      //
-      // A team game still needs the real /game/lobby (team boxes, invite code,
-      // quiz picker). A classic game has none of that: the Play tab already
-      // shows the roster and its START reuses the room code, so the host lands
-      // there instead. `rematchHost=1` keeps START on screen for them.
-      if (teamMode) {
-        // `isHost` is passed explicitly because the button is host-only, so the
-        // lobby can be relied on for its host controls immediately rather than
-        // after it re-derives that from Firestore.
-        router.replace(`/game/lobby?roomCode=${roomCode}&isHost=true`);
-      } else {
-        router.replace({
-          pathname: '/(tabs)/games',
-          params: { rematchRoom: roomCode, rematchHost: '1' },
-        } as any);
-      }
+      // Back to the Play tab with the SAME code -- that is the whole point of a
+      // rematch, so the students never have to re-enter anything. Both classic
+      // and team games land here now: the host re-picks the mode on the Play tab
+      // (its START reuses this room code) and, for a team game, only then does
+      // the lobby open again. `rematchHost=1` keeps START on screen for them.
+      router.replace({
+        pathname: '/(tabs)/games',
+        params: { rematchRoom: roomCode, rematchHost: '1' },
+      } as any);
     } catch (e: any) {
       Alert.alert('Rematch failed', e?.message ?? 'Could not start the rematch');
       setRematching(false);
     }
-  }, [roomCode, router, teamMode]);
+  }, [roomCode, router]);
 
   /**
    * Leave the room and return to the Play tab.
@@ -166,6 +158,89 @@ export default function FinalScreen() {
     if (isLan) resetLanState();
     router.replace('/(tabs)/games');
   }, [isOffline, isLan, roomCode, myUserId, router]);
+
+  // A LAN game has no room document, so "am I the host" is decided by whether
+  // this device owns the LAN server. Only the host gets the rematch control.
+  const isLanHost = isLan && getLanHostServer() != null;
+  const lanLobbyNavRef = useRef(false);
+
+  /**
+   * Send every LAN device back to the Play tab for a rematch -- the LAN twin of
+   * the online group rematch, which also lands everyone on the Play tab so the
+   * host re-picks the mode and only then reopens the lobby.
+   *
+   * The host server and every client socket are deliberately left running: it is
+   * the same room, so joiners keep their seats and connections. The finished
+   * run's quiz is cleared only so the Play tab's focus effect does not mistake
+   * the still-live session for an abandoned one and tear it down.
+   */
+  const goToLanPlayTab = useCallback(() => {
+    if (lanLobbyNavRef.current) return;
+    lanLobbyNavRef.current = true;
+    lanGame.quiz = null;
+    lanGame.order = [];
+    router.replace('/(tabs)/games');
+  }, [router]);
+
+  /**
+   * Host-only LAN rematch: reset the still-running server in place and send the
+   * room back to the Play tab. The server is kept alive on game end precisely so
+   * this can happen without re-binding LAN_PORT or dropping the players.
+   */
+  const playAgainLan = useCallback(() => {
+    getLanHostServer()?.resetForRematch();
+    goToLanPlayTab();
+  }, [goToLanPlayTab]);
+
+  /**
+   * Offline-solo rematch. The finished run's quiz is re-read from the local
+   * cache and handed to a fresh offline engine, so the player can go again
+   * without leaving the results screen.
+   */
+  const playAgainOffline = useCallback(() => {
+    const meta = getOfflineGameMeta(Number(params.offlineId ?? 0));
+    if (!meta || meta.quizId == null) {
+      Alert.alert('Play Again', 'This saved quiz is no longer on this device.');
+      return;
+    }
+    const quiz = getCachedQuiz(meta.quizId);
+    if (!quiz) {
+      Alert.alert('Play Again', 'This quiz is no longer saved on this device. Reconnect and open it once to play again.');
+      return;
+    }
+    try {
+      createOfflineGame(quiz, meta.timePerQuestion);
+    } catch (e: any) {
+      Alert.alert("Can't Play Again", e?.message ?? 'Could not start another round.');
+      return;
+    }
+    router.replace({
+      pathname: '/game/question',
+      params: {
+        offline: 'true',
+        quizTitle: quiz.title || meta.quizTitle,
+        roomCode: 'OFFLINE',
+        isHost: 'true',
+      },
+    } as any);
+  }, [params.offlineId, router]);
+
+  // Non-host LAN devices watch for the host's rematch broadcast while parked on
+  // the results screen, then follow back to the Play tab (the online group
+  // rematch behaves the same way). Guarded so cleanup cannot clobber a handler
+  // another screen installs after we navigate away.
+  useEffect(() => {
+    if (!isLan) return;
+    const client = getLanClient();
+    if (!client) return;
+    const handler = (msg: LanMessage) => {
+      if (msg.t === 'rematch') goToLanPlayTab();
+    };
+    client.onEvent = handler;
+    return () => {
+      if (client.onEvent === handler) client.onEvent = () => {};
+    };
+  }, [isLan, goToLanPlayTab]);
 
   useEffect(() => {
     if (isOffline || isLan) return;
@@ -704,8 +779,11 @@ const breakdown = useMemo(() => buildBreakdown({
         <Text style={styles.btnText}>Back to Game Center</Text>
       </TouchableOpacity>
 
-      {/* Only the host, and only for a real room -- offline and LAN sessions have
-          no server-side room to reset. Everyone else just reads results. */}
+      {/* Play Again, per mode:
+          · online classic/team — host-only, resets the server room
+          · offline solo        — re-runs the cached quiz locally
+          · LAN                 — host-only, resets the live server + reunites
+                                  everyone in the same room's lobby */}
       {isHost && !isOffline && !isLan && (
         <TouchableOpacity
           style={[styles.btn, styles.rematchBtn, rematching && { opacity: 0.6 }]}
@@ -715,6 +793,24 @@ const breakdown = useMemo(() => buildBreakdown({
           {rematching
             ? <ActivityIndicator color="#fff" />
             : <Text style={styles.btnText}>Play Again</Text>}
+        </TouchableOpacity>
+      )}
+
+      {isOffline && (
+        <TouchableOpacity
+          style={[styles.btn, styles.rematchBtn]}
+          onPress={playAgainOffline}
+        >
+          <Text style={styles.btnText}>Play Again</Text>
+        </TouchableOpacity>
+      )}
+
+      {isLanHost && (
+        <TouchableOpacity
+          style={[styles.btn, styles.rematchBtn]}
+          onPress={playAgainLan}
+        >
+          <Text style={styles.btnText}>Play Again</Text>
         </TouchableOpacity>
       )}
     </ScrollView>

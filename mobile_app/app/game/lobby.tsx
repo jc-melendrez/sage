@@ -416,6 +416,11 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
         const list = msg.teams ?? [];
         setLanTeams(list);
         setTeams(list.map(asLobbyTeam));
+      } else if (msg.t === 'mode') {
+        // The host flipped classic <-> group while the lobby is up. Rare, but if
+        // it happens the team columns must follow instead of showing a stale
+        // mode.
+        setTeamMode(!!msg.teamMode);
       } else if (msg.t === 'quiz') {
         lanGame.quiz = msg.quiz;
         lanGame.order = msg.order ?? lanGame.order;

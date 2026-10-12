@@ -441,6 +441,13 @@ export default function QuestionScreen() {
     /** The team disagreed but still got an answer: a pure 1-1 was drawn at
      * random between the two picks (the server's own rule). */
     split?: boolean;
+    /** The vote tied with no majority, so a designated leader must pick the
+     * final answer. Nothing is scored until they do. */
+    needsLeader?: boolean;
+    /** The member whose turn it is to break the tie. */
+    leaderId?: string;
+    /** The tied answers the leader may choose between. */
+    candidates?: string[];
     /**
      * This is the client's own guess at the verdict, shown the instant the clock
      * hits zero -- not the server's word. It flips the card immediately instead
@@ -514,13 +521,13 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
    * response, then kept live from the team's published `pickCount`. */
   const [teamPickCount, setTeamPickCount] = useState<{ picked: number; expected: number } | null>(null);
   /**
-   * Ready-up state for the current shared question. Team mode no longer
-   * auto-advances after the reveal: every member marks the question read, and
-   * the room moves on only once everyone has (the host may force it). `ready`
-   * is the room-wide count the server last reported, null before any attempt.
+   * An open tie-break for the current question: which leader must decide, and
+   * the tied answers they may choose between. Set from the resolve response or
+   * the shared reveal; cleared when the question resolves for real.
    */
-  const [readyState, setReadyState] = useState<{ ready: number; expected: number } | null>(null);
-  const [iAmReady, setIAmReady] = useState(false);
+  const [teamDecision, setTeamDecision] = useState<{ leaderId: string; candidates: string[] } | null>(null);
+  /** The leader's highlighted candidate, before they confirm it. */
+  const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
   /** Host's epoch ms for the current LAN question; the shared clock's origin. */
   const [lanQuestionAt, setLanQuestionAt] = useState<number | null>(null);
   /** This member's own answer log, so "did I agree with my team?" can be shown
@@ -558,15 +565,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
    * dead code. A ref is always current.
    */
   const answeredRef = useRef(false);
-  // A spectator is a player in a team game who has no team assigned. The server
-  // rejects their POST /game/answer/ with 403 and ignores them in settlement, so
-  // the UI must not offer them an answer path in the first place.
-  //
-  // Declared up here rather than beside `myTeam` because the auto-advance effect
-  // needs it in its dependency array, which is evaluated during render. LAN team
-  // play has no Firestore team id, so it is never a spectator on that ground.
-  const spectator = isSpectating || (!!teamMode && !isLan && !myTeamId);
-
   /**
    * The order this screen walks through.
    *
@@ -619,6 +617,21 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // Bumped on a `roster` broadcast so the team-quorum strip recomputes against
   // the live roster (the roster itself is kept in a ref for the event closure).
   const [lanRosterTick, setLanRosterTick] = useState(0);
+  // A spectator is a player in a team game who has no team assigned. Online the
+  // server rejects their POST /game/answer/ with 403 and ignores them when
+  // settling, so the UI must not offer them an answer path in the first place.
+  // LAN group play has no Firestore team id -- it is derived from the host's
+  // roster broadcasts -- so a LAN member with no team is a spectator too, but
+  // only once the roster/teams have actually arrived, or a legitimate member
+  // would flash as a spectator during the first frames.
+  //
+  // Declared here (not beside `myTeam`) because it reads `lanTeamList` and
+  // `lanPlayersRef`, and must still sit in the auto-advance effect's dependency
+  // array, which is evaluated during render.
+  const lanRosterReady = isLan && teamMode && lanTeamList.length > 0 && lanPlayersRef.current.length > 0;
+  const spectator = isSpectating
+    || (!!teamMode && !isLan && !myTeamId)
+    || (lanRosterReady && !myTeamId);
   const lanPrevStandingsRef = useRef<Record<string, { rank: number; score: number }>>({});
   const lanSubmittedRef = useRef(false);
   // Row id of the saved offline/LAN session, handed to the results screen so it
@@ -830,13 +843,22 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         pickers: reveal.pickers,
         voided: reveal.void,
         split: reveal.split,
+        needsLeader: !!reveal.needsLeader,
+        leaderId: reveal.leaderId,
+        candidates: reveal.candidates,
         provisional: false,
       };
       if (prev && sameSnapshot(prev, next)) return prev;
       return next;
     });
+    // A tie names a leader and waits: mirror that so the leader gets the prompt
+    // and every teammate sees who is deciding. A real reveal clears it.
+    setTeamDecision(reveal.needsLeader
+      ? { leaderId: String(reveal.leaderId ?? ''), candidates: reveal.candidates ?? [] }
+      : null);
     const game = getCurrentOfflineGame();
-    if (game) {
+    // Don't record a tie as a finished row: the question has not resolved yet.
+    if (game && !reveal.needsLeader) {
       game.applyTeamReveal(reveal.index, {
         answer: reveal.answer,
         correctAnswer: reveal.correctAnswer,
@@ -1010,10 +1032,10 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       setHintedChoices([]);
               setShowRoulette(false);
               setRouletteTarget(null);
-              setIAmReady(false);
-              setReadyState(null);
               setLanPicks({});
               setLanReactions([]);
+              setTeamDecision(null);
+              setDecisionChoice(null);
             } else if (msg.t === 'reaction') {
               const now = Date.now();
               setLanReactions(prev => [
@@ -1027,8 +1049,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   at: msg.at,
                 },
               ].slice(-12));
-            } else if (msg.t === 'ready-count') {
-              setReadyState({ ready: msg.ready, expected: msg.expected });
             } else if (msg.t === 'picks') {
               setLanPicks(msg.picks ?? {});
             } else if (msg.t === 'team-powerups') {
@@ -1069,6 +1089,17 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               const myTid = myLanTeamId();
               const reveal = myTid ? msg.reveals?.[myTid] : null;
               if (reveal) applyLanTeamReveal(reveal);
+            } else if (msg.t === 'team-decision') {
+              // The host tallied a tie: the named leader gets the tie-break
+              // prompt, everyone else just waits for the reveal.
+              const myTid = myLanTeamId();
+              if (!myTid || String(msg.teamId) !== myTid) return;
+              if (msg.index !== lanQuestionIndexRef.current) return;
+              setTeamDecision({
+                leaderId: String(msg.leaderId ?? ''),
+                candidates: (msg.candidates ?? []) as string[],
+              });
+              setDecisionChoice(null);
             } else if (msg.t === 'roster') {
               lanPlayersRef.current = msg.players ?? [];
               setLanRosterTick(t => t + 1);
@@ -1394,8 +1425,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     setPendingAnswer(null);
     setResult(null);
     setTeamPickCount({ picked: 0, expected: 0 });
-    setReadyState(null);
-    setIAmReady(false);
     setBoxChars([]);
     setIsFrozen(false);
     setActivePowerups({ hint: false, doublePoints: false, shield: false });
@@ -1866,6 +1895,17 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         : [])
     : hintedChoices;
 
+  /* ── team mode: a new shared question clears the old tie-break ──
+   *
+   * Declared before the reveal listener so it resets first: the reveal for the
+   * new index (if any) then wins on the same commit. Without this a tie that
+   * was pending on q3 kept its prompt alive into q4.
+   */
+  useEffect(() => {
+    setTeamDecision(null);
+    setDecisionChoice(null);
+  }, [teamIndex]);
+
   /* ── team mode: the shared quorum count and the team's reveal ──
    *
    * Two things arrive here that a member cannot get from their own pick
@@ -1941,6 +1981,14 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         pickers: take(prev?.pickers, reveal.pickers),
         voided: take(prev?.voided, reveal.void),
         split: take(prev?.split, reveal.split),
+        // The reveal is authoritative for the tie state in BOTH directions: a
+        // real (non-provisional) prev that was a tie must flip to "decided"
+        // when the leader's reveal lands. `take`, by contrast, keeps `mine`
+        // whenever it is truthy -- so a stale `needsLeader: true` would outlive
+        // the decision and keep the tie panel up forever.
+        needsLeader: !!reveal.needsLeader,
+        leaderId: reveal.leaderId,
+        candidates: reveal.candidates,
         provisional: false,
       };
       // Returning the SAME object when nothing changed is the point of this
@@ -1950,6 +1998,20 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       // two and buzz again. Compare before adopting.
       if (prev && sameSnapshot(prev, next)) return prev;
       return next;
+    });
+
+    // Mirror the tie-break on/off in its own state, so the choice UI and the
+    // "who is deciding" copy are driven by one source for every member.
+    setTeamDecision(prev => {
+      if (!reveal.needsLeader) return prev == null ? prev : null;
+      const leaderId = String(reveal.leaderId ?? '');
+      const candidates = reveal.candidates ?? [];
+      if (prev && prev.leaderId === leaderId
+          && prev.candidates.length === candidates.length
+          && prev.candidates.every((c, i) => c === candidates[i])) {
+        return prev;
+      }
+      return { leaderId, candidates };
     });
 
     // The team earned a streak reward on this question. The server publishes it
@@ -2013,7 +2075,11 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         bestStreak: 0,
         powerups,
       };
-  const hasPoolPowerups = pool.freeze > 0 || pool.hint > 0 || pool.doublePoints > 0 || pool.shield > 0;
+  // Freeze is solo-only, so a team pool holding only freeze would render an
+  // empty bar (the freeze button is hidden in team mode). Ignore it there.
+  const hasPoolPowerups = teamMode
+    ? pool.hint > 0 || pool.doublePoints > 0 || pool.shield > 0
+    : pool.freeze > 0 || pool.hint > 0 || pool.doublePoints > 0 || pool.shield > 0;
 
   // In team mode the pool belongs to the team and the server spends from it
   // inside the answer transaction (via the useHint/useDoublePoints/useShield
@@ -2319,6 +2385,32 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         return;
       }
 
+      if (data.needsLeader) {
+        // The vote tied: nobody scores yet. Show the neutral "a leader is
+        // deciding" card and, on the leader's own device, the tie-break prompt.
+        setTeamPickCount(null);
+        const leaderId = String(data.leaderId ?? '');
+        const candidates = (data.candidates ?? []) as string[];
+        setTeamDecision({ leaderId, candidates });
+        setResult({
+          correct: false,
+          correctAnswer: data.correctAnswer ?? '',
+          points: 0,
+          speedBonus: 0,
+          picked: answer,
+          teamAnswer: '',
+          agreed: data.agreed ?? 0,
+          iAgreed: null,
+          pickers: data.pickers ?? 0,
+          voided: false,
+          split: true,
+          needsLeader: true,
+          leaderId,
+          candidates,
+        });
+        return;
+      }
+
       setTeamPickCount(null);
       setResult({
         correct: !!data.correct,
@@ -2369,6 +2461,62 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   teamPickRef.current = (answer, force) => { void submitTeamPick(answer, force); };
 
   /**
+   * Commit a tied team vote as the designated leader.
+   *
+   * Online this posts to `/game/teams/decide/`, which verifies this caller
+   * really is the leader the tie named before it scores. LAN sends
+   * `leader-answer` and the host does the same check. The neutral card stays up
+   * until the real reveal lands, so there is no flash of a wrong verdict.
+   */
+  const submitTeamDecision = async (answer: string) => {
+    if (!answer) return;
+    setError(null);
+    setDecisionChoice(answer);
+    if (isLan) {
+      getLanClient()?.send({
+        t: 'leader-answer',
+        index: lanQuestionIndexRef.current,
+        answer,
+      });
+      return;
+    }
+    try {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/game/teams/decide/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ roomCode, questionIndex: teamIndex, answer }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.error || 'Could not submit the team decision.');
+        setDecisionChoice(null);
+        return;
+      }
+      if (data.needsLeader !== true) {
+        setTeamDecision(null);
+        // The reveal listener overwrites this, but show the outcome at once.
+        setResult({
+          correct: !!data.correct,
+          correctAnswer: data.correctAnswer ?? '',
+          points: data.pointsAwarded ?? 0,
+          speedBonus: data.speedBonus ?? 0,
+          picked: answer,
+          teamAnswer: data.answer ?? '',
+          agreed: data.agreed ?? 0,
+          iAgreed: answer === (data.answer ?? ''),
+          pickers: data.pickers ?? 0,
+          voided: !!data.void,
+          split: !!data.split,
+        });
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Could not submit the team decision.');
+      setDecisionChoice(null);
+    }
+  };
+
+  /**
    * Move the room on to the next shared question.
    *
    * The room owns the index, so this is a request rather than a local
@@ -2401,10 +2549,11 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         );
         return false;
       }
-      // Ready-up gate: the room is open, but not every member has marked the
-      // question read (and the caller is not the host, who may force it).
-      if (res.status === 409 && typeof data.ready === 'number') {
-        setReadyState({ ready: data.ready, expected: data.expected ?? 0 });
+      // A non-leader tapping Next when the button somehow stayed live: the
+      // server refuses it, and the message explains why rather than leaving the
+      // tap looking broken.
+      if (res.status === 403) {
+        setError(data.error || 'Only the team leader can start the next question.');
         return false;
       }
       // Everything else really is fine: 200 moved the room, and the remaining
@@ -2414,37 +2563,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     } catch {
       return false;
     }
-  };
-
-  /**
-   * Mark this member ready for the current shared question, then try to advance.
-   *
-   * The last member to ready up is the one whose advance succeeds -- the server
-   * lets any member advance once everyone is ready -- so a room moves the moment
-   * its final member taps Ready, with no host round-trip. The host instead
-   * force-advances directly, which is the escape hatch for a member who has gone
-   * quiet or disconnected.
-   */
-  const handleTeamReady = async () => {
-    if (iAmReady) return;
-    setIAmReady(true);
-    try {
-      const token = await getToken();
-      const res = await fetch(`${API_BASE_URL}/game/teams/ready/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ roomCode, questionIndex: teamIndex }),
-      });
-      if (res.ok) {
-        const data = await res.json().catch(() => ({}));
-        if (typeof data.ready === 'number') {
-          setReadyState({ ready: data.ready, expected: data.expected ?? 0 });
-        }
-      }
-    } catch {
-      // Non-fatal: the count simply stays as it was. The host can force.
-    }
-    await advanceTeamQuestion(isRoomOwner);
   };
 
   /**
@@ -3006,23 +3124,22 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         await finishTeamGame();
         return;
       }
-      // The room owns the index, and the ready-up gate means the room only moves
-      // once every member has marked the question read. `handleTeamReady` records
-      // this member's readiness and then attempts the advance (the last member to
-      // tap is the one whose call succeeds); the host force-advances instead.
-      await handleTeamReady();
+      // The room owns the index. Only the host or a team leader may move it, and
+      // their Next advances the whole room immediately (a force past any team
+      // still on the question). Everyone else's button is disabled; a stray tap
+      // gets an explanatory 403 from the server.
+      await advanceTeamQuestion(isRoomOwner || isTeamLeader);
       return;
     }
     if (isLan) {
-      // LAN is host-driven. The host tap advances the shared clock straight
-      // away; a player tap only marks the question read, and the host moves the
-      // room once every connected player has (see LanHostServer.markReady).
+      // LAN is host-driven, but a team's leader may advance too. The host moves
+      // its own room directly; a leader sends the `advance` message, which the
+      // host validates against the team's leader before moving the shared clock.
       const host = getLanHostServer();
       if (host) {
         host.advanceQuestion();
-      } else if (!iAmReady) {
-        setIAmReady(true);
-        getLanClient()?.send({ t: 'ready', playerId: getLanPlayerId() || '', index: currentIndex });
+      } else if (isLanTeamLeader) {
+        getLanClient()?.send({ t: 'advance', playerId: getLanPlayerId() || '', index: currentIndex });
       }
       return;
     }
@@ -3157,6 +3274,14 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // it never routes into the online team engine (shared question + voting).
   const lanIsHost = isLan && getLanHostServer() != null;
   const lanMyPlayer = isLan ? lanPlayersRef.current.find(isMyLanPlayer) : undefined;
+  // The LAN team leader is the first connected member of the team in join order
+  // -- there is no stored seat here, so it is derived from the roster every
+  // render. A leader (or the host) is the only member who may advance the room.
+  const isLanTeamLeader = isLan && !!lanMyPlayer?.teamId && (() => {
+    const tid = String(lanMyPlayer!.teamId);
+    const first = lanPlayersRef.current.find(p => p.connected && String(p.teamId ?? '') === tid);
+    return !!first && first.id === lanMyPlayer!.id;
+  })();
   const lanTeam = isLan
     ? (lanTeamList.find(t => t.id === lanMyPlayer?.teamId) ?? null)
     : null;
@@ -3178,16 +3303,36 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // they are done. Saying so on the button stops a member from tapping "Finish"
   // and expecting the game to end.
   const isRoomOwner = roomOwnerId != null && String(roomOwnerId) === String(userId);
+  // The team's leader -- or, for a team that predates the stored seat, the
+  // roster's first member, matching the server's `team_leader_id` fallback.
+  // Only the host or the leader may start the next question.
+  const isTeamLeader = teamMode && !!myTeam && (() => {
+    const me = myDocIdRef.current;
+    if (!me) return false;
+    if (myTeam.leaderId != null && String(myTeam.leaderId) !== '') {
+      return String(myTeam.leaderId) === me;
+    }
+    const first = myTeam.memberIds?.[0];
+    return first != null && String(first) === me;
+  })();
+  // A tie on the current question is unresolved until a leader picks: nobody
+  // may advance the room, and the named leader gets the tie-break prompt.
+  const tiePending = !!teamDecision;
+  const myIdentity = isLan ? (getLanPlayerId() || '') : String(userId ?? '');
+  const isTieLeader = tiePending && myIdentity !== '' && String(teamDecision!.leaderId) === myIdentity;
+  // The tie leader has committed: hide the prompt while the real reveal lands,
+  // rather than leaving a live Confirm over an already-sent decision.
+  const tieResolvedForUi = isTieLeader && decisionChoice != null;
+  const canAdvanceTeam = (isRoomOwner || isTeamLeader) && !tiePending;
   const nextLabel = teamMode
     ? (isLastQuestion
         ? (isRoomOwner ? 'End game 🏁' : 'Done — waiting for host')
-        // Ready-up gate: the host force-advances; a member marks the question
-        // read and the room moves when the last member does.
-        : (isRoomOwner ? 'Start next →' : (iAmReady ? 'Waiting…' : 'Ready ✓')))
+        // Only the host or the team leader can advance; everyone else waits.
+        : (canAdvanceTeam ? 'Start next →' : (tiePending ? 'Tie pending…' : 'Waiting for leader…')))
     : isLan
       ? (isLastQuestion
           ? (lanIsHost ? 'End game 🏁' : 'Done — waiting for host')
-          : (lanIsHost ? 'Start next →' : (iAmReady ? 'Waiting…' : 'Ready ✓')))
+          : (lanIsHost || isLanTeamLeader ? 'Start next →' : 'Waiting for leader…'))
       : (isLastQuestion ? 'Finish 🏁' : 'Next →');
 
   /* ═══════════════════════════════════════════════════════════
@@ -3494,7 +3639,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           <RNAnimated.View
             style={[
               styles.resultStrip,
-              result.correct ? styles.resultStripCorrect : styles.resultStripWrong,
+              !result.needsLeader && (result.correct ? styles.resultStripCorrect : styles.resultStripWrong),
               {
                 opacity: resultFlipAnim,
                 transform: [{ translateY: resultFlipAnim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }],
@@ -3504,19 +3649,26 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             <View style={styles.resultStripMain}>
               <Text style={[styles.resultStripLabel, !result.correct && styles.resultStripLabelWrong]}>
                 {teamMode
-                  ? (result.voided
-                      ? "\U0001f91d Split vote \u2014 no majority, so it scored nothing"
-                      : result.correct
-                        ? `✅ Team correct!`
-                        : result.split
-                          ? `✗ Team answered: ${result.teamAnswer || "\u2014"} (split \u2014 one pick drawn at random)`
-                          : `✗ Team answered: ${result.teamAnswer || "\u2014"}`)
+                  ? (result.needsLeader
+                      ? (isTieLeader
+                          ? "\U0001f91d Tie \u2014 pick your team's answer"
+                          : "\U0001f91d Tie \u2014 your team leader is deciding")
+                      : result.voided
+                        ? "\U0001f91d Split vote \u2014 no majority, so it scored nothing"
+                        : result.correct
+                          ? `✅ Team correct!`
+                          : result.split
+                            ? `✗ Team answered: ${result.teamAnswer || "\u2014"} (split \u2014 one pick drawn at random)`
+                            : `✗ Team answered: ${result.teamAnswer || "\u2014"}`)
                   : (result.correct ? `✅ Correct!` : `✗ Incorrect`)}
               </Text>
               {/* Speed shown as its own line: a single "+840" hides the fact
                   that part of it was earned by being quick, which is the
                   reward the timer is actually asking for. */}
-              {result.correct ? (
+              {result.needsLeader ? (
+                // The verdict is not final yet, so do not leak the answer.
+                <Text style={styles.resultAnswerLine}>Waiting on the tie-break…</Text>
+              ) : result.correct ? (
                 <Text style={[styles.resultStripPts, styles.ptsGreen]}>
                   +{result.points}
                   {(result.speedBonus ?? 0) > 0 ? `  (${result.speedBonus} speed)` : ''}
@@ -3536,7 +3688,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                 of it. Sits outside the label row so the strip stays two clean
                 lines. Never who disagreed -- only this member's own position,
                 which they already know. */}
-            {teamMode && !result.voided && !!result.teamAnswer && (
+            {teamMode && !result.voided && !result.needsLeader && !!result.teamAnswer && (
               <Text style={styles.teamAgreementLine}>
                 Team picked: {result.teamAnswer}
                 {result.split
@@ -3549,18 +3701,18 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                 flip the member whose pick was drawn would otherwise be told they
                 agreed even though nobody agreed with anybody; a sole picker
                 (their teammates timed out) has nobody to have agreed with. */}
-            {teamMode && !result.voided && result.iAgreed === true && result.split && (
+            {teamMode && !result.voided && !result.needsLeader && result.iAgreed === true && result.split && (
               <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
                 The team split \u2014 your pick was drawn
               </Text>
             )}
-            {teamMode && !result.voided && result.iAgreed === true && !result.split
+            {teamMode && !result.voided && !result.needsLeader && result.iAgreed === true && !result.split
               && (result.pickers ?? 0) >= 2 && (
               <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
                 You agreed with your team
               </Text>
             )}
-            {teamMode && !result.voided && result.iAgreed === true && !result.split
+            {teamMode && !result.voided && !result.needsLeader && result.iAgreed === true && !result.split
               && (result.pickers ?? 0) < 2 && (
               <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
                 You were the only one who answered
@@ -3573,17 +3725,64 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                 and there was no way to tell which had happened. Their own pick is
                 now shown either way, so the disagreement is at least legible.
                 A void (null) is handled by the split-vote line above. */}
-            {teamMode && !result.voided && result.iAgreed === false && (
+            {teamMode && !result.voided && !result.needsLeader && result.iAgreed === false && (
               <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
                 {result.picked
                   ? `You picked ${result.picked} \u2014 the team went with ${result.teamAnswer}`
                   : 'You did not pick before time ran out'}
               </Text>
             )}
-            {!result.correct && question.explanation ? (
+            {!result.correct && !result.needsLeader && question.explanation ? (
               <Text style={styles.resultExplanation}>{question.explanation}</Text>
             ) : null}
           </RNAnimated.View>
+        )}
+
+        {/* ── TEAM TIE-BREAK ──
+            A tied vote hands the decision to one member. They pick among the
+            answers teammates actually chose; everyone else watches and waits.
+            Nothing is scored until the choice lands. */}
+        {teamMode && !!teamDecision && !tieResolvedForUi && (
+          <View style={styles.tieBreakCard}>
+            {isTieLeader ? (
+              <>
+                <Text style={styles.tieBreakTitle}>🤝 It&apos;s a tie — you decide</Text>
+                <Text style={styles.tieBreakSub}>Pick your team&apos;s final answer.</Text>
+                <View style={styles.tieBreakChoices}>
+                  {teamDecision.candidates.map(c => {
+                    const on = decisionChoice === c;
+                    return (
+                      <TouchableOpacity
+                        key={c}
+                        style={[styles.tieBreakChoice, on && styles.tieBreakChoiceOn]}
+                        onPress={() => setDecisionChoice(c)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={[styles.tieBreakChoiceText, on && styles.tieBreakChoiceTextOn]}>
+                          {c}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <TouchableOpacity
+                  style={[styles.tieBreakConfirm, !decisionChoice && styles.tieBreakConfirmDisabled]}
+                  onPress={() => { if (decisionChoice) void submitTeamDecision(decisionChoice); }}
+                  disabled={!decisionChoice}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.tieBreakConfirmText}>Confirm</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <View style={styles.tieBreakWaiting}>
+                <ActivityIndicator size="small" color={COLORS.purpleVibrant} />
+                <Text style={styles.tieBreakWaitingText}>
+                  Your team leader is choosing the final answer…
+                </Text>
+              </View>
+            )}
+          </View>
         )}
 
         {/* ── SPECTATOR TEAM BOARD ──
@@ -3635,6 +3834,15 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   ]}
                   onPress={() => {
                     if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    // Team play confirms before it commits: a tap only
+                    // highlights the option (and arms the timeout's forced pick
+                    // via `lockPick`), and the Confirm button below is what
+                    // actually submits. A mistap on a shared answer used to be
+                    // locked in for the whole team with no way back.
+                    if (teamMode && !answered) {
+                      lockPick(choice);
+                      return;
+                    }
                     handleAnswer(choice);
                   }}
                   // `answered`, not `selected`: after a timeout `selected` is '' and every
@@ -3688,6 +3896,21 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                 </TouchableOpacity>
               );
             })}
+            {/* Team play only: a shared answer is confirmed, not tapped.
+                A plain solo question submits on tap as it always has. */}
+            {teamMode && !answered && !result && (
+              <TouchableOpacity
+                style={[styles.teamConfirmBtn, !selected && styles.teamConfirmBtnDisabled]}
+                onPress={() => {
+                  if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  handleAnswer(selected ?? '');
+                }}
+                disabled={!selected}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.teamConfirmText}>Confirm lock-in</Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
 
@@ -3763,8 +3986,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               ]}
               onPress={() => { if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; } handleNext(); }}
               disabled={
-                (teamMode && !isRoomOwner && !isLastQuestion && iAmReady)
-                || (isLan && !lanIsHost && !isLastQuestion && iAmReady)
+                !!tiePending
+                || (teamMode && !isLan && !isLastQuestion && !canAdvanceTeam)
+                || (isLan && !isLastQuestion && !lanIsHost && !isLanTeamLeader)
               }
               activeOpacity={0.8}
             >
@@ -3778,13 +4002,15 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                 <Text style={styles.nextBtnCountdown}>{Math.ceil(autoCountdown)}s</Text>
               )}
             </TouchableOpacity>
-            {/* Ready-up progress. The count comes from the server's own roster,
-                so it is accurate even for a member who has not readied yet. */}
-            {(teamMode || (isLan && !lanIsHost)) && !isLastQuestion && (
+            {/* The Ready gate is gone: only the host or a team leader moves the
+                room. Explain the inert button to a member who is waiting. */}
+            {((teamMode && !isLan && !isLastQuestion && !canAdvanceTeam)
+              || (isLan && !isLastQuestion && !lanIsHost && !isLanTeamLeader)
+              || (tiePending && !isTieLeader)) && (
               <Text style={styles.readyStatus}>
-                {readyState
-                  ? `${readyState.ready} of ${readyState.expected} ready`
-                  : (iAmReady ? 'Waiting for the others…' : 'Tap Ready when you have read the answer')}
+                {tiePending
+                  ? (isTieLeader ? 'Pick your team\u2019s answer above' : 'Waiting for your team leader to break the tie\u2026')
+                  : 'Waiting for your team leader\u2026'}
               </Text>
             )}
           </RNAnimated.View>
@@ -4539,6 +4765,57 @@ const styles = StyleSheet.create({
   },
   submitBtnDisabled: { opacity: 0.4 },
   submitBtnText: { color: '#fff', fontSize: 15, fontFamily: FONTS.extraBold },
+
+  /* ── team confirm lock-in ── */
+  teamConfirmBtn: {
+    marginTop: 14,
+    backgroundColor: COLORS.accentBright,
+    borderRadius: 14,
+    paddingVertical: 15,
+    alignItems: 'center',
+  },
+  teamConfirmBtnDisabled: { opacity: 0.4 },
+  teamConfirmText: { color: COLORS.bg, fontSize: 15, fontFamily: FONTS.extraBold, letterSpacing: 0.5 },
+
+  /* ── team tie-break ── */
+  tieBreakCard: {
+    marginTop: 14,
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: 'rgba(127,119,221,0.35)',
+    padding: 16,
+  },
+  tieBreakTitle: { color: COLORS.textPrimary, fontSize: 15, fontFamily: FONTS.extraBold },
+  tieBreakSub: {
+    color: COLORS.textMuted,
+    fontSize: 12.5,
+    fontFamily: FONTS.medium,
+    marginTop: 4,
+  },
+  tieBreakChoices: { marginTop: 12, gap: 8 },
+  tieBreakChoice: {
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: 'rgba(127,119,221,0.25)',
+    backgroundColor: COLORS.bg,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  tieBreakChoiceOn: { borderColor: COLORS.accentBright, backgroundColor: 'rgba(127,119,221,0.18)' },
+  tieBreakChoiceText: { color: COLORS.textPrimary, fontSize: 14.5, fontFamily: FONTS.semiBold },
+  tieBreakChoiceTextOn: { color: COLORS.accentBright, fontFamily: FONTS.extraBold },
+  tieBreakConfirm: {
+    marginTop: 14,
+    backgroundColor: COLORS.accentBright,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  tieBreakConfirmDisabled: { opacity: 0.4 },
+  tieBreakConfirmText: { color: COLORS.bg, fontSize: 15, fontFamily: FONTS.extraBold, letterSpacing: 0.5 },
+  tieBreakWaiting: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  tieBreakWaitingText: { color: COLORS.textMuted, fontSize: 13, fontFamily: FONTS.medium, flex: 1 },
 
   /* ── next / finish ── */
   nextWrap: { marginTop: 20 },

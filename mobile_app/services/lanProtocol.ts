@@ -95,6 +95,18 @@ export interface LanReveal {
   expected: number;
   points: number;
   speedBonus: number;
+  /**
+   * The team's vote tied with no majority, so a designated leader must pick the
+   * final answer before this question can score. While true, `leadId` names the
+   * deciding member and `candidates` lists the tied answers they may choose from;
+   * `answer`/`correct`/`points` are not final until a later reveal has
+   * `needsLeader` false (or absent).
+   */
+  needsLeader?: boolean;
+  /** The member who breaks a tie (`needsLeader`). */
+  leaderId?: string;
+  /** The tied answers the leader may choose between (`needsLeader`). */
+  candidates?: string[];
 }
 
 export interface LanResultPayload {
@@ -135,6 +147,20 @@ export type LanMessage =
   | { t: 'ready'; playerId: string; index: number }
   /** What the host counted this round: how many are ready of how many active. */
   | { t: 'ready-count'; index: number; ready: number; expected: number }
+  /**
+   * A team leader asks to move the room on. The host validates the sender
+   * against that team's leader (first connected member) and, if so, advances the
+   * shared question the same way a host tap does. SUPERSEDES `ready` for players.
+   */
+  | { t: 'advance'; playerId: string; index: number }
+  /**
+   * The host's team vote tied, so a leader must break it. Broadcast after the
+   * team's `needsLeader` reveal; the client whose id matches `leaderId` shows
+   * the candidates and a Confirm, then sends `leader-answer`.
+   */
+  | { t: 'team-decision'; index: number; teamId: string; leaderId: string; candidates: string[] }
+  /** The designated leader's chosen final answer for a tied team vote. */
+  | { t: 'leader-answer'; index: number; answer: string }
   /**
    * A player has armed a shared team power-up for question `index`. The host
    * validates it, decrements the team pool, computes hint choices if needed,
@@ -201,6 +227,27 @@ export type LanMessage =
     }
   | { t: 'leaderboard'; players: LanPlayer[]; final: boolean; teams?: LanTeam[] }
   | { t: 'end'; reason: string }
+  /**
+   * The host reset the finished game and is opening a fresh lobby with the same
+   * room, players and teams. Clients return to /game/lobby on receipt; the host
+   * navigates itself. Mirrors the online group rematch, which drops everyone
+   * back into the same room's lobby.
+   */
+  | { t: 'rematch' }
+  /**
+   * The host changed the game mode (classic <-> group) while the room is still
+   * on the Play tab. Clients re-tint their mode card and lock it. Sent on its
+   * own so a joiner who is already seated sees the switch without a roster
+   * frame; `hello` re-sends it so a late joiner starts in the right mode.
+   */
+  | { t: 'mode'; teamMode: boolean }
+  /**
+   * The host pressed START and is opening the group lobby (and pick window).
+   * Joiners navigate to /game/lobby on receipt; `hello` re-sends it so a client
+   * that reconnects mid-countdown still lands in the room instead of sitting on
+   * the Play tab.
+   */
+  | { t: 'lobby'; teamMode?: boolean; topic?: string }
   | { t: 'error'; message: string };
 
 export function encodeMessage(msg: LanMessage): string[] {

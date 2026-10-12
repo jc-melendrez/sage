@@ -21,8 +21,13 @@ import type { QuizPayload, GameQuestion } from './offlineEngine';
 import type { PowerupKey } from '@/types/game';
 import { REACTION_EMOJIS, emptyPowerupPool } from '@/types/game';
 
-/** The four power-up kinds, in the pool's canonical order. */
-const POWERUP_KEYS: PowerupKey[] = ['freeze', 'hint', 'doublePoints', 'shield'];
+/**
+ * Team streak rewards exclude freeze. Freeze pauses a single player's timer; a
+ * team shares one countdown, so a frozen teammate has nothing to stop and the
+ * freeze button is hidden in team mode. Awarding it would leave the team with a
+ * power-up it cannot spend. Mirrors TEAM_POWERUP_KEYS in the backend.
+ */
+const TEAM_REWARD_KEYS: PowerupKey[] = ['hint', 'doublePoints', 'shield'];
 
 /**
  * The host's representative answer time for a team: the median of the recorded
@@ -46,14 +51,19 @@ interface TeamTally {
   pickers: number;
   void: boolean;
   split: boolean;
+  /** The tied answers, when a leader must break the tie (`needsLeader`). */
+  candidates: string[];
+  /** The vote tied with no majority, so a designated leader must decide. */
+  needsLeader: boolean;
 }
 
 /**
- * Resolve a team's private picks into one answer: plain majority wins. A pure
- * 1-1 disagreement is settled by a coin flip; any larger even split voids.
- * Mirrors `tally_team_picks` in the backend, including the lenient
- * case/whitespace-folding when the question is typed (so two members who typed
- * "Mitochondria" and "mitochondria" are one vote, not a split).
+ * Resolve a team's private picks into one answer: plain majority wins. A tie
+ * (a 1-1, a 1-1-1, a 2-2, ...) has no majority, so a designated leader picks
+ * the team's final answer -- there is no coin flip. Mirrors `tally_team_picks`
+ * in the backend, including the lenient case/whitespace-folding when the
+ * question is typed (so two members who typed "Mitochondria" and "mitochondria"
+ * are one vote, not a split).
  */
 function tallyTeamPicks(values: string[], typed: boolean): TeamTally {
   const counts = new Map<string, number>();
@@ -67,19 +77,25 @@ function tallyTeamPicks(values: string[], typed: boolean): TeamTally {
   }
   const pickers = values.filter(v => String(v ?? '').trim()).length;
   if (counts.size === 0) {
-    return { choice: '', agreed: 0, pickers: 0, void: true, split: false };
+    return { choice: '', agreed: 0, pickers: 0, void: true, split: false, candidates: [], needsLeader: false };
   }
   const top = Math.max(...counts.values());
   const leaders = [...counts.entries()].filter(([, c]) => c === top).map(([k]) => k);
   if (leaders.length === 1) {
-    return { choice: sample.get(leaders[0]) ?? '', agreed: top, pickers, void: false, split: false };
+    return {
+      choice: sample.get(leaders[0]) ?? '', agreed: top, pickers,
+      void: false, split: false, candidates: [], needsLeader: false,
+    };
   }
-  if (leaders.length === 2 && pickers === 2) {
-    const winner = leaders[Math.floor(Math.random() * leaders.length)];
-    return { choice: sample.get(winner) ?? '', agreed: counts.get(winner) ?? 0, pickers, void: false, split: true };
-  }
-  return { choice: '', agreed: top, pickers, void: true, split: true };
+  return {
+    choice: '', agreed: top, pickers, void: true, split: true,
+    candidates: leaders.map(k => sample.get(k) ?? k),
+    needsLeader: pickers >= 2,
+  };
 }
+
+/** How long the designated leader has to break a tie before it auto-resolves. */
+const DECISION_TIMEOUT_MS = 15000;
 
 interface Connection {
   id: string;
@@ -110,6 +126,12 @@ export class LanHostServer {
   private started = false;
   private stopped = false;
   private endedOnce = false;
+  /**
+   * True once the host pressed START in group play and is pulling everyone into
+   * /game/lobby. Re-sent to a client that (re)connects before the quiz starts so
+   * it lands in the room rather than sitting on the Play tab.
+   */
+  private lobbyOpen = false;
   /** True once the TCP server has actually bound LAN_PORT. */
   private listening = false;
   private listeners = new Set<(msg: LanMessage) => void>();
@@ -148,7 +170,7 @@ export class LanHostServer {
   }
 
   /** Create the initial `count` teams. Idempotent against an existing set. */
-  setTeams(count: number) {
+  setTeams(count: number): LanTeam[] {
     this.teamMode = count > 0;
     while (this.teams.length < count) {
       const i = this.teams.length;
@@ -166,6 +188,30 @@ export class LanHostServer {
       });
       this.teams = this.teams.slice(0, count);
     }
+    return this.teams;
+  }
+
+  /**
+   * Switch the room between classic and group play while it is still on the
+   * Play tab, mirroring the online `POST /game/mode/`. Group (re)creates the
+   * team slots; classic releases every seat and drops the teams. The new mode
+   * is broadcast so a joiner's locked mode card re-tints immediately.
+   */
+  setMode(mode: 'classic' | 'group', teamCount = 2): void {
+    if (mode === 'group') {
+      this.setTeams(Math.max(2, teamCount));
+    } else {
+      this.setTeams(0);
+    }
+    this.broadcast({ t: 'mode', teamMode: this.teamMode });
+    this.broadcast({ t: 'roster', players: this.players });
+    this.broadcast({ t: 'teams', teams: this.teams });
+  }
+
+  /** Host pressed START: tell joiners to open the lobby. */
+  openLobby(topic?: string): void {
+    this.lobbyOpen = true;
+    this.broadcast({ t: 'lobby', teamMode: this.teamMode, topic });
   }
 
   addTeam(name?: string): LanTeam {
@@ -240,6 +286,44 @@ export class LanHostServer {
   private readonly hintChoicesByIndex = new Map<number, string[]>();
   /** Resolves a team's stragglers when the shared question timer expires. */
   private questionTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Teams whose vote tied and are waiting on a designated leader to pick the
+   * final answer, keyed by index then team id. A team is only ever "final"
+   * once it is absent from here AND present in `finalTeamsByIndex`.
+   */
+  private readonly pendingDecisionsByIndex =
+    new Map<number, Record<string, { leaderId: string; candidates: string[] }>>();
+  /** Teams whose question is truly scored (not merely awaiting a leader). */
+  private readonly finalTeamsByIndex = new Map<number, Set<string>>();
+  /** Random starting offset in a team's leader rotation, fixed per session. */
+  private readonly leaderSeedByTeam = new Map<string, number>();
+  /** How many tie-breaks this team has had; drives the alternating leader. */
+  private readonly decisionCountByTeam = new Map<string, number>();
+  /** Auto-resolve timers for pending leader decisions, keyed `index:teamId`. */
+  private readonly decisionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * Whose turn it is to break a tie for `teamId`.
+   *
+   * The order is the team's connected roster (join order) filtered to the
+   * members who actually answered, so the same pair alternates A, B, A, B... The
+   * starting offset is randomised once per team so the first decider is not
+   * always the same person.
+   */
+  private nextLeader(teamId: string, answeredIds: string[]): string {
+    const roster = this.players
+      .filter(p => String(p.teamId ?? '') === String(teamId))
+      .map(p => p.id);
+    const order = roster.filter(id => answeredIds.includes(id));
+    if (order.length === 0) return answeredIds[0] ?? '';
+    if (!this.leaderSeedByTeam.has(teamId)) {
+      this.leaderSeedByTeam.set(teamId, Math.floor(Math.random() * order.length));
+    }
+    const seed = this.leaderSeedByTeam.get(teamId) ?? 0;
+    const count = this.decisionCountByTeam.get(teamId) ?? 0;
+    this.decisionCountByTeam.set(teamId, count + 1);
+    return order[(seed + count) % order.length];
+  }
 
   /** The armed power-up keys per team for `index`, for the wire broadcast. */
   private armedForIndex(index: number): Record<string, PowerupKey[]> {
@@ -262,6 +346,8 @@ export class LanHostServer {
     this.hintChoicesByIndex.delete(index);
     this.picksByIndex.delete(index);
     this.pickTimesByIndex.delete(index);
+    this.pendingDecisionsByIndex.delete(index);
+    this.finalTeamsByIndex.delete(index);
     this.broadcast({
       t: 'question',
       index,
@@ -316,12 +402,15 @@ export class LanHostServer {
    * member applies the same payload, so the team scores once -- not once per
    * player -- and the results screen can rank teams without summing members.
    */
-  private resolveTeam(index: number, teamId: string, fallbackTime?: number) {
+  private resolveTeam(index: number, teamId: string, fallbackTime?: number, forcedAnswer?: string) {
     if (!this.quiz) return;
     const question = this.questions[index];
     if (!question) return;
-    const resolved = this.revealsByIndex.get(index) ?? {};
-    if (resolved[teamId]) return;
+    const finals = this.finalTeamsByIndex.get(index) ?? new Set<string>();
+    if (finals.has(teamId)) return;
+    const pending = this.pendingDecisionsByIndex.get(index) ?? {};
+    // Already awaiting a leader: only `applyLeaderAnswer` may resume this team.
+    if (pending[teamId] && forcedAnswer == null) return;
     const team = this.teams.find(t => t.id === teamId);
     if (!team) return;
 
@@ -334,10 +423,32 @@ export class LanHostServer {
       .filter(id => picks[id] != null && String(picks[id]).trim() !== '');
     const typed = (TYPED_QUESTION_TYPES as readonly string[]).includes(question.type);
     const tally = tallyTeamPicks(answeredIds.map(id => picks[id]), typed);
+
+    // A tie has no majority, so a designated leader picks the team's final
+    // answer. Publish the tie now and wait; the question only scores once the
+    // leader (or the auto-resolve timer) has chosen.
+    if (tally.needsLeader && forcedAnswer == null) {
+      this.enterDecision(index, teamId, tally, answeredIds, expected);
+      return;
+    }
+
+    let choice = tally.choice;
+    let isVoid = tally.void;
+    let isSplit = tally.split;
+    let agreed = tally.agreed;
+    if (forcedAnswer != null) {
+      choice = forcedAnswer;
+      isVoid = false;
+      isSplit = true;
+      agreed = answeredIds.filter(id => (
+        typed ? answerMatches(String(picks[id]), forcedAnswer) : String(picks[id]) === forcedAnswer
+      )).length;
+    }
+
     const teamTime = medianPickTime(answeredIds.map(id => times[id]).filter((t): t is number => typeof t === 'number'))
       ?? (typeof fallbackTime === 'number' ? fallbackTime : this.timePerQuestion);
-    let isCorrect = !tally.void
-      && (typed ? answerMatches(tally.choice, question.correctAnswer) : tally.choice === question.correctAnswer);
+    let isCorrect = !isVoid
+      && (typed ? answerMatches(choice, question.correctAnswer) : choice === question.correctAnswer);
     if (!String(question.correctAnswer || '').trim()) isCorrect = false;
 
     const armedForTeam = (this.armedTeamsByIndex.get(index) ?? {})[teamId] ?? [];
@@ -373,8 +484,8 @@ export class LanHostServer {
           && newStreak >= STREAK_REWARD_INTERVAL
           && newStreak % STREAK_REWARD_INTERVAL === 0) {
         const p = team.powerups ?? (team.powerups = emptyPowerupPool());
-        const lowest = Math.min(...POWERUP_KEYS.map(k => p[k] ?? 0));
-        const candidates = POWERUP_KEYS.filter(k => (p[k] ?? 0) === lowest);
+        const lowest = Math.min(...TEAM_REWARD_KEYS.map(k => p[k] ?? 0));
+        const candidates = TEAM_REWARD_KEYS.filter(k => (p[k] ?? 0) === lowest);
         const ptype = candidates[Math.floor(Math.random() * candidates.length)];
         p[ptype] = (p[ptype] ?? 0) + 1;
         rewardKey = ptype;
@@ -387,19 +498,22 @@ export class LanHostServer {
     team.memberCount = expected;
     const reveal: LanReveal = {
       index,
-      answer: tally.choice,
+      answer: choice,
       correctAnswer: question.correctAnswer,
       correct: isCorrect,
-      void: tally.void,
-      split: tally.split,
-      agreed: tally.agreed,
+      void: isVoid,
+      split: isSplit,
+      agreed,
       pickers: tally.pickers,
       expected,
       points,
       speedBonus,
     };
+    const resolved = this.revealsByIndex.get(index) ?? {};
     resolved[teamId] = reveal;
     this.revealsByIndex.set(index, resolved);
+    finals.add(teamId);
+    this.finalTeamsByIndex.set(index, finals);
     this.broadcast({ t: 'team-reveal', index, reveals: resolved });
     this.broadcast({
       t: 'team-powerups',
@@ -410,8 +524,99 @@ export class LanHostServer {
     });
   }
 
+  /**
+   * A team's vote tied: publish the tie, name the deciding leader (alternating
+   * per team), and wait for their `leader-answer`. An auto-resolve timer picks
+   * the first candidate so a silent leader cannot stall the room.
+   */
+  private enterDecision(
+    index: number, teamId: string, tally: TeamTally, answeredIds: string[], expected: number,
+  ) {
+    const leaderId = this.nextLeader(teamId, answeredIds);
+    const pending = this.pendingDecisionsByIndex.get(index) ?? {};
+    pending[teamId] = { leaderId, candidates: tally.candidates };
+    this.pendingDecisionsByIndex.set(index, pending);
+
+    const reveal: LanReveal = {
+      index,
+      answer: '',
+      correctAnswer: this.questions[index]?.correctAnswer ?? '',
+      correct: false,
+      void: true,
+      split: true,
+      agreed: tally.agreed,
+      pickers: tally.pickers,
+      expected,
+      points: 0,
+      speedBonus: 0,
+      needsLeader: true,
+      leaderId,
+      candidates: tally.candidates,
+    };
+    const resolved = this.revealsByIndex.get(index) ?? {};
+    resolved[teamId] = reveal;
+    this.revealsByIndex.set(index, resolved);
+    this.broadcast({ t: 'team-reveal', index, reveals: resolved });
+    this.broadcast({ t: 'team-decision', index, teamId, leaderId, candidates: tally.candidates });
+
+    const key = `${index}:${teamId}`;
+    const timer = setTimeout(() => {
+      this.decisionTimers.delete(key);
+      const still = (this.pendingDecisionsByIndex.get(index) ?? {})[teamId];
+      if (!still) return;
+      this.applyLeaderAnswer(index, teamId, tally.candidates[0] ?? '');
+    }, DECISION_TIMEOUT_MS);
+    this.decisionTimers.set(key, timer);
+  }
+
+  /** Commit a leader's tie-break and score the team for `index`. */
+  applyLeaderAnswer(index: number, teamId: string, answer: string, fallbackTime?: number) {
+    const pending = this.pendingDecisionsByIndex.get(index);
+    if (!pending || !pending[teamId]) return;
+    const { candidates } = pending[teamId];
+    delete pending[teamId];
+    if (Object.keys(pending).length === 0) this.pendingDecisionsByIndex.delete(index);
+    const key = `${index}:${teamId}`;
+    const timer = this.decisionTimers.get(key);
+    if (timer != null) {
+      clearTimeout(timer);
+      this.decisionTimers.delete(key);
+    }
+    const chosen = candidates.includes(answer) ? answer : (candidates[0] ?? '');
+    this.resolveTeam(index, teamId, fallbackTime, chosen);
+  }
+
+  /** Whether `playerId` leads their team (first connected member, join order). */
+  private isTeamLeader(playerId: string): boolean {
+    const p = this.players.find(x => x.id === playerId);
+    if (!p || !p.teamId) return false;
+    const tid = String(p.teamId);
+    const first = this.players.find(x => x.connected && String(x.teamId ?? '') === tid);
+    return !!first && first.id === playerId;
+  }
+
+  /** A leader tapped Next: move the room if they really lead a team. */
+  private recordAdvance(playerId: string, index: number) {
+    if (index !== this.currentIndex) return;
+    if (this.isTeamLeader(playerId)) this.advanceQuestion();
+  }
+
+  /** A leader submitted their tie-break; commit it only from the named leader. */
+  private recordLeaderAnswer(playerId: string, index: number, answer: string) {
+    const pending = this.pendingDecisionsByIndex.get(index);
+    if (!pending) return;
+    const p = this.players.find(x => x.id === playerId);
+    const teamId = p?.teamId != null ? String(p.teamId) : '';
+    const entry = teamId ? pending[teamId] : undefined;
+    if (!entry || entry.leaderId !== playerId) return;
+    this.applyLeaderAnswer(index, teamId, answer);
+  }
+
   /** Host-forced advance: the escape hatch for a player who never readies up. */
   advanceQuestion() {
+    const pending = this.pendingDecisionsByIndex.get(this.currentIndex);
+    // A tie-break is in flight: moving on now would drop the team's answer.
+    if (pending && Object.keys(pending).length > 0) return;
     const total = this.quiz?.questions?.length ?? 0;
     if (this.currentIndex + 1 < total) {
       this.broadcastQuestion(this.currentIndex + 1);
@@ -441,6 +646,13 @@ export class LanHostServer {
    */
   recordPick(playerId: string, index: number, answer: string, timeTaken?: number) {
     if (!playerId) return;
+    // Team play: a member with no team is a spectator. The online server rejects
+    // their answer with 403 and ignores them in settlement, so the LAN host must
+    // do the same -- never record a pick that would sway the shared team tally.
+    if (this.teamMode) {
+      const picker = this.players.find(p => p.id === playerId);
+      if (!picker || !picker.teamId) return;
+    }
     const picks = this.picksByIndex.get(index) ?? {};
     picks[playerId] = answer;
     this.picksByIndex.set(index, picks);
@@ -594,6 +806,7 @@ export class LanHostServer {
     this.players = [];
     this.teams = [];
     this.teamMode = false;
+    this.lobbyOpen = false;
     this.currentIndex = 0;
     this.questionStartedAt = null;
     this.readyByIndex.clear();
@@ -703,6 +916,13 @@ export class LanHostServer {
         totalQuestions: 0,
       });
       this.send(conn, { t: 'welcome', roomCode: this.roomCode, playerId: conn.id, hostName: this.hostInfo.name, hostAvatar: this.hostInfo.avatar, teamMode: this.teamMode });
+      // Re-send state a reconnecting client would otherwise miss: the current
+      // mode (so its card is tinted/locked correctly) and, if the host has
+      // already started pulling everyone in, the lobby signal itself.
+      this.send(conn, { t: 'mode', teamMode: this.teamMode });
+      if (this.lobbyOpen) {
+        this.send(conn, { t: 'lobby', teamMode: this.teamMode, topic: this.quiz?.title });
+      }
       this.broadcast({ t: 'roster', players: this.players });
       this.broadcast({ t: 'teams', teams: this.teams });
       return;
@@ -745,6 +965,14 @@ export class LanHostServer {
     }
     if (msg.t === 'pick') {
       this.recordPick(conn.id, msg.index, msg.answer, msg.timeTaken);
+      return;
+    }
+    if (msg.t === 'advance') {
+      this.recordAdvance(conn.id, msg.index);
+      return;
+    }
+    if (msg.t === 'leader-answer') {
+      this.recordLeaderAnswer(conn.id, msg.index, msg.answer);
       return;
     }
     if (msg.t === 'powerup') {
@@ -821,11 +1049,66 @@ export class LanHostServer {
     });
     if (this.allFinished() && !this.endedOnce) {
       this.endedOnce = true;
-      // Let the final leaderboard round-trip, then close the server so a
-      // "play again" session starts fresh instead of reusing a stale one.
       this.broadcast({ t: 'end', reason: 'All players have finished' });
-      setTimeout(() => this.stop(), 800);
     }
+  }
+
+  /**
+   * Prepare the SAME server for another round after a finished game.
+   *
+   * The server is deliberately NOT stopped when a game ends: the host's results
+   * screen offers "Play Again", which resets the running game in place and
+   * broadcasts `rematch` so every client returns to the lobby with the same
+   * room, players and teams -- the LAN twin of the online group rematch. This
+   * is why `applyResult` no longer self-stops. The socket is still released the
+   * normal way: leaving the results screen (resetLanState) or focusing the Play
+   * tab tears the host down.
+   */
+  resetForRematch() {
+    if (this.stopped) return;
+    this.started = false;
+    this.endedOnce = false;
+    this.lobbyOpen = false;
+    this.currentIndex = 0;
+    this.questionStartedAt = null;
+    this.readyByIndex.clear();
+    this.picksByIndex.clear();
+    this.pickTimesByIndex.clear();
+    this.revealsByIndex.clear();
+    this.armedTeamsByIndex.clear();
+    this.hintChoicesByIndex.clear();
+    if (this.questionTimer != null) {
+      clearTimeout(this.questionTimer);
+      this.questionTimer = null;
+    }
+    // Keep everyone connected but release the seats, exactly like the online
+    // rematch: round two starts on the Play tab where the host re-picks the mode
+    // and students re-pick teams, so a stale seat would lock the wrong board in.
+    this.players.forEach(p => {
+      p.finished = false;
+      p.score = 0;
+      p.correctCount = 0;
+      p.answeredCount = 0;
+      p.totalQuestions = 0;
+      p.answers = undefined;
+      p.teamId = undefined;
+    });
+    this.teams.forEach(t => {
+      t.score = 0;
+      t.correctCount = 0;
+      t.answeredCount = 0;
+      t.teamCorrect = 0;
+      t.teamStreak = 0;
+      t.bestStreak = 0;
+      t.memberCount = 0;
+      t.powerups = emptyPowerupPool();
+    });
+    // `teamMode` is kept so a joiner's card shows the mode just played; the
+    // `mode` rebroadcast lets the host flip it from the Play tab.
+    this.broadcast({ t: 'roster', players: this.players });
+    this.broadcast({ t: 'teams', teams: this.teams });
+    this.broadcast({ t: 'mode', teamMode: this.teamMode });
+    this.broadcast({ t: 'rematch' });
   }
 
   private drop(conn: Connection) {

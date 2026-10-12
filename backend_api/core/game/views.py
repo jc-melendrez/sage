@@ -50,6 +50,11 @@ TEAM_COLORS = [
 # mobile_app/services/offlineEngine.ts — solo/LAN runs the TS engine and
 # multiplayer runs this one, so the two must not drift.
 POWERUP_KEYS = ('freeze', 'hint', 'doublePoints', 'shield')
+# Freeze is solo-only: it pauses one player's countdown, but a team shares a
+# single countdown, and the server rejects a team freeze with 400
+# `teamTimer: true`. A team streak reward therefore must never roll freeze or
+# the team gets a power-up it cannot spend (the bar renders empty).
+TEAM_POWERUP_KEYS = ('hint', 'doublePoints', 'shield')
 STREAK_REWARD_INTERVAL = 3
 
 # ── Team momentum: removed ───────────────────────────────────────────────
@@ -279,19 +284,24 @@ def median_pick_time(picks):
 class TeamTally(NamedTuple):
     """Resolved state of one round of private team picks."""
 
-    #: The team's answer. '' when there is none (no picks at all, or a larger
-    #: split that could not be reduced to one answer).
+    #: The team's answer. '' when there is none (no picks at all, or a tie that
+    #: a designated leader has not broken yet).
     choice: str
     #: How many pickers chose `choice`.
     agreed: int
     #: How many members picked at all.
     pickers: int
-    #: The vote was even and could not be reduced to one answer: the question
-    #: voids.
+    #: Nobody picked: the question voids and scores zero.
     void: bool
-    #: The vote was even. A pure 1-1 was resolved by a coin flip (`choice` set
-    #: and `void` False); any larger split voids (`void` True).
+    #: The vote was even. `needs_leader` says a designated leader must pick the
+    #: final answer; `split` alone says the team disagreed.
     split: bool
+    #: The tied answers, in first-seen order. Non-empty exactly when
+    #: `needs_leader` is true.
+    candidates: tuple = ()
+    #: A tie with no majority: a designated team leader picks the final answer
+    #: from `candidates` (see `tally_team_picks`).
+    needs_leader: bool = False
 
 
 def tally_team_picks(picks, typed=False, correct_answer=''):
@@ -304,18 +314,16 @@ def tally_team_picks(picks, typed=False, correct_answer=''):
 
     Returns a `TeamTally`.
 
-    The rule is plain majority: most-picked wins. A pure 1-1 disagreement (two
-    members, two different answers) has no majority, so ONE OF THE TWO IS CHOSEN
-    AT RANDOM -- never a third answer, and never by knowledge. Resolving it by
-    knowledge made the slower teammate's vote meaningless and let the game pick
-    the winner for the team; a coin flip keeps both votes equally live and stops
-    a two-person team from voiding every question they simply disagreed about.
-    Any larger even split (a 2-2 among four, a 1-1-1) still voids: there is no
-    honest way to reduce three-plus positions to one. A void scores zero points,
-    but the "split decision" display and the honest `agreed: None` stat stay.
+    The rule is plain majority: most-picked wins. A tie (a 1-1, a 1-1-1, a
+    2-2, ...) has no majority, so a DESIGNATED TEAM LEADER picks the team's final
+    answer from the tied candidates -- never a coin flip, and never by knowledge.
+    The leader is chosen by the caller (alternating per team, random start), so
+    between two teammates who disagree it is one of them deciding, deliberately
+    and in turn, rather than the game rolling dice for them. Nobody picked at all
+    still voids and scores zero.
 
-    `correct_answer` is accepted for call-site compatibility and is no longer
-    consulted: the tie-break is random, not knowledge-based.
+    `correct_answer` is accepted for call-site compatibility and is never
+    consulted: the tie-break is a leader's decision, not knowledge-based.
 
     `typed` turns on case/whitespace-normalised counting so two members who
     typed the same answer with different capitalisation are one leader rather
@@ -342,15 +350,11 @@ def tally_team_picks(picks, typed=False, correct_answer=''):
     pickers = len([c for c in (picks or {}).values() if pick_answer(c)])
     if len(leaders) == 1:
         return TeamTally(sample[leaders[0]], top, pickers, False, False)
-    # Even split. A pure 1-1 disagreement (exactly two pickers, two different
-    # answers) has no majority, so one of the two is chosen at random. The
-    # choice is between the two leaders only -- a third answer can never win --
-    # and drawing at random keeps both teammates' votes equally live instead of
-    # letting knowledge settle it for them. Any larger split still voids.
-    if len(leaders) == 2 and pickers == 2:
-        winner = rng.choice(leaders)
-        return TeamTally(sample[winner], counts[winner], pickers, False, True)
-    return TeamTally('', top, pickers, True, True)
+    # A tie: no majority, so a designated team leader decides the final answer.
+    # Publish the tied candidates so the client can prompt that leader; the
+    # question is not void and does not score until the leader has chosen.
+    candidates = tuple(sample[key] for key in leaders)
+    return TeamTally('', top, pickers, False, True, candidates=candidates, needs_leader=True)
 
 
 def agreement_rate(answers):
@@ -1770,10 +1774,12 @@ class AnswerQuestionView(APIView):
                             # streak rewards don't all resolve to the same
                             # "lowest" type against a stale pool.
                             owned = team_now.get('powerups') or {}
+                            reward_keys = TEAM_POWERUP_KEYS
                         else:
                             owned = data.get('powerups') or {}
-                        lowest = min((owned.get(k, 0) or 0) for k in POWERUP_KEYS)
-                        candidates = [k for k in POWERUP_KEYS if (owned.get(k, 0) or 0) == lowest]
+                            reward_keys = POWERUP_KEYS
+                        lowest = min((owned.get(k, 0) or 0) for k in reward_keys)
+                        candidates = [k for k in reward_keys if (owned.get(k, 0) or 0) == lowest]
                         ptype = candidates[rng.randrange(len(candidates))]
                         if team_ref is not None:
                             # Team pool: anyone on the team can spend it, which
@@ -2473,6 +2479,10 @@ def _reset_room_for_rematch(room_ref, room_data):
         'finishedAt': fs.DELETE_FIELD,
         'pickStartedAt': fs.DELETE_FIELD,
         'teamAssignments': fs.DELETE_FIELD,
+        # Round two starts on the Play tab, not back in the lobby the LAST
+        # group START opened -- a stale `lobbyOpen` would yank every joiner
+        # straight out of the new game before the host picks a mode.
+        'lobbyOpen': fs.DELETE_FIELD,
     }
     if team_mode:
         patch['teamQuestionIndex'] = 0
@@ -2887,6 +2897,121 @@ class AddTeamView(APIView):
         }, status=201)
 
 
+class RoomModeView(APIView):
+    """Switch a waiting room between classic and team (group) mode in place.
+
+    The mode is normally fixed when the room is created: /game/create/ bakes
+    `teamMode` and the team documents. But the host can change their mind after
+    students have already joined (the Play tab posts here), and a room students
+    are sitting in cannot be recreated without orphaning the code they were
+    given. This reconfigures the existing room instead.
+
+    Host-only and waiting-only: once the game is active the mode is settled, and
+    flipping it mid-round would leave the shared team clock and question index
+    pointing at a game that no longer exists.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        if not room_code:
+            return Response({'error': 'roomCode is required'}, status=400)
+        mode = str(request.data.get('mode') or '').lower()
+        if mode not in ('classic', 'group'):
+            return Response({'error': "mode must be 'classic' or 'group'"}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+
+        room_data = room.to_dict() or {}
+        if str(room_data.get('hostId')) != str(request.user.id):
+            return Response({'error': 'Only the host can change the game mode'}, status=403)
+        if room_data.get('status') != 'waiting':
+            return Response({'error': 'The mode is locked once the game starts'}, status=400)
+
+        if mode == 'classic':
+            room_ref.update({'mode': 'classic', 'teamMode': False})
+            # Release the seats so a later switch back to group starts from an
+            # empty board rather than a stale roster nobody can re-pick into.
+            for player in room_ref.collection('players').stream():
+                player.reference.update({'teamId': fs.DELETE_FIELD})
+            for team in room_ref.collection('teams').stream():
+                team.reference.update({'memberIds': [], 'memberCount': 0, 'leaderId': None})
+            return Response({
+                'mode': 'classic',
+                'teamMode': False,
+                'teamCount': int(room_data.get('teamCount') or 0),
+            })
+
+        team_count = int(request.data.get('teamCount') or room_data.get('teamCount') or 2)
+        if not (2 <= team_count <= MAX_TEAMS):
+            return Response({'error': f'teamCount must be between 2 and {MAX_TEAMS}'}, status=400)
+        question_count = int(room_data.get('questionCount') or 0)
+        if question_count and team_count > question_count:
+            return Response({
+                'error': 'Not enough questions for that many teams',
+                'questionCount': question_count,
+                'maxTeams': question_count,
+            }, status=400)
+
+        room_ref.update({
+            'mode': 'group',
+            'teamMode': True,
+            'teamCount': team_count,
+            'teamQuestionIndex': 0,
+            'teamStartedAt': None,
+        })
+
+        # Idempotent team build: the slots belong to the room code, so switching
+        # classic -> group -> classic -> group must not stack duplicates or leave
+        # a team id the room still counts but that no longer exists.
+        existing = {
+            int(t.id) for t in room_ref.collection('teams').stream()
+            if str(t.id).isdigit()
+        }
+        for i in range(team_count):
+            slot = i + 1
+            if slot in existing:
+                continue
+            room_ref.collection('teams').document(str(slot)).set({
+                'name': f'Team {slot}',
+                'color': TEAM_COLORS[i % len(TEAM_COLORS)],
+                'score': 0,
+                'correctCount': 0,
+                'answeredCount': 0,
+                'memberIds': [],
+                'memberCount': 0,
+                'maxSize': DEFAULT_TEAM_MAX_SIZE,
+                'teamCorrect': 0,
+                'teamStreak': 0,
+                'bestStreak': 0,
+                'powerups': empty_powerups(),
+                'namedBy': None,
+                'nameLocked': False,
+                'leaderId': None,
+            })
+        for slot in sorted(s for s in existing if s > team_count):
+            room_ref.collection('teams').document(str(slot)).delete()
+        # Free anyone still seated in a team that no longer exists.
+        for player in room_ref.collection('players').stream():
+            seat = (player.to_dict() or {}).get('teamId')
+            try:
+                seat_int = int(seat)
+            except (TypeError, ValueError):
+                continue
+            if seat_int > team_count:
+                player.reference.update({'teamId': fs.DELETE_FIELD})
+
+        return Response({
+            'mode': 'group',
+            'teamMode': True,
+            'teamCount': team_count,
+        })
+
+
 class RenameTeamView(APIView):
     """Let the host — or any member — give the team a real name.
 
@@ -3155,8 +3280,102 @@ class TeamPickView(APIView):
         return Response(settled)
 
 
+class TeamDecideView(APIView):
+    """A designated leader breaks a tied team vote.
+
+    When the picks tie with no majority, `TeamPickView` does not score: it names
+    an alternating leader (published on `reveals.q{n}.leaderId`) and waits. That
+    leader -- and only that leader -- posts here to commit the team's final
+    answer from the tied candidates. The host may also step in, so a leader who
+    has gone quiet cannot freeze their team for the rest of the quiz.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        raw_index = request.data.get('questionIndex')
+        if not room_code or raw_index is None:
+            return Response({'error': 'roomCode and questionIndex are required'}, status=400)
+        try:
+            question_index = int(raw_index)
+        except (TypeError, ValueError):
+            return Response({'error': 'questionIndex must be a number'}, status=400)
+        answer = str(request.data.get('answer') or '')
+
+        try:
+            room_ref, room_data = _room_and_teams(room_code)
+        except _Rejected as rejected:
+            return Response(rejected.payload, status=rejected.status)
+        if room_data.get('status') != 'active':
+            return Response({'error': 'Game is not in progress'}, status=400)
+        questions = room_data.get('questions') or []
+        if question_index < 0 or question_index >= len(questions):
+            return Response({'error': 'Invalid question index'}, status=400)
+
+        player_ref = room_ref.collection('players').document(str(request.user.id))
+        player_data = player_ref.get().to_dict() or {}
+        if not player_data:
+            return Response({'error': 'You are not in this room'}, status=400)
+        uid = str(request.user.id)
+
+        # Resolve the team that has a pending tie-break for this question. The
+        # caller's own team is the normal case; the host may also step in for a
+        # team they are not on, so a quiet leader cannot freeze the room, which
+        # means searching for the team holding the open decision.
+        team_ref = None
+        team_data = None
+        team_id = player_data.get('teamId')
+        if team_id:
+            candidate_ref = room_ref.collection('teams').document(str(team_id))
+            candidate = candidate_ref.get().to_dict() or {}
+            members = [str(m) for m in (candidate.get('memberIds') or [])]
+            if uid in members and (candidate.get('pendingDecision') or {}).get('questionIndex') == question_index:
+                team_ref, team_data = candidate_ref, candidate
+        if team_ref is None and str(room_data.get('hostId')) == uid:
+            for snap in room_ref.collection('teams').stream():
+                data = snap.to_dict() or {}
+                if (data.get('pendingDecision') or {}).get('questionIndex') == question_index:
+                    team_ref, team_data = snap.reference, data
+                    break
+        if team_ref is None:
+            return Response(
+                {'error': 'There is no tie to break', 'pendingDecision': False},
+                status=409,
+            )
+
+        pending = team_data.get('pendingDecision') or {}
+        leader_id = str(pending.get('leaderId') or '')
+        if leader_id != uid and str(room_data.get('hostId')) != uid:
+            return Response({
+                'error': 'Only the team leader can break the tie',
+                'leaderId': leader_id or None,
+            }, status=403)
+        candidates = [str(c) for c in (pending.get('candidates') or [])]
+        chosen = answer if answer in candidates else (candidates[0] if candidates else '')
+        if not str(chosen).strip():
+            return Response({'error': 'No candidate answer to choose'}, status=400)
+
+        # Attribute the commit to an actual member so the resolver's membership
+        # guard passes: when the host is not on this team, the choice is recorded
+        # against the leader's own pick, which is what the leader was asked to do.
+        team_members = [str(m) for m in (team_data.get('memberIds') or [])]
+        decider_id = uid if uid in team_members else leader_id
+
+        time_per_q = question_time_limit(questions[question_index], room_data)
+        db = get_firestore()
+        settled = _resolve_team_question(
+            db, room_ref, team_ref, questions, question_index, time_per_q,
+            player_id=decider_id, answer=chosen, time_taken=time_per_q,
+            expired=True, forced_answer=chosen,
+        )
+        if settled.get('_error'):
+            return Response(settled, status=settled.get('_status', 400))
+        return Response(settled)
+
+
 def _resolve_team_question(db, room_ref, team_ref, questions, question_index, time_per_q,
-                           player_id, answer, time_taken, expired, lock_in=False):
+                           player_id, answer, time_taken, expired, lock_in=False,
+                           forced_answer=None):
     """Tally one team's picks and, if the question closed, score it once.
 
     Returns the resolved payload (identical for every member, so nobody can see
@@ -3175,6 +3394,11 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
     `lock_in` is the leader ending the round early by decision rather than by
     clock. It is a third closing condition alongside "everyone picked" and "the
     deadline passed", and it is authorised by the caller before it gets here.
+
+    `forced_answer` is the designated leader's tie-break, set only by
+    `TeamDecideView` after it has verified the caller really is the leader the
+    tie named. When present the tally is overridden with that answer, so the tie
+    resolves to the leader's choice instead of a coin flip.
 
     The tally itself lives in the server-only `_server` subcollection, NOT on the
     team document. `firestore.rules` lets any authenticated user read a team's
@@ -3226,7 +3450,7 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
         pickers = len([p for p in picks.values() if pick_answer(p)])
 
         # Everyone picked, the deadline closed it, or the leader locked it in.
-        if pickers < len(members) and not expired and not lock_in:
+        if pickers < len(members) and not expired and not lock_in and forced_answer is None:
             # `set`, not `update`: this document does not exist until a team
             # picks for the first time, and the full tally is in hand here.
             transaction.set(picks_ref, {'questionIndex': question_index, 'picks': picks})
@@ -3261,9 +3485,87 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             typed=q_type in TYPED_QUESTION_TYPES,
             correct_answer=correct_answer,
         )
+
+        # A tie has no majority. A designated team leader picks the final answer
+        # (alternating per team, random start), so publish the tied candidates
+        # and wait for that leader instead of rolling dice or voiding. Idempotent:
+        # a late retry from a teammate must not re-roll the leader or re-count.
+        if tally.needs_leader and forced_answer is None:
+            existing = team.get('pendingDecision') or {}
+            if existing.get('questionIndex') == question_index:
+                leader_id = str(existing.get('leaderId') or '')
+                candidates = list(existing.get('candidates') or [])
+            else:
+                answered = [m for m in members if pick_answer(picks.get(m))]
+                order = answered or members
+                seed = team.get('splitLeaderSeed')
+                if seed is None:
+                    seed = rng.randrange(len(order))
+                count = team.get('splitDecisionCount', 0) or 0
+                leader_id = order[(seed + count) % len(order)]
+                candidates = list(tally.candidates)
+                # Persist the full tally, exactly as the pending branch does:
+                # this submitter's pick was only added in memory, and the leader's
+                # decision re-reads the picks to grade every member against the
+                # final answer. Dropping it here lost the last voter's pick.
+                transaction.set(picks_ref, {'questionIndex': question_index, 'picks': picks})
+                transaction.update(team_ref, {
+                    'pendingDecision': {
+                        'questionIndex': question_index,
+                        'leaderId': leader_id,
+                        'candidates': candidates,
+                    },
+                    'splitLeaderSeed': seed,
+                    'splitDecisionCount': count + 1,
+                    'pickCount': len(answered),
+                    'livePicks': {
+                        pid: pick_answer(p) for pid, p in picks.items() if pick_answer(p)
+                    },
+                    f'reveals.q{question_index}': {
+                        'index': question_index,
+                        'answer': '',
+                        'correctAnswer': correct_answer,
+                        'correct': False,
+                        'void': True,
+                        'split': True,
+                        'needsLeader': True,
+                        'leaderId': leader_id,
+                        'candidates': candidates,
+                        'agreed': tally.agreed,
+                        'pickers': tally.pickers,
+                        'expected': len(members),
+                        'points': 0,
+                        'basePoints': 0,
+                        'speedBonus': 0,
+                        'doublePoint': is_double_point_question(question_index),
+                    },
+                })
+            return {
+                'pending': False,
+                'needsLeader': True,
+                'questionIndex': question_index,
+                'leaderId': leader_id,
+                'candidates': candidates,
+                'agreed': tally.agreed,
+                'pickers': tally.pickers,
+            }
+
         choice, agreed, distinct, tie = (
             tally.choice, tally.agreed, tally.pickers, tally.void,
         )
+        # The designated leader's tie-break overrides the tally: the team's answer
+        # is their choice, "agreed" by however many teammates actually picked it.
+        if forced_answer is not None:
+            choice = forced_answer
+            tie = False
+            typed_q = q_type in TYPED_QUESTION_TYPES
+            agreed = len([
+                p for p in picks.values()
+                if pick_answer(p) and (
+                    answer_matches(pick_answer(p), forced_answer)
+                    if typed_q else pick_answer(p) == forced_answer
+                )
+            ])
         # The team's speed is the median of the recorded pick times, so no single
         # member decides the payout for everyone. Falls back to this submitter's
         # time only when the room holds picks with no times at all (a round that
@@ -3359,8 +3661,8 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
                     and new_streak >= STREAK_REWARD_INTERVAL
                     and new_streak % STREAK_REWARD_INTERVAL == 0):
                 owned = team.get('powerups') or {}
-                lowest = min((owned.get(k, 0) or 0) for k in POWERUP_KEYS)
-                candidates = [k for k in POWERUP_KEYS if (owned.get(k, 0) or 0) == lowest]
+                lowest = min((owned.get(k, 0) or 0) for k in TEAM_POWERUP_KEYS)
+                candidates = [k for k in TEAM_POWERUP_KEYS if (owned.get(k, 0) or 0) == lowest]
                 ptype = candidates[rng.randrange(len(candidates))]
                 team_updates[f'powerups.{ptype}'] = fs.Increment(1)
                 powerup_earned = ptype
@@ -3386,6 +3688,10 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
         team_updates.update(spent)
         team_updates['resolvedQuestions'] = fs.ArrayUnion([question_index])
         team_updates['pickCount'] = 0
+        # The tie-break, if one was pending, has now been committed (or the
+        # question settled without one): clear the marker so it cannot resolve
+        # this question twice.
+        team_updates['pendingDecision'] = fs.DELETE_FIELD
         # A team document written by an older build may still carry the old
         # client-readable tally. Drop it rather than leaving it readable.
         team_updates['picks'] = fs.DELETE_FIELD
@@ -3587,12 +3893,16 @@ class TeamAdvanceView(APIView):
     here -- otherwise a question nobody answered would inherit the previous
     question's votes.
 
-    Who may advance: any member of the room, because the shared countdown is
-    client-driven and the host's device may not even be on the question screen.
-    But the ROOM may only move once the question everyone is looking at is
-    actually over -- every team has answered it, or the room's own deadline has
-    passed. Without that, any player could skip the shared question for everyone
-    else by calling this the instant they joined.
+    Who may advance: the host, or a team's leader. The write moves the whole
+    room, so leaving it open to any member let a single player skip the shared
+    question for everyone. Leadership is re-derived from the roster on every
+    call (see `team_leader_id`), so a leader who leaves cannot keep the power
+    and a team whose leader leaves self-heals.
+
+    The room may move once every team has answered, or the shared deadline has
+    passed -- but the host or a leader can force it past an unanswered team, the
+    escape hatch for a quiet or disconnected teammate. Once the question is
+    genuinely over the leader's Next advances the whole room immediately.
     """
     permission_classes = [IsAuthenticated]
 
@@ -3641,8 +3951,31 @@ class TeamAdvanceView(APIView):
         # The rule is ROOM-wide, not caller-wide. The index is shared, so letting
         # one team move it the moment that team is done would pull every other
         # team off the question before they had answered it. The room may move
-        # once every team has answered, or once the shared deadline has passed.
+        # once every team has answered, or once the shared deadline has passed --
+        # unless the host or a team leader forces it past an unanswered team.
         team_refs = list(room_ref.collection('teams').stream())
+        force = str(request.data.get('force', 'false')).lower() == 'true'
+        is_host = str(room_data.get('hostId')) == str(request.user.id)
+
+        # Leadership is re-derived from the roster, never trusted from the team
+        # document (see `team_leader_id`), so a stale leaderId cannot keep the
+        # power after leaving. Only the host or the caller's team leader may
+        # advance; the write moves the whole room, so any-member access let a
+        # single player skip the shared question for everyone.
+        caller_team = None
+        for team in team_refs:
+            data = team.to_dict() or {}
+            if str(request.user.id) in [str(m) for m in (data.get('memberIds') or [])]:
+                caller_team = data
+                break
+        is_team_leader = bool(caller_team) and team_leader_id(caller_team) == str(request.user.id)
+        if not (is_host or is_team_leader):
+            return Response({
+                'error': 'Only the team leader can start the next question',
+                'leaderOnly': True,
+            }, status=403)
+        can_force = force and (is_host or is_team_leader)
+
         waiting_teams = 0
         for team in team_refs:
             data = team.to_dict() or {}
@@ -3651,7 +3984,7 @@ class TeamAdvanceView(APIView):
             if current_index not in list(data.get('resolvedQuestions') or []):
                 waiting_teams += 1
         time_limit = question_time_limit(questions[current_index], room_data)
-        if waiting_teams and not shared_question_expired(room_data, time_limit):
+        if waiting_teams and not shared_question_expired(room_data, time_limit) and not can_force:
             return Response({
                 'error': 'The question is still open',
                 'questionIndex': current_index,
@@ -3660,34 +3993,6 @@ class TeamAdvanceView(APIView):
                     time_limit + EXPIRY_GRACE_SECONDS - (shared_question_elapsed(room_data) or 0.0),
                 ),
                 'waitingTeams': waiting_teams,
-            }, status=409)
-
-        # Ready-up gate: once every team has resolved, the room no longer moves
-        # on by itself -- each member marks the question read, and the advance
-        # waits until everyone has. The host can force it, so one quiet or
-        # disconnected member cannot freeze the class forever.
-        force = str(request.data.get('force', 'false')).lower() == 'true'
-        is_host = str(room_data.get('hostId')) == str(request.user.id)
-        ready = 0
-        expected_ready = 0
-        for player in room_ref.collection('players').stream():
-            pdata = player.to_dict() or {}
-            if not pdata.get('teamId') or pdata.get('isFinished'):
-                continue
-            expected_ready += 1
-            # `is not None`, not `or -1`: question index 0 is a real answer, and
-            # the `or` idiom read a ready member on the FIRST question as not
-            # ready (0 is falsy), so the room could never move off it without a
-            # host force.
-            rqi = pdata.get('readyQuestionIndex')
-            if rqi is not None and int(rqi) == current_index:
-                ready += 1
-        if ready < expected_ready and not (force and is_host):
-            return Response({
-                'error': 'Not everyone is ready',
-                'questionIndex': current_index,
-                'ready': ready,
-                'expected': expected_ready,
             }, status=409)
 
         for team in team_refs:
