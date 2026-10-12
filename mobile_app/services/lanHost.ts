@@ -9,6 +9,8 @@ import {
   encodeMessage,
 } from './lanProtocol';
 import type { QuizPayload } from './offlineEngine';
+import type { PowerupKey } from '@/types/game';
+import { emptyPowerupPool } from '@/types/game';
 
 interface Connection {
   id: string;
@@ -83,6 +85,7 @@ export class LanHostServer {
         id: String(i + 1),
         name: `Team ${i + 1}`,
         color: TEAM_COLORS[i % TEAM_COLORS.length],
+        powerups: emptyPowerupPool(),
       });
     }
     if (this.teams.length > count) {
@@ -99,6 +102,7 @@ export class LanHostServer {
       id: String(this.teams.length + 1),
       name: (name || '').trim().slice(0, 24) || `Team ${this.teams.length + 1}`,
       color: TEAM_COLORS[this.teams.length % TEAM_COLORS.length],
+      powerups: emptyPowerupPool(),
     };
     this.teams.push(team);
     this.teamMode = true;
@@ -148,6 +152,15 @@ export class LanHostServer {
   private readonly readyByIndex = new Map<number, Set<string>>();
   /** Group play: reported picks per question, keyed by player id. */
   private readonly picksByIndex = new Map<number, Record<string, string>>();
+  /** Per-question team power-ups armed, keyed by index then team id. */
+  private readonly armedTeamsByIndex = new Map<number, Record<string, PowerupKey[]>>();
+  /** Per-question hint choices the host chose, shared by the team. */
+  private readonly hintChoicesByIndex = new Map<number, string[]>();
+
+  /** The armed power-up keys per team for `index`, for the wire broadcast. */
+  private armedForIndex(index: number): Record<string, PowerupKey[]> {
+    return this.armedTeamsByIndex.get(index) ?? {};
+  }
 
   /**
    * Open `index` on the shared clock and tell every client.
@@ -160,12 +173,18 @@ export class LanHostServer {
   broadcastQuestion(index: number) {
     this.currentIndex = index;
     this.questionStartedAt = Date.now();
+    this.readyByIndex.delete(index);
+    this.armedTeamsByIndex.delete(index);
+    this.hintChoicesByIndex.delete(index);
     this.broadcast({
       t: 'question',
       index,
       startedAt: this.questionStartedAt,
       timeLimit: this.timePerQuestion,
     });
+    if (this.teamMode) {
+      this.broadcast({ t: 'team-powerups', index, teams: this.teams, armed: this.armedForIndex(index) });
+    }
   }
 
   /** Host-forced advance: the escape hatch for a player who never readies up. */
@@ -203,6 +222,63 @@ export class LanHostServer {
     picks[playerId] = answer;
     this.picksByIndex.set(index, picks);
     this.broadcast({ t: 'picks', index, picks });
+  }
+
+  /** Add an earned power-up to the member's shared team pool (team mode). */
+  grantTeamPowerup(playerId: string, key: PowerupKey) {
+    if (!this.teamMode) return;
+    const player = this.players.find(p => p.id === playerId);
+    if (!player || !player.teamId) return;
+    const team = this.teams.find(t => t.id === player.teamId);
+    if (!team) return;
+    const p = team.powerups ?? (team.powerups = emptyPowerupPool());
+    p[key] = (p[key] ?? 0) + 1;
+    this.broadcast({ t: 'team-powerups', index: this.currentIndex, teams: this.teams, armed: this.armedForIndex(this.currentIndex) });
+  }
+
+  recordPowerup(playerId: string, index: number, key: PowerupKey) {
+    if (!this.teamMode || !this.quiz) return;
+    if (index !== this.currentIndex) return;
+    const player = this.players.find(p => p.id === playerId);
+    if (!player || !player.connected) return;
+    const teamId = player.teamId;
+    if (!teamId) return;
+    const team = this.teams.find(t => t.id === teamId);
+    if (!team) return;
+    const p = team.powerups ?? (team.powerups = emptyPowerupPool());
+    const armed = this.armedTeamsByIndex.get(index) ?? {};
+    const teamArmed = armed[team.id] ?? [];
+    if (p[key] <= 0 || teamArmed.includes(key)) {
+      // Still broadcast teams to keep state consistent.
+      this.broadcast({ t: 'team-powerups', index, teams: this.teams, armed });
+      return;
+    }
+    p[key] = Math.max(0, p[key] - 1);
+    armed[team.id] = [...teamArmed, key];
+    this.armedTeamsByIndex.set(index, armed);
+    let hintChoices: string[] | undefined;
+    if (key === 'hint') {
+      // Prefer the hint the client already picked (kept stable across members);
+      // otherwise pick two wrong ones here so both members hide the same pair.
+      const existing = this.hintChoicesByIndex.get(index);
+      if (existing && existing.length > 0) {
+        hintChoices = existing;
+      } else {
+        const qIndex = this.order[this.currentIndex];
+        const q = this.quiz.questions?.[qIndex];
+        if (q && Array.isArray(q.options)) {
+          const correct = q.correct_answer ?? '';
+          const wrong = q.options.filter((c: string) => c !== correct);
+          for (let i = wrong.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [wrong[i], wrong[j]] = [wrong[j], wrong[i]];
+          }
+          hintChoices = wrong.slice(0, 2);
+          this.hintChoicesByIndex.set(index, hintChoices);
+        }
+      }
+    }
+    this.broadcast({ t: 'team-powerups', index, teams: this.teams, armed, hintChoices });
   }
 
   get isStarted() {
@@ -252,6 +328,8 @@ export class LanHostServer {
     this.questionStartedAt = null;
     this.readyByIndex.clear();
     this.picksByIndex.clear();
+    this.armedTeamsByIndex.clear();
+    this.hintChoicesByIndex.clear();
     try {
       this.server?.close();
     } catch {}
@@ -386,6 +464,14 @@ export class LanHostServer {
     }
     if (msg.t === 'pick') {
       this.recordPick(conn.id, msg.index, msg.answer);
+      return;
+    }
+    if (msg.t === 'powerup') {
+      this.recordPowerup(conn.id, msg.index, msg.key);
+      return;
+    }
+    if (msg.t === 'powerup-earned') {
+      this.grantTeamPowerup(conn.id, msg.key);
       return;
     }
     if (msg.t === 'result') {

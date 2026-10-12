@@ -1,6 +1,6 @@
 import TcpSocket from 'react-native-tcp-socket';
+import type { PowerupKey } from '@/types/game';
 import { LAN_PORT, LanMessage, LanResultPayload, LineBuffer, encodeMessage } from './lanProtocol';
-
 export class LanClientSession {
   private socket: any = null;
   private buffer: LineBuffer;
@@ -57,6 +57,14 @@ export class LanClientSession {
 
   submitResult(data: LanResultPayload) {
     this.send({ t: 'result', data });
+  }
+
+  sendPowerup(index: number, key: PowerupKey) {
+    this.send({ t: 'powerup', index, key });
+  }
+
+  sendPowerupEarned(key: PowerupKey) {
+    this.send({ t: 'powerup-earned', key });
   }
 
   disconnect() {

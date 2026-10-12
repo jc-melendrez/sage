@@ -500,13 +500,13 @@ def delete_message(group_id: str, message_id: str) -> bool:
 
 
 def set_message_pinned(group_id: str, message_id: str, pinned: bool) -> bool:
-    """Pin or unpin a message. Pinning clears any other pinned message first.
+    """Pin or unpin a single message. Pins are independent of one another.
 
-    The mobile app draws a single banner from wherever ``pinned`` is true, and
-    two banners disagreeing with each other -- or a banner pointing at a ghost --
-    looked like lost input instead of an honest constraint. Enforcing one pin
-    per group here, server-side, keeps every client on the same page even if a
-    pin and a pin race each other.
+    Several messages may be pinned at once: the app draws a banner from the
+    newest and lists the rest behind a pin button. Pinning one therefore must not
+    silently release another. ``bool(pinned)`` normalises the value so a JSON
+    null/1 can never leave a non-boolean in the doc, which would break the
+    client's ``pinned`` check.
 
     Returns False when the id is unknown.
     """
@@ -515,12 +515,6 @@ def set_message_pinned(group_id: str, message_id: str, pinned: bool) -> bool:
            .collection('messages').document(message_id))
     if not ref.get().exists:
         return False
-    if pinned:
-        # Any other message carrying a pin loses it. Messages without the field
-        # are unaffected (the 'pinned' == True query cannot match them).
-        for doc in ref.parent.where('pinned', '==', True).stream():
-            if doc.id != message_id:
-                doc.reference.update({'pinned': False})
     ref.update({'pinned': bool(pinned)})
     return True
 

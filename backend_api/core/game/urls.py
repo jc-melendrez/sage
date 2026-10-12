@@ -20,6 +20,7 @@ urlpatterns = [
     path('teams/open-pick/', views.OpenTeamPickView.as_view(), name='open-team-pick'),
     path('host/claim/', views.HostClaimView.as_view(), name='host-claim'),
     path('teams/boost/', views.BoostTeammateView.as_view(), name='boost-teammate'),
+    path('teams/powerup/', views.TeamPowerupView.as_view(), name='team-powerup'),
     path('powerups/freeze/', views.FreezeTimerView.as_view(), name='freeze-timer'),
     path('react/', views.ReactToGameView.as_view(), name='react'),
     path('rooms/<str:room_code>/leaderboard/', views.RoomLeaderboardView.as_view(), name='room-leaderboard'),

@@ -1838,8 +1838,16 @@ class GroupRemoveMemberView(APIView):
             return Response({"error": "firebase_uid is required"}, status=400)
         if target_uid == request.user.firebase_uid:
             return Response({"error": "You can't remove yourself. Use Leave Group instead."}, status=400)
+        member = User.objects.filter(firebase_uid=target_uid).first()
+        member_name = (
+            (member.get_full_name() or member.username) if member else 'A member'
+        )
         if not remove_group_member(group_id, target_uid):
             return Response({"error": "Member not found in this group"}, status=400)
+        display_name = request.user.get_full_name() or request.user.username
+        _post_system_message(
+            group_id, f"{display_name} removed {member_name} from the group.", request.user.firebase_uid,
+        )
         return Response({"message": "Member removed."})
 
 

@@ -276,6 +276,7 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
               roomCode,
               isHost,
               ...(isLAN ? { lan: 'true' } : {}),
+              ...(teamMode ? { teamMode: 'true' } : {}),
             },
           } as any);
         });

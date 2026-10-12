@@ -21,7 +21,7 @@ import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser, getCachedUserId } from '@/services/authService';
 import { getFirebaseUid } from '@/services/firebaseAuthService';
 import { getChatCache, setChatCache, clearChatCache, setCacheUserId, invalidateCachePrefix } from '@/services/apiCache';
-import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName, QuizEmbed, DeckEmbed, editGroupMessage, deleteGroupMessage, setGroupMessagePinned } from '@/services/chatService';
+import { getGroupRoster, updateGroup, leaveGroup, GroupMember, JoinRequestMember, removeGroupMember, handleJoinRequest, Attachment, LocalAttachment, uploadGroupAttachment, getAttachmentLink, safeFileName, QuizEmbed, DeckEmbed, editGroupMessage, deleteGroupMessage } from '@/services/chatService';
 import { pfpSource } from '@/constants/pfps';
 import QuizShareSheet from '@/components/QuizShareSheet';
 import DeckShareSheet from '@/components/DeckShareSheet';
@@ -130,6 +130,11 @@ function formatDayLabel(created_at: GroupMessage['created_at']): string | null {
 
 // Accepts REST GET, REST POST, and Firestore snapshot docs alike.
 function mapMessage(raw: RawMessage): GroupMessage {
+  // REST normalizes a missing embed to `{}` and Firestore omits the key
+  // entirely; both must read as absent or mergeMessages' strip-guard (which
+  // keys off falsiness) keeps the empty object and clobbers the real embed.
+  const emptyEmbed = (v: unknown) =>
+    v != null && typeof v === 'object' && Object.keys(v as object).length === 0;
   return {
     id: String(raw.id),
     text: raw.text ?? '',
@@ -139,8 +144,8 @@ function mapMessage(raw: RawMessage): GroupMessage {
     reactions: raw.reactions ?? {},
     attachments: raw.attachments ?? [],
     // Older messages predate the field, and Firestore omits keys entirely.
-    quiz_embed: raw.quiz_embed ?? null,
-    deck_embed: raw.deck_embed ?? null,
+    quiz_embed: emptyEmbed(raw.quiz_embed) ? null : (raw.quiz_embed ?? null),
+    deck_embed: emptyEmbed(raw.deck_embed) ? null : (raw.deck_embed ?? null),
     type: raw.type || 'user',
     edited: raw.edited ?? false,
     pinned: raw.pinned ?? false,
@@ -174,10 +179,10 @@ function mergeMessages(prev: GroupMessage[], incoming: GroupMessage[]): GroupMes
     const existing = prevById.get(msg.id);
     if (!existing) return msg;
     // None of the three writers reliably carries an embed: REST normalizes a
-    // missing one to null and Firestore omits the key entirely, so an incoming
-    // copy that lacks an embed must never overwrite the one a different writer
-    // supplied. Strip the empty embed keys before merging so only a real
-    // object can overwrite one.
+    // missing one to `{}` (which mapMessage collapses to null) and Firestore
+    // omits the key entirely, so an incoming copy that lacks an embed must never
+    // overwrite the one a different writer supplied. Strip the empty embed keys
+    // before merging so only a real object can overwrite one.
     const patch: Partial<GroupMessage> = { ...msg };
     if (!patch.quiz_embed) delete patch.quiz_embed;
     if (!patch.deck_embed) delete patch.deck_embed;
@@ -305,18 +310,72 @@ export default function GroupChatScreen() {
   const [sharedDeck, setSharedDeck] = useState<DeckEmbed | null>(null);
   const [editingMessage, setEditingMessage] = useState<GroupMessage | null>(null);
   const [editMessageText, setEditMessageText] = useState('');
+  const [isPinsOpen, setIsPinsOpen] = useState(false);
+  // Briefly true on the row a pin/list tap jumped to, so it flashes.
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  // Drives the floating "jump to newest" button.
+  const [atBottom, setAtBottom] = useState(true);
   const linkCacheRef = useRef<Record<string, string>>({});
   const mintAtRef = useRef<Record<string, number>>({});
 
   const scrollViewRef = useRef<ScrollView>(null);
   const chatUnsubscribeRef = useRef<(() => void) | null>(null);
+  // y-offset of each rendered row, so a pinned tap can scroll straight to it.
+  const messageOffsetsRef = useRef<Record<string, number>>({});
+  // True once the user has scrolled away from the bottom; auto-scroll then backs
+  // off until a message is sent or the go-down button is tapped.
+  const userScrolledRef = useRef(false);
+  // Set on open (and on a group switch) so the first layout pass that has
+  // content snaps to the newest message. Without this the initial scroll fired
+  // before the list was laid out and the chat opened at the very top.
+  const pendingInitialScrollRef = useRef(true);
 
-  const scrollToEnd = useCallback((animated = false) => {
+  const scrollToBottom = useCallback((animated = false, force = false) => {
+    if (userScrolledRef.current && !force) return;
     // Let content layout settle instead of relying on fixed timeouts.
     requestAnimationFrame(() => {
       scrollViewRef.current?.scrollToEnd({ animated });
     });
   }, []);
+
+  const handleScroll = (event: any) => {
+    const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+    const nearBottom = distanceFromBottom < 80;
+    setAtBottom(nearBottom);
+    userScrolledRef.current = !nearBottom;
+  };
+
+  const handleContentSizeChange = () => {
+    // The first content pass on open snaps instantly to the bottom; later new
+    // messages only follow when the user is already there.
+    if (pendingInitialScrollRef.current) {
+      pendingInitialScrollRef.current = false;
+      userScrolledRef.current = false;
+      scrollToBottom(false, true);
+      return;
+    }
+    scrollToBottom(true);
+  };
+
+  const scrollToMessage = useCallback((messageId: string) => {
+    const y = messageOffsetsRef.current[messageId];
+    if (y == null) return;
+    scrollViewRef.current?.scrollTo({ y: Math.max(0, y - 12), animated: true });
+    setHighlightId(messageId);
+    setTimeout(() => {
+      setHighlightId(current => (current === messageId ? null : current));
+    }, 1600);
+  }, []);
+
+  // Fresh open or a switch to another group: land on the newest message again
+  // and forget the previous conversation's measured offsets.
+  useEffect(() => {
+    pendingInitialScrollRef.current = true;
+    userScrolledRef.current = false;
+    messageOffsetsRef.current = {};
+    setAtBottom(true);
+  }, [groupId]);
 
   // Load group metadata (from my-groups list) + current user + our Firebase uid
   useEffect(() => {
@@ -387,7 +446,7 @@ export default function GroupChatScreen() {
         const cachedMsgs = (cached.messages as GroupMessage[]).filter(m => !m.local);
         if (cachedMsgs.length > 0) {
           setMessages(cachedMsgs);
-          scrollToEnd(false);
+          scrollToBottom(false);
         }
         if (cached.group) {
           const cachedGroup = cached.group as StudyGroup;
@@ -435,7 +494,7 @@ export default function GroupChatScreen() {
         if (res.ok) {
           const initialMsgs: GroupMessage[] = (await res.json()).map(mapMessage);
           setMessages(prev => mergeMessages(prev, initialMsgs));
-          scrollToEnd(false);
+          scrollToBottom(false);
         }
       } catch (err) {
         console.error('Failed to load initial messages:', err);
@@ -479,11 +538,12 @@ export default function GroupChatScreen() {
               type: data?.type,
               edited: data?.edited,
               pinned: data?.pinned,
+              deleted: data?.deleted,
             });
           });
 
           setMessages(prev => mergeMessages(prev, firestoreMsgs));
-          scrollToEnd(true);
+          scrollToBottom(true);
         }, error => {
           console.error('Firestore Chat Subscription Error:', error);
         });
@@ -499,7 +559,7 @@ export default function GroupChatScreen() {
         chatUnsubscribeRef.current = null;
       }
     };
-  }, [groupId, scrollToEnd]);
+  }, [groupId, scrollToBottom]);
 
   // Persist the latest conversation + group metadata + roster so the next
   // visit paints instantly from SQLite. Optimistic echoes are never stored —
@@ -733,7 +793,8 @@ export default function GroupChatScreen() {
       local: true,
     };
     setMessages(prev => [...prev, tempMsg]);
-    scrollToEnd(true);
+    // Sending should always chase the new bubble, even if the user had scrolled up.
+    scrollToBottom(true, true);
 
     try {
       const token = await getToken();
@@ -1014,17 +1075,23 @@ export default function GroupChatScreen() {
     // silently did nothing and the banner could never be dismissed.
     const target = targetOverride ?? reactionTarget;
     if (!target) return;
-    const next = !target.pinned;
     if (!targetOverride) setReactionTarget(null);
-    // One pin per group: pinning this message drops any other pin, so the
-    // banner can never reference two messages (or a just-deleted ghost).
-    setMessages(prev => prev.map(m => (
-      m.id === target.id ? { ...m, pinned: next } : next ? { ...m, pinned: false } : m
-    )));
+    // An unsent echo has no Firestore doc yet, so there is nothing to pin.
+    if (target.local) return;
+    const next = !target.pinned;
+    // Pins are independent (the banner shows the newest, the pin button lists
+    // the rest), so pinning one leaves every other pin in place. Writing the
+    // field straight to Firestore is what makes the pin survive a revisit and
+    // reach the other members live -- the old REST call updated a doc the
+    // reading path did not always observe.
+    setMessages(prev => prev.map(m => (m.id === target.id ? { ...m, pinned: next } : m)));
     try {
-      const token = await getToken();
-      if (!token) return;
-      await setGroupMessagePinned(String(groupId), token, target.id, next);
+      await firestore()
+        .collection('studyGroups')
+        .doc(String(groupId))
+        .collection('messages')
+        .doc(target.id)
+        .update({ pinned: next });
     } catch (err) {
       setMessages(prev => prev.map(m => (m.id === target.id ? { ...m, pinned: target.pinned } : m)));
       Alert.alert('Pin Failed', err instanceof Error ? err.message : 'Please try again.');
@@ -1070,7 +1137,10 @@ export default function GroupChatScreen() {
               <View style={styles.dayDividerLine} />
             </View>
           )}
-          <View style={[styles.messageWrapper, isMe ? styles.messageMe : styles.messageOther]}>
+          <View
+            style={[styles.messageWrapper, isMe ? styles.messageMe : styles.messageOther]}
+            onLayout={(e) => { messageOffsetsRef.current[msg.id] = e.nativeEvent.layout.y; }}
+          >
             {!isMe && (
               <View style={styles.avatarColumn}>
                 <MemberAvatar member={senderMember} name={msg.sender_name} size={34} />
@@ -1252,7 +1322,10 @@ const renderAttachments = () => {
             <View style={styles.dayDividerLine} />
           </View>
         )}
-        <View style={[styles.messageWrapper, isGroupEnd ? null : styles.messageWrapperTight, isMe ? styles.messageMe : styles.messageOther]}>
+        <View
+          style={[styles.messageWrapper, isGroupEnd ? null : styles.messageWrapperTight, isMe ? styles.messageMe : styles.messageOther]}
+          onLayout={(e) => { messageOffsetsRef.current[msg.id] = e.nativeEvent.layout.y; }}
+        >
           {!isMe && (
             <View style={styles.avatarColumn}>
               {isGroupStart && <MemberAvatar member={senderMember} name={msg.sender_name} size={34} />}
@@ -1271,6 +1344,7 @@ const renderAttachments = () => {
                   styles.messageBubble,
                   isMe ? styles.bubbleMe : styles.bubbleOther,
                   (msg.attachments?.length ?? 0) > 0 ? styles.bubbleMedia : null,
+                  highlightId === msg.id ? styles.bubbleHighlight : null,
                 ]}
               >
                 {renderAttachments()}
@@ -1298,7 +1372,12 @@ const renderAttachments = () => {
     );
   };
 
-  const pinnedMessage = messages.find(m => m.pinned && !m.local && !m.deleted) ?? null;
+  // Newest first, so the banner always shows the most recent pin while the pin
+  // list keeps them all.
+  const pinnedMessages = messages
+    .filter(m => m.pinned && !m.local && !m.deleted)
+    .sort((a, b) => (toTimestamp(b.created_at) ?? 0) - (toTimestamp(a.created_at) ?? 0));
+  const pinnedMessage = pinnedMessages[0] ?? null;
 
   return (
       <KeyboardSafeView
@@ -1323,6 +1402,14 @@ const renderAttachments = () => {
           </Text>
         </View>
         <View style={styles.headerActions}>
+          <TouchableOpacity onPress={() => setIsPinsOpen(true)} style={styles.headerIconBtn} accessibilityLabel="Pinned messages">
+            <Ionicons name={pinnedMessages.length > 0 ? 'pin' : 'pin-outline'} size={22} color="white" />
+            {pinnedMessages.length > 0 && (
+              <View style={styles.headerBadge}>
+                <Text style={styles.headerBadgeText}>{pinnedMessages.length}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
           <TouchableOpacity onPress={() => setIsMembersOpen(true)} style={styles.headerIconBtn} accessibilityLabel="Group members">
             <Ionicons name="people" size={22} color="white" />
           </TouchableOpacity>
@@ -1336,12 +1423,14 @@ const renderAttachments = () => {
         <TouchableOpacity
           style={styles.pinnedBanner}
           activeOpacity={0.8}
-          onPress={() => setReactionTarget(pinnedMessage)}
-          accessibilityLabel={`Pinned message: ${pinnedMessage.text}. Tap for options.`}
+          onPress={() => scrollToMessage(pinnedMessage.id)}
+          accessibilityLabel={`Pinned message: ${pinnedMessage.text}. Tap to jump to it.`}
         >
           <Ionicons name="pin" size={15} color={COLORS.purplePrimary} />
           <View style={styles.pinnedBannerBody}>
-            <Text style={styles.pinnedBannerLabel}>Pinned message</Text>
+            <Text style={styles.pinnedBannerLabel}>
+              {pinnedMessages.length > 1 ? `Pinned messages · ${pinnedMessages.length}` : 'Pinned message'}
+            </Text>
             <Text style={styles.pinnedBannerText} numberOfLines={1}>
               {pinnedMessage.deck_embed?.title
                 || pinnedMessage.quiz_embed?.title
@@ -1355,28 +1444,43 @@ const renderAttachments = () => {
         </TouchableOpacity>
       )}
 
-      <ScrollView
-        ref={scrollViewRef}
-        style={styles.chatArea}
-        contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
-        onContentSizeChange={() => scrollToEnd(false)}
-      >
-        {loading && messages.length === 0 ? (
-          <View style={styles.chatState}>
-            <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
-          </View>
-        ) : messages.length === 0 ? (
-          <View style={styles.chatState}>
-            <View style={styles.emptyIcon}>
-              <Ionicons name="chatbubbles-outline" size={34} color={COLORS.purpleVibrant} />
+      <View style={styles.chatAreaWrap}>
+        <ScrollView
+          ref={scrollViewRef}
+          style={styles.chatArea}
+          contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
+          onContentSizeChange={handleContentSizeChange}
+          onScroll={handleScroll}
+          scrollEventThrottle={16}
+          onLayout={() => { if (pendingInitialScrollRef.current) scrollToBottom(false, true); }}
+        >
+          {loading && messages.length === 0 ? (
+            <View style={styles.chatState}>
+              <ActivityIndicator size="large" color={COLORS.purpleVibrant} />
             </View>
-            <Text style={styles.emptyTitle}>No messages yet</Text>
-            <Text style={styles.emptySubtitle}>Say hi to your study group</Text>
-          </View>
-        ) : (
-          messages.map(renderMessage)
+          ) : messages.length === 0 ? (
+            <View style={styles.chatState}>
+              <View style={styles.emptyIcon}>
+                <Ionicons name="chatbubbles-outline" size={34} color={COLORS.purpleVibrant} />
+              </View>
+              <Text style={styles.emptyTitle}>No messages yet</Text>
+              <Text style={styles.emptySubtitle}>Say hi to your study group</Text>
+            </View>
+          ) : (
+            messages.map(renderMessage)
+          )}
+        </ScrollView>
+
+        {!atBottom && messages.length > 0 && (
+          <TouchableOpacity
+            style={styles.goDownBtn}
+            onPress={() => scrollToBottom(true, true)}
+            accessibilityLabel="Jump to the latest messages"
+          >
+            <Ionicons name="chevron-down" size={22} color={COLORS.purplePrimary} />
+          </TouchableOpacity>
         )}
-      </ScrollView>
+      </View>
 
       <View style={styles.inputShell}>
         {pendingAttachments.length > 0 && (
@@ -1632,6 +1736,49 @@ const renderAttachments = () => {
         </View>
       </Modal>
 
+      {/* Pinned Messages Modal */}
+      <Modal visible={isPinsOpen} animationType="slide" transparent={true} onRequestClose={() => setIsPinsOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { maxHeight: '75%' }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Pinned ({pinnedMessages.length})</Text>
+              <TouchableOpacity onPress={() => setIsPinsOpen(false)}>
+                <Ionicons name="close" size={24} color={COLORS.textDark} />
+              </TouchableOpacity>
+            </View>
+            {pinnedMessages.length === 0 ? (
+              <Text style={styles.emptyText}>No pinned messages yet. Long-press a message to pin it.</Text>
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {pinnedMessages.map(m => (
+                  <TouchableOpacity
+                    key={m.id}
+                    style={styles.pinnedListRow}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      setIsPinsOpen(false);
+                      // Let the modal close before scrolling so the target is
+                      // laid out and the jump lands on it.
+                      setTimeout(() => scrollToMessage(m.id), 250);
+                    }}
+                    accessibilityLabel={`Go to pinned message from ${m.sender_name}`}
+                  >
+                    <Ionicons name="pin" size={16} color={COLORS.purplePrimary} />
+                    <View style={styles.pinnedListBody}>
+                      <Text style={styles.pinnedListSender} numberOfLines={1}>{m.sender_name}</Text>
+                      <Text style={styles.pinnedListText} numberOfLines={2}>
+                        {m.text || m.deck_embed?.title || m.quiz_embed?.title || 'Attachment'}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
+
       {/* Member Profile Peek Modal */}
       <Modal visible={peekMember != null} animationType="fade" transparent={true} onRequestClose={() => setPeekMember(null)}>
         <TouchableOpacity style={styles.peekOverlay} activeOpacity={1} onPress={() => setPeekMember(null)}>
@@ -1867,7 +2014,20 @@ const styles = StyleSheet.create({
   chatHeaderSubtitle: { color: COLORS.purplePale, fontSize: 12, marginTop: 2, fontFamily: FONTS.medium },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   headerIconBtn: { padding: 4 },
+  headerBadge: {
+    position: 'absolute', top: -2, right: -6, minWidth: 15, height: 15,
+    borderRadius: 8, paddingHorizontal: 3, backgroundColor: COLORS.danger,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  headerBadgeText: { color: 'white', fontSize: 9, fontFamily: FONTS.bold },
+  chatAreaWrap: { flex: 1, backgroundColor: COLORS.bg },
   chatArea: { flex: 1, backgroundColor: COLORS.bg },
+  goDownBtn: {
+    position: 'absolute', right: 16, bottom: 16, width: 40, height: 40, borderRadius: 20,
+    backgroundColor: COLORS.surface, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: COLORS.border, shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.15, shadowRadius: 6, elevation: 4,
+  },
 
   messageWrapper: { marginBottom: 16, maxWidth: '82%', flexDirection: 'row' },
   messageWrapperTight: { marginBottom: 2 },
@@ -1885,6 +2045,7 @@ const styles = StyleSheet.create({
   bubbleDeleted: { backgroundColor: COLORS.surface, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: COLORS.border, opacity: 0.75 },
   deletedText: { fontSize: 13.5, fontFamily: FONTS.regular, fontStyle: 'italic', color: COLORS.textMuted },
   bubbleMedia: { backgroundColor: 'transparent', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(76, 29, 149, 0.15)', borderRadius: 12, paddingHorizontal: 0, paddingVertical: 0 },
+  bubbleHighlight: { borderWidth: 2, borderColor: COLORS.purpleVibrant },
   messageText: { fontSize: 15, lineHeight: 22, fontFamily: FONTS.regular },
   messageTime: { fontSize: 10, color: COLORS.textMuted, marginTop: 4, fontFamily: FONTS.medium },
   timeMe: { alignSelf: 'flex-end' },
@@ -2092,6 +2253,11 @@ const styles = StyleSheet.create({
   editDescInput: { minHeight: 72, textAlignVertical: 'top' },
   saveBtn: { backgroundColor: COLORS.purplePrimary, borderRadius: 12, paddingVertical: 12, alignItems: 'center', justifyContent: 'center' },
   saveBtnText: { color: 'white', fontSize: 14, fontFamily: FONTS.bold },
+
+  pinnedListRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: COLORS.border },
+  pinnedListBody: { flex: 1, minWidth: 0 },
+  pinnedListSender: { fontSize: 13, fontFamily: FONTS.semiBold, color: COLORS.textDark },
+  pinnedListText: { fontSize: 12, fontFamily: FONTS.regular, color: COLORS.textMuted, marginTop: 2 },
 
   memberRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: COLORS.border, gap: 12 },
   memberInfo: { flex: 1 },

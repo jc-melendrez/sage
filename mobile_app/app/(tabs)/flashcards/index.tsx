@@ -521,10 +521,10 @@ export default function FlashcardsHome() {
                 <Ionicons name="close" size={22} color={COLORS.textMuted} />
               </TouchableOpacity>
             </View>
-            <Text style={styles.inputLabel}>SHARE "{shareTarget?.name || ''}" TO A GROUP</Text>
+            <Text style={styles.inputLabel}>SHARE &quot;{shareTarget?.name || ''}&quot; TO A GROUP</Text>
             {shareGroups.length === 0 ? (
               <View style={styles.importEmpty}>
-                <Text style={styles.emptyDesc}>You're not in any groups yet. Join a group to share decks with classmates.</Text>
+                <Text style={styles.emptyDesc}>You&apos;re not in any groups yet. Join a group to share decks with classmates.</Text>
               </View>
             ) : (
               <ScrollView style={styles.quizList} showsVerticalScrollIndicator={false}>

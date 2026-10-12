@@ -268,6 +268,8 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  // Drives the floating "jump to newest" button.
+  const [atBottom, setAtBottom] = useState(true);
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
   const [attachedFile, setAttachedFile] = useState<PickedDocument | PickedImage | null>(null);
 
@@ -290,6 +292,7 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
     const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
     const isAtBottom = contentOffset.y >= contentSize.height - layoutMeasurement.height - 50;
     userScrolledRef.current = !isAtBottom;
+    setAtBottom(isAtBottom);
   };
 
   const handleContentSizeChange = () => {
@@ -942,11 +945,13 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
       </Modal>
 
       {/* Messages Scroll Area */}
+      <View style={styles.messagesWrap}>
       <ScrollView 
         ref={scrollViewRef} 
         style={styles.messagesContainer} 
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.messagesContent}
+        scrollEventThrottle={16}
         onScroll={handleScroll}
         onContentSizeChange={handleContentSizeChange}
         onLayout={() => {
@@ -1044,6 +1049,17 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
           </View>
         )}
       </ScrollView>
+
+        {!atBottom && messages.length > 0 && (
+          <TouchableOpacity
+            style={styles.goDownBtn}
+            onPress={() => scrollToBottom(true, true)}
+            accessibilityLabel="Jump to the latest messages"
+          >
+            <Ionicons name="chevron-down" size={22} color={COLORS.purplePrimary} />
+          </TouchableOpacity>
+        )}
+      </View>
 
       {/* Input Area */}
       <View style={styles.inputContainer}>
@@ -1252,6 +1268,9 @@ sessionMenuButton: {
     fontWeight: '700',
   },
   // Messages
+  messagesWrap: {
+    flex: 1,
+  },
   messagesContainer: { 
     flex: 1,
   },
@@ -1259,6 +1278,12 @@ sessionMenuButton: {
     paddingHorizontal: 20, 
     paddingVertical: 16, 
     paddingBottom: 20,
+  },
+  goDownBtn: {
+    position: 'absolute', right: 20, bottom: 16, width: 40, height: 40, borderRadius: 20,
+    backgroundColor: COLORS.surface, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: COLORS.border, shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.15, shadowRadius: 6, elevation: 4,
   },
   messageWrapper: { 
     marginBottom: 16, 

@@ -2516,7 +2516,7 @@ class GroupChatMessageTests(APITestCase):
 
 
 class FirestoreMessageServiceTests(TestCase):
-    """The tombstone and one-pin rules live in the Firestore layer, patched far
+    """The tombstone and multi-pin rules live in the Firestore layer, patched far
     below the Django views -- these tests pin the writes those views trigger."""
 
     def setUp(self):
@@ -2539,13 +2539,15 @@ class FirestoreMessageServiceTests(TestCase):
         self.assertIn('quiz_embed', payload)
         self.assertIn('deck_embed', payload)
 
-    def test_pinning_clears_any_other_pin(self):
+    def test_pinning_leaves_other_pins_alone(self):
+        # Pins are independent: the app draws a banner from the newest and lists
+        # the rest, so pinning one message must not silently release another.
         other = _PinnedMessageDoc('m2', self.updates)
         self.pinned_docs.append(other)
         with patch.object(firestore_service, 'get_db', return_value=self._db()):
             ok = firestore_service.set_message_pinned('group-abc', 'm1', True)
         self.assertTrue(ok)
-        self.assertIn('m2', other.unpinned)
+        self.assertEqual(other.unpinned, [])
         self.assertEqual(self.updates[-1], {'pinned': True})
 
     def test_pinning_digit_keeps_the_target_pin(self):
@@ -2847,6 +2849,20 @@ class GroupMembersAndSettingsTests(APITestCase):
             )
         self.assertEqual(res.status_code, 200)
         mock_remove.assert_called_once_with('group-abc', 'fb-uid-follower')
+
+    def test_remove_member_posts_system_message(self):
+        with patch.object(users_views, 'get_study_group', return_value=self._group()), \
+             patch.object(users_views, 'remove_group_member', return_value=True), \
+             patch.object(users_views, '_post_system_message') as mock_sys:
+            res = self.client.post(
+                reverse('group_remove_member', args=['group-abc']),
+                {'firebase_uid': 'fb-uid-follower'},
+                format='json',
+            )
+        self.assertEqual(res.status_code, 200)
+        mock_sys.assert_called_once_with(
+            'group-abc', 'Lead Er removed Fold Lower from the group.', 'fb-uid-leader',
+        )
 
     def test_remove_member_denied_for_non_admin(self):
         with patch.object(users_views, 'get_study_group',

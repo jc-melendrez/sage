@@ -257,7 +257,11 @@ export default function NotificationSheet({
           !dueRow && due ? `Due ${due.short}` : null,
         ].filter(Boolean).join(' · '),
         time: dueRow && due ? due.label : relativeTime(t.created_at),
-        href: `/(tabs)/course/task/${t.id}`,
+        // The task screen loads an activity out of its course's list, so the
+        // course id is required. Without it `Number(courseId)` was NaN, the
+        // fetch returned [], and every task tap landed on "Assignment not
+        // found."
+        href: `/(tabs)/course/task/${t.id}?courseId=${t.course}`,
         urgent: dueRow,
         createdAt: dueRow ? undefined : createdAt,
       });

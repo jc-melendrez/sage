@@ -3648,6 +3648,195 @@ class TeamMajorityVoteTests(TestCase):
         self.assertEqual(self.room_ref.get().to_dict()['teamQuestionIndex'], 0)
 
 
+class TeamSharedPowerupTests(TestCase):
+    """Team power-ups are a SHARED act, not a self-asserted request flag.
+
+    The pool belongs to the team, so arming one has to be shared: the first
+    member to arm claims it for the whole team, a second member tapping the same
+    button is a no-op, and the resolve reads the team's own `armedPowerups`
+    marker instead of a flag on the pick request. That is what makes "both
+    members see it" and "applied exactly once" true at the same time, and stops
+    one member spending the team's pool on an effect no teammate agreed to.
+    """
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='phost', password='pass')
+        self.a = User.objects.create_user(username='pa', password='pass')
+        self.b = User.objects.create_user(username='pb', password='pass')
+        self.spectator = User.objects.create_user(username='pspec', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('PWR1')
+        self.room_ref.set({
+            'status': 'active', 'hostId': self.host.id, 'ownerId': self.host.id,
+            'teamMode': True, 'teamCount': 2, 'timePerQuestion': 15,
+            'teamQuestionIndex': 0,
+            'teamStartedAt': timezone.now(),
+            'questions': [
+                {'type': 'mcq', 'question': f'Q{i}',
+                 'choices': ['A. yes', 'B. no', 'C. maybe', 'D. sure'],
+                 'correctAnswer': 'A. yes'} for i in range(2)
+            ],
+        })
+        self.team_ref = self.room_ref.collection('teams').document('1')
+        self.team_ref.set({
+            'name': 'Alphas', 'color': TEAM_COLORS[0], 'score': 0,
+            'correctCount': 0, 'answeredCount': 0,
+            'memberIds': [str(self.a.id), str(self.b.id)], 'memberCount': 2,
+            'teamCorrect': 0, 'teamStreak': 0,
+            'powerups': {'freeze': 0, 'hint': 2, 'doublePoints': 1, 'shield': 1},
+        })
+        for user, team_id in [(self.a, '1'), (self.b, '1'), (self.spectator, None)]:
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': 0, 'answeredCount': 0,
+                'correctCount': 0, 'streak': 0, 'teamId': team_id, 'isFinished': False,
+            })
+
+    def team(self):
+        return self.team_ref.get().to_dict()
+
+    def arm(self, user, powerup, index=0):
+        self.client.force_authenticate(user=user)
+        return self.client.post(reverse('team-powerup'), {
+            'roomCode': 'PWR1', 'powerup': powerup, 'questionIndex': index,
+        }, format='json')
+
+    def pick(self, user, answer, index=0, body_extra=None):
+        self.client.force_authenticate(user=user)
+        payload = {'roomCode': 'PWR1', 'questionIndex': index, 'answer': answer, 'timeTaken': '1'}
+        if body_extra:
+            payload.update(body_extra)
+        return self.client.post(reverse('team-pick'), payload, format='json')
+
+    def test_arming_stores_a_shared_marker_without_spending_the_pool(self):
+        resp = self.arm(self.a, 'doublePoints')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        team = self.team()
+        self.assertEqual(team['armedPowerups']['questionIndex'], 0)
+        self.assertTrue(team['armedPowerups']['doublePoints'])
+        self.assertEqual(team['armedPowerups']['by'], str(self.a.id))
+        # Charging happens at resolve, not here.
+        self.assertEqual(team['powerups']['doublePoints'], 1)
+
+    def test_a_second_member_arming_the_same_powerup_is_idempotent(self):
+        self.assertEqual(self.arm(self.a, 'hint').status_code, 200)
+        resp = self.arm(self.b, 'hint')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        # Still one arm, still the first member's marker.
+        self.assertEqual(self.team()['armedPowerups']['by'], str(self.a.id))
+
+    def test_different_members_can_arm_different_powerups(self):
+        self.arm(self.a, 'hint')
+        self.arm(self.b, 'doublePoints')
+        armed = self.team()['armedPowerups']
+        self.assertTrue(armed['hint'])
+        self.assertTrue(armed['doublePoints'])
+        self.assertEqual(armed['by'], str(self.b.id))
+
+    def test_hint_stores_a_shared_pair_of_wrong_choices(self):
+        self.arm(self.a, 'hint')
+        choices = self.team()['hintChoices']
+        self.assertEqual(len(choices), 2)
+        self.assertNotIn('A. yes', choices)
+        # The pair is stable: a teammate's screen reads the same one.
+        self.arm(self.b, 'hint')
+        self.assertEqual(self.team()['hintChoices'], choices)
+
+    def test_a_spectator_cannot_arm_a_powerup(self):
+        resp = self.arm(self.spectator, 'hint')
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(resp.json()['spectator'])
+
+    def test_freezing_is_not_armable_in_team_mode(self):
+        resp = self.arm(self.a, 'freeze')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_arming_an_empty_pool_is_refused(self):
+        self.team_ref.update({'powerups.shield': 0})
+        resp = self.arm(self.a, 'shield')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_arming_is_refused_after_the_clock_runs_out(self):
+        self.room_ref.update({'teamStartedAt': timezone.now() - timedelta(seconds=120)})
+        resp = self.arm(self.a, 'hint')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_arming_is_refused_on_a_question_that_is_not_current(self):
+        resp = self.arm(self.a, 'hint', index=1)
+        self.assertEqual(resp.status_code, 409)
+
+    def test_the_resolve_ignores_a_request_flag(self):
+        self.pick(self.a, 'A. yes')
+        resp = self.pick(self.b, 'A. yes', body_extra={'useDoublePoints': 'true'})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        # No arm was placed, so the pool is untouched even though the request
+        # claimed a 2x -- the resolve reads the team marker, not the request.
+        self.assertEqual(self.team()['powerups']['doublePoints'], 1)
+
+    def test_the_resolve_spends_an_armed_powerup_exactly_once(self):
+        self.assertEqual(self.arm(self.a, 'doublePoints').status_code, 200)
+        self.pick(self.a, 'A. yes')
+        resp = self.pick(self.b, 'A. yes')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        team = self.team()
+        self.assertEqual(team['powerups']['doublePoints'], 0)
+        # The marker is cleared so it cannot carry into the next question.
+        self.assertNotIn('armedPowerups', team)
+        self.assertNotIn('hintChoices', team)
+
+    def test_an_armed_shield_is_only_spent_on_a_miss(self):
+        self.assertEqual(self.arm(self.a, 'shield').status_code, 200)
+        self.pick(self.a, 'A. yes')
+        self.pick(self.b, 'A. yes')
+        # Correct answer: the shield was armed for safety but not consumed.
+        self.assertEqual(self.team()['powerups']['shield'], 1)
+
+    def test_an_armed_shield_absorbs_a_miss(self):
+        self.team_ref.update({'teamStreak': 2})
+        self.assertEqual(self.arm(self.a, 'shield').status_code, 200)
+        self.pick(self.a, 'B. no')
+        self.pick(self.b, 'B. no')
+        team = self.team()
+        self.assertEqual(team['powerups']['shield'], 0)
+        # The shield keeps the flame alive rather than resetting the run.
+        self.assertEqual(team['teamStreak'], 2)
+
+    def test_arming_is_refused_once_the_question_is_settled(self):
+        self.pick(self.a, 'A. yes')
+        self.pick(self.b, 'A. yes')
+        resp = self.arm(self.a, 'hint')
+        self.assertEqual(resp.status_code, 409)
+
+    def test_advancing_clears_a_stale_armed_marker(self):
+        self.pick(self.a, 'A. yes')
+        self.pick(self.b, 'A. yes')
+        # Plant a marker as if it had survived the resolve, and make sure the
+        # advance wipes it rather than letting it leak into the next question.
+        self.team_ref.update({
+            'armedPowerups': {'questionIndex': 0, 'hint': True},
+            'hintChoices': ['B. no'],
+        })
+        # The ready-up gate holds the room until every member has marked the
+        # question read, so both members do before the advance.
+        for user in (self.a, self.b):
+            self.client.force_authenticate(user=user)
+            r = self.client.post(reverse('team-ready'), {
+                'roomCode': 'PWR1', 'questionIndex': 0}, format='json')
+            self.assertEqual(r.status_code, 200, r.data)
+        self.client.force_authenticate(user=self.a)
+        adv = self.client.post(reverse('team-advance'), {
+            'roomCode': 'PWR1', 'questionIndex': 1}, format='json')
+        self.assertEqual(adv.status_code, 200, adv.data)
+        team = self.team()
+        self.assertNotIn('armedPowerups', team)
+        self.assertNotIn('hintChoices', team)
+
+
 class FairTeamRankingTests(TestCase):
     """Teams are ranked on average points per active member, and the XP that
     gets paid is computed from that same number."""

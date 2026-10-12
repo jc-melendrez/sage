@@ -9,6 +9,7 @@ import 'react-native-reanimated';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { UserProvider } from '@/contexts/UserContext';
 import { TutorialProvider } from '@/components/TutorialSpotlight';
+import OfflineBanner from '@/components/OfflineBanner';
 import {
   useFonts,
   Montserrat_400Regular,
@@ -161,6 +162,11 @@ export default function RootLayout() {
               <Stack.Screen name="chat/[groupId]" options={{ headerShown: false, presentation: 'card' }} />
             </Stack>
           </TutorialProvider>
+          {/* App-wide offline indicator. Painted above every native screen
+              (tabs, chat, flashcards, courses) so "you're offline" is never
+              only discoverable on Home and Play. Skips web, the game screens,
+              and the public TV view, which each handle offline state already. */}
+          <OfflineBanner />
         </UserProvider>
         <StatusBar style="auto" />
       </ThemeProvider>

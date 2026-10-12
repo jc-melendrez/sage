@@ -1,4 +1,5 @@
 import type { QuizPayload } from './offlineEngine';
+import type { PowerupKey, PowerupPool } from '@/types/game';
 
 export const LAN_PORT = 5050;
 export const MAX_CHUNK = 24000;
@@ -56,6 +57,12 @@ export interface LanTeam {
   id: string;
   name: string;
   color: string;
+  /**
+   * Shared power-ups for this team in LAN team play. The host owns and
+   * broadcasts this pool, so every member sees the same counts and can see
+   * when a power-up has been armed.
+   */
+  powerups?: PowerupPool;
 }
 
 export interface LanResultPayload {
@@ -96,6 +103,24 @@ export type LanMessage =
   | { t: 'ready'; playerId: string; index: number }
   /** What the host counted this round: how many are ready of how many active. */
   | { t: 'ready-count'; index: number; ready: number; expected: number }
+  /**
+   * A player has armed a shared team power-up for question `index`. The host
+   * validates it, decrements the team pool, computes hint choices if needed,
+   * and broadcasts `team-powerups`.
+   */
+  | { t: 'powerup'; index: number; key: PowerupKey }
+  /**
+   * A member earned a power-up on a streak in team play. The host adds it to
+   * that member's shared team pool (online, the server does this) and
+   * re-broadcasts `team-powerups`.
+   */
+  | { t: 'powerup-earned'; key: PowerupKey }
+  /**
+   * Host broadcast of team power-ups for question `index`. `armed` lists, per
+   * team id, the power-up keys armed for this question; `hintChoices` are the
+   * two wrong choices to hide when the hint is active (shared by the team).
+   */
+  | { t: 'team-powerups'; index: number; teams: LanTeam[]; armed?: Record<string, PowerupKey[]>; hintChoices?: string[] }
   /**
    * Group play: a player reports the option they picked for `index`. The host
    * tallies these and echoes them back so every member can see what their own

@@ -424,6 +424,8 @@ def serialize_team(team_id, data):
         'teamStreak': data.get('teamStreak', 0) or 0,
         'bestStreak': data.get('bestStreak', 0) or 0,
         'powerups': {k: (data.get('powerups') or {}).get(k, 0) for k in POWERUP_KEYS},
+        'armedPowerups': data.get('armedPowerups'),
+        'hintChoices': data.get('hintChoices'),
         'namedBy': data.get('namedBy'),
         'nameLocked': bool(data.get('nameLocked', False)),
         'leaderId': team_leader_id(data),
@@ -3056,9 +3058,6 @@ class TeamPickView(APIView):
             time_taken = float(request.data.get('timeTaken', 15))
         except (TypeError, ValueError):
             time_taken = 15.0
-        use_double = str(request.data.get('useDoublePoints', 'false')).lower() == 'true'
-        use_shield = str(request.data.get('useShield', 'false')).lower() == 'true'
-        use_hint = str(request.data.get('useHint', 'false')).lower() == 'true'
         force = str(request.data.get('force', 'false')).lower() == 'true'
         # The leader pressing "Lock in" settles the question early instead of
         # waiting out the clock for the rest of the team.
@@ -3146,7 +3145,6 @@ class TeamPickView(APIView):
             db, room_ref, team_ref, questions, question_index, time_per_q,
             player_id=str(request.user.id),
             answer=answer, time_taken=time_taken, expired=expired,
-            use_double=use_double, use_shield=use_shield, use_hint=use_hint,
             lock_in=lock_in,
         )
         if settled.get('_error'):
@@ -3158,8 +3156,7 @@ class TeamPickView(APIView):
 
 
 def _resolve_team_question(db, room_ref, team_ref, questions, question_index, time_per_q,
-                           player_id, answer, time_taken, expired,
-                           use_double=False, use_shield=False, use_hint=False, lock_in=False):
+                           player_id, answer, time_taken, expired, lock_in=False):
     """Tally one team's picks and, if the question closed, score it once.
 
     Returns the resolved payload (identical for every member, so nobody can see
@@ -3288,17 +3285,25 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             is_correct = False
 
         pool = dict(team.get('powerups') or {})
-        # Same rule as the solo endpoint: a self-asserted flag is only honoured
-        # when the pool can actually pay for it. Local names on purpose --
-        # assigning to the parameters would make this closure read them as
-        # unbound locals, which is what UnboundLocalError means here.
-        spent_double = bool(use_double) and (pool.get('doublePoints', 0) or 0) > 0
-        # Same rule as the solo endpoint: a blank submission is a timeout, and a
-        # timeout is not something the pool should be charged for. Without this a
-        # team that ran out of the clock burned its shield on the miss.
+        # Power-ups are a SHARED decision, so they are read from the team's own
+        # `armedPowerups` marker (written by TeamPowerupView when a member armed
+        # one) rather than from a self-asserted flag on this request. A flag on
+        # the request would let one member spend the team's pool on an effect no
+        # teammate agreed to, and would let the same power-up be applied twice if
+        # two members stamped the same flag. The marker is keyed by question, so
+        # a stale arm from a previous question cannot leak into this one.
+        armed = team.get('armedPowerups') or {}
+        if armed.get('questionIndex') != question_index:
+            armed = {}
+        # Same rule as the solo endpoint: a power-up is only honoured when the
+        # pool can actually pay for it.
+        spent_double = bool(armed.get('doublePoints')) and (pool.get('doublePoints', 0) or 0) > 0
+        # A blank submission is a timeout, and a timeout is not something the
+        # pool should be charged for. Without this a team that ran out of the
+        # clock burned its shield on the miss.
         submitted_answer = bool(str(answer or '').strip())
-        spent_shield = bool(use_shield) and submitted_answer and (pool.get('shield', 0) or 0) > 0
-        spent_hint = bool(use_hint) and submitted_answer and (pool.get('hint', 0) or 0) > 0
+        spent_shield = bool(armed.get('shield')) and submitted_answer and (pool.get('shield', 0) or 0) > 0
+        spent_hint = bool(armed.get('hint')) and submitted_answer and (pool.get('hint', 0) or 0) > 0
         # A boost bought through BoostTeammateView already paid for itself when
         # it was purchased, so it is not charged again here -- it only has to be
         # applied, and then cleared, so it cannot carry to the next question.
@@ -3386,6 +3391,14 @@ def _resolve_team_question(db, room_ref, team_ref, questions, question_index, ti
             team_updates['boostTarget'] = fs.DELETE_FIELD
             team_updates['boostQuestion'] = fs.DELETE_FIELD
             team_updates['boostedBy'] = fs.DELETE_FIELD
+
+        # The armed power-ups for this question are spent (or refused) now, so
+        # clear the marker and its agreed hint choices. Keyed by question, so
+        # this is hygiene rather than a correctness guard -- but leaving a stale
+        # arm behind would let the HUD keep claiming a power-up is live into the
+        # next question.
+        team_updates['armedPowerups'] = fs.DELETE_FIELD
+        team_updates['hintChoices'] = fs.DELETE_FIELD
 
         # Freeze the live vote into the resolve payload so the "who picked what"
         # view survives past the timer, then the reveal every member reads.
@@ -3545,7 +3558,9 @@ class TeamReadyView(APIView):
             if not pdata.get('teamId') or pdata.get('isFinished'):
                 continue
             expected += 1
-            if int(pdata.get('readyQuestionIndex', -1) or -1) == question_index:
+            # Same falsy-zero trap as TeamAdvanceView: index 0 is a real answer.
+            rqi = pdata.get('readyQuestionIndex')
+            if rqi is not None and int(rqi) == question_index:
                 ready += 1
         return Response({
             'questionIndex': question_index,
@@ -3655,7 +3670,12 @@ class TeamAdvanceView(APIView):
             if not pdata.get('teamId') or pdata.get('isFinished'):
                 continue
             expected_ready += 1
-            if int(pdata.get('readyQuestionIndex', -1) or -1) == current_index:
+            # `is not None`, not `or -1`: question index 0 is a real answer, and
+            # the `or` idiom read a ready member on the FIRST question as not
+            # ready (0 is falsy), so the room could never move off it without a
+            # host force.
+            rqi = pdata.get('readyQuestionIndex')
+            if rqi is not None and int(rqi) == current_index:
                 ready += 1
         if ready < expected_ready and not (force and is_host):
             return Response({
@@ -3671,7 +3691,13 @@ class TeamAdvanceView(APIView):
             # question nobody answered would inherit the previous one's tally.
             # `livePicks` is cleared here too, so the previous question's vote
             # does not bleed into the next one's badges.
-            team.reference.update({'pickCount': 0, 'livePicks': {}})
+            team.reference.update({
+                'pickCount': 0, 'livePicks': {},
+                # A power-up armed for the question just left must not follow the
+                # team into the next one.
+                'armedPowerups': fs.DELETE_FIELD,
+                'hintChoices': fs.DELETE_FIELD,
+            })
             room_ref.collection('_server').document(
                 f"teamPicks_{team.id}").set({'questionIndex': current_index, 'picks': {}})
         room_ref.update({
@@ -4019,6 +4045,132 @@ class BoostTeammateView(APIView):
             'teamId': str(caller_team),
             'boostTarget': target_id,
             'boostQuestion': boosted_question,
+            'shared': True,
+        })
+
+
+class TeamPowerupView(APIView):
+    """Arm a shared power-up for the team's current question.
+
+    A team pool is a shared resource, so arming one has to be a shared act: the
+    first member to arm a power-up claims it for the whole team, and a second
+    member tapping the same button is an idempotent no-op rather than a second
+    charge. The marker lives on the team document, which the app already reads
+    live, so BOTH members see the effect light up on the same tick.
+
+    The pool is NOT charged here. `_resolve_team_question` reads this marker,
+    spends from the pool and clears it when the question is scored -- the same
+    "bought now, applied and cleared at resolve" contract as a Boost. Charging
+    at resolve is also what keeps a shield armed for safety from being thrown
+    away on a correct answer (it is only spent on a miss).
+
+    Arming is refused once the question is settled or the shared clock has run
+    out, so a power-up can never land on a question the team has already
+    answered.
+    """
+    permission_classes = [IsAuthenticated]
+
+    # Freeze is deliberately absent: team mode has one shared clock, so pausing
+    # a single member's timer is meaningless (see FreezeTimerView).
+    ARMABLE = ('hint', 'doublePoints', 'shield')
+
+    def post(self, request):
+        room_code = (request.data.get('roomCode') or '').upper()
+        powerup = str(request.data.get('powerup') or '')
+        raw_index = request.data.get('questionIndex')
+        if not room_code or powerup not in self.ARMABLE:
+            return Response({'error': 'roomCode and a valid powerup are required'}, status=400)
+        try:
+            question_index = int(raw_index)
+        except (TypeError, ValueError):
+            return Response({'error': 'questionIndex must be a number'}, status=400)
+
+        db = get_firestore()
+        room_ref = db.collection('gameRooms').document(room_code)
+        room = room_ref.get()
+        if not room.exists:
+            return Response({'error': 'Room not found'}, status=404)
+        room_data = room.to_dict() or {}
+        if not room_data.get('teamMode', False):
+            return Response({'error': 'This room is not in team mode'}, status=400)
+        if room_data.get('status') != 'active':
+            return Response({'error': 'Power-ups only work while the game is running'}, status=400)
+
+        questions = room_data.get('questions') or []
+        if question_index < 0 or question_index >= len(questions):
+            return Response({'error': 'Invalid question index'}, status=400)
+        current_index = int(room_data.get('teamQuestionIndex') or 0)
+        if question_index != current_index:
+            return Response({
+                'error': 'That is not the current question',
+                'questionIndex': current_index,
+            }, status=409)
+
+        # The shared clock has run out: the question is over even if the resolve
+        # has not landed yet, so arming now would apply to a closed question.
+        time_limit = question_time_limit(questions[question_index], room_data)
+        if shared_question_expired(room_data, time_limit):
+            return Response({'error': 'The question has ended'}, status=400)
+
+        uid = str(request.user.id)
+        caller = room_ref.collection('players').document(uid).get().to_dict() or {}
+        team_id = caller.get('teamId')
+        if not team_id:
+            return Response({
+                'error': 'Join a team before using a power-up',
+                'spectator': True,
+            }, status=403)
+
+        team_ref = room_ref.collection('teams').document(str(team_id))
+
+        def _hint_choices(question):
+            """The two wrong choices a Hint should hide, chosen once for the team.
+
+            A Hint used to be a client-local random removal, which is fine when
+            one player owns the pool but wrong when the pool is shared: two
+            members arming the same Hint would each hide a DIFFERENT pair. The
+            server picks the pair and stores it on the team so both screens hide
+            the same options.
+            """
+            correct = question.get('correctAnswer')
+            wrong = [c for c in (question.get('choices') or []) if c != correct]
+            rng.shuffle(wrong)
+            return wrong[:2]
+
+        @fs.transactional
+        def arm(transaction):
+            team = team_ref.get(transaction=transaction).to_dict() or {}
+            members = [str(m) for m in (team.get('memberIds') or [])]
+            if uid not in members:
+                return ('err', {'error': 'Join a team before using a power-up'}, 403)
+            if question_index in list(team.get('resolvedQuestions') or []):
+                return ('err', {'error': 'That question is already settled'}, 409)
+            armed = dict(team.get('armedPowerups') or {})
+            # A marker from a previous question must not count as an arm here.
+            if armed.get('questionIndex') != question_index:
+                armed = {'questionIndex': question_index}
+            if armed.get(powerup):
+                # Already armed by a teammate (or a retry of this same tap).
+                return ('ok',)
+            pool = dict(team.get('powerups') or {})
+            if (pool.get(powerup, 0) or 0) <= 0:
+                return ('err', {'error': f'No {powerup} left in the team pool'}, 400)
+            armed[powerup] = True
+            armed['by'] = uid
+            update = {'armedPowerups': armed}
+            if powerup == 'hint':
+                update['hintChoices'] = _hint_choices(questions[question_index])
+            transaction.update(team_ref, update)
+            return ('ok',)
+
+        result = arm(db.transaction())
+        if result[0] == 'err':
+            return Response(result[1], status=result[2])
+        return Response({
+            'message': 'Power-up armed',
+            'teamId': str(team_id),
+            'powerup': powerup,
+            'questionIndex': question_index,
             'shared': True,
         })
 

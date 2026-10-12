@@ -21,6 +21,22 @@ export type PowerupPool = Record<PowerupKey, number>;
 
 export const POWERUP_KEYS: PowerupKey[] = ['freeze', 'hint', 'doublePoints', 'shield'];
 
+/**
+ * The team-wide power-ups armed for one question.
+ *
+ * `questionIndex` makes the marker per-question: the HUD only treats an arm as
+ * live when it names the question currently on screen, so a marker that has not
+ * been cleared yet cannot make the next question look armed.
+ */
+export interface ArmedPowerups {
+  questionIndex: number;
+  hint?: boolean;
+  doublePoints?: boolean;
+  shield?: boolean;
+  /** Which member placed the (latest) arm. */
+  by?: string;
+}
+
 /** Emoji reactions the backend accepts (see REACTION_EMOJIS in game/views.py). */
 export const REACTION_EMOJIS = ['🔥', '👏', '🤯', '😢', '💪'] as const;
 
@@ -170,6 +186,19 @@ export interface TeamEntry {
   teamStreak: number;
   bestStreak: number;
   powerups: PowerupPool;
+  /**
+   * Power-ups the team has armed for the CURRENT question, written by the
+   * server when a member arms one (`TeamPowerupView`). Shared, so both members
+   * see the same effect light up; keyed by question index so a stale arm cannot
+   * leak into the next one. Absent when nothing is armed.
+   */
+  armedPowerups?: ArmedPowerups;
+  /**
+   * The two wrong choices a shared Hint should hide, chosen by the server so
+   * both members' screens hide the SAME options. Only present for the question
+   * a Hint is armed on, and cleared when the question resolves.
+   */
+  hintChoices?: string[];
   namedBy?: string | null;
   nameLocked?: boolean;
   /** Present on the leaderboard and the final snapshot. */

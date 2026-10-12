@@ -378,7 +378,7 @@ function buildLanParticipants(
 export default function QuestionScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const params = useLocalSearchParams<{ roomCode: string; offline?: string; lan?: string; quizTitle?: string }>();
+  const params = useLocalSearchParams<{ roomCode: string; offline?: string; lan?: string; quizTitle?: string; teamMode?: string }>();
   const roomCode = params.roomCode;
   const isOffline = params.offline === 'true';
   const isLan = params.lan === 'true';
@@ -480,6 +480,11 @@ export default function QuestionScreen() {
   const [isFrozen, setIsFrozen] = useState(false);
 /** Blocks a second tap while the freeze charge is being confirmed. */
 const [freezeBusy, setFreezeBusy] = useState(false);
+  /**
+   * Which shared power-up this member is currently arming, so the button can
+   * show busy and a double tap cannot fire two server calls.
+   */
+  const [armingPowerup, setArmingPowerup] = useState<PowerupKey | null>(null);
   const [showStandings, setShowStandings] = useState(false);
   const [roomStatus, setRoomStatus] = useState('waiting');
   const [teamMode, setTeamMode] = useState(false);
@@ -558,8 +563,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // the UI must not offer them an answer path in the first place.
   //
   // Declared up here rather than beside `myTeam` because the auto-advance effect
-  // needs it in its dependency array, which is evaluated during render.
-  const spectator = isSpectating || (!!teamMode && !myTeamId);
+  // needs it in its dependency array, which is evaluated during render. LAN team
+  // play has no Firestore team id, so it is never a spectator on that ground.
+  const spectator = isSpectating || (!!teamMode && !isLan && !myTeamId);
 
   /**
    * The order this screen walks through.
@@ -598,6 +604,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // re-renders the pill, while the session copy (`setLanTeams`) is what the
   // results screen reads at the very end.
   const [lanTeamList, setLanTeamList] = useState<LanTeam[]>([]);
+  const lanTeamListRef = useRef<LanTeam[]>([]);
+  // The LAN question index the host last opened, tracked in a ref because the
+  // onEvent closure is created once (empty dep array) and would otherwise read
+  // a stale `currentIndex`.
+  const lanQuestionIndexRef = useRef(0);
+  const [lanHintChoices, setLanHintChoices] = useState<string[]>([]);
   // Group play: the host's live pick tally for the open question, keyed by
   // player id, so a member can see what their own team-mates chose.
   const [lanPicks, setLanPicks] = useState<Record<string, string>>({});
@@ -830,6 +842,10 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           // to id 'me' so the drawer tags it "(You)".
           const seedTeams = getLanTeams();
           if (seedTeams.length > 0) setLanTeamList(seedTeams);
+          // LAN team play: adopt team mode from the lobby handoff (or from a
+          // seeded team list) so the shared pool, armed markers and team HUD
+          // behave like the online team path.
+          if (params.teamMode === 'true' || seedTeams.length > 0) setTeamMode(true);
           lanPlayersRef.current = roster;
           setStandings(roster.length
             ? roster.map(p => {
@@ -878,6 +894,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   setTimePerQuestion(g.timePerQuestion);
                   setTimeLeft(g.timePerQuestion);
                   setPowerups({ ...g.powerups });
+                  setLanHintChoices([]);
                 } catch (e) {
                   setEngineError(e instanceof Error ? e.message : String(e));
                 }
@@ -886,19 +903,27 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               const list = msg.teams ?? [];
               setLanTeams(list);
               setLanTeamList(list);
+              lanTeamListRef.current = list;
             } else if (msg.t === 'question') {
               // Host-driven shared clock: adopt the host's index and origin, and
               // clear this question's per-player state -- the local advance that
               // normally resets it never runs, because the host moves the room.
               setLanQuestionAt(msg.startedAt);
               setCurrentIndex(msg.index);
+              lanQuestionIndexRef.current = msg.index;
+              // LAN team play keys the shared power-up pool off the same index
+              // the host owns, so keep teamIndex in lockstep with the host's
+              // question number (the Firestore listener that normally sets it
+              // never runs in LAN mode).
+              setTeamIndex(msg.index);
               setSelected(null);
               markAnswered(false);
               setResult(null);
               setPendingAnswer(null);
               setIsFrozen(false);
-              setActivePowerups({ hint: false, doublePoints: false, shield: false });
-              setHintedChoices([]);
+      setActivePowerups({ hint: false, doublePoints: false, shield: false });
+      setLanHintChoices([]);
+      setHintedChoices([]);
               setShowRoulette(false);
               setRouletteTarget(null);
               setIAmReady(false);
@@ -908,6 +933,27 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               setReadyState({ ready: msg.ready, expected: msg.expected });
             } else if (msg.t === 'picks') {
               setLanPicks(msg.picks ?? {});
+            } else if (msg.t === 'team-powerups') {
+              const index = msg.index;
+              setLanTeamList(prev => {
+                const next = (msg.teams ?? prev) as LanTeam[];
+                lanTeamListRef.current = next;
+                return sameSnapshot(prev, next) ? prev : next;
+              });
+              if (index === lanQuestionIndexRef.current) {
+                setLanHintChoices(msg.hintChoices ?? []);
+                const me = lanPlayersRef.current.find(isMyLanPlayer);
+                const myTid = me?.teamId != null ? String(me.teamId) : '';
+                const myArmed = (msg.armed?.[myTid] ?? []) as string[];
+                setActivePowerups({
+                  hint: myArmed.includes('hint'),
+                  doublePoints: myArmed.includes('doublePoints'),
+                  shield: myArmed.includes('shield'),
+                });
+              } else {
+                setLanHintChoices([]);
+                setActivePowerups({ hint: false, doublePoints: false, shield: false });
+              }
             } else if (msg.t === 'leaderboard') {
               applyLanLeaderboardRef.current(msg.players);
             } else if (msg.t === 'end') {
@@ -1602,8 +1648,44 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
 
   // Team mode spends from the team's shared pool; classic/offline/LAN from the
   // personal one. One source of truth for both the buttons and their guards,
-  // so a teammate's award cannot leave this player tapping a dead button.
-  const pool = (teamMode && myTeam ? myTeam.powerups : powerups) ?? powerups;
+  // so a teammate's award cannot leave this player tapping a dead button. LAN
+  // team play gets its shared pool from the host's broadcast team list.
+  const lanMyTeam = isLan
+    ? (lanTeamList.find(t => t.id === (() => {
+        const myId = getLanPlayerId();
+        const me = lanPlayersRef.current.find(p => (myId ? p.id === myId : p.name === lanGame.playerName));
+        return me?.teamId != null ? String(me.teamId) : '';
+      })()) ?? null)
+    : null;
+  const pool = (teamMode && myTeam ? myTeam.powerups
+    : teamMode && isLan && lanMyTeam ? lanMyTeam.powerups
+    : powerups) ?? powerups;
+
+  // The power-ups the TEAM has armed for the question on screen. Online reads
+  // the shared marker off the team document; LAN reads the flags the host
+  // broadcast (stored in `activePowerups`). Solo/classic keep the local flags.
+  // The `questionIndex` guard means an arm from the previous question never
+  // reads as live.
+  const teamArmed = teamMode && myTeam && myTeam.armedPowerups?.questionIndex === teamIndex
+    ? myTeam.armedPowerups
+    : null;
+  const activePowerupsHud = teamMode
+    ? (isLan
+        ? activePowerups
+        : {
+            hint: !!teamArmed?.hint,
+            doublePoints: !!teamArmed?.doublePoints,
+            shield: !!teamArmed?.shield,
+          })
+    : activePowerups;
+  // The Hint options to hide. Online team mode uses the pair the server stored
+  // on the team (both members hide the SAME two); LAN uses the host's
+  // broadcast pair; solo/classic/offline use the local random pair.
+  const hintedChoicesShared = teamMode
+    ? (activePowerupsHud.hint
+        ? (isLan ? lanHintChoices : (myTeam?.hintChoices ?? []))
+        : [])
+    : hintedChoices;
 
   /* ── team mode: the shared quorum count and the team's reveal ──
    *
@@ -1696,7 +1778,20 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // already renders for a team is what makes the solo pool read identically
   // instead of looking like a different game.
   const poolTeam: TeamEntry | null = teamMode
-    ? myTeam
+    ? (myTeam ?? (isLan && lanMyTeam ? {
+        id: lanMyTeam.id,
+        name: lanMyTeam.name,
+        color: lanMyTeam.color,
+        score: 0,
+        correctCount: 0,
+        answeredCount: 0,
+        memberIds: [],
+        memberCount: 0,
+        teamCorrect: 0,
+        teamStreak: 0,
+        bestStreak: 0,
+        powerups: lanMyTeam.powerups ?? powerups,
+      } as TeamEntry : null))
     : {
         id: 'me',
         name: 'Your powerups',
@@ -1726,9 +1821,55 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       .update({ [`powerups.${key}`]: firestore.FieldValue.increment(-1) });
   };
 
-  const handleHint = async () => {
-    if (pool.hint <= 0 || answered || activePowerups.hint) return;
+  // A shared power-up is armed by the server (online) or the LAN host, so the
+  // effect is team-wide and applied exactly once. The local `activePowerups`
+  // flags remain for solo/classic/offline, which have no team document to read.
+  const armSharedPowerup = async (key: 'hint' | 'doublePoints' | 'shield') => {
     if (Platform.OS !== 'web') Haptics.selectionAsync();
+    if (isLan) {
+      // LAN team play: the host owns the shared pool and broadcasts the arm.
+      getLanClient()?.sendPowerup(teamIndex, key);
+      return;
+    }
+    if (!myTeam || armingPowerup) return;
+    if (result || teamArmed?.[key] || pool[key] <= 0) return;
+    setArmingPowerup(key);
+    try {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE_URL}/game/teams/powerup/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ roomCode, powerup: key, questionIndex: teamIndex }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not arm that power-up');
+    } catch (e: any) {
+      Alert.alert('Power-up failed', e?.message || 'Could not arm that power-up');
+    } finally {
+      setArmingPowerup(null);
+    }
+  };
+
+  // Gate the shared buttons on the TEAM state, not on this member's own pick:
+  // the team's answer is not settled until every member has picked (or the
+  // clock ends), so a member who picked early can still arm for the team.
+  // Offline/LAN applies the effect to each member's own score, so there it has
+  // to be placed before that member answers.
+  const powerupLocked = (key: 'hint' | 'doublePoints' | 'shield') => {
+    if (teamMode) {
+      if (spectator || result) return true;
+      const armed = isLan ? activePowerups[key] : !!teamArmed?.[key];
+      if (armed || armingPowerup === key) return true;
+      if (isLan && answered) return true;
+      return false;
+    }
+    return answered || activePowerups[key];
+  };
+
+  const handleHint = async () => {
+    if (pool.hint <= 0 || powerupLocked('hint')) return;
+    if (Platform.OS !== 'web') Haptics.selectionAsync();
+    if (teamMode) { await armSharedPowerup('hint'); return; }
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game || !game.consumePowerup('hint')) return;
@@ -1753,8 +1894,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const handleDoublePoints = async () => {
-    if (pool.doublePoints <= 0 || answered || activePowerups.doublePoints) return;
+    if (pool.doublePoints <= 0 || powerupLocked('doublePoints')) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
+    if (teamMode) { await armSharedPowerup('doublePoints'); return; }
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game || !game.consumePowerup('doublePoints')) return;
@@ -1767,8 +1909,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const handleShield = async () => {
-    if (pool.shield <= 0 || answered || activePowerups.shield) return;
+    if (pool.shield <= 0 || powerupLocked('shield')) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
+    if (teamMode) { await armSharedPowerup('shield'); return; }
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game || !game.consumePowerup('shield')) return;
@@ -1889,9 +2032,11 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           // would read as an oversight. The server keeps the capability for API
           // callers.
           lockIn: 'false',
-          useHint: activePowerups.hint ? 'true' : 'false',
-          useDoublePoints: activePowerups.doublePoints ? 'true' : 'false',
-          useShield: activePowerups.shield ? 'true' : 'false',
+          // Power-ups are NOT sent here any more. A power-up is a shared,
+          // server-owned decision (TeamPowerupView writes it onto the team
+          // document), so the resolve reads that marker rather than a flag on
+          // this request. A flag here would let one member spend the team's
+          // pool on an effect no teammate agreed to.
         }),
         signal: controller.signal,
       });
@@ -2331,6 +2476,50 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     );
   };
 
+  /** The offline classic "host" can end the run from any question. Answers so
+   * far are saved and this device is routed to the final screen — the same
+   * save-and-navigate block the auto-finish runs on the last question, so
+   * ending early shows the same scores. */
+  const endOfflineSession = () => {
+    Alert.alert(
+      'End game?',
+      'This ends the session now and shows your final score.',
+      [
+        { text: 'Keep playing', style: 'cancel' },
+        {
+          text: 'End game',
+          style: 'destructive',
+          onPress: () => {
+            if (!claimNav()) return;
+            const game = getCurrentOfflineGame();
+            const savedId = game ? saveOfflineGameResult(game, [{
+              user_id: currentUser?.id ?? 'me',
+              name: meName,
+              score: game.score,
+              correct: game.correctCount,
+              answered: game.answeredCount,
+              bestStreak: game.bestStreak,
+              avatar: currentUser?.avatar ?? null,
+            }]) : 0;
+            clearCurrentOfflineGame();
+            router.replace({
+              pathname: '/game/final',
+              params: {
+                roomCode: 'OFFLINE',
+                offline: 'true',
+                offlineId: String(savedId),
+                quizTitle: params.quizTitle || game?.quizTitle || '',
+                score: String(game?.score ?? 0),
+                correctCount: String(game?.correctCount ?? 0),
+                totalQuestions: String(game?.totalQuestions ?? 0),
+              },
+            });
+          },
+        },
+      ],
+    );
+  };
+
   const handleAnswer = async (answer: string | null) => {
     // The latch, not the answer text: a timeout submits '' and a second
     // submission for the same index is answered from the server's cache with
@@ -2412,6 +2601,11 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       if (outcome.powerupEarned) {
         setShowRoulette(true);
         setRouletteTarget(outcome.powerupEarned);
+        // LAN team play: the pool is shared, so tell the host to add the earned
+        // power-up to the team's pool (online, the server does this itself).
+        if (isLan && teamMode) {
+          getLanClient()?.sendPowerupEarned(outcome.powerupEarned);
+        }
       }
       // LAN group play: report the pick so the host can tally it and echo the
       // room back, letting every member see what their own team-mates chose.
@@ -2659,7 +2853,8 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       // shut, which is exactly the reported symptom. It is a toggle now: it
       // closes on the toggle and on a backdrop tap, and stays put otherwise.
       // Standings are live, so what it shows keeps updating across questions.
-      setActivePowerups({ hint: false, doublePoints: false, shield: false });
+    setActivePowerups({ hint: false, doublePoints: false, shield: false });
+    setLanHintChoices([]);
       setHintedChoices([]);
       setShowRoulette(false);
       setRouletteTarget(null);
@@ -2725,7 +2920,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // choices is absent on a malformed MCQ just as often as it is wrong, and
     // .filter on undefined is a hard crash.
     ? ((question.choices && question.choices.length > 0)
-      ? (question.choices || []).filter((c: string) => !hintedChoices.includes(c))
+      ? (question.choices || []).filter((c: string) => !hintedChoicesShared.includes(c))
       : (question.type === 'true_false' || question.type === 'tf' ? ['True', 'False'] : []))
     : [];
   // In team play the room owns the question order, so "last" is a fact about the
@@ -2801,6 +2996,21 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           <TouchableOpacity
             style={styles.stopSessionBtn}
             onPress={endLanSession}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="End game"
+          >
+            <Text style={styles.stopSessionBtnText}>■ End</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Offline classic "host": the run is local and the only player can end
+            it from any question — answers so far are saved and scored. Keep the
+            Quit exit (below) as the discard option. */}
+        {isOffline && (
+          <TouchableOpacity
+            style={styles.stopSessionBtn}
+            onPress={endOfflineSession}
             activeOpacity={0.7}
             accessibilityRole="button"
             accessibilityLabel="End game"
@@ -2898,7 +3108,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         <PowerupPoolHUD
           team={poolTeam}
           pool={pool}
-          active={activePowerups}
+          active={activePowerupsHud}
           shared={teamMode}
         />
       )}
@@ -2921,15 +3131,19 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         />
       )}
 
-      {/* ── ACTIVE POWERUP BANNERS ── */}
-      {!answered && !result && (activePowerups.doublePoints || activePowerups.shield) && (
+      {/* ── ACTIVE POWERUP BANNERS ──
+          Team mode shows the TEAM's armed banners until the question resolves,
+          and keeps them up even after this member has picked -- the power-up
+          belongs to the whole team, and the card stays up until everyone is in.
+          Solo/classic hide theirs the moment this player answers. */}
+      {!result && (teamMode || !answered) && (activePowerupsHud.doublePoints || activePowerupsHud.shield) && (
         <View style={styles.bannerRow}>
-          {activePowerups.doublePoints && (
+          {activePowerupsHud.doublePoints && (
             <View style={[styles.banner, styles.banner2x]}>
               <Text style={styles.bannerText2x}>⚡ 2x Points Active!</Text>
             </View>
           )}
-          {activePowerups.shield && (
+          {activePowerupsHud.shield && (
             <View style={[styles.banner, styles.bannerShield]}>
               <Text style={styles.bannerTextShield}>🛡️ Shield Active!</Text>
             </View>
@@ -3125,7 +3339,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           <View style={styles.choicesWrap}>
             {/* True/False has no wrong choice to eliminate, so the hint shows
                 the first letter instead of being a dead spend. */}
-            {isTfQuestion && activePowerups.hint && String(question.correctAnswer ?? '').trim() && (
+            {isTfQuestion && activePowerupsHud.hint && String(question.correctAnswer ?? '').trim() && (
               <View style={styles.hintBanner}>
                 <Text style={styles.hintBannerText}>
                   💡 Starts with: <Text style={styles.hintLetter}>{String(question.correctAnswer).charAt(0).toUpperCase()}</Text>
@@ -3214,7 +3428,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         {!spectator && (TYPED_QUESTION_TYPES as readonly string[]).includes(question.type) && (
           <View style={styles.idArea}>
             {/* A hint only makes sense when there is a first letter to give. */}
-            {activePowerups.hint && String(question.correctAnswer ?? '').trim() && (
+            {activePowerupsHud.hint && String(question.correctAnswer ?? '').trim() && (
               <View style={styles.hintBanner}>
                 <Text style={styles.hintBannerText}>
                   💡 Starts with: <Text style={styles.hintLetter}>{String(question.correctAnswer).charAt(0).toUpperCase()}</Text>
@@ -3382,38 +3596,38 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           )}
           {pool.hint > 0 && (
             <TouchableOpacity
-              style={[styles.puBtn, activePowerups.hint && styles.puBtnUsed]}
+              style={[styles.puBtn, activePowerupsHud.hint && styles.puBtnUsed]}
               onPress={handleHint}
-              disabled={answered || activePowerups.hint}
+              disabled={powerupLocked('hint')}
               activeOpacity={0.7}
             >
               <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.hint}</Text></View>
               <Text style={styles.puIcon}>💡</Text>
-              <Text style={[styles.puLabel, activePowerups.hint && styles.puLabelYellow]}>Hint</Text>
+              <Text style={[styles.puLabel, activePowerupsHud.hint && styles.puLabelYellow]}>Hint</Text>
             </TouchableOpacity>
           )}
           {pool.doublePoints > 0 && (
             <TouchableOpacity
-              style={[styles.puBtn, activePowerups.doublePoints && styles.puBtnUsed]}
+              style={[styles.puBtn, activePowerupsHud.doublePoints && styles.puBtnUsed]}
               onPress={handleDoublePoints}
-              disabled={answered || activePowerups.doublePoints}
+              disabled={powerupLocked('doublePoints')}
               activeOpacity={0.7}
             >
               <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.doublePoints}</Text></View>
               <Text style={styles.puIcon}>⚡</Text>
-              <Text style={[styles.puLabel, activePowerups.doublePoints && styles.puLabelYellow]}>2x Pts</Text>
+              <Text style={[styles.puLabel, activePowerupsHud.doublePoints && styles.puLabelYellow]}>2x Pts</Text>
             </TouchableOpacity>
           )}
           {pool.shield > 0 && (
             <TouchableOpacity
-              style={[styles.puBtn, activePowerups.shield && styles.puBtnShieldActive]}
+              style={[styles.puBtn, activePowerupsHud.shield && styles.puBtnShieldActive]}
               onPress={handleShield}
-              disabled={answered || activePowerups.shield}
+              disabled={powerupLocked('shield')}
               activeOpacity={0.7}
             >
               <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.shield}</Text></View>
               <Text style={styles.puIcon}>🛡️</Text>
-              <Text style={[styles.puLabel, activePowerups.shield && styles.puLabelCyan]}>Shield</Text>
+              <Text style={[styles.puLabel, activePowerupsHud.shield && styles.puLabelCyan]}>Shield</Text>
             </TouchableOpacity>
           )}
         </View>
