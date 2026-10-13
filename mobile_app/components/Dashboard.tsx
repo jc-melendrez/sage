@@ -35,7 +35,7 @@ import NotificationSheet from './NotificationSheet';
 import { getCurrentUser } from '@/services/authService';
 import { useCurrentUser } from '@/contexts/UserContext';
 import { apiCall } from '@/services/apiClient';
-import { isRateLimitError } from '@/services/aiLimits';
+import { isRateLimitError, limitMessage } from '@/services/aiLimits';
 import { dailyCheckIn } from '@/services/gamificationService';
 import TutorialModal from './TutorialModal';
 import BottomSheet from './BottomSheet';
@@ -468,7 +468,9 @@ export default function Dashboard() {
       }
     } catch (err) {
       if (isRateLimitError(err)) {
-        Alert.alert('AI limit', err.message);
+        // Prefer the client's own wording over the server's raw DRF text
+        // ("Request was throttled. Expected available in N seconds.").
+        Alert.alert('AI limit', limitMessage(err.retryAfterSeconds ?? 60));
       } else {
         console.error('Error refreshing recommendations:', err);
       }

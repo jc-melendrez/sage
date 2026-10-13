@@ -102,8 +102,18 @@ export default function SuperAdminDashboard() {
           <View style={styles.statsGrid}>
             <StatCard icon="people" label="Total Users" value={String(analytics.total_users)} color={COLORS.superAdminGlow} />
             <StatCard icon="checkmark-circle" label="Active Users" value={String(analytics.active_users)} color={COLORS.success} />
-            <StatCard icon="school" label="Educators" value={String(analytics.users_by_role?.educator ?? 0)} color={COLORS.superAdminGlow} />
-            <StatCard icon="shield-checkmark" label="Superadmins" value={String(analytics.users_by_role?.superadmin ?? 0)} color={COLORS.superAdminGlow} />
+            <TouchableOpacity
+              onPress={() => router.push({ pathname: '/superadmin/database', params: { role: 'educator' } })}
+              activeOpacity={0.7}
+            >
+              <StatCard icon="school" label="Educators" value={String(analytics.users_by_role?.educator ?? 0)} color={COLORS.superAdminGlow} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => router.push({ pathname: '/superadmin/database', params: { role: 'superadmin' } })}
+              activeOpacity={0.7}
+            >
+              <StatCard icon="shield-checkmark" label="Superadmins" value={String(analytics.users_by_role?.superadmin ?? 0)} color={COLORS.superAdminGlow} />
+            </TouchableOpacity>
           </View>
         ) : null}
 

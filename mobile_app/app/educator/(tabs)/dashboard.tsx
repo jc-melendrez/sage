@@ -21,6 +21,8 @@ import { getMyGames, CourseGame } from '@/services/gameHistoryService';
 import { GameHistoryRow } from '@/components/educator/GameHistoryRow';
 import { describeDue } from '@/services/dueDate';
 import { pfpSource } from '@/constants/pfps';
+import ResumeGameBanner from '@/components/game/ResumeGameBanner';
+import type { ActiveGame } from '@/services/activeGameService';
 
 const ACTIVITY_META: Record<ActivityKind, { icon: any; color: string }> = {
   quiz: { icon: 'help-circle', color: COLORS.purpleVibrant },
@@ -108,6 +110,7 @@ export default function EducatorDashboardScreen() {
 
   const [teacherName, setTeacherName] = useState('Teacher');
   const [avatarKey, setAvatarKey] = useState<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [activities, setActivities] = useState<ClassActivity[]>([]);
   const [games, setGames] = useState<CourseGame[]>([]);
@@ -124,6 +127,7 @@ export default function EducatorDashboardScreen() {
       if (user) {
         const name = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username;
         setTeacherName(name || 'Teacher');
+        setCurrentUserId(user.id ?? null);
         // This used to be dropped on the floor, so the header showed initials
         // even for educators who had picked a picture in Edit Profile.
         setAvatarKey(user.avatar || null);
@@ -199,6 +203,14 @@ export default function EducatorDashboardScreen() {
       pathname: '/educator/(tabs)/course-detail',
       params: { courseId: course.id, courseName: course.name },
     });
+
+  /** Send the educator back into a still-live session from the resume banner. */
+  const handleResume = (game: ActiveGame) => {
+    router.replace({
+      pathname: '/educator/host-session',
+      params: { roomCode: game.roomCode, topic: game.topic },
+    });
+  };
 
   /**
    * Row taps resolve to the same destinations the Assignments tab already
@@ -330,6 +342,9 @@ export default function EducatorDashboardScreen() {
           />
         }
       >
+        {/* Resume entry for a session the educator walked away from mid-game. */}
+        <ResumeGameBanner userId={currentUserId} onResume={handleResume} />
+
         {/* 1 — Grading queue. Only rendered when there is real work waiting. */}
         {reviewQueue.length > 0 && (
           <View style={styles.section}>

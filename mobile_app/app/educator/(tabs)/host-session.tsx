@@ -3,7 +3,8 @@ import {
   View, Text, ScrollView, TouchableOpacity, TouchableWithoutFeedback, StyleSheet, Alert,
   ActivityIndicator, Platform, StatusBar, Animated,
 } from 'react-native';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useRouter, useLocalSearchParams, useNavigation } from 'expo-router';
+import { usePreventRemove } from '@react-navigation/native';
 import firestore from '@react-native-firebase/firestore';
 import { getToken, getCurrentUser } from '@/services/authService';
 import { useEducatorBack } from '@/hooks/useEducatorBack';
@@ -14,6 +15,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { POWERUP_META } from '@/components/game/PowerupPoolHUD';
 import { POWERUP_KEYS } from '@/types/game';
+import { saveActiveGame, clearActiveGame } from '@/services/activeGameService';
 
 const COLORS = {
   bg: '#0f0c29',
@@ -601,6 +603,13 @@ export default function HostSessionScreen() {
   const { roomCode, topic } = useLocalSearchParams<{ roomCode: string; topic: string }>();
   const code = String(roomCode || '');
 
+  // Claimed whenever this screen navigates itself (goHome), so the accidental
+  // exit guard below lets deliberate jumps through.
+  const navClaimedRef = useRef(false);
+  // Mirror of `currentUserId` readable from inside the room listener, whose
+  // closure captures the id only at effect-setup time.
+  const currentUserIdRef = useRef<string | null>(null);
+
   const [status, setStatus] = useState<RoomStatus>('waiting');
   const [hostId, setHostId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -628,8 +637,26 @@ export default function HostSessionScreen() {
   };
 
   useEffect(() => {
-    getCurrentUser().then((u) => setCurrentUserId(u ? String(u.id) : null));
+    getCurrentUser().then((u) => {
+      const id = u ? String(u.id) : null;
+      currentUserIdRef.current = id;
+      setCurrentUserId(id);
+    });
   }, []);
+
+  /* ── active-game record: an educator who backs out mid-session can resume
+     from the dashboard while the room keeps running. Never for finished rooms,
+     which get cleared below. ── */
+  useEffect(() => {
+    if (!code || !currentUserId) return;
+    saveActiveGame(currentUserId, {
+      roomCode: code,
+      role: 'host',
+      mode: teamMode ? 'group' : 'classic',
+      isHost: true,
+      topic: String(topic || ''),
+    });
+  }, [code, currentUserId, teamMode, topic]);
 
   useEffect(() => {
     codeAnim.setValue(0); listAnim.setValue(0); ctaAnim.setValue(0);
@@ -672,6 +699,11 @@ export default function HostSessionScreen() {
         setHostId(String(data.hostId ?? ''));
         setTeamMode(!!data.teamMode);
         setQuestionCount(data.questionCount ?? data.questions?.length ?? 0);
+        // A finished room is no longer resumable; drop the stored record so the
+        // dashboard banner does not offer a dead game.
+        if (data.status === 'finished') {
+          clearActiveGame(currentUserIdRef.current);
+        }
       });
 
     const unsubPlayers = firestore()
@@ -803,7 +835,36 @@ export default function HostSessionScreen() {
 
   // Deliberate end-of-session jump, not a back action: after a room is created the
   // educator has no screen to return to, so this one keeps going to the dashboard.
-  const goHome = () => router.replace('/educator/dashboard');
+  const goHome = () => {
+    navClaimedRef.current = true;
+    router.replace('/educator/dashboard');
+  };
+
+  /* ── accidental-exit guard: by default leaving this screen used to be a bare
+     route pop that abandoned a live room. Now it confirms; the game keeps
+     running either way, and the dashboard banner offers the way back. ── */
+  const navigation = useNavigation();
+  usePreventRemove(true, ({ data }) => {
+    if (navClaimedRef.current) {
+      navigation.dispatch(data.action);
+      return;
+    }
+    Alert.alert(
+      'Leave host view?',
+      'The game keeps running for your students. You can resume it from the dashboard banner.',
+      [
+        { text: 'Stay', style: 'cancel' },
+        {
+          text: 'Leave',
+          style: 'destructive',
+          onPress: () => {
+            navClaimedRef.current = true;
+            navigation.dispatch(data.action);
+          },
+        },
+      ],
+    );
+  });
 
   const students = players.filter((p) => p.id !== hostId && p.id !== currentUserId);
   const ranked = [...students].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));

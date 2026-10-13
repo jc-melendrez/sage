@@ -6,10 +6,11 @@ import {
   ScrollView,
   ActivityIndicator,
   RefreshControl,
+  TouchableOpacity,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { COLORS, FONTS, RADIUS, CARD_SHADOW, tint, SPACE, TYPE } from '@/constants/educatorTheme';
 import { EducatorHeader } from '@/components/educator/EducatorHeader';
 import {
@@ -43,6 +44,7 @@ function countNodes(topics: Awaited<ReturnType<typeof getCoursePath>>): number {
 }
 
 export default function AnalyticsScreen() {
+  const router = useRouter();
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [coursesLoading, setCoursesLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -249,26 +251,37 @@ export default function AnalyticsScreen() {
               />
             ) : (
               <>
-                <View style={styles.statsRow}>
-                  <StatCard
-                    icon="people"
-                    value={analytics.students}
-                    label="Students"
-                    color={COLORS.purpleVibrant}
-                  />
-                  <StatCard
-                    icon="trending-up"
-                    value={`${analytics.averageCompletion}%`}
-                    label="Avg done"
-                    color={COLORS.success}
-                  />
-                  <StatCard
-                    icon="warning"
-                    value={analytics.fallingBehind}
-                    label="Falling behind"
-                    color={COLORS.danger}
-                  />
-                </View>
+                 <View style={styles.statsRow}>
+                   <StatCard
+                     icon="people"
+                     value={analytics.students}
+                     label="Students"
+                     color={COLORS.purpleVibrant}
+                   />
+                   <StatCard
+                     icon="trending-up"
+                     value={`${analytics.averageCompletion}%`}
+                     label="Avg done"
+                     color={COLORS.success}
+                   />
+                   <TouchableOpacity
+                     onPress={() =>
+                       selectedId &&
+                       (router.push as any)({
+                         pathname: '/educator/course-students',
+                         params: { courseId: String(selectedId), courseName: selected?.name ?? '' },
+                       })
+                     }
+                     activeOpacity={0.7}
+                   >
+                     <StatCard
+                       icon="warning"
+                       value={analytics.fallingBehind}
+                       label="Falling behind"
+                       color={COLORS.danger}
+                     />
+                   </TouchableOpacity>
+                 </View>
 
                 {/* ---------- Class average by quiz ---------- */}
                 <View style={styles.section}>
@@ -291,32 +304,44 @@ export default function AnalyticsScreen() {
                         />
                         <View style={styles.chartRow}>
                           {trend.map((point) => (
-                            <View
-                              key={point.quizId}
-                              style={styles.barColumn}
-                              accessible
-                              accessibilityRole="image"
-                              accessibilityLabel={`${point.title}: class average ${Math.round(
-                                point.averagePercent,
-                              )} percent, ${point.attempted} of ${point.enrolled} took it`}
-                            >
-                              <View style={styles.barTrack}>
-                                <LinearGradient
-                                  colors={[COLORS.purpleLight, COLORS.purplePrimary]}
-                                  start={{ x: 0, y: 1 }}
-                                  end={{ x: 0, y: 0 }}
-                                  style={[
-                                    styles.barFill,
-                                    {
-                                      height: `${Math.max(
-                                        0,
-                                        Math.min(100, point.averagePercent),
-                                      )}%`,
-                                    },
-                                  ]}
-                                />
-                              </View>
-                            </View>
+                             <TouchableOpacity
+                               key={point.quizId}
+                               style={styles.barColumn}
+                               accessible
+                               accessibilityRole="button"
+                               accessibilityLabel={`${point.title}: class average ${Math.round(
+                                 point.averagePercent,
+                               )} percent, ${point.attempted} of ${point.enrolled} took it`}
+                               onPress={() => {
+                                 if (!selectedId) return;
+                             (router.push as any)({
+                               pathname: '/educator/quiz-attempts',
+                               params: {
+                                 quizId: String(point.quizId),
+                                 quizTitle: point.title,
+                                 courseId: String(selectedId),
+                               },
+                             });
+                               }}
+                               activeOpacity={0.7}
+                             >
+                               <View style={styles.barTrack}>
+                                 <LinearGradient
+                                   colors={[COLORS.purpleLight, COLORS.purplePrimary]}
+                                   start={{ x: 0, y: 1 }}
+                                   end={{ x: 0, y: 0 }}
+                                   style={[
+                                     styles.barFill,
+                                     {
+                                       height: `${Math.max(
+                                         0,
+                                         Math.min(100, point.averagePercent),
+                                       )}%`,
+                                     },
+                                   ]}
+                                 />
+                               </View>
+                             </TouchableOpacity>
                           ))}
                         </View>
                       </View>
@@ -346,27 +371,39 @@ export default function AnalyticsScreen() {
                     <SectionHeader title="Lowest Averages" />
                     <View style={styles.listCard}>
                       {hardest.map((point, idx) => (
-                        <View
-                          key={point.quizId}
-                          style={[styles.hardestRow, idx > 0 && styles.borderTop]}
-                        >
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.hardestTitle} numberOfLines={1}>
-                              {point.title}
-                            </Text>
-                            <Text style={styles.hardestSub}>
-                              {point.attempted} of {point.enrolled} took it
-                            </Text>
-                          </View>
-                          <Text
-                            style={[
-                              styles.hardestPercent,
-                              point.averagePercent < 60 && { color: COLORS.danger },
-                            ]}
-                          >
-                            {Math.round(point.averagePercent)}%
-                          </Text>
-                        </View>
+                         <TouchableOpacity
+                           key={point.quizId}
+                           style={[styles.hardestRow, idx > 0 && styles.borderTop]}
+                           onPress={() => {
+                             if (!selectedId) return;
+                             (router.push as any)({
+                               pathname: '/educator/quiz-attempts',
+                               params: {
+                                 quizId: String(point.quizId),
+                                 quizTitle: point.title,
+                                 courseId: String(selectedId),
+                               },
+                             });
+                           }}
+                           activeOpacity={0.7}
+                         >
+                           <View style={{ flex: 1 }}>
+                             <Text style={styles.hardestTitle} numberOfLines={1}>
+                               {point.title}
+                             </Text>
+                             <Text style={styles.hardestSub}>
+                               {point.attempted} of {point.enrolled} took it
+                             </Text>
+                           </View>
+                           <Text
+                             style={[
+                               styles.hardestPercent,
+                               point.averagePercent < 60 && { color: COLORS.danger },
+                             ]}
+                           >
+                             {Math.round(point.averagePercent)}%
+                           </Text>
+                         </TouchableOpacity>
                       ))}
                     </View>
                   </View>
@@ -376,20 +413,46 @@ export default function AnalyticsScreen() {
                 <View style={styles.section}>
                   <SectionHeader title="Engagement" />
                   <View style={styles.listCard}>
-                    {engagement.map((row, idx) => (
-                      <View key={row.label} style={[styles.engagementRow, idx > 0 && styles.borderTop]}>
-                        <View style={styles.engagementTop}>
-                          <View style={styles.engagementLeft}>
-                            <View style={[styles.engagementIconBg, { backgroundColor: tint(row.color) }]}>
-                              <Ionicons name={row.icon} size={16} color={row.color} />
-                            </View>
-                            <Text style={styles.engagementLabel}>{row.label}</Text>
-                          </View>
-                          <Text style={styles.engagementValue}>{row.value}</Text>
-                        </View>
-                        <ProgressBar percent={row.percent} height={6} />
-                      </View>
-                    ))}
+                     {engagement.map((row, idx) => {
+                       const isAssignments = row.label === 'Assignments turned in';
+                       const isActive = row.label === 'Active this week';
+                       return (
+                         <TouchableOpacity
+                           key={row.label}
+                           style={[styles.engagementRow, idx > 0 && styles.borderTop]}
+                           onPress={() => {
+                             if (!selectedId || selected == null) return;
+                             if (isAssignments) {
+                               // Navigate to assignments tab filtered by this course? assignments shows courses; maybe go to course detail or assignments list
+                               router.push('/educator/(tabs)/assignments'); // keep as is if valid
+                               return;
+                             }
+                             if (isActive) {
+                               router.push({
+                               pathname: '/educator/course-students',
+                               params: { courseId: String(selectedId), courseName: selected.name },
+                             } as any);
+                               return;
+                             }
+                             // quiz participation - could go to quizzes/attempts overview for course
+                             router.push('/educator/(tabs)/quiz-attempts');
+                           }}
+                           activeOpacity={isActive || isAssignments || row.label === 'Quiz participation' ? 0.7 : 1}
+                           disabled={!(isActive || isAssignments || row.label === 'Quiz participation')}
+                         >
+                           <View style={styles.engagementTop}>
+                             <View style={styles.engagementLeft}>
+                               <View style={[styles.engagementIconBg, { backgroundColor: tint(row.color) }]}>
+                                 <Ionicons name={row.icon} size={16} color={row.color} />
+                               </View>
+                               <Text style={styles.engagementLabel}>{row.label}</Text>
+                             </View>
+                             <Text style={styles.engagementValue}>{row.value}</Text>
+                           </View>
+                           <ProgressBar percent={row.percent} height={6} />
+                         </TouchableOpacity>
+                       );
+                     })}
                   </View>
                 </View>
               </>

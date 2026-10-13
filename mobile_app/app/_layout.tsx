@@ -8,8 +8,9 @@ import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { UserProvider } from '@/contexts/UserContext';
+import { NetworkProvider, useNetwork } from '@/contexts/NetworkContext';
 import { TutorialProvider } from '@/components/TutorialSpotlight';
-import OfflineBanner from '@/components/OfflineBanner';
+import OfflinePrompt from '@/components/OfflinePrompt';
 import {
   useFonts,
   Montserrat_400Regular,
@@ -48,6 +49,30 @@ async function fetchRoleHome() {
     const tokenRole = await auth.getRoleFromToken();
     return auth.roleHomePath(null, tokenRole);
   }
+}
+
+/**
+ * Forces the app onto the Play tab while in offline mode.
+ *
+ * `initialRouteName` on the tabs navigator only applies on its first mount, so
+ * a connection drop while the user is on another tab would leave them stranded
+ * there. This is what actually "reloads" the UI offline. /game sub-routes and
+ * /login are exempt: an in-progress offline game must not be interrupted, and
+ * the login screen owns its own offline messaging.
+ */
+function OfflineRouteGuard() {
+  const { offlineMode } = useNetwork();
+  const router = useRouter();
+  const pathname = usePathname();
+
+  useEffect(() => {
+    if (Platform.OS === 'web' || !offlineMode) return;
+    const path = pathname ?? '';
+    if (path.startsWith('/game') || path.startsWith('/login')) return;
+    router.replace('/(tabs)/games');
+  }, [offlineMode, pathname, router]);
+
+  return null;
 }
 
 export default function RootLayout() {
@@ -144,30 +169,31 @@ export default function RootLayout() {
     // app, only works when a GestureHandlerRootView wraps the tree.
     <GestureHandlerRootView style={styles.root}>
       <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-        <UserProvider>
-          {/* The tutorial overlays as a sibling AFTER the navigator, so it
-              paints above every screen while still living in this window. */}
-          <TutorialProvider>
-            <Stack>
-              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-              <Stack.Screen name="login" options={{ headerShown: false }} />
-              <Stack.Screen name="edit-profile" options={{ headerShown: false, presentation: 'card' }} />
-              <Stack.Screen name="settings" options={{ headerShown: false, presentation: 'card' }} />
-              <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-              <Stack.Screen name="game" options={{ headerShown: false }} />
-              <Stack.Screen name="superadmin" options={{ headerShown: false }} />
-              <Stack.Screen name="educator" options={{ headerShown: false }} />
-              <Stack.Screen name="tv" options={{ headerShown: false }} />
-              <Stack.Screen name="[roomCode]" options={{ headerShown: false }} />
-              <Stack.Screen name="chat/[groupId]" options={{ headerShown: false, presentation: 'card' }} />
-            </Stack>
-          </TutorialProvider>
-          {/* App-wide offline indicator. Painted above every native screen
-              (tabs, chat, flashcards, courses) so "you're offline" is never
-              only discoverable on Home and Play. Skips web, the game screens,
-              and the public TV view, which each handle offline state already. */}
-          <OfflineBanner />
-        </UserProvider>
+        <NetworkProvider>
+          <UserProvider>
+            {/* The tutorial overlays as a sibling AFTER the navigator, so it
+                paints above every screen while still living in this window. */}
+            <TutorialProvider>
+              <Stack>
+                <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+                <Stack.Screen name="login" options={{ headerShown: false }} />
+                <Stack.Screen name="edit-profile" options={{ headerShown: false, presentation: 'card' }} />
+                <Stack.Screen name="settings" options={{ headerShown: false, presentation: 'card' }} />
+                <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+                <Stack.Screen name="game" options={{ headerShown: false }} />
+                <Stack.Screen name="superadmin" options={{ headerShown: false }} />
+                <Stack.Screen name="educator" options={{ headerShown: false }} />
+                <Stack.Screen name="tv" options={{ headerShown: false }} />
+                <Stack.Screen name="[roomCode]" options={{ headerShown: false }} />
+                <Stack.Screen name="chat/[groupId]" options={{ headerShown: false, presentation: 'card' }} />
+              </Stack>
+              {/* Siblings after the navigator so the offline prompt paints over
+                  every screen. The guard renders nothing. */}
+              <OfflineRouteGuard />
+              <OfflinePrompt />
+            </TutorialProvider>
+          </UserProvider>
+        </NetworkProvider>
         <StatusBar style="auto" />
       </ThemeProvider>
     </GestureHandlerRootView>

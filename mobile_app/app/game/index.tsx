@@ -22,7 +22,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_BASE_URL } from '@/config/api';
 import { getToken, getCurrentUser } from '@/services/authService';
-import NetInfo from '@react-native-community/netinfo';
+import { useNetwork } from '@/contexts/NetworkContext';
 import firestore from '@react-native-firebase/firestore';
 import { cacheQuizzes, getCachedQuizzes, createOfflineGame } from '@/services/offlineGameService';
 import * as Clipboard from 'expo-clipboard';
@@ -40,6 +40,9 @@ import { useCurrentUser } from '@/contexts/UserContext';
 import { useTutorialTarget } from '@/components/TutorialSpotlight';
 import { initialsOf } from '@/services/courseRoster';
 import { leaveGameRoom } from '@/services/gameRoomService';
+import type { ActiveGame } from '@/services/activeGameService';
+import { clearActiveGame } from '@/services/activeGameService';
+import ResumeGameBanner from '@/components/game/ResumeGameBanner';
 
 /**
  * busyTeamId sentinel for the spectator column. Team ids are numeric strings,
@@ -207,7 +210,7 @@ export default function GameCenterScreen() {
   const [loadingQuizzes, setLoadingQuizzes] = useState(false);
   const [isCreatingRoom, setIsCreatingRoom] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [isOffline, setIsOffline] = useState(false);
+  const { isOffline } = useNetwork();
   const [usingCachedQuizzes, setUsingCachedQuizzes] = useState(false);
   
   // Modal States
@@ -358,13 +361,6 @@ const lobbyTokenRef = useRef(0);
       });
     });
   }, [animateNumber, router]);
-
-  useEffect(() => {
-    const unsub = NetInfo.addEventListener(state => {
-      setIsOffline(state.isConnected === false || state.isInternetReachable === false);
-    });
-    return () => unsub();
-  }, []);
 
   // Read the avatar/initial off the shared profile context instead of a one-shot
   // getCurrentUser() local state, so saving a new name or avatar in edit-profile
@@ -1463,6 +1459,10 @@ const lobbyTokenRef = useRef(0);
             // the room over if we were hosting it. Shared with the final
             // screen's Back to Game Center so both teardown paths match.
             await leaveGameRoom(roomCode, currentUserId);
+            // Leaving the pre-game room is a real exit -- drop any resume
+            // entry for it so the banner stops offering a room we walked away
+            // from on purpose.
+            clearActiveGame(currentUserId);
             // Reset joined room state
             setJoinedRoom(false);
             setRoomCode(null);
@@ -1649,6 +1649,34 @@ const lobbyTokenRef = useRef(0);
   const lanHostInfo = getLanHostInfo();
   const showLanHostSlot = isJoinedLan && !!lanHostInfo.name && !lanJoined.some(p => p.name === lanHostInfo.name);
 
+  /** Send a backed-out player back into their still-live room, from the resume banner. */
+  const handleResumeGame = (game: ActiveGame) => {
+    // Educator-owned rooms live in the educator side of the app; a store from
+    // there routes back to the host view. Students host from this screen.
+    if (game.role === 'host' && isEducator) {
+      router.replace({
+        pathname: '/educator/host-session',
+        params: { roomCode: game.roomCode, topic: game.topic },
+      } as any);
+      return;
+    }
+    if (game.mode === 'group') {
+      router.replace({
+        pathname: '/game/lobby',
+        params: {
+          roomCode: game.roomCode,
+          isHost: game.isHost ? 'true' : 'false',
+          topic: game.topic,
+        },
+      } as any);
+      return;
+    }
+    router.replace({
+      pathname: '/game/question',
+      params: { roomCode: game.roomCode, isHost: game.isHost ? 'true' : 'false' },
+    } as any);
+  };
+
   const gameModes = isEducator
     ? GAME_MODES.filter(m => EDUCATOR_GAME_MODES.has(m.id))
     : GAME_MODES;
@@ -1743,6 +1771,16 @@ const lobbyTokenRef = useRef(0);
 
         {/* Main Content Card */}
         <View style={styles.contentCard}>
+            {/* Resume entry for a backed-out live game. Hidden while the student
+                is already inside a joined room view. */}
+            {!joinedRoom && (
+              <ResumeGameBanner
+                userId={currentUserId}
+                onResume={handleResumeGame}
+                style={{ paddingTop: 16 }}
+              />
+            )}
+
             {/* Tabs: PRESETS | CUSTOM SETTINGS */}
             <View style={styles.tabsContainer}>
                 <TouchableOpacity

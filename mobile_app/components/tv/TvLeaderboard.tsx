@@ -782,9 +782,7 @@ export default function TvLeaderboard({ mode = 'live' }: { mode?: 'live' | 'demo
           answeredCount: t.answeredCount,
           color: t.color,
         }))
-      : (data.players ?? [])
-          .filter((p) => p.id !== data.hostId)
-          .map((p) => ({
+      : (data.players ?? []).map((p) => ({
             id: p.id,
             name: p.displayName,
             score: p.score,
@@ -905,8 +903,7 @@ export default function TvLeaderboard({ mode = 'live' }: { mode?: 'live' | 'demo
   const status = room?.status ?? 'waiting';
   const statusMeta = STATUS_META[status] ?? STATUS_META.waiting;
 
-  const students =
-    room?.players.filter((p) => p.id !== room.hostId) ?? [];
+  const students = room?.players ?? [];
   const rankedTeams = room?.teams ?? [];
 
   const rankedEntries: RankedEntry[] = status === 'finished' && room

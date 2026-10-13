@@ -1,10 +1,9 @@
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
   TextInput,
   TouchableOpacity,
-  Pressable,
   StyleSheet,
   ScrollView,
   // ✨ RENAMED to avoid conflict with react-native-reanimated
@@ -26,15 +25,15 @@ import Animated, {
   Easing,
   interpolate,
 } from 'react-native-reanimated';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useRouter, useLocalSearchParams, useNavigation } from 'expo-router';
+import { usePreventRemove } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import firestore from '@react-native-firebase/firestore';
 import * as Haptics from 'expo-haptics';
 import { getToken, getCurrentUser } from '@/services/authService';
-import { createOfflineGame, getCurrentOfflineGame, saveOfflineGameResult, clearCurrentOfflineGame, type OfflineParticipant } from '@/services/offlineGameService';
-import { getLanClient, lanGame, getLanPlayerId, setLanPlayerId, setLanFinalStandings, getLastLanRoster, getLanHostServer, getLanTeams, setLanTeams, resetLanState } from '@/services/lanSession';
-import type { LanMessage, LanPlayer, LanReveal, LanTeam } from '@/services/lanProtocol';
-import { useCurrentUser } from '@/contexts/UserContext';
+import { createOfflineGame, getCurrentOfflineGame, saveOfflineGameResult, clearCurrentOfflineGame } from '@/services/offlineGameService';
+import { getLanClient, lanGame, getLanPlayerId, setLanPlayerId, setLanFinalStandings, getLastLanRoster } from '@/services/lanSession';
+import type { LanMessage, LanPlayer } from '@/services/lanProtocol';
 import { API_BASE_URL } from '@/config/api';
 import TeamRevealOverlay from '@/components/TeamRevealOverlay';
 import { Ionicons } from '@expo/vector-icons';
@@ -42,9 +41,15 @@ import PowerupPoolHUD from '@/components/game/PowerupPoolHUD';
 import StandingsTicker from '@/components/game/StandingsTicker';
 import { answerLogFromOutcomes } from '@/services/gameBreakdown';
 import { TYPED_QUESTION_TYPES } from '@/services/offlineEngine';
-import ReactionBar, { type LiveReaction } from '@/components/game/ReactionBar';
-import { sameTeamId, activeMembersByTeam, teamRankValue, emptyPowerupPool, type PowerupKey, type TeamEntry, type PlayerAnswerLog } from '@/types/game';
+import ReactionBar from '@/components/game/ReactionBar';
+import { sameTeamId, activeMembersByTeam, teamRankValue, type PowerupKey, type TeamEntry, type PlayerAnswerLog } from '@/types/game';
 import { pfpSource } from '@/constants/pfps';
+import {
+  saveActiveGame,
+  updateActiveGameProgress,
+  clearActiveGame,
+  getActiveGame,
+} from '@/services/activeGameService';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -329,64 +334,16 @@ const isMyLanPlayer = (p: LanPlayer) => {
   return myId ? p.id === myId : p.name === lanGame.playerName;
 };
 
-/** Longest run of consecutive correct answers in a LAN player's log. */
-function bestStreakFromAnswers(answers?: LanPlayer['answers']): number {
-  if (!answers) return 0;
-  const indices = Object.keys(answers)
-    .map(Number)
-    .filter((n) => Number.isFinite(n))
-    .sort((a, b) => a - b);
-  let best = 0;
-  let run = 0;
-  for (const index of indices) {
-    if (answers[String(index)]?.correct) {
-      run += 1;
-      if (run > best) best = run;
-    } else {
-      run = 0;
-    }
-  }
-  return best;
-}
-
-/**
- * Map a LAN roster into the participant rows the offline sync stores.
- *
- * Your own row carries your Django user id (the app's identity everywhere else)
- * rather than the LAN player id, so the activity detail can tag it "(you)". A
- * peer's LAN id is all the host knows, so it is sent as-is and simply renders as
- * another player.
- */
-function buildLanParticipants(
-  players: LanPlayer[],
-  opts: { myLanId: string; myUserId: number | string | null; myName: string; myAvatar?: string | null },
-): OfflineParticipant[] {
-  return players.map((p) => {
-    const isMe = opts.myLanId ? p.id === opts.myLanId : p.name === opts.myName;
-    return {
-      user_id: isMe && opts.myUserId != null ? opts.myUserId : p.id,
-      name: p.name || 'Player',
-      score: p.score ?? 0,
-      correct: p.correctCount ?? 0,
-      answered: p.answeredCount ?? 0,
-      bestStreak: bestStreakFromAnswers(p.answers),
-      avatar: (isMe ? opts.myAvatar : p.avatar) ?? null,
-    };
-  });
-}
-
 export default function QuestionScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const params = useLocalSearchParams<{ roomCode: string; offline?: string; lan?: string; quizTitle?: string; teamMode?: string }>();
+  const params = useLocalSearchParams<{ roomCode: string; offline?: string; lan?: string; quizTitle?: string; isHost?: string }>();
   const roomCode = params.roomCode;
   const isOffline = params.offline === 'true';
   const isLan = params.lan === 'true';
-  // The signed-in profile carries the Django id the activity snapshot keys
-  // "you" off, and the name/avatar an offline solo result is attributed with.
-  const { user: currentUser } = useCurrentUser();
-  const meName = [currentUser?.first_name, currentUser?.last_name].filter(Boolean).join(' ')
-    || currentUser?.username || 'You';
+  // Whether this member is the one who created the room. Not in the params type
+  // because classic rooms never carried it; it is only passed on resume.
+  const isHostParam = params.isHost === 'true';
   const [questions, setQuestions] = useState<any[]>([]);
   const [questionOrder, setQuestionOrder] = useState<number[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -438,9 +395,6 @@ export default function QuestionScreen() {
     pickers?: number;
     /** The team split and nobody answered for it, so it scored nothing. */
     voided?: boolean;
-    /** The team disagreed but still got an answer: a pure 1-1 was drawn at
-     * random between the two picks (the server's own rule). */
-    split?: boolean;
     /**
      * This is the client's own guess at the verdict, shown the instant the clock
      * hits zero -- not the server's word. It flips the card immediately instead
@@ -480,11 +434,6 @@ export default function QuestionScreen() {
   const [isFrozen, setIsFrozen] = useState(false);
 /** Blocks a second tap while the freeze charge is being confirmed. */
 const [freezeBusy, setFreezeBusy] = useState(false);
-  /**
-   * Which shared power-up this member is currently arming, so the button can
-   * show busy and a double tap cannot fire two server calls.
-   */
-  const [armingPowerup, setArmingPowerup] = useState<PowerupKey | null>(null);
   const [showStandings, setShowStandings] = useState(false);
   const [roomStatus, setRoomStatus] = useState('waiting');
   const [teamMode, setTeamMode] = useState(false);
@@ -513,16 +462,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   /** Picks submitted so far / expected. Seeded from this member's own pending
    * response, then kept live from the team's published `pickCount`. */
   const [teamPickCount, setTeamPickCount] = useState<{ picked: number; expected: number } | null>(null);
-  /**
-   * Ready-up state for the current shared question. Team mode no longer
-   * auto-advances after the reveal: every member marks the question read, and
-   * the room moves on only once everyone has (the host may force it). `ready`
-   * is the room-wide count the server last reported, null before any attempt.
-   */
-  const [readyState, setReadyState] = useState<{ ready: number; expected: number } | null>(null);
-  const [iAmReady, setIAmReady] = useState(false);
-  /** Host's epoch ms for the current LAN question; the shared clock's origin. */
-  const [lanQuestionAt, setLanQuestionAt] = useState<number | null>(null);
   /** This member's own answer log, so "did I agree with my team?" can be shown
    * for a question that resolved without this client making the last pick. */
   const [ownAnswers, setOwnAnswers] = useState<PlayerAnswerLog>({});
@@ -563,9 +502,8 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // the UI must not offer them an answer path in the first place.
   //
   // Declared up here rather than beside `myTeam` because the auto-advance effect
-  // needs it in its dependency array, which is evaluated during render. LAN team
-  // play has no Firestore team id, so it is never a spectator on that ground.
-  const spectator = isSpectating || (!!teamMode && !isLan && !myTeamId);
+  // needs it in its dependency array, which is evaluated during render.
+  const spectator = isSpectating || (!!teamMode && !myTeamId);
 
   /**
    * The order this screen walks through.
@@ -600,25 +538,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const bootedRef = useRef(false);
   const navigatedRef = useRef(false);
   const lanPlayersRef = useRef<LanPlayer[]>([]);
-  // LAN team list for the header pill. Kept in state so a `teams` broadcast
-  // re-renders the pill, while the session copy (`setLanTeams`) is what the
-  // results screen reads at the very end.
-  const [lanTeamList, setLanTeamList] = useState<LanTeam[]>([]);
-  const lanTeamListRef = useRef<LanTeam[]>([]);
-  // The LAN question index the host last opened, tracked in a ref because the
-  // onEvent closure is created once (empty dep array) and would otherwise read
-  // a stale `currentIndex`.
-  const lanQuestionIndexRef = useRef(0);
-  const [lanHintChoices, setLanHintChoices] = useState<string[]>([]);
-  // Group play: the host's live pick tally for the open question, keyed by
-  // player id, so a member can see what their own team-mates chose.
-  const [lanPicks, setLanPicks] = useState<Record<string, string>>({});
-  // Group play: teammates' cheers relayed by the host (team-scoped), fed to the
-  // ReactionBar in place of the online Firestore subscription.
-  const [lanReactions, setLanReactions] = useState<LiveReaction[]>([]);
-  // Bumped on a `roster` broadcast so the team-quorum strip recomputes against
-  // the live roster (the roster itself is kept in a ref for the event closure).
-  const [lanRosterTick, setLanRosterTick] = useState(0);
   const lanPrevStandingsRef = useRef<Record<string, { rank: number; score: number }>>({});
   const lanSubmittedRef = useRef(false);
   // Row id of the saved offline/LAN session, handed to the results screen so it
@@ -645,12 +564,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // every later one gets a fast spin. Deliberately not reset per question in
   // handleNext — this tracks "has this player already won one", not "this round".
   const hasWonPowerupRef = useRef(false);
-  // Question index whose team reward has already played the roulette on THIS
-  // device. A team reward is granted once but broadcast/echoed more than once
-  // (the host re-sends team-powerups, Firestore re-delivers the team doc), and
-  // the last picker also gets it in their own pick response -- the ref keeps the
-  // animation to one play per question.
-  const rewardShownRef = useRef<number | null>(null);
 
   // ✨ NEW: Timer urgency animation (shake + pulse at ≤5s)
   const urgencyAnim = useSharedValue(0);
@@ -719,6 +632,44 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     return true;
   };
 
+  /**
+   * Server-side membership cleanup for a member who is really leaving: erase
+   * the player doc, drop the team seat, and hand ownership over if this member
+   * somehow had it. Shared by the explicit Leave button and the exit guard.
+   * Does not navigate -- the caller decides where the player lands.
+   */
+  const doLeaveCleanup = async () => {
+    try {
+      if (roomCode && userId != null) {
+        const roomRef = firestore().collection('gameRooms').doc(roomCode);
+        const playerRef = roomRef.collection('players').doc(String(userId));
+        try {
+          const playerSnap = await playerRef.get();
+          const myTeamId = playerSnap.data()?.teamId;
+          if (myTeamId) {
+            const teamRef = roomRef.collection('teams').doc(myTeamId);
+            await teamRef.update({ memberIds: firestore.FieldValue.arrayRemove(String(userId)) });
+          }
+        } catch {}
+        await playerRef.delete().catch(() => {});
+        // Hand the room over if this player was hosting it. Same endpoint the
+        // pre-game LEAVE calls; harmless when the owner is still present.
+        const token = await getToken();
+        await fetch(`${API_BASE_URL}/game/host/claim/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ roomCode }),
+        }).catch(() => {});
+      }
+    } catch {
+      // The server-side cleanup is best-effort; never strand the player. They
+      // asked to leave, so leave.
+    }
+    try {
+      await clearActiveGame(userId);
+    } catch {}
+  };
+
   const finalizeLanGame = async () => {
     if (!claimNav()) return;
     const game = getCurrentOfflineGame();
@@ -743,18 +694,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     const myId = getLanPlayerId();
     const list = [...lanPlayersRef.current];
     if (game) {
-      const meName = lanGame.playerName || 'You';
-      // The host relays our own row back in the final leaderboard, already
-      // carrying the answers we submitted and our team. Rebuilding it from
-      // scratch dropped both, which left the viewer with no review of their own
-      // play and no team placement on the results screen.
-      const existing = myId
-        ? list.find(p => p.id === myId)
-        : list.find(p => p.name === meName);
       const me = {
-        ...(existing ?? {}),
         id: myId || 'me',
-        name: meName,
+        name: lanGame.playerName || 'You',
         avatar: lanGame.playerAvatar || undefined,
         connected: true,
         finished: true,
@@ -762,25 +704,17 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         correctCount: game.correctCount,
         answeredCount: game.answeredCount,
         totalQuestions: game.totalQuestions,
-        answers: answerLogFromOutcomes(game.outcomeLog),
-        teamId: existing?.teamId,
       };
-      const idx = existing ? list.indexOf(existing) : -1;
+      const idx = myId
+        ? list.findIndex(p => p.id === myId)
+        : list.findIndex(p => p.name === me.name);
       if (idx >= 0) list[idx] = me;
       else list.push(me);
     }
     setLanFinalStandings(list);
     if (game) {
       try {
-        // Persist the whole roster, not just this device's line, so the synced
-        // activity row replays the online "Final standings" for a LAN game.
-        const participants = buildLanParticipants(list, {
-          myLanId: myId,
-          myUserId: currentUser?.id ?? null,
-          myName: lanGame.playerName || 'You',
-          myAvatar: lanGame.playerAvatar || null,
-        });
-        lanSavedIdRef.current = saveOfflineGameResult(game, participants);
+        lanSavedIdRef.current = saveOfflineGameResult(game);
       } catch {}
       clearCurrentOfflineGame();
     }
@@ -791,78 +725,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         lan: 'true',
         playerId: myId || '',
         offlineId: String(lanSavedIdRef.current),
-        ...(getLanTeams().length > 0 ? { teamMode: 'true' } : {}),
       },
     } as any);
   };
 
-  /** This device's LAN team id ('' when unseated). Reads the live roster ref. */
-  const myLanTeamId = () => {
-    const myId = getLanPlayerId();
-    const roster = lanPlayersRef.current;
-    const me = roster.find(p => (myId ? p.id === myId : p.name === lanGame.playerName));
-    return me?.teamId != null ? String(me.teamId) : '';
-  };
-
-  /**
-   * Apply the host's resolved reveal for THIS device's team.
-   *
-   * LAN team play has no Firestore team document, so the host's `team-reveal`
-   * broadcast stands in for the online `reveals.q{n}` listener: it publishes the
-   * team's single answer and score, and every member folds in the same points so
-   * the team is scored once. The local engine records the row (for the review
-   * and breakdown) via `applyTeamReveal` rather than re-deriving the score.
-   */
-  const applyLanTeamReveal = (reveal: LanReveal) => {
-    const myPick = selectedRef.current ?? '';
-    setTeamPickCount({ picked: reveal.pickers, expected: reveal.expected });
-    setResult(prev => {
-      const next = {
-        ...(prev ?? {}),
-        correct: reveal.correct,
-        correctAnswer: reveal.correctAnswer,
-        points: reveal.points,
-        speedBonus: reveal.speedBonus,
-        picked: myPick,
-        teamAnswer: reveal.answer,
-        agreed: reveal.agreed,
-        iAgreed: reveal.void ? null : (!!myPick && myPick === reveal.answer),
-        pickers: reveal.pickers,
-        voided: reveal.void,
-        split: reveal.split,
-        provisional: false,
-      };
-      if (prev && sameSnapshot(prev, next)) return prev;
-      return next;
-    });
-    const game = getCurrentOfflineGame();
-    if (game) {
-      game.applyTeamReveal(reveal.index, {
-        answer: reveal.answer,
-        correctAnswer: reveal.correctAnswer,
-        correct: reveal.correct,
-        points: reveal.points,
-        speedBonus: reveal.speedBonus,
-        picked: myPick,
-      });
-      setPowerups({ ...game.powerups });
-      setMyCorrectCount(game.correctCount);
-      setStandings(prev => prev.map(r =>
-        (r.id === 'me' || r.displayName === lanGame.playerName)
-          ? { ...r, id: 'me', score: game.score, streak: game.streak }
-          : r
-      ));
-    }
-  };
-
   applyLanLeaderboardRef.current = applyLanLeaderboard;
   finalizeLanGameRef.current = finalizeLanGame;
-
-  /** Send a cheer through the host (LAN group mode). */
-  const handleLanReact = (emoji: string) => {
-    const lc = lcRef.current ?? getLanClient();
-    lc?.sendReaction(emoji);
-  };
 
   /* ── all useEffects below ── */
 
@@ -913,16 +781,10 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           }]);
         } else {
           const roster = getLastLanRoster();
-          // Seed the LAN player list (and team names) so the final standings
-          // show everyone, even if no leaderboard broadcast has arrived yet.
-          // Your own row is seeded with the real local score/streak, remapped
-          // to id 'me' so the drawer tags it "(You)".
-          const seedTeams = getLanTeams();
-          if (seedTeams.length > 0) setLanTeamList(seedTeams);
-          // LAN team play: adopt team mode from the lobby handoff (or from a
-          // seeded team list) so the shared pool, armed markers and team HUD
-          // behave like the online team path.
-          if (params.teamMode === 'true' || seedTeams.length > 0) setTeamMode(true);
+          // Seed the LAN player list so the final standings show everyone,
+          // even if no leaderboard broadcast has been received yet. Your own
+          // row is seeded with the real local score/streak, remapped to id
+          // 'me' so the drawer tags it "(You)".
           lanPlayersRef.current = roster;
           setStandings(roster.length
             ? roster.map(p => {
@@ -946,11 +808,22 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       myDocIdRef.current = user?.id != null ? String(user.id) : null;
       const player = await firestore().collection('gameRooms').doc(roomCode)
         .collection('players').doc(String(user?.id)).get();
-      setQuestionOrder(player.data()?.questionOrder || []);
+      const order = player.data()?.questionOrder || [];
+      setQuestionOrder(order);
       setMyTeamId(player.data()?.teamId ?? null);
       setMyCorrectCount(player.data()?.correctCount ?? 0);
       const pPowerups = player.data()?.powerups;
       if (pPowerups) setPowerups(pPowerups);
+      // Resume support: a backed-out player re-enters on the same question they
+      // were on. The stored index is clamped to the order, because everyone gets
+      // the same order but the last spot must never point past the end.
+      if (order.length > 0) {
+        const saved = await getActiveGame(user?.id);
+        if (saved && saved.roomCode === roomCode) {
+          const from = Math.min(Math.max(Number(saved.currentIndex) || 0, 0), order.length - 1);
+          setCurrentIndex(from);
+        }
+      }
     };
     init();
 
@@ -971,113 +844,11 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                   setTimePerQuestion(g.timePerQuestion);
                   setTimeLeft(g.timePerQuestion);
                   setPowerups({ ...g.powerups });
-                  setLanHintChoices([]);
                 } catch (e) {
                   setEngineError(e instanceof Error ? e.message : String(e));
                 }
               }
-            } else if (msg.t === 'teams') {
-              const list = msg.teams ?? [];
-              setLanTeams(list);
-              setLanTeamList(list);
-              lanTeamListRef.current = list;
-            } else if (msg.t === 'question') {
-              // Host-driven shared clock: adopt the host's index and origin, and
-              // clear this question's per-player state -- the local advance that
-              // normally resets it never runs, because the host moves the room.
-              setLanQuestionAt(msg.startedAt);
-              setCurrentIndex(msg.index);
-              lanQuestionIndexRef.current = msg.index;
-              // LAN team play keys the shared power-up pool off the same index
-              // the host owns, so keep teamIndex in lockstep with the host's
-              // question number (the Firestore listener that normally sets it
-              // never runs in LAN mode).
-              setTeamIndex(msg.index);
-              // Team play counts down against the HOST's clock, so a LAN team
-              // round shows the same seconds as an online one and the host's
-              // timeout is what actually closes it.
-              if (params.teamMode === 'true' || getLanTeams().length > 0) {
-                setTeamStartedAt(msg.startedAt);
-                setTeamTimeLimit(msg.timeLimit || timePerQuestion);
-              }
-              setSelected(null);
-              markAnswered(false);
-              setResult(null);
-              setPendingAnswer(null);
-              setIsFrozen(false);
-      setActivePowerups({ hint: false, doublePoints: false, shield: false });
-      setLanHintChoices([]);
-      setHintedChoices([]);
-              setShowRoulette(false);
-              setRouletteTarget(null);
-              setIAmReady(false);
-              setReadyState(null);
-              setLanPicks({});
-              setLanReactions([]);
-            } else if (msg.t === 'reaction') {
-              const now = Date.now();
-              setLanReactions(prev => [
-                ...prev.filter(r => now - r.at < 4000),
-                {
-                  id: msg.id,
-                  emoji: msg.emoji,
-                  userId: msg.playerId,
-                  displayName: msg.displayName,
-                  teamId: msg.teamId ?? null,
-                  at: msg.at,
-                },
-              ].slice(-12));
-            } else if (msg.t === 'ready-count') {
-              setReadyState({ ready: msg.ready, expected: msg.expected });
-            } else if (msg.t === 'picks') {
-              setLanPicks(msg.picks ?? {});
-            } else if (msg.t === 'team-powerups') {
-              const index = msg.index;
-              setLanTeamList(prev => {
-                const next = (msg.teams ?? prev) as LanTeam[];
-                lanTeamListRef.current = next;
-                // Persist to the session so the results screen ranks teams by
-                // the host's running score, not a sum of members.
-                setLanTeams(next);
-                return sameSnapshot(prev, next) ? prev : next;
-              });
-              if (index === lanQuestionIndexRef.current) {
-                setLanHintChoices(msg.hintChoices ?? []);
-                const me = lanPlayersRef.current.find(isMyLanPlayer);
-                const myTid = me?.teamId != null ? String(me.teamId) : '';
-                const myArmed = (msg.armed?.[myTid] ?? []) as string[];
-                setActivePowerups({
-                  hint: myArmed.includes('hint'),
-                  doublePoints: myArmed.includes('doublePoints'),
-                  shield: myArmed.includes('shield'),
-                });
-                // The team earned a streak reward: show the same roulette every
-                // member sees, not just the device whose pick completed the run.
-                if (msg.reward && String(msg.reward.teamId) === myTid
-                    && rewardShownRef.current !== index) {
-                  rewardShownRef.current = index;
-                  setShowRoulette(true);
-                  setRouletteTarget(msg.reward.key);
-                }
-              } else {
-                setLanHintChoices([]);
-                setActivePowerups({ hint: false, doublePoints: false, shield: false });
-              }
-            } else if (msg.t === 'team-reveal') {
-              // Only this device's own team is ours to show. The broadcast is
-              // keyed by team id, so a member never sees a rival team's reveal.
-              const myTid = myLanTeamId();
-              const reveal = myTid ? msg.reveals?.[myTid] : null;
-              if (reveal) applyLanTeamReveal(reveal);
-            } else if (msg.t === 'roster') {
-              lanPlayersRef.current = msg.players ?? [];
-              setLanRosterTick(t => t + 1);
             } else if (msg.t === 'leaderboard') {
-              if (msg.teams && msg.teams.length > 0) {
-                setLanTeamList(msg.teams);
-                lanTeamListRef.current = msg.teams;
-                setLanTeams(msg.teams);
-              }
               applyLanLeaderboardRef.current(msg.players);
             } else if (msg.t === 'end') {
               finalizeLanGameRef.current();
@@ -1196,6 +967,67 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     };
   }, []);
 
+  /* ── active-game record: written while inside a real online room so a backing
+     out does not orphan the player. Removed on explicit leave or when the
+     results screen mounts. Never written for offline/LAN, which have no room. ── */
+  useEffect(() => {
+    if (isOffline || isLan || !roomCode || userId == null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const roomSnap = await firestore().collection('gameRooms').doc(roomCode).get();
+        if (!roomSnap.exists || cancelled) return;
+        const data = roomSnap.data() || {};
+        await saveActiveGame(userId, {
+          roomCode,
+          role: isHostParam ? 'host' : 'player',
+          mode: data.teamMode ? 'group' : 'classic',
+          isHost: isHostParam,
+          topic: data.topic || '',
+        });
+      } catch {
+        // Best-effort; a dead room simply won't leave a resume entry.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isHostParam, isLan, isOffline, roomCode, userId]);
+
+  /* ── classic-mode progress: bump the stored question index as the player
+     advances, so a resume lands on the exact question they left. ── */
+  useEffect(() => {
+    if (isOffline || isLan || !roomCode || userId == null) return;
+    void updateActiveGameProgress(userId, roomCode, currentIndex);
+  }, [isLan, isOffline, roomCode, userId, currentIndex]);
+
+  /* ── accidental-exit guard: hardware back, swipe, or an unclaimed router call
+     would pop this screen and strand the player in a live room. Intercept the
+     removal, explain, and only dispatch once the player confirms Leave. Any
+     programmatic nav that already claimed `navigatedRef` (room finished,
+     finish-after-last-question, explicit Leave) sails straight through. ── */
+  const navigation = useNavigation();
+  usePreventRemove(true, ({ data }) => {
+    if (navigatedRef.current || isOffline || isLan) {
+      navigation.dispatch(data.action);
+      return;
+    }
+    Alert.alert(
+      'Leave game?',
+      "Your answers so far won't be scored. The game continues for everyone else — you can resume from the Play tab.",
+      [
+        { text: 'Stay', style: 'cancel' },
+        {
+          text: 'Leave',
+          style: 'destructive',
+          onPress: () => {
+            navigatedRef.current = true;
+            navigation.dispatch(data.action);
+            void doLeaveCleanup();
+          },
+        },
+      ],
+    );
+  });
+
   useEffect(() => {
     if (isOffline || !userId) return;
     const unsub = firestore()
@@ -1255,20 +1087,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       });
     return () => { unsub(); };
   }, [teamMode, roomCode]);
-
-  /* ── LAN: adopt this device's team id from the live roster ──
-   * Online, `myTeamId` comes off the player's Firestore doc; LAN has no such
-   * doc, so it is derived from the host's roster broadcasts. It drives the
-   * "(You)" tag on the team standings and the "your team" highlight. */
-  useEffect(() => {
-    if (!isLan || !teamMode) return;
-    const myId = getLanPlayerId();
-    const me = lanPlayersRef.current.find(
-      p => (myId ? p.id === myId : p.name === lanGame.playerName),
-    );
-    const tid = me?.teamId != null ? String(me.teamId) : null;
-    setMyTeamId(prev => (prev === tid ? prev : tid));
-  }, [isLan, teamMode, lanRosterTick]);
 
   /* ── teammates subscription: the boost strip needs names to aim at ── */
   useEffect(() => {
@@ -1394,8 +1212,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     setPendingAnswer(null);
     setResult(null);
     setTeamPickCount({ picked: 0, expected: 0 });
-    setReadyState(null);
-    setIAmReady(false);
     setBoxChars([]);
     setIsFrozen(false);
     setActivePowerups({ hint: false, doublePoints: false, shield: false });
@@ -1425,10 +1241,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       || showTeamReveal
       || teamMode
     ) return;
-    // LAN runs on the host's clock: derive the deadline from the `startedAt` the
-    // host broadcast so every device shows the same seconds left. Every other
-    // mode keeps its own local origin.
-    startTimeRef.current = (isLan && lanQuestionAt != null) ? lanQuestionAt : Date.now();
+    startTimeRef.current = Date.now();
     setTimeLeft(timePerQuestion);
     timerBarAnim.setValue(1);
     const tick = () => {
@@ -1456,7 +1269,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         timerRef.current = null;
       }
     };
-  }, [currentIndex, questions, questionOrder, showTeamReveal, teamMode, timePerQuestion, isLan, lanQuestionAt]);
+  }, [currentIndex, questions, questionOrder, showTeamReveal, teamMode, timePerQuestion]);
 
   useEffect(() => {
     // In team play the shared countdown runs against the ROOM's limit for this
@@ -1523,19 +1336,17 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // unrenderable and silently shorter than the answer. One array, two views.
     setBoxChars(Array(words.join('').length).fill(''));
     boxRefs.current = [];
-    // `question` is `questions[effectiveOrder[currentIndex]]`, so all of
-    // `currentIndex`, `questions`, `questionOrder` and `teamMode` are inputs --
-    // this effect used to list only `currentIndex` and `questions`. `questionOrder`
-    // arrives from a different fetch than `questions` (the player doc vs the room
-    // doc), and when it landed late the effect had already run against
-    // `question = {}`, early-returned, and never re-ran: the card rendered with no
-    // box row at all, or with the previous question's word split, and the student
-    // could not type the full answer. `teamMode` selects whether `questionOrder`
-    // or the identity order (team play) drives `question`.
+    // `question` is `questions[questionOrder[currentIndex]]`, so ALL THREE are
+    // inputs -- this effect used to list only `currentIndex` and `questions`.
+    // `questionOrder` arrives from a different fetch than `questions` (the
+    // player doc vs the room doc), and when it landed late the effect had
+    // already run against `question = {}`, early-returned, and never re-ran:
+    // the card rendered with no box row at all, or with the previous
+    // question's word split, and the student could not type the full answer.
     // Naming `question` itself is impossible: it is declared further down this
     // render, and the deps array is evaluated before that declaration is
     // reached.
-  }, [currentIndex, questions, questionOrder, teamMode]);
+  }, [currentIndex, questions, questionOrder]);
 
   useEffect(() => {
     if (questions.length === 0 || questionOrder.length === 0) return;
@@ -1589,11 +1400,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // effect re-runs and the countdown resumes.
     if (showRoulette) { setAutoCountdown(0); return; }
 
-    // Team mode never auto-advances: the room moves on the ready-up gate, so a
-    // countdown firing `handleNext` would pull the whole team forward before
-    // everyone had read the answer.
-    if (teamMode) { setAutoCountdown(0); return; }
-
     const isLast = currentIndex + 1 >= effectiveOrder.length;
     // A spectator has nothing to answer, so they get a real read of the question.
     // A timed-out question gets less: the clock already ran out on it, so the
@@ -1618,7 +1424,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     autoAdvanceRef.current = window.setInterval(tick, 250);
     tick();
     return () => { if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; } };
-  }, [result, showRoulette, spectator, submitting, teamMode]);
+  }, [result, showRoulette, spectator, submitting]);
 
   /* ── all handlers below are UNCHANGED ── */
   const joinWithSpaces = (chars: string[]) => {
@@ -1707,46 +1513,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const myTeam = teamMode ? teams.find(t => sameTeamId(t.id, myTeamId)) ?? null : null;
-  /**
-   * The team list the standings UI renders.
-   *
-   * Online this is the Firestore `teams` snapshot. LAN has no Firestore teams,
-   * so the host's `lanTeamList` broadcast is mapped into the same shape, with
-   * the roster folded in for member counts. A LAN team carries `rankScore` =
-   * its raw host score, matching the results screen (which scores a team once
-   * rather than averaging members).
-   */
-  const standingsTeams = useMemo<TeamEntry[]>(() => {
-    if (!(teamMode && isLan)) return teams;
-    // The roster lives in a ref; `lanRosterTick` is bumped on every roster
-    // broadcast, so referencing it here forces this memo to recompute when
-    // members join or leave (a ref read alone triggers no render).
-    void lanRosterTick;
-    const roster = lanPlayersRef.current;
-    const active = activeMembersByTeam(
-      roster.map(p => ({ teamId: p.teamId, answeredCount: p.answeredCount })),
-    );
-    return lanTeamList.map(t => {
-      const members = roster.filter(p => String(p.teamId ?? '') === String(t.id));
-      const score = t.score ?? 0;
-      return {
-        id: String(t.id),
-        name: t.name,
-        color: t.color,
-        score,
-        rankScore: score,
-        activeMembers: active[String(t.id)] ?? members.length,
-        correctCount: t.correctCount ?? 0,
-        answeredCount: t.answeredCount ?? 0,
-        memberIds: members.map(p => p.id),
-        memberCount: t.memberCount ?? members.length,
-        teamCorrect: t.teamCorrect ?? t.correctCount ?? 0,
-        teamStreak: t.teamStreak ?? 0,
-        bestStreak: t.bestStreak ?? 0,
-        powerups: t.powerups ?? emptyPowerupPool(),
-      } as TeamEntry;
-    });
-  }, [teamMode, isLan, lanTeamList, teams, lanRosterTick]);
   // Rank by average per active member, matching the server. A teammate who has
   // not answered yet must not push their team up the table.
   //
@@ -1757,114 +1523,14 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const activeByTeam = activeMembersByTeam(
     (standings as any[]).map(r => ({ teamId: r.teamId, answeredCount: r.answeredCount })),
   );
-  const sortedTeams = [...standingsTeams].sort(
+  const sortedTeams = [...teams].sort(
     (a, b) => teamRankValue(b, activeByTeam[String(b.id)]) - teamRankValue(a, activeByTeam[String(a.id)]),
   );
   const myTeamRank = sortedTeams.findIndex(t => sameTeamId(t.id, myTeamId)) + 1;
-
-  /**
-   * The live vote for the current shared question, keyed by the exact answer
-   * string a member picked (`{ [answer]: { count, names } }`). Built from the
-   * team's published `livePicks`, with ids resolved to names through the
-   * teammate roster. Null outside team mode, or before anyone has picked.
-   */
-  const liveVote = useMemo(() => {
-    if (!teamMode) return null;
-    const picks = myTeam?.livePicks;
-    if (!picks || Object.keys(picks).length === 0) return null;
-    const nameById: Record<string, string> = {};
-    for (const t of teammates) nameById[String(t.id)] = t.displayName;
-    const out: Record<string, { count: number; names: string[] }> = {};
-    for (const [pid, ans] of Object.entries(picks)) {
-      const key = String(ans ?? '');
-      if (!key) continue;
-      const entry = out[key] ?? (out[key] = { count: 0, names: [] });
-      entry.count += 1;
-      entry.names.push(nameById[String(pid)] ?? 'A teammate');
-    }
-    return out;
-  }, [teamMode, myTeam, teammates]);
-
-  // LAN group play has no server, so the host's `picks` broadcast stands in for
-  // the online team doc's `livePicks`. Count only this player's own team-mates
-  // (the tally is room-wide, but seeing the rival team's picks would defeat the
-  // point of the vote).
-  const lanLiveVote = useMemo(() => {
-    if (!isLan || lanTeamList.length === 0) return null;
-    const myId = getLanPlayerId();
-    const roster = lanPlayersRef.current;
-    const me = roster.find(p => (myId ? p.id === myId : p.name === lanGame.playerName));
-    const myTid = me?.teamId != null ? String(me.teamId) : '';
-    if (!myTid) return null;
-    const nameById: Record<string, string> = {};
-    for (const p of roster) nameById[String(p.id)] = p.name;
-    const out: Record<string, { count: number; names: string[] }> = {};
-    for (const [pid, ans] of Object.entries(lanPicks)) {
-      const key = String(ans ?? '');
-      if (!key) continue;
-      const pl = roster.find(p => String(p.id) === String(pid));
-      if (!pl || String(pl.teamId ?? '') !== myTid) continue;
-      const entry = out[key] ?? (out[key] = { count: 0, names: [] });
-      entry.count += 1;
-      entry.names.push(nameById[String(pid)] ?? 'A team-mate');
-    }
-    return Object.keys(out).length > 0 ? out : null;
-  }, [isLan, lanTeamList, lanPicks]);
-
-  // The badge renders once, so both engines feed the same view: online team
-  // mode uses the roster's `livePicks`, LAN group uses the host's tally.
-  const displayVote = teamMode && !isLan ? liveVote : lanLiveVote;
-
-  /** Show who backed a given option. The badge is the tap target. */
-  const showLiveVoters = (choice: string) => {
-    const entry = displayVote?.[choice];
-    if (!entry || entry.names.length === 0) return;
-    Alert.alert(
-      textOf(choice),
-      `${entry.count} ${entry.count === 1 ? 'pick' : 'picks'}\n\n${entry.names.join(', ')}`,
-    );
-  };
-
   // Team mode spends from the team's shared pool; classic/offline/LAN from the
   // personal one. One source of truth for both the buttons and their guards,
-  // so a teammate's award cannot leave this player tapping a dead button. LAN
-  // team play gets its shared pool from the host's broadcast team list.
-  const lanMyTeam = isLan
-    ? (lanTeamList.find(t => t.id === (() => {
-        const myId = getLanPlayerId();
-        const me = lanPlayersRef.current.find(p => (myId ? p.id === myId : p.name === lanGame.playerName));
-        return me?.teamId != null ? String(me.teamId) : '';
-      })()) ?? null)
-    : null;
-  const pool = (teamMode && myTeam ? myTeam.powerups
-    : teamMode && isLan && lanMyTeam ? lanMyTeam.powerups
-    : powerups) ?? powerups;
-
-  // The power-ups the TEAM has armed for the question on screen. Online reads
-  // the shared marker off the team document; LAN reads the flags the host
-  // broadcast (stored in `activePowerups`). Solo/classic keep the local flags.
-  // The `questionIndex` guard means an arm from the previous question never
-  // reads as live.
-  const teamArmed = teamMode && myTeam && myTeam.armedPowerups?.questionIndex === teamIndex
-    ? myTeam.armedPowerups
-    : null;
-  const activePowerupsHud = teamMode
-    ? (isLan
-        ? activePowerups
-        : {
-            hint: !!teamArmed?.hint,
-            doublePoints: !!teamArmed?.doublePoints,
-            shield: !!teamArmed?.shield,
-          })
-    : activePowerups;
-  // The Hint options to hide. Online team mode uses the pair the server stored
-  // on the team (both members hide the SAME two); LAN uses the host's
-  // broadcast pair; solo/classic/offline use the local random pair.
-  const hintedChoicesShared = teamMode
-    ? (activePowerupsHud.hint
-        ? (isLan ? lanHintChoices : (myTeam?.hintChoices ?? []))
-        : [])
-    : hintedChoices;
+  // so a teammate's award cannot leave this player tapping a dead button.
+  const pool = (teamMode && myTeam ? myTeam.powerups : powerups) ?? powerups;
 
   /* ── team mode: the shared quorum count and the team's reveal ──
    *
@@ -1940,7 +1606,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         iAgreed: own?.agreed !== undefined ? own.agreed : prev?.iAgreed,
         pickers: take(prev?.pickers, reveal.pickers),
         voided: take(prev?.voided, reveal.void),
-        split: take(prev?.split, reveal.split),
         provisional: false,
       };
       // Returning the SAME object when nothing changed is the point of this
@@ -1951,54 +1616,13 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       if (prev && sameSnapshot(prev, next)) return prev;
       return next;
     });
-
-    // The team earned a streak reward on this question. The server publishes it
-    // on the shared team document so EVERY member shows the roulette here, not
-    // just the member whose request happened to be the one that scored it.
-    const reward = myTeam.reward;
-    if (reward && reward.q === teamIndex && rewardShownRef.current !== teamIndex) {
-      rewardShownRef.current = teamIndex;
-      setShowRoulette(true);
-      setRouletteTarget(reward.key);
-    }
   }, [teamMode, myTeam, teamIndex, ownAnswers]);
-
-  /* ── LAN team play: the quorum strip ──
-   * There is no team document to read `pickCount` from, so derive it from the
-   * host's live pick tally against this device's own team-mates. Counting only
-   * the roster rows in our team is what keeps the strip showing "2 of 3 in"
-   * rather than the whole room. The reveal (when it lands) overwrites this.
-   */
-  useEffect(() => {
-    if (!(isLan && teamMode)) return;
-    if (result) return;
-    const myTid = myLanTeamId();
-    if (!myTid) return;
-    const members = lanPlayersRef.current.filter(p => String(p.teamId ?? '') === myTid);
-    const expected = members.length;
-    const picked = members.filter(m => String(lanPicks[m.id] ?? '').trim() !== '').length;
-    setTeamPickCount(prev => (prev && prev.picked === picked && prev.expected === expected) ? prev : { picked, expected });
-  }, [isLan, teamMode, lanPicks, lanTeamList, lanRosterTick, result]);
-
   // Classic has no team document to hang the pool HUD on, so synthesize one
   // from the player's own stats. Feeding PowerupPoolHUD the same shape it
   // already renders for a team is what makes the solo pool read identically
   // instead of looking like a different game.
   const poolTeam: TeamEntry | null = teamMode
-    ? (myTeam ?? (isLan && lanMyTeam ? {
-        id: lanMyTeam.id,
-        name: lanMyTeam.name,
-        color: lanMyTeam.color,
-        score: 0,
-        correctCount: 0,
-        answeredCount: 0,
-        memberIds: [],
-        memberCount: 0,
-        teamCorrect: 0,
-        teamStreak: 0,
-        bestStreak: 0,
-        powerups: lanMyTeam.powerups ?? powerups,
-      } as TeamEntry : null))
+    ? myTeam
     : {
         id: 'me',
         name: 'Your powerups',
@@ -2028,55 +1652,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       .update({ [`powerups.${key}`]: firestore.FieldValue.increment(-1) });
   };
 
-  // A shared power-up is armed by the server (online) or the LAN host, so the
-  // effect is team-wide and applied exactly once. The local `activePowerups`
-  // flags remain for solo/classic/offline, which have no team document to read.
-  const armSharedPowerup = async (key: 'hint' | 'doublePoints' | 'shield') => {
-    if (Platform.OS !== 'web') Haptics.selectionAsync();
-    if (isLan) {
-      // LAN team play: the host owns the shared pool and broadcasts the arm.
-      getLanClient()?.sendPowerup(teamIndex, key);
-      return;
-    }
-    if (!myTeam || armingPowerup) return;
-    if (result || teamArmed?.[key] || pool[key] <= 0) return;
-    setArmingPowerup(key);
-    try {
-      const token = await getToken();
-      const res = await fetch(`${API_BASE_URL}/game/teams/powerup/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ roomCode, powerup: key, questionIndex: teamIndex }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Could not arm that power-up');
-    } catch (e: any) {
-      Alert.alert('Power-up failed', e?.message || 'Could not arm that power-up');
-    } finally {
-      setArmingPowerup(null);
-    }
-  };
-
-  // Gate the shared buttons on the TEAM state, not on this member's own pick:
-  // the team's answer is not settled until every member has picked (or the
-  // clock ends), so a member who picked early can still arm for the team.
-  // Offline/LAN applies the effect to each member's own score, so there it has
-  // to be placed before that member answers.
-  const powerupLocked = (key: 'hint' | 'doublePoints' | 'shield') => {
-    if (teamMode) {
-      if (spectator || result) return true;
-      const armed = isLan ? activePowerups[key] : !!teamArmed?.[key];
-      if (armed || armingPowerup === key) return true;
-      if (isLan && answered) return true;
-      return false;
-    }
-    return answered || activePowerups[key];
-  };
-
   const handleHint = async () => {
-    if (pool.hint <= 0 || powerupLocked('hint')) return;
+    if (pool.hint <= 0 || answered || activePowerups.hint) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
-    if (teamMode) { await armSharedPowerup('hint'); return; }
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game || !game.consumePowerup('hint')) return;
@@ -2101,9 +1679,8 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const handleDoublePoints = async () => {
-    if (pool.doublePoints <= 0 || powerupLocked('doublePoints')) return;
+    if (pool.doublePoints <= 0 || answered || activePowerups.doublePoints) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
-    if (teamMode) { await armSharedPowerup('doublePoints'); return; }
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game || !game.consumePowerup('doublePoints')) return;
@@ -2116,9 +1693,8 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   };
 
   const handleShield = async () => {
-    if (pool.shield <= 0 || powerupLocked('shield')) return;
+    if (pool.shield <= 0 || answered || activePowerups.shield) return;
     if (Platform.OS !== 'web') Haptics.selectionAsync();
-    if (teamMode) { await armSharedPowerup('shield'); return; }
     if (isOffline || isLan) {
       const game = getCurrentOfflineGame();
       if (!game || !game.consumePowerup('shield')) return;
@@ -2207,7 +1783,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         iAgreed: null,
         pickers: 0,
         voided: false,
-        split: false,
         provisional: true,
       }));
     }
@@ -2239,11 +1814,9 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           // would read as an oversight. The server keeps the capability for API
           // callers.
           lockIn: 'false',
-          // Power-ups are NOT sent here any more. A power-up is a shared,
-          // server-owned decision (TeamPowerupView writes it onto the team
-          // document), so the resolve reads that marker rather than a flag on
-          // this request. A flag here would let one member spend the team's
-          // pool on an effect no teammate agreed to.
+          useHint: activePowerups.hint ? 'true' : 'false',
+          useDoublePoints: activePowerups.doublePoints ? 'true' : 'false',
+          useShield: activePowerups.shield ? 'true' : 'false',
         }),
         signal: controller.signal,
       });
@@ -2337,14 +1910,8 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         iAgreed: data.void ? null : !!answer && answer === (data.answer ?? ''),
         pickers: data.pickers ?? 0,
         voided: !!data.void,
-        split: !!data.split,
       });
-      // Only the member who happened to submit last gets the reward in their
-      // response. Show it here for that member (immediate feedback), and record
-      // the question so the shared team marker below does not replay it. The
-      // rest of the team is reached by the team document's `reward` field.
-      if (data.powerupEarned && rewardShownRef.current !== teamIndex) {
-        rewardShownRef.current = teamIndex;
+      if (data.powerupEarned) {
         setShowRoulette(true);
         setRouletteTarget(data.powerupEarned);
       }
@@ -2377,14 +1944,14 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
    * while the current question is still open, so a member cannot skip it for
    * everyone else.
    */
-  const advanceTeamQuestion = async (force = false) => {
-    if (isOffline || isLan) return false;
+  const advanceTeamQuestion = async () => {
+    if (isOffline || isLan) return;
     try {
       const token = await getToken();
       const res = await fetch(`${API_BASE_URL}/game/teams/advance/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ roomCode, questionIndex: teamIndex + 1, force: force ? 'true' : 'false' }),
+        body: JSON.stringify({ roomCode, questionIndex: teamIndex + 1 }),
       });
       const data = await res.json().catch(() => ({}));
       // "The question is still open" is a 409 that arrives with `secondsLeft`,
@@ -2401,12 +1968,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         );
         return false;
       }
-      // Ready-up gate: the room is open, but not every member has marked the
-      // question read (and the caller is not the host, who may force it).
-      if (res.status === 409 && typeof data.ready === 'number') {
-        setReadyState({ ready: data.ready, expected: data.expected ?? 0 });
-        return false;
-      }
       // Everything else really is fine: 200 moved the room, and the remaining
       // 409s mean somebody else already advanced. The room listener is what
       // actually moves this screen.
@@ -2414,37 +1975,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     } catch {
       return false;
     }
-  };
-
-  /**
-   * Mark this member ready for the current shared question, then try to advance.
-   *
-   * The last member to ready up is the one whose advance succeeds -- the server
-   * lets any member advance once everyone is ready -- so a room moves the moment
-   * its final member taps Ready, with no host round-trip. The host instead
-   * force-advances directly, which is the escape hatch for a member who has gone
-   * quiet or disconnected.
-   */
-  const handleTeamReady = async () => {
-    if (iAmReady) return;
-    setIAmReady(true);
-    try {
-      const token = await getToken();
-      const res = await fetch(`${API_BASE_URL}/game/teams/ready/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ roomCode, questionIndex: teamIndex }),
-      });
-      if (res.ok) {
-        const data = await res.json().catch(() => ({}));
-        if (typeof data.ready === 'number') {
-          setReadyState({ ready: data.ready, expected: data.expected ?? 0 });
-        }
-      }
-    } catch {
-      // Non-fatal: the count simply stays as it was. The host can force.
-    }
-    await advanceTeamQuestion(isRoomOwner);
   };
 
   /**
@@ -2581,32 +2111,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     if (isOwner) return;
 
     const doLeave = async () => {
-      try {
-        if (roomCode && userId != null) {
-          const roomRef = firestore().collection('gameRooms').doc(roomCode);
-          const playerRef = roomRef.collection('players').doc(String(userId));
-          try {
-            const playerSnap = await playerRef.get();
-            const myTeamId = playerSnap.data()?.teamId;
-            if (myTeamId) {
-              const teamRef = roomRef.collection('teams').doc(myTeamId);
-              await teamRef.update({ memberIds: firestore.FieldValue.arrayRemove(String(userId)) });
-            }
-          } catch {}
-          await playerRef.delete().catch(() => {});
-          // Hand the room over if this player was hosting it. Same endpoint the
-          // pre-game LEAVE calls; harmless when the owner is still present.
-          const token = await getToken();
-          await fetch(`${API_BASE_URL}/game/host/claim/`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ roomCode }),
-          }).catch(() => {});
-        }
-      } catch {
-        // The server-side cleanup is best-effort; never strand the player on a
-        // dead card. They asked to leave, so leave.
-      }
+      await doLeaveCleanup();
       if (!claimNav()) return;
       router.replace('/(tabs)/games' as any);
     };
@@ -2621,156 +2126,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     );
   };
 
-  /**
-   * LAN host ending the session mid-game.
-   *
-   * `endGame` broadcasts `{t:'end'}` to every player AND to this device's own
-   * loopback client, so the existing `end` handler finalizes each run (saving
-   * the answers so far) and routes everyone to the results screen -- the host
-   * included. No separate navigation is needed here.
-   */
-  const endLanSession = () => {
-    const host = getLanHostServer();
-    if (!host) return;
-    Alert.alert(
-      'End game for everyone?',
-      'This closes the game for every player and shows the final scores now.',
-      [
-        { text: 'Keep playing', style: 'cancel' },
-        {
-          text: 'End game',
-          style: 'destructive',
-          onPress: () => { host.endGame('The host ended the game'); },
-        },
-      ],
-    );
-  };
-
-  /** A LAN player walking out. There is no server room to clean up. */
-  const leaveLanSession = () => {
-    Alert.alert(
-      'Quit game?',
-      "Your answers so far won't be scored.",
-      [
-        { text: 'Stay', style: 'cancel' },
-        {
-          text: 'Quit',
-          style: 'destructive',
-          onPress: () => {
-            if (!claimNav()) return;
-            getLanClient()?.disconnect();
-            clearCurrentOfflineGame();
-            resetLanState();
-            router.replace('/(tabs)/games' as any);
-          },
-        },
-      ],
-    );
-  };
-
-  /** Abandon a solo offline run. Nothing is persisted until the end. */
-  const quitOffline = () => {
-    Alert.alert(
-      'Quit game?',
-      "Your progress won't be saved.",
-      [
-        { text: 'Keep playing', style: 'cancel' },
-        {
-          text: 'Quit',
-          style: 'destructive',
-          onPress: () => {
-            if (!claimNav()) return;
-            clearCurrentOfflineGame();
-            router.replace('/(tabs)/games' as any);
-          },
-        },
-      ],
-    );
-  };
-
-  /** The offline classic "host" can end the run from any question. Answers so
-   * far are saved and this device is routed to the final screen — the same
-   * save-and-navigate block the auto-finish runs on the last question, so
-   * ending early shows the same scores. */
-  const endOfflineSession = () => {
-    Alert.alert(
-      'End game?',
-      'This ends the session now and shows your final score.',
-      [
-        { text: 'Keep playing', style: 'cancel' },
-        {
-          text: 'End game',
-          style: 'destructive',
-          onPress: () => {
-            if (!claimNav()) return;
-            const game = getCurrentOfflineGame();
-            const savedId = game ? saveOfflineGameResult(game, [{
-              user_id: currentUser?.id ?? 'me',
-              name: meName,
-              score: game.score,
-              correct: game.correctCount,
-              answered: game.answeredCount,
-              bestStreak: game.bestStreak,
-              avatar: currentUser?.avatar ?? null,
-            }]) : 0;
-            clearCurrentOfflineGame();
-            router.replace({
-              pathname: '/game/final',
-              params: {
-                roomCode: 'OFFLINE',
-                offline: 'true',
-                offlineId: String(savedId),
-                quizTitle: params.quizTitle || game?.quizTitle || '',
-                score: String(game?.score ?? 0),
-                correctCount: String(game?.correctCount ?? 0),
-                totalQuestions: String(game?.totalQuestions ?? 0),
-              },
-            });
-          },
-        },
-      ],
-    );
-  };
-
   const handleAnswer = async (answer: string | null) => {
     // The latch, not the answer text: a timeout submits '' and a second
     // submission for the same index is answered from the server's cache with
     // the blank verdict, so a correct pick could be scored as wrong.
     if (answeredRef.current || spectator) return;
     markAnswered(true);
-    if (teamMode && isLan) {
-      // LAN team play submits a private PICK to the HOST (`submitTeamPick` talks
-      // to the online server, which does not exist here). The host tallies the
-      // majority, scores the team once and broadcasts the reveal; this member
-      // decides nothing locally. Before this branch existed the pick fell
-      // through to the online path, whose `submitTeamPick` returns immediately
-      // for LAN -- so the tap was silently dropped and the strip counted nothing.
-      lockPick(answer || '');
-      if (answer != null) {
-        pendingAnswerRef.current = answer;
-        setPendingAnswer(answer);
-      }
-      setError(null);
-      const myId = getLanPlayerId();
-      const blank = answer == null || !String(answer).trim();
-      const idx = lanQuestionIndexRef.current;
-      if (myId) {
-        // Optimistic local echo so the strip moves on the tap, not on the
-        // round-trip. The host's `picks` broadcast then reconciles it.
-        setLanPicks(prev => ({ ...prev, [myId]: blank ? '' : String(answer) }));
-        if (!blank) {
-          const since = lanQuestionAt != null ? lanQuestionAt : Date.now();
-          getLanClient()?.send({
-            t: 'pick',
-            playerId: myId,
-            index: idx,
-            answer: String(answer),
-            timeTaken: Math.max(0, (Date.now() - since) / 1000),
-          });
-        }
-      }
-      return;
-    }
     if (teamMode) {
       // Team play submits a private PICK, not an answer: the team has one
       // answer and the server tallies it. Nothing here decides the outcome.
@@ -2844,22 +2205,8 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         ));
       }
       if (outcome.powerupEarned) {
-        // Classic/offline: the reward is this device's own. LAN TEAM play never
-        // reaches here -- it is scored by the host -- so a team reward is
-        // delivered by the host's `team-powerups.reward` broadcast instead.
         setShowRoulette(true);
         setRouletteTarget(outcome.powerupEarned);
-      }
-      // LAN group play: report the pick so the host can tally it and echo the
-      // room back, letting every member see what their own team-mates chose.
-      // The host's own row travels over the loopback socket, same as `ready`.
-      if (isLan && lanTeamList.length > 0 && !blank) {
-        getLanClient()?.send({
-          t: 'pick',
-          playerId: getLanPlayerId() || '',
-          index: currentIndex,
-          answer: String(answer),
-        });
       }
       return;
     }
@@ -3006,42 +2353,21 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         await finishTeamGame();
         return;
       }
-      // The room owns the index, and the ready-up gate means the room only moves
-      // once every member has marked the question read. `handleTeamReady` records
-      // this member's readiness and then attempts the advance (the last member to
-      // tap is the one whose call succeeds); the host force-advances instead.
-      await handleTeamReady();
-      return;
-    }
-    if (isLan) {
-      // LAN is host-driven. The host tap advances the shared clock straight
-      // away; a player tap only marks the question read, and the host moves the
-      // room once every connected player has (see LanHostServer.markReady).
-      const host = getLanHostServer();
-      if (host) {
-        host.advanceQuestion();
-      } else if (!iAmReady) {
-        setIAmReady(true);
-        getLanClient()?.send({ t: 'ready', playerId: getLanPlayerId() || '', index: currentIndex });
-      }
+      // The room owns the index: ask it to move, and let the room listener pull
+      // this screen onto whatever question the team is actually on.
+      await advanceTeamQuestion();
       return;
     }
     if (currentIndex + 1 >= effectiveOrder.length) {
+      if (isLan) {
+        finalizeLanGameRef.current();
+        return;
+      }
       if (isOffline) {
         const game = getCurrentOfflineGame();
         // The results screen reads the questions and the answer log back out of
-        // this row, so the id has to travel with the navigation. A one-row
-        // roster is stored too, so the synced activity detail can show the same
-        // "Final standings" a live game does and tag the row "(you)".
-        const savedId = game ? saveOfflineGameResult(game, [{
-          user_id: currentUser?.id ?? 'me',
-          name: meName,
-          score: game.score,
-          correct: game.correctCount,
-          answered: game.answeredCount,
-          bestStreak: game.bestStreak,
-          avatar: currentUser?.avatar ?? null,
-        }]) : 0;
+        // this row, so the id has to travel with the navigation.
+        const savedId = game ? saveOfflineGameResult(game) : 0;
         clearCurrentOfflineGame();
         if (!claimNav()) return;
         router.replace({
@@ -3096,8 +2422,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       // shut, which is exactly the reported symptom. It is a toggle now: it
       // closes on the toggle and on a backdrop tap, and stays put otherwise.
       // Standings are live, so what it shows keeps updating across questions.
-    setActivePowerups({ hint: false, doublePoints: false, shield: false });
-    setLanHintChoices([]);
+      setActivePowerups({ hint: false, doublePoints: false, shield: false });
       setHintedChoices([]);
       setShowRoulette(false);
       setRouletteTarget(null);
@@ -3140,12 +2465,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     );
   }
 
-  // The engine grades `effectiveOrder[currentIndex]` (see `handleAnswer`), so the
-  // card MUST render the same index or the verdict is scored against a different
-  // question. In team mode `effectiveOrder` is identity while `questionOrder` is
-  // a per-device shuffle (LAN group hands out a shuffled order from `makeOrder`),
-  // so using `questionOrder` here showed one question and graded another.
-  const actualIndex = effectiveOrder[currentIndex];
+  const actualIndex = questionOrder[currentIndex];
   // A `currentIndex` past the end of the order left `question` undefined and the
   // next line threw on `.type`, blanking the screen mid-round. Fall back to an
   // empty object: the card renders empty instead of crashing, and the existing
@@ -3153,13 +2473,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   const question = questions[actualIndex] || {};
   const playerRank = standings.findIndex(p => String(p.id) === String(userId)) + 1;
   const isDanger = !isFrozen && timeLeft <= 5;
-  // LAN team display. LAN play is asynchronous, so this is presentational only:
-  // it never routes into the online team engine (shared question + voting).
-  const lanIsHost = isLan && getLanHostServer() != null;
-  const lanMyPlayer = isLan ? lanPlayersRef.current.find(isMyLanPlayer) : undefined;
-  const lanTeam = isLan
-    ? (lanTeamList.find(t => t.id === lanMyPlayer?.teamId) ?? null)
-    : null;
   const isChoiceQuestion = question.type === 'mcq' || question.type === 'true_false' || question.type === 'tf';
   // Anything choice-shaped that isn't a plain MCQ is a True/False round: it
   // renders as two letter-less buttons rather than "A / B" chips.
@@ -3168,7 +2481,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
     // choices is absent on a malformed MCQ just as often as it is wrong, and
     // .filter on undefined is a hard crash.
     ? ((question.choices && question.choices.length > 0)
-      ? (question.choices || []).filter((c: string) => !hintedChoicesShared.includes(c))
+      ? (question.choices || []).filter((c: string) => !hintedChoices.includes(c))
       : (question.type === 'true_false' || question.type === 'tf' ? ['True', 'False'] : []))
     : [];
   // In team play the room owns the question order, so "last" is a fact about the
@@ -3179,16 +2492,8 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
   // and expecting the game to end.
   const isRoomOwner = roomOwnerId != null && String(roomOwnerId) === String(userId);
   const nextLabel = teamMode
-    ? (isLastQuestion
-        ? (isRoomOwner ? 'End game 🏁' : 'Done — waiting for host')
-        // Ready-up gate: the host force-advances; a member marks the question
-        // read and the room moves when the last member does.
-        : (isRoomOwner ? 'Start next →' : (iAmReady ? 'Waiting…' : 'Ready ✓')))
-    : isLan
-      ? (isLastQuestion
-          ? (lanIsHost ? 'End game 🏁' : 'Done — waiting for host')
-          : (lanIsHost ? 'Start next →' : (iAmReady ? 'Waiting…' : 'Ready ✓')))
-      : (isLastQuestion ? 'Finish 🏁' : 'Next →');
+    ? (isLastQuestion ? (isRoomOwner ? 'End game 🏁' : 'Done — waiting for host') : 'Next →')
+    : (isLastQuestion ? 'Finish 🏁' : 'Next →');
 
   /* ═══════════════════════════════════════════════════════════
      RENDER
@@ -3216,12 +2521,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
               <Text style={[styles.teamPillScore, { color: myTeam.color }]}>{(myTeam.score ?? 0).toLocaleString()}</Text>
             </View>
           )}
-          {!myTeam && lanTeam && (
-            <View style={[styles.teamPill, { borderColor: lanTeam.color + '66', backgroundColor: lanTeam.color + '14' }]}>
-              <View style={[styles.teamPillDot, { backgroundColor: lanTeam.color }]} />
-              <Text style={styles.teamPillName} numberOfLines={1}>{lanTeam.name}</Text>
-            </View>
-          )}
         </View>
 
         {/* Host-only escape hatch. Everyone else finishes the round; the owner
@@ -3239,34 +2538,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           </TouchableOpacity>
         )}
 
-        {/* LAN host: end for everyone. Mirrors the online host's stop button. */}
-        {lanIsHost && (
-          <TouchableOpacity
-            style={styles.stopSessionBtn}
-            onPress={endLanSession}
-            activeOpacity={0.7}
-            accessibilityRole="button"
-            accessibilityLabel="End game"
-          >
-            <Text style={styles.stopSessionBtnText}>■ End</Text>
-          </TouchableOpacity>
-        )}
-
-        {/* Offline classic "host": the run is local and the only player can end
-            it from any question — answers so far are saved and scored. Keep the
-            Quit exit (below) as the discard option. */}
-        {isOffline && (
-          <TouchableOpacity
-            style={styles.stopSessionBtn}
-            onPress={endOfflineSession}
-            activeOpacity={0.7}
-            accessibilityRole="button"
-            accessibilityLabel="End game"
-          >
-            <Text style={styles.stopSessionBtnText}>■ End</Text>
-          </TouchableOpacity>
-        )}
-
         {/* Non-host participants can walk out of a running online game. The
             host's counterpart is End above (closes for everyone), so this is
             never shown to the owner. Offline and LAN have their own exits. */}
@@ -3279,34 +2550,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             accessibilityLabel="Leave game"
           >
             <Text style={styles.leaveSessionBtnText}>Leave</Text>
-          </TouchableOpacity>
-        )}
-
-        {/* LAN player: quit the ad-hoc game. There is no room to close, so the
-            exit reads "Quit" -- the same word solo offline uses -- and the host
-            keeps the "End" button that closes the round for everyone. */}
-        {isLan && !lanIsHost && (
-          <TouchableOpacity
-            style={styles.leaveSessionBtn}
-            onPress={leaveLanSession}
-            activeOpacity={0.7}
-            accessibilityRole="button"
-            accessibilityLabel="Quit game"
-          >
-            <Text style={styles.leaveSessionBtnText}>Quit</Text>
-          </TouchableOpacity>
-        )}
-
-        {/* Solo offline run: abandon it. Nothing is saved until the end. */}
-        {isOffline && (
-          <TouchableOpacity
-            style={styles.leaveSessionBtn}
-            onPress={quitOffline}
-            activeOpacity={0.7}
-            accessibilityRole="button"
-            accessibilityLabel="Quit game"
-          >
-            <Text style={styles.leaveSessionBtnText}>Quit</Text>
           </TouchableOpacity>
         )}
 
@@ -3356,7 +2599,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         <PowerupPoolHUD
           team={poolTeam}
           pool={pool}
-          active={activePowerupsHud}
+          active={activePowerups}
           shared={teamMode}
         />
       )}
@@ -3370,7 +2613,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           said Q2 while the class was answering question 3. */}
       {!showTeamReveal && !result && (
         <StandingsTicker
-          teams={standingsTeams}
+          teams={teams}
           players={standings}
           teamMode={teamMode}
           myUserId={userId != null ? String(userId) : null}
@@ -3379,19 +2622,15 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         />
       )}
 
-      {/* ── ACTIVE POWERUP BANNERS ──
-          Team mode shows the TEAM's armed banners until the question resolves,
-          and keeps them up even after this member has picked -- the power-up
-          belongs to the whole team, and the card stays up until everyone is in.
-          Solo/classic hide theirs the moment this player answers. */}
-      {!result && (teamMode || !answered) && (activePowerupsHud.doublePoints || activePowerupsHud.shield) && (
+      {/* ── ACTIVE POWERUP BANNERS ── */}
+      {!answered && !result && (activePowerups.doublePoints || activePowerups.shield) && (
         <View style={styles.bannerRow}>
-          {activePowerupsHud.doublePoints && (
+          {activePowerups.doublePoints && (
             <View style={[styles.banner, styles.banner2x]}>
               <Text style={styles.bannerText2x}>⚡ 2x Points Active!</Text>
             </View>
           )}
-          {activePowerupsHud.shield && (
+          {activePowerups.shield && (
             <View style={[styles.banner, styles.bannerShield]}>
               <Text style={styles.bannerTextShield}>🛡️ Shield Active!</Text>
             </View>
@@ -3508,9 +2747,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                       ? "\U0001f91d Split vote \u2014 no majority, so it scored nothing"
                       : result.correct
                         ? `✅ Team correct!`
-                        : result.split
-                          ? `✗ Team answered: ${result.teamAnswer || "\u2014"} (split \u2014 one pick drawn at random)`
-                          : `✗ Team answered: ${result.teamAnswer || "\u2014"}`)
+                        : `✗ Team answered: ${result.teamAnswer || "\u2014"}`)
                   : (result.correct ? `✅ Correct!` : `✗ Incorrect`)}
               </Text>
               {/* Speed shown as its own line: a single "+840" hides the fact
@@ -3539,31 +2776,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
             {teamMode && !result.voided && !!result.teamAnswer && (
               <Text style={styles.teamAgreementLine}>
                 Team picked: {result.teamAnswer}
-                {result.split
-                  ? '  \u00b7  split'
-                  : typeof result.agreed === 'number' ? `  \u00b7  ${result.agreed} agreed` : ''}
+                {typeof result.agreed === 'number' ? `  \u00b7  ${result.agreed} agreed` : ''}
               </Text>
             )}
-            {/* "You agreed" is only honest when the team actually reached a
-                majority AND more than one member voted for it. On a 1-1 coin
-                flip the member whose pick was drawn would otherwise be told they
-                agreed even though nobody agreed with anybody; a sole picker
-                (their teammates timed out) has nobody to have agreed with. */}
-            {teamMode && !result.voided && result.iAgreed === true && result.split && (
-              <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
-                The team split \u2014 your pick was drawn
-              </Text>
-            )}
-            {teamMode && !result.voided && result.iAgreed === true && !result.split
-              && (result.pickers ?? 0) >= 2 && (
+            {teamMode && !result.voided && result.iAgreed === true && (
               <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
                 You agreed with your team
-              </Text>
-            )}
-            {teamMode && !result.voided && result.iAgreed === true && !result.split
-              && (result.pickers ?? 0) < 2 && (
-              <Text style={[styles.teamAgreementLine, styles.teamOwnLine]}>
-                You were the only one who answered
               </Text>
             )}
             {/* Three separate verdicts, not two.
@@ -3606,7 +2824,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           <View style={styles.choicesWrap}>
             {/* True/False has no wrong choice to eliminate, so the hint shows
                 the first letter instead of being a dead spend. */}
-            {isTfQuestion && activePowerupsHud.hint && String(question.correctAnswer ?? '').trim() && (
+            {isTfQuestion && activePowerups.hint && String(question.correctAnswer ?? '').trim() && (
               <View style={styles.hintBanner}>
                 <Text style={styles.hintBannerText}>
                   💡 Starts with: <Text style={styles.hintLetter}>{String(question.correctAnswer).charAt(0).toUpperCase()}</Text>
@@ -3670,21 +2888,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                     {isTf && (isCorrect || isWrongPick) ? `${isCorrect ? '✓' : '✗'} ` : ''}
                     {textOf(choice)}
                   </Text>
-                  {/* Live team vote: how many teammates have backed this option.
-                      Tapping shows who, without answering the question. Shown
-                      while the clock runs and kept through the reveal. */}
-                  {displayVote?.[choice] && (
-                    <Pressable
-                      style={styles.voteBadge}
-                      onPress={() => showLiveVoters(choice)}
-                      hitSlop={10}
-                      accessibilityRole="button"
-                      accessibilityLabel={`${displayVote[choice].count} teammates picked this`}
-                    >
-                      <Ionicons name="people" size={11} color="#FFFFFF" />
-                      <Text style={styles.voteBadgeText}>{displayVote[choice].count}</Text>
-                    </Pressable>
-                  )}
                 </TouchableOpacity>
               );
             })}
@@ -3695,7 +2898,7 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
         {!spectator && (TYPED_QUESTION_TYPES as readonly string[]).includes(question.type) && (
           <View style={styles.idArea}>
             {/* A hint only makes sense when there is a first letter to give. */}
-            {activePowerupsHud.hint && String(question.correctAnswer ?? '').trim() && (
+            {activePowerups.hint && String(question.correctAnswer ?? '').trim() && (
               <View style={styles.hintBanner}>
                 <Text style={styles.hintBannerText}>
                   💡 Starts with: <Text style={styles.hintLetter}>{String(question.correctAnswer).charAt(0).toUpperCase()}</Text>
@@ -3762,10 +2965,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                 isLastQuestion ? styles.nextBtnFinish : styles.nextBtnAccent,
               ]}
               onPress={() => { if (autoAdvanceRef.current !== null) { clearInterval(autoAdvanceRef.current); autoAdvanceRef.current = null; } handleNext(); }}
-              disabled={
-                (teamMode && !isRoomOwner && !isLastQuestion && iAmReady)
-                || (isLan && !lanIsHost && !isLastQuestion && iAmReady)
-              }
               activeOpacity={0.8}
             >
               <Text style={[
@@ -3778,15 +2977,6 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
                 <Text style={styles.nextBtnCountdown}>{Math.ceil(autoCountdown)}s</Text>
               )}
             </TouchableOpacity>
-            {/* Ready-up progress. The count comes from the server's own roster,
-                so it is accurate even for a member who has not readied yet. */}
-            {(teamMode || (isLan && !lanIsHost)) && !isLastQuestion && (
-              <Text style={styles.readyStatus}>
-                {readyState
-                  ? `${readyState.ready} of ${readyState.expected} ready`
-                  : (iAmReady ? 'Waiting for the others…' : 'Tap Ready when you have read the answer')}
-              </Text>
-            )}
           </RNAnimated.View>
         )}
       </ScrollView>
@@ -3833,14 +3023,12 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
       {/* Team mode only. Reactions cheer on a shared team, but in classic
           every player is competing alone, so cheering on other players is
           meaningless rather than supportive. */}
-      {!isOffline && !result && teamMode && (
+      {!isOffline && !isLan && !result && teamMode && (
         <ReactionBar
           roomCode={roomCode}
           enabled={roomStatus === 'active'}
           myId={userId != null ? String(userId) : null}
-          teams={standingsTeams}
-          lanSend={isLan ? handleLanReact : undefined}
-          lanLive={isLan ? lanReactions : undefined}
+          teams={teams}
         />
       )}
 
@@ -3865,38 +3053,38 @@ const [myTeamId, setMyTeamId] = useState<string | null>(null);
           )}
           {pool.hint > 0 && (
             <TouchableOpacity
-              style={[styles.puBtn, activePowerupsHud.hint && styles.puBtnUsed]}
+              style={[styles.puBtn, activePowerups.hint && styles.puBtnUsed]}
               onPress={handleHint}
-              disabled={powerupLocked('hint')}
+              disabled={answered || activePowerups.hint}
               activeOpacity={0.7}
             >
               <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.hint}</Text></View>
               <Text style={styles.puIcon}>💡</Text>
-              <Text style={[styles.puLabel, activePowerupsHud.hint && styles.puLabelYellow]}>Hint</Text>
+              <Text style={[styles.puLabel, activePowerups.hint && styles.puLabelYellow]}>Hint</Text>
             </TouchableOpacity>
           )}
           {pool.doublePoints > 0 && (
             <TouchableOpacity
-              style={[styles.puBtn, activePowerupsHud.doublePoints && styles.puBtnUsed]}
+              style={[styles.puBtn, activePowerups.doublePoints && styles.puBtnUsed]}
               onPress={handleDoublePoints}
-              disabled={powerupLocked('doublePoints')}
+              disabled={answered || activePowerups.doublePoints}
               activeOpacity={0.7}
             >
               <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.doublePoints}</Text></View>
               <Text style={styles.puIcon}>⚡</Text>
-              <Text style={[styles.puLabel, activePowerupsHud.doublePoints && styles.puLabelYellow]}>2x Pts</Text>
+              <Text style={[styles.puLabel, activePowerups.doublePoints && styles.puLabelYellow]}>2x Pts</Text>
             </TouchableOpacity>
           )}
           {pool.shield > 0 && (
             <TouchableOpacity
-              style={[styles.puBtn, activePowerupsHud.shield && styles.puBtnShieldActive]}
+              style={[styles.puBtn, activePowerups.shield && styles.puBtnShieldActive]}
               onPress={handleShield}
-              disabled={powerupLocked('shield')}
+              disabled={answered || activePowerups.shield}
               activeOpacity={0.7}
             >
               <View style={styles.puCountBadge}><Text style={styles.puCountText}>{pool.shield}</Text></View>
               <Text style={styles.puIcon}>🛡️</Text>
-              <Text style={[styles.puLabel, activePowerupsHud.shield && styles.puLabelCyan]}>Shield</Text>
+              <Text style={[styles.puLabel, activePowerups.shield && styles.puLabelCyan]}>Shield</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -4470,22 +3658,6 @@ const styles = StyleSheet.create({
   choiceTextCorrect: { color: '#34D399' },
   choiceTextWrong: { color: '#F87171' },
   choiceTextPending: { color: '#DDD6FE' },
-  /* Live team-vote count badge on a choice; tap reveals who backed it. */
-  voteBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-    backgroundColor: 'rgba(139,92,246,0.85)',
-  },
-  voteBadgeText: {
-    fontSize: 11,
-    fontFamily: FONTS.bold,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
 
   /* ── identification ── */
   idArea: {
@@ -4554,13 +3726,6 @@ const styles = StyleSheet.create({
   nextBtnFinish: { backgroundColor: COLORS.purplePrimary },
   nextBtnText: { fontSize: 16, fontFamily: FONTS.extraBold, letterSpacing: 0.5 },
   nextBtnCountdown: { fontSize: 12, fontFamily: FONTS.medium, opacity: 0.7, marginLeft: 8 },
-  readyStatus: {
-    marginTop: 8,
-    fontSize: 12,
-    fontFamily: FONTS.medium,
-    color: COLORS.textMuted,
-    textAlign: 'center',
-  },
   nextBtnTextAccent: { color: COLORS.bg },
   nextBtnTextFinish: { color: '#fff' },
 

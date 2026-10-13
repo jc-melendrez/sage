@@ -1,11 +1,11 @@
 import { Tabs } from 'expo-router';
-import React, { useEffect, useState } from 'react'; // ✅ added useEffect
-import NetInfo from '@react-native-community/netinfo';
+import React, { useEffect } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as NavigationBar from 'expo-navigation-bar'; // ✅ import
 
 import { HapticTab } from '@/components/haptic-tab';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useNetwork } from '@/contexts/NetworkContext';
 
 // 🔥 Import Tabler icons
 import {
@@ -24,21 +24,7 @@ export default function TabLayout() {
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
   const insets = useSafeAreaInsets();
-  const [isOffline, setIsOffline] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let mounted = true;
-    NetInfo.fetch().then(state => {
-      if (mounted) setIsOffline(state.isConnected === false || state.isInternetReachable === false);
-    });
-    const unsub = NetInfo.addEventListener(state => {
-      setIsOffline(state.isConnected === false || state.isInternetReachable === false);
-    });
-    return () => {
-      mounted = false;
-      unsub();
-    };
-  }, []);
+  const { isOffline, isInitialized, offlineMode } = useNetwork();
 
   // ✅ Set system navigation bar color (Android only) – different from tab bar
   useEffect(() => {
@@ -57,7 +43,7 @@ export default function TabLayout() {
     setNavBar();
   }, []);
 
-  if (isOffline === null) return null;
+  if (!isInitialized) return null;
 
   return (
     <Tabs
@@ -83,6 +69,9 @@ export default function TabLayout() {
           shadowOffset: { width: 0, height: -2 },
           shadowOpacity: 0.03,
           shadowRadius: 10,
+          // Offline mode is Play-only, so the bar would show a single button
+          // with no siblings to switch to. Hide it entirely instead.
+          ...(offlineMode ? { display: 'none' as const } : {}),
         },
         tabBarLabelStyle: {
           fontSize: 11,
@@ -95,6 +84,8 @@ export default function TabLayout() {
         options={{
           title: 'Home',
           tabBarIcon: ({ color }) => <IconHome size={24} color={color} />,
+          // Offline mode is Play-only: hide every other tab button.
+          ...(offlineMode ? { href: null } : {}),
         }}
       />
       <Tabs.Screen
@@ -102,6 +93,7 @@ export default function TabLayout() {
         options={{
           title: 'Activities',
           tabBarIcon: ({ color }) => <IconBook size={24} color={color} />,
+          ...(offlineMode ? { href: null } : {}),
         }}
       />
       <Tabs.Screen
@@ -116,6 +108,7 @@ export default function TabLayout() {
         options={{
           title: 'AI Assistant',
           tabBarIcon: ({ color }) => <IconSparkles size={24} color={color} />,
+          ...(offlineMode ? { href: null } : {}),
         }}
       />
       <Tabs.Screen
@@ -123,6 +116,7 @@ export default function TabLayout() {
         options={{
           title: 'Profile',
           tabBarIcon: ({ color }) => <IconUser size={24} color={color} />,
+          ...(offlineMode ? { href: null } : {}),
         }}
       />
       <Tabs.Screen name="leaderboard" options={{ href: null }} />
