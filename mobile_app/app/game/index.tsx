@@ -27,15 +27,13 @@ import firestore from '@react-native-firebase/firestore';
 import { cacheQuizzes, getCachedQuizzes, createOfflineGame } from '@/services/offlineGameService';
 import * as Clipboard from 'expo-clipboard';
 import { LanClientSession } from '@/services/lanClient';
-import { lanGame, setLanClient, setLanHost, resetLanState, getLanClient, getLanHostInfo, setLanHostInfo, setLastLanRoster, setLanPlayerId, getLanPlayerId, setLanTeams } from '@/services/lanSession';
+import { lanGame, setLanClient, setLanHost, resetLanState, getLanClient, getLanHostServer, getLanHostInfo, setLanHostInfo, setLastLanRoster, setLanPlayerId, getLanPlayerId, setLanTeams } from '@/services/lanSession';
 import { LanHostServer, makeOrder } from '@/services/lanHost';
 import { LanMessage, LanPlayer, generateRoomCode } from '@/services/lanProtocol';
 import { startScanning, stopScanning, startAdvertising, stopAdvertising, DiscoveredRoom } from '@/services/lanDiscovery';
 import { buildQuestions } from '@/services/offlineEngine';
 import { pfpSource } from '@/constants/pfps';
 import JoinCodeInput, { JOIN_CODE_LENGTH, joinCodeToString } from '@/components/JoinCodeInput';
-import TeamColumns from '@/components/game/TeamColumns';
-import { sameTeamId, type PlayerEntry, type TeamEntry } from '@/types/game';
 import { useCurrentUser } from '@/contexts/UserContext';
 import { useTutorialTarget } from '@/components/TutorialSpotlight';
 import { initialsOf } from '@/services/courseRoster';
@@ -43,12 +41,6 @@ import { leaveGameRoom } from '@/services/gameRoomService';
 import type { ActiveGame } from '@/services/activeGameService';
 import { clearActiveGame } from '@/services/activeGameService';
 import ResumeGameBanner from '@/components/game/ResumeGameBanner';
-
-/**
- * busyTeamId sentinel for the spectator column. Team ids are numeric strings,
- * so a non-numeric key can never collide with a real one.
- */
-const SPECTATOR_KEY = '__spectator__';
 
 /** Deadline for a Play-screen POST; mirrors the one in game/lobby.tsx. */
 const POST_TIMEOUT_MS = 45000;
@@ -231,30 +223,16 @@ export default function GameCenterScreen() {
 
   // Joined room state
   const [joinedRoom, setJoinedRoom] = useState(false);
-  const [roomStatus, setRoomStatus] = useState<'waiting' | 'active'>('waiting');
   const [roomMode, setRoomMode] = useState<'classic' | 'group' | null>(null);
+  // The mode a LAN joiner is locked into. The online twin of `roomMode`, driven
+  // by the host's `mode` broadcast (and the `welcome` teamMode), so a joiner's
+  // mode card re-tints live when the host switches classic <-> group.
+  const [lanMode, setLanMode] = useState<'classic' | 'group' | null>(null);
   const [roomHostId, setRoomHostId] = useState<number | string | null>(null);
-  const [teams, setTeams] = useState<any[]>([]);
-  // Team columns (GROUP MODE): `busyTeamId` both shows a spinner and blocks
-  // further taps while the server decides the assignment.
-  const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
-  const [addingTeam, setAddingTeam] = useState(false);
-  // A new team column can land off screen in the horizontal strip with no other
-  // cue, which looks identical to "+ TEAM did nothing". The server echoes the new
-  // teamId, so scroll it into view and pulse it. Mirrors the lobby screen.
-  const [highlightTeamId, setHighlightTeamId] = useState<string | null>(null);
-  const teamScrollRef = useRef<ScrollView>(null);
   // The mode-config list is a different ScrollView from the preset list, and
   // the custom team-count field is the last thing in it -- so that field is the
   // one that has to be scrolled back into view when it takes focus.
   const modesScrollRef = useRef<ScrollView>(null);
-  // Rendered next to the team columns instead of only in a toast: the previous
-  // Alert-only reporting is why this reached "reproducible nowhere".
-  const [addTeamError, setAddTeamError] = useState<string | null>(null);
-  const [addTeamOk, setAddTeamOk] = useState<string | null>(null);
-  // Compared against each teams snapshot, so a server-written team that never
-  // reaches the screen is visible as a number mismatch in the log.
-  const lastAddedTeamIdRef = useRef<string | null>(null);
   const [lanName, setLanName] = useState('Player');
   const lanRoomsRef = useRef<DiscoveredRoom[]>([]);
   const lanHostRef = useRef<LanHostServer | null>(null);
@@ -267,6 +245,10 @@ export default function GameCenterScreen() {
   });
   const myLanIdRef = useRef<string | null>(null);
   const lanNavPushedRef = useRef(false);
+  // The host pressed START in group play: the room document's `lobbyOpen` (or a
+  // LAN `lobby` message) has pulled this screen toward /game/lobby. Latched so
+  // the re-firing room listener does not navigate a second time.
+  const wentToLobbyRef = useRef(false);
   // Bumped every time a group lobby create starts, so a create that resolves
 // after the host has already changed their mind cannot navigate or write state.
 const lobbyTokenRef = useRef(0);
@@ -397,7 +379,12 @@ const lobbyTokenRef = useRef(0);
     return () => unsub();
   }, [roomCode]);
 
-  // Room doc listener for joined players — mode, status, hostId
+  // Room doc listener for joined players — mode, status, hostId.
+  //
+  // `mode` is the source of truth (falling back to `teamMode` only for an older
+  // room that predates the field). Reading `teamMode` first made the derivation
+  // sticky: once a group room existed, switching back to classic never cleared
+  // the card because `teamMode` is not deleted, only set false.
   useEffect(() => {
     if (!joinedRoom || !roomCode) return;
     const unsub = firestore()
@@ -407,95 +394,40 @@ const lobbyTokenRef = useRef(0);
         if (!snap.exists) {
           // Room deleted — reset joined state
           countdownStartedRef.current = false;
+          wentToLobbyRef.current = false;
           setJoinedRoom(false);
           setRoomCode(null);
           setRoomMode(null);
-          setRoomStatus('waiting');
           return;
         }
         const d = snap.data();
         if (!d) return;
-        setRoomStatus(d.status ?? 'waiting');
-        setRoomMode(d.mode === 'group' || d.teamMode ? 'group' : 'classic');
+        const nextMode: 'classic' | 'group' =
+          d.mode != null
+            ? (d.mode === 'group' ? 'group' : 'classic')
+            : (d.teamMode ? 'group' : 'classic');
+        setRoomMode(nextMode);
         setRoomHostId(d.hostId ?? null);
         if (d.status !== 'active') {
           // Room went back to the lobby (reset, rematch) -- the next run counts
           // down again.
           countdownStartedRef.current = false;
-        } else if (!countdownStartedRef.current) {
+        }
+        if (nextMode === 'group') {
+          // The host pressed START and opened the lobby: follow them in so the
+          // joiner picks a team from the same screen the host sees. The lobby
+          // owns the countdown from there.
+          if (d.lobbyOpen && !wentToLobbyRef.current) {
+            wentToLobbyRef.current = true;
+            router.push({ pathname: '/game/lobby', params: { roomCode, isHost: 'false' } } as any);
+          }
+        } else if (d.status === 'active' && !countdownStartedRef.current) {
           countdownStartedRef.current = true;
           startJoinedCountdown(roomCode);
         }
       });
     return () => unsub();
-  }, [joinedRoom, roomCode, startJoinedCountdown]);
-
-  // Team picker subscription (team mode only) — separate effect
-  // Latest host identity, readable from the teams subscription below without
-  // re-subscribing whenever hostId lands.
-  const isHostUserRef = useRef(false);
-  useEffect(() => {
-    isHostUserRef.current =
-      roomHostId != null && currentUserId != null
-      && String(roomHostId) === String(currentUserId);
-  }, [roomHostId, currentUserId]);
-
-  useEffect(() => {
-    if (!joinedRoom || !roomCode) return;
-    let unsubTeams: (() => void) | null = null;
-
-    const attachTeams = () => {
-      if (unsubTeams) return;
-      unsubTeams = firestore()
-        .collection('gameRooms')
-        .doc(roomCode)
-        .collection('teams')
-        .onSnapshot(snap => {
-          const docs = snap?.docs?.map(doc => ({ id: doc.id, ...doc.data() })) ?? [];
-          setTeams(docs as TeamEntry[]);
-          // Server's word vs what is actually on screen. A mismatch is the
-          // signature of a write that landed and a read that did not.
-          console.log('[play] teams snapshot', {
-            fromServer: lastAddedTeamIdRef.current,
-            rendered: docs.length,
-            ids: docs.map(d => d.id).join(','),
-          });
-          // A team-mode room with an empty teams subcollection is a dead end:
-          // there is no box to tap, no name to edit, and the host's own add-team
-          // control was the only way out. Creating the first team here makes the
-          // room recoverable without having to delete and re-share it.
-          //
-          // Read through a ref: this subscription is created before the room
-          // document has delivered hostId, so a captured isHostUser would still
-          // be false forever and the repair would never run.
-          if (docs.length === 0 && isHostUserRef.current) {
-            post('teams/add/', { roomCode }).catch(() => {});
-          }
-        }, error => {
-          console.warn('[index] teams subscription failed', error);
-        });
-    };
-
-    // Subscribed to the room rather than read once. The old one-shot .get()
-    // only attached the teams listener if teamMode was already true at the
-    // instant this ran, so a room document that had not landed yet (or any
-    // late write of the flag) left the screen permanently unsubscribed: the
-    // host could add a team successfully and see no new column, because
-    // nothing was listening for it.
-    const unsubRoom = firestore()
-      .collection('gameRooms')
-      .doc(roomCode)
-      .onSnapshot(snap => {
-        if (snap?.data()?.teamMode) attachTeams();
-      }, error => {
-        console.warn('[index] room subscription failed', error);
-      });
-
-    return () => {
-      unsubRoom();
-      unsubTeams?.();
-    };
-  }, [joinedRoom, roomCode]);
+  }, [joinedRoom, roomCode, startJoinedCountdown, router]);
 
   const fetchQuizzes = useCallback(async () => {
     setLoadingQuizzes(true);
@@ -568,8 +500,7 @@ const lobbyTokenRef = useRef(0);
   /**
    * Coming back from a lobby the host abandoned.
    *
-   * startGroupLobby stores the group's room code here before pushing the lobby,
-   * and START below treats any non-null code as "reuse this room". The lobby
+   * START below treats any non-null room code as "reuse this room". The lobby
    * returns with leftLobby=1 (from its back button and its hardware-back
    * handler) precisely so that code is dropped instead of quietly hijacking
    * whatever the student starts next.
@@ -579,37 +510,50 @@ const lobbyTokenRef = useRef(0);
     lobbyTokenRef.current += 1;
     setRoomCode(null);
     setRoomTopic('');
-    setRoomStatus('waiting');
     setRoomMode(null);
     setRoomHostId(null);
     setRoomPlayers([]);
-    setTeams([]);
     setSelectedMode(null);
     setIsCreatingRoom(false);
     router.setParams({ leftLobby: undefined });
   }, [leftLobbyParam, router]);
 
   /**
-   * Coming back from a completed classic game's "Play Again".
+   * Coming back from a completed game's "Play Again".
    *
    * The rematch endpoint has already reset the room to 'waiting' and kept the
    * whole roster, so this only has to adopt the same code again: the host's
-   * START reuses it (the `!roomCode` branch in handleStartPress is skipped) and
-   * the joiners land in the waiting-lobby view. `rematchHost` keeps the two
-   * roles apart -- the host stays out of `joinedRoom` so START is on screen,
-   * everyone else is a joiner waiting on the host.
+   * START reuses it (the `!roomCode` branch in handleStartPress is skipped).
+   * Both roles land on the Play tab so the host can re-pick the mode -- exactly
+   * like a classic rematch -- so the mode is read back off the room rather than
+   * assumed to be classic. `rematchHost` keeps the two roles apart -- the host
+   * stays out of `joinedRoom` so START is on screen.
    */
   useEffect(() => {
     if (!rematchRoomParam) return;
     lobbyTokenRef.current += 1;
-    setRoomCode(rematchRoomParam);
+    const code = rematchRoomParam;
+    setRoomCode(code);
     setRoomTopic('');
-    setRoomMode('classic');
-    setSelectedMode('classic');
-    setRoomStatus('waiting');
     setJoinedRoom(rematchHostParam !== '1');
     setActiveTab('presets');
+    wentToLobbyRef.current = false;
     router.setParams({ rematchRoom: undefined, rematchHost: undefined });
+    firestore()
+      .collection('gameRooms')
+      .doc(code)
+      .get()
+      .then(snap => {
+        const d = snap.data();
+        const m: 'classic' | 'group' =
+          d?.mode === 'group' || (d?.mode == null && d?.teamMode) ? 'group' : 'classic';
+        setRoomMode(m);
+        setSelectedMode(m);
+      })
+      .catch(() => {
+        setRoomMode('classic');
+        setSelectedMode('classic');
+      });
   }, [rematchRoomParam, rematchHostParam, router]);
 
   const handleRefresh = useCallback(async () => {
@@ -623,58 +567,39 @@ const lobbyTokenRef = useRef(0);
 
   // --- Handlers ---
   
-  // 1. Handle Mode Click -> Open Config Modal
+  // 1. Handle Mode Click -> select a mode and, on a live room, reconfigure it.
+  //
+  // The mode is no longer baked once: a host who changes their mind after
+  // students have joined reconfigures the same room instead of orphaning the
+  // code they typed. Online that is POST /game/mode/; over LAN the host server
+  // reconfigures and broadcasts `mode` so joiners' cards re-tint live.
   const handleModePress = (modeId: string) => {
-    if (modeId === 'classic') {
-      setSelectedMode(modeId);
-      setActiveTab('custom');
-      // Switching away from Teams must also drop the team room's leftovers, or
-      // the number-of-teams panel keeps rendering and START keeps aiming at a
-      // deferQuiz room. The lobby normally clears these on the way out; this
-      // covers a student who changes their mind without ever opening it.
-      if (roomMode === 'group') {
-        lobbyTokenRef.current += 1;
-        setRoomCode(null);
-        setRoomMode(null);
-        setRoomHostId(null);
-        setRoomPlayers([]);
-        setTeams([]);
-      }
-      // Sync mode to room doc if host has an active room
-      if (roomCode && !joinedRoom) {
-        firestore()
-          .collection('gameRooms')
-          .doc(roomCode)
-          .update({ mode: 'classic' })
-          .catch(() => {});
-      }
-    } else if (modeId === 'group') {
-      setSelectedMode(modeId);
-      setActiveTab('custom');
-      // Switching away from Teams must also drop the team room's leftovers, or
-      // the number-of-teams panel keeps rendering and START keeps aiming at a
-      // deferQuiz room. The lobby normally clears these on the way out; this
-      // covers a student who changes their mind without ever opening it.
-      if (roomMode === 'classic') {
-        lobbyTokenRef.current += 1;
-        setRoomCode(null);
-        setRoomMode(null);
-        setRoomHostId(null);
-        setRoomPlayers([]);
-        setTeams([]);
-      }
-      // Sync mode to room doc if host has an active room
-      if (roomCode && !joinedRoom) {
-        firestore()
-          .collection('gameRooms')
-          .doc(roomCode)
-          .update({ mode: 'group' })
-          .catch(() => {});
-      }
-    } else if (modeId === 'flashcards') {
+    if (modeId === 'flashcards') {
       router.push('/flashcards');
-    } else {
-      Alert.alert("Coming Soon", "This mode is under development!");
+      return;
+    }
+    if (modeId !== 'classic' && modeId !== 'group') {
+      Alert.alert('Coming Soon', 'This mode is under development!');
+      return;
+    }
+
+    setSelectedMode(modeId);
+    setActiveTab('custom');
+
+    const lanHost = lanHostRef.current;
+    if (lanHost) {
+      lanHost.setMode(modeId, teamCount);
+      setLanMode(modeId);
+      return;
+    }
+    if (roomCode && !joinedRoom) {
+      post('mode/', {
+        roomCode,
+        mode: modeId,
+        ...(modeId === 'group' ? { teamCount } : {}),
+      })
+        .then(() => setRoomMode(modeId))
+        .catch((e: any) => Alert.alert('Error', e?.message || 'Could not change the game mode'));
     }
   };
 
@@ -697,74 +622,6 @@ const lobbyTokenRef = useRef(0);
       `Please choose ${missing.join(' and ')} before starting a game.`,
     );
     return null;
-  };
-
-  /**
-   * Team mode hands off to /game/lobby. The room is created without a quiz
-   * (`deferQuiz`), because the host picks one inside the lobby once the team
-   * boxes and the invite code are already on screen. That ordering is the
-   * whole point of the custom lobby: invite people first, choose second.
-   */
-  const startGroupLobby = async () => {
-    // A lobby the host walks away from must not keep its room code here.
-    // START below reuses any non-null roomCode instead of creating a fresh one,
-    // so a leftover deferQuiz group room silently hijacked a later Classic game
-    // and failed with "choose a quiz" for a quiz the student had picked. The
-    // lobby's back button and its hardware-back handler both come back here
-    // with leftLobby=1 to clear it.
-    const token = ++lobbyTokenRef.current;
-    setIsCreatingRoom(true);
-    try {
-      const token2 = await getToken();
-      const response = await fetch(`${API_BASE_URL}/game/create/`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token2}`,
-        },
-        body: JSON.stringify({
-          deferQuiz: 'true',
-          timePerQuestion: parseInt(timePerQuestion) || 15,
-          teamMode: 'true',
-          autoAssignTeams: 'false',
-          teamCount,
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to create room');
-      // Superseded while the create was in flight: a second mode press, or the
-      // student gave up and picked something else. Navigating now would strand
-      // them in a lobby they already walked out of.
-      if (token !== lobbyTokenRef.current) return;
-
-      // The lobby reads the room document directly, so the mode has to be on it
-      // rather than only in this component's state.
-      firestore()
-        .collection('gameRooms')
-        .doc(data.roomCode)
-        .update({ mode: 'group' })
-        .catch(() => {});
-
-      setRoomCode(data.roomCode);
-      // `isHost` is what switches the lobby between host controls (quiz picker,
-      // start button) and the waiting state. Omitting it renders the host as a
-      // joiner with no way to pick a quiz or begin.
-      router.push({
-        pathname: '/game/lobby',
-        params: {
-          roomCode: data.roomCode,
-          isHost: 'true',
-          teamMode: 'true',
-          teamCount: String(teamCount),
-        },
-      } as any);
-    } catch (error: any) {
-      if (token !== lobbyTokenRef.current) return;
-      Alert.alert('Error', error.message || 'Could not open the team lobby');
-    } finally {
-      if (token === lobbyTokenRef.current) setIsCreatingRoom(false);
-    }
   };
 
   /**
@@ -984,23 +841,27 @@ const lobbyTokenRef = useRef(0);
       stopAdvertising();
       // The host must be registered as a player BEFORE the game starts, or the
       // server rejects its own hello as "already started" and the host never
-      // shows up on the leaderboard.
-      let hostJoined = false;
-      const client = new LanClientSession(msg => {
-        if (msg.t === 'welcome') {
-          hostJoined = true;
-          setLanPlayerId(msg.playerId);
-        }
-      });
-      setLanClient(client);
-      try {
-        await client.connect('127.0.0.1');
-        client.join(lanGame.roomCode, hostName, currentUserAvatar);
-        const deadline = Date.now() + 3000;
-        while (!hostJoined && Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 25));
-        }
-      } catch {}
+      // shows up on the leaderboard. On a rematch the host is already seated --
+      // resetForRematch keeps the roster -- so re-join only when there is no live
+      // self-client, otherwise the host would appear twice.
+      if (!getLanClient()?.connected) {
+        let hostJoined = false;
+        const client = new LanClientSession(msg => {
+          if (msg.t === 'welcome') {
+            hostJoined = true;
+            setLanPlayerId(msg.playerId);
+          }
+        });
+        setLanClient(client);
+        try {
+          await client.connect('127.0.0.1');
+          client.join(lanGame.roomCode, hostName, currentUserAvatar);
+          const deadline = Date.now() + 3000;
+          while (!hostJoined && Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 25));
+          }
+        } catch {}
+      }
       host.startGame();
       router.push({ pathname: '/game/question', params: { lan: 'true', roomCode: lanGame.roomCode } } as any);
       return;
@@ -1068,6 +929,13 @@ const lobbyTokenRef = useRef(0);
         setIsCreatingRoom(true);
         try {
           const code = await createRoomFor(quiz, teamCount);
+          // Signal open-lobby so joiners waiting on the Play tab follow the
+          // host into /game/lobby and pick their teams there.
+          firestore()
+            .collection('gameRooms')
+            .doc(code)
+            .update({ mode: 'group', lobbyOpen: true })
+            .catch(() => {});
           router.push({
             pathname: '/game/lobby',
             params: { roomCode: code, isHost: 'true', topic: quiz.title, myId: String(currentUserId ?? '') },
@@ -1082,7 +950,13 @@ const lobbyTokenRef = useRef(0);
 
       await createAndStartFor(quiz, teamCount);
     } else if (selectedMode === 'group') {
-      // An existing group room still owes us the team-pick window.
+      // An existing group room still owes us the team-pick window. Opening the
+      // lobby is also the signal joiners are waiting on.
+      firestore()
+        .collection('gameRooms')
+        .doc(roomCode)
+        .update({ mode: 'group', lobbyOpen: true })
+        .catch(() => {});
       router.push({
         pathname: '/game/lobby',
         params: { roomCode, isHost: 'true', topic: roomTopic, myId: String(currentUserId ?? '') },
@@ -1141,7 +1015,13 @@ const lobbyTokenRef = useRef(0);
       startAdvertising(code, quiz.title || 'LAN Quiz', () => lanPlayerCountRef.current);
     }
     setLanHost(host);
-    host.setTeams(teamCount);
+    // Switch the live host to group (creating and broadcasting the teams) and
+    // open the lobby. `openLobby` is what pulls LAN joiners off the Play tab;
+    // the `mode` broadcast it triggers re-tints their locked mode card.
+    host.setMode('group', teamCount);
+    setLanTeams(host.teams);
+    setLanMode('group');
+    host.openLobby(quiz.title || 'LAN Quiz');
 
     const count = buildQuestions(quiz).length;
     const time = parseInt(timePerQuestion, 10) || 15;
@@ -1283,17 +1163,13 @@ const lobbyTokenRef = useRef(0);
       setLanPlayerId(msg.playerId);
       setIsJoinedLan(true);
       setLanHostInfo({ name: msg.hostName, avatar: msg.hostAvatar });
-      // A team room is owned by /game/lobby (same as online). Staying on the
-      // Play tab would leave the joiner without the team boxes while the host
-      // sits in the real lobby, so both views would disagree about the roster.
-      if (msg.teamMode) {
-        setShowJoinModal(false);
-        setJoinCode(Array(JOIN_CODE_LENGTH).fill(''));
-        router.push({
-          pathname: '/game/lobby',
-          params: { roomCode: lanGame.roomCode, isHost: 'false', teamMode: 'true', lan: 'true', myId: msg.playerId },
-        } as any);
-      }
+      setLanMode(msg.teamMode ? 'group' : 'classic');
+      // Stay on the Play tab for both classic and group until the host starts:
+      // classic rides the 'quiz' broadcast into the game, group first pulls
+      // everyone into the lobby via the `lobby` message below.
+    } else if (msg.t === 'mode') {
+      // The host changed classic <-> group while everyone is still waiting.
+      setLanMode(msg.teamMode ? 'group' : 'classic');
     } else if (msg.t === 'roster') {
       const connected = msg.players.filter(p => p.connected);
       lanPlayerCountRef.current = connected.length;
@@ -1302,6 +1178,15 @@ const lobbyTokenRef = useRef(0);
       setLastLanRoster(connected);
     } else if (msg.t === 'teams') {
       setLanTeams(msg.teams);
+    } else if (msg.t === 'lobby') {
+      setLanMode(msg.teamMode === false ? 'classic' : 'group');
+      if (!lanNavPushedRef.current) {
+        lanNavPushedRef.current = true;
+        router.push({
+          pathname: '/game/lobby',
+          params: { roomCode: lanGame.roomCode, isHost: 'false', lan: 'true', topic: msg.topic ?? '' },
+        } as any);
+      }
     } else if (msg.t === 'quiz') {
       lanGame.quiz = msg.quiz;
       lanGame.order = msg.order;
@@ -1322,15 +1207,23 @@ const lobbyTokenRef = useRef(0);
   };
   lanClientMsgRef.current = handleLanClientMsg;
 
-  // If a live LAN client exists (screen refocused mid-session), re-attach the
-  // handler so lobby updates and game-over events keep flowing on this screen.
-  // If a finished/abandoned LAN game is leftover, tear the session down so the
-  // next INVITE/START/JOIN builds a fresh room instead of reusing a stale one.
+  // If a live LAN client exists (screen refocused mid-session -- e.g. after a
+  // rematch sent this device back to the Play tab), re-attach the handler so
+  // mode/lobby/quiz broadcasts keep flowing. If a finished/abandoned LAN game is
+  // leftover, tear the session down so the next INVITE/START/JOIN builds a fresh
+  // room instead of reusing a stale one.
   useFocusEffect(
     useCallback(() => {
       const c = getLanClient();
+      const hosting = getLanHostServer() != null;
       if (c && c.connected && !lanGame.quiz) {
-        c.onEvent = lanClientMsgRef.current;
+        // A joiner keeps listening for the host's next broadcasts; the host has
+        // its own self-client but drives its UI through the host's message
+        // listener, so it must not adopt the joiner handler (which would
+        // navigate the host into the lobby as a guest). Either way the next
+        // quiz/lobby may navigate this screen again, so release the latch.
+        lanNavPushedRef.current = false;
+        if (!hosting) c.onEvent = lanClientMsgRef.current;
       } else if (lanGame.quiz) {
         lanHostRef.current?.stop();
         lanHostRef.current = null;
@@ -1408,29 +1301,17 @@ const lobbyTokenRef = useRef(0);
       setShowJoinModal(false);
       setJoinCode(Array(JOIN_CODE_LENGTH).fill(''));
 
-      // A team-mode room is owned by /game/lobby. Staying here would put the
-      // joiner in this screen's inline panel while the host is in the real
-      // lobby, so both sides would be looking at different room state.
-      if (data.teamMode) {
-        router.push({
-          pathname: '/game/lobby',
-          params: {
-            roomCode: code,
-            isHost: 'false',
-            teamMode: 'true',
-            topic: data.topic || '',
-          },
-        } as any);
-        return;
-      }
-
-      // Stay on Play tab — joined room view
+      // Stay on the Play tab for BOTH classic and group. The joiner's mode card
+      // shows what the host chose (and stays locked), and when the host starts
+      // a group game the room's `lobbyOpen` flag pulls this screen into the
+      // lobby so teams are picked there -- the same screen the host sees.
       setRoomCode(code);
       setRoomTopic(data.topic || '');
       setJoinedRoom(true);
-      setRoomMode('classic');
-      setSelectedMode('classic');
+      setRoomMode(data.teamMode ? 'group' : 'classic');
+      setSelectedMode(data.teamMode ? 'group' : 'classic');
       setActiveTab('presets');
+      wentToLobbyRef.current = false;
     } catch (error: any) {
       console.warn('Join fell back to LAN after server error', error);
       const joined = await tryJoinLan(code);
@@ -1467,11 +1348,9 @@ const lobbyTokenRef = useRef(0);
             setJoinedRoom(false);
             setRoomCode(null);
             setRoomTopic('');
-            setRoomStatus('waiting');
             setRoomMode(null);
             setRoomHostId(null);
             setRoomPlayers([]);
-            setTeams([]);
             // The mode card the host pressed to get into the lobby is not a
             // choice for whatever they do next. Leaving reset only `roomMode`,
             // so `selectedMode` stayed on 'group' and the group configuration
@@ -1488,10 +1367,9 @@ const lobbyTokenRef = useRef(0);
     );
   };
 
-  /* ── team columns (GROUP MODE) ── */
-  // Assignment goes through the server, not a client-side Firestore batch:
-  // capacity is a race otherwise, and a full team would happily accept a
-  // write that the roster then over-reports. This matches the lobby.
+  // Host-side room mutations go through the server, not client-side Firestore:
+  // the backend owns the room's roster and team bookkeeping and is the only
+  // writer that can keep them consistent.
   const post = async (path: string, body: Record<string, unknown>) => {
     const token = await getToken();
     // Deadline, because a pending fetch leaves every caller's `busy` flag stuck
@@ -1520,111 +1398,6 @@ const lobbyTokenRef = useRef(0);
     return data;
   };
 
-  const assignTeamServer = async (teamId: string | null) => {
-    if (!roomCode) return;
-    // Sent as a real null, not String(null). The server reads teamId: null as
-    // "go back to the spectators"; the string "null" would look for a team with
-    // that id and 404.
-    setBusyTeamId(teamId == null ? SPECTATOR_KEY : String(teamId));
-    try {
-      await post('teams/assign/', { roomCode, teamId });
-    } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to join team');
-    } finally {
-      setBusyTeamId(null);
-    }
-  };
-
-  // Lets the host decide how many teams the class needs while students are
-  // still arriving, instead of guessing before the room is created.
-  const addTeamServer = async () => {
-    // Logged and shown, not silently ignored -- an untraced early return is how
-    // this became an unreproducible "nothing happens" report.
-    if (!roomCode) {
-      console.warn('[play] addTeam ignored: no roomCode');
-      setAddTeamError('You are not in a room yet.');
-      return;
-    }
-    if (addingTeam) {
-      console.warn('[play] addTeam ignored: already in flight');
-      setAddTeamError('Still adding the previous team, give it a moment.');
-      return;
-    }
-    setAddingTeam(true);
-    setAddTeamError(null);
-    try {
-      const data = await post('teams/add/', { roomCode });
-      const newId = data?.teamId != null ? String(data.teamId) : null;
-      console.log('[play] addTeam ok', { teamId: newId, teamCount: data?.teamCount });
-      lastAddedTeamIdRef.current = newId;
-      setHighlightTeamId(newId);
-      // The server confirmed the write. Saying so on screen is what separates
-      // "the column is off to the right" from "the request never landed".
-      setAddTeamOk(
-        newId != null
-          ? `Team ${newId} was created (${data?.teamCount ?? '?'} teams total).`
-          : 'The team was created.',
-      );
-      teamScrollRef.current?.scrollToEnd({ animated: true });
-    } catch (e: any) {
-      console.warn('[play] addTeam failed', e?.message);
-      setAddTeamError(e?.message || 'Could not add team. Try again.');
-    } finally {
-      setAddingTeam(false);
-    }
-  };
-
-  // Success is dismissible; a failure is not, because a failure that quietly
-  // disappears is indistinguishable from the bug it was meant to explain.
-  const addTeamNotice = addTeamError
-    ? { kind: 'error' as const, text: addTeamError }
-    : addTeamOk
-      ? { kind: 'ok' as const, text: addTeamOk }
-      : null;
-
-  useEffect(() => {
-    if (highlightTeamId == null) return;
-    const t = setTimeout(() => setHighlightTeamId(null), 2200);
-    return () => clearTimeout(t);
-  }, [highlightTeamId]);
-
-  const doRename = async (teamId: string, name: string) => {
-    if (!roomCode) return;
-    await post('teams/rename/', { roomCode, teamId, name });
-  };
-
-  // teamId null means "go back to the spectators". First pick needs no
-  // ceremony; leaving or switching teams does, since it silently changes who
-  // you are answering for.
-  const handlePickTeam = (teamId: string | null) => {
-    if (teamId == null) {
-      const current = teams.find(t => sameTeamId(t.id, myTeamId));
-      if (!current) return;
-      Alert.alert(
-        'Leave team',
-        `Go back to the spectators instead of playing for ${current.name || `Team ${current.id}`}?`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Leave', onPress: () => assignTeamServer(null) },
-        ],
-      );
-      return;
-    }
-
-    const target = teams.find(t => String(t.id) === String(teamId));
-    const current = teams.find(t => sameTeamId(t.id, myTeamId));
-    if (!target || String(target.id) === String(myTeamId)) return;
-    if (!current) { assignTeamServer(teamId); return; }
-    Alert.alert(
-      'Switch team',
-      `Move from ${current.name || `Team ${current.id}`} to ${target.name || `Team ${target.id}`}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Switch', onPress: () => assignTeamServer(teamId) },
-      ],
-    );
-  };
-
   // --- Render Helpers ---
   const lanActive = !!lanHostRef.current || isJoinedLan;
   const lanRoster = isJoinedLan && !lanHostRef.current
@@ -1634,14 +1407,6 @@ const lobbyTokenRef = useRef(0);
     ? lanRoster.map(p => ({ id: p.id, displayName: p.name, avatar: p.avatar }))
     : roomPlayers.filter(p => String(p.id) !== String(currentUserId));
   const joinedCount = joinedPlayers.length;
-
-  // Which team am I in, and am I the host? Needed by the team columns for the
-  // "YOU" pill, rename permission and the switch confirmation.
-  const myTeamId = roomPlayers.find(
-    p => String(p.id) === String(currentUserId)
-  )?.teamId as string | undefined;
-  const isHostUser = roomHostId != null && currentUserId != null
-    && String(roomHostId) === String(currentUserId);
 
   // While waiting in a LAN game, the host is only a roster player once they tap
   // START — until then, show a dedicated HOST slot so joiners can see them.
@@ -1814,7 +1579,6 @@ const lobbyTokenRef = useRef(0);
 
             {activeTab === 'presets' ? (
             <ScrollView 
-                ref={teamScrollRef}
                 style={styles.modesScroll} 
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={{ paddingBottom: 100 }}
@@ -1828,8 +1592,12 @@ const lobbyTokenRef = useRef(0);
                 }
             >
                 {gameModes.map((mode) => {
-                    const isSelected = joinedRoom ? roomMode === mode.id : selectedMode === mode.id;
-                    const isLocked = joinedRoom;
+                    const isSelected = joinedRoom
+                        ? roomMode === mode.id
+                        : isJoinedLan
+                            ? lanMode === mode.id
+                            : selectedMode === mode.id;
+                    const isLocked = joinedRoom || isJoinedLan;
                     return (
                         <TouchableOpacity
                             key={mode.id}
@@ -1882,54 +1650,6 @@ const lobbyTokenRef = useRef(0);
                         </TouchableOpacity>
                     );
                 })}
-
-                {/* Team columns for joined players in GROUP MODE. The leftmost
-                    column is always Spectators, where players start, and tapping
-                    it puts a player back on it -- so it has to render even when
-                    the room has no teams yet. The lobby screen uses this same
-                    component, so GROUP MODE looks and behaves identically
-                    whichever way a room was created. */}
-                {joinedRoom && roomMode === 'group' && (
-                    <View style={styles.teamPickerSection}>
-                        <Text style={styles.teamPickerLabel}>PICK A TEAM OR STAY IN THE SPECTATORS</Text>
-                        {/* Attached to the columns themselves: a rejected add or a
-                            failed read is otherwise invisible, which is what made
-                            "+ TEAM did nothing" unreproducible. */}
-                        {addTeamNotice ? (
-                            <View style={[
-                                styles.teamNotice,
-                                addTeamNotice.kind === 'error' ? styles.teamNoticeError : styles.teamNoticeOk,
-                            ]}>
-                                <Ionicons
-                                    name={addTeamNotice.kind === 'error' ? 'alert-circle' : 'checkmark-circle'}
-                                    size={16}
-                                    color={addTeamNotice.kind === 'error' ? COLORS.danger : COLORS.success}
-                                />
-                                <Text style={styles.teamNoticeText}>{addTeamNotice.text}</Text>
-                                {addTeamNotice.kind === 'ok' ? (
-                                    <TouchableOpacity onPress={() => setAddTeamOk(null)} hitSlop={10}>
-                                        <Ionicons name="close" size={16} color={COLORS.textMuted} />
-                                    </TouchableOpacity>
-                                ) : null}
-                            </View>
-                        ) : null}
-                        <TeamColumns
-                            teams={teams as TeamEntry[]}
-                            players={roomPlayers as PlayerEntry[]}
-                            myId={currentUserId != null ? String(currentUserId) : null}
-                            myTeamId={myTeamId ?? null}
-                            locked={roomStatus !== 'waiting'}
-                            canRename={isHostUser || myTeamId != null}
-                            busyTeamId={busyTeamId}
-                            onJoin={handlePickTeam}
-                            onRename={doRename}
-                            canAddTeam={isHostUser}
-                            onAddTeam={addTeamServer}
-                            addingTeam={addingTeam}
-                            highlightTeamId={highlightTeamId}
-                        />
-                    </View>
-                )}
             </ScrollView>
             ) : (
             <KeyboardSafeView style={styles.modesScroll}>

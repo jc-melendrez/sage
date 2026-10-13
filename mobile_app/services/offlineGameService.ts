@@ -83,6 +83,11 @@ export function initOfflineGameDb() {
       questions TEXT,
       participants TEXT
     );
+    CREATE TABLE IF NOT EXISTS pending_quiz_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payload TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
 
   // `CREATE TABLE IF NOT EXISTS` silently leaves an EXISTING table alone, so on
@@ -252,6 +257,40 @@ export function getOfflineGameAnswerLog(id: number): PlayerAnswerLog {
   return getOfflineGameSession(id).answerLog;
 }
 
+export interface OfflineGameMeta {
+  quizId: number | null;
+  quizTitle: string;
+  quizType: string;
+  timePerQuestion: number;
+}
+
+/**
+ * Quiz identity and clock for re-running a finished offline session ("Play
+ * Again"). Returns null when the row is missing or the DB is unavailable, so
+ * the caller can tell the user the quiz is gone rather than starting a blank run.
+ */
+export function getOfflineGameMeta(id: number): OfflineGameMeta | null {
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const d = getDb();
+  if (!d) return null;
+  const row = d.getFirstSync<{
+    quiz_id: number | null;
+    quiz_title: string | null;
+    quiz_type: string | null;
+    time_per_question: number | null;
+  }>(
+    'SELECT quiz_id, quiz_title, quiz_type, time_per_question FROM offline_games WHERE id = ?',
+    [id],
+  );
+  if (!row) return null;
+  return {
+    quizId: row.quiz_id ?? null,
+    quizTitle: row.quiz_title ?? '',
+    quizType: row.quiz_type ?? '',
+    timePerQuestion: row.time_per_question ?? 15,
+  };
+}
+
 export function getPendingOfflineGames(): OfflineGameRow[] {
   const d = getDb();
   if (!d) return [];
@@ -264,4 +303,40 @@ export function markOfflineGameSynced(id: number) {
   const d = getDb();
   if (!d) return;
   d.runSync('UPDATE offline_games SET is_synced = 1 WHERE id = ?', [id]);
+}
+
+export interface PendingQuizResult {
+  id: number;
+  payload: string;
+  created_at: string;
+}
+
+/**
+ * Queue a practice-quiz completion that could not be POSTed (offline or a
+ * dropped connection). Unlike the offline-game rows there is no local scoring
+ * to replay -- the server assigns the XP -- so only the request body is stored
+ * and it is re-sent verbatim on reconnect.
+ */
+export function savePendingQuizResult(payload: object): number {
+  const d = getDb();
+  if (!d) return 0;
+  d.runSync(
+    'INSERT INTO pending_quiz_results (payload, created_at) VALUES (?, ?)',
+    [JSON.stringify(payload), new Date().toISOString()],
+  );
+  return d.getFirstSync<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0;
+}
+
+export function getPendingQuizResults(): PendingQuizResult[] {
+  const d = getDb();
+  if (!d) return [];
+  return d.getAllSync<PendingQuizResult>(
+    'SELECT * FROM pending_quiz_results ORDER BY id'
+  );
+}
+
+export function markQuizResultSynced(id: number) {
+  const d = getDb();
+  if (!d) return;
+  d.runSync('DELETE FROM pending_quiz_results WHERE id = ?', [id]);
 }

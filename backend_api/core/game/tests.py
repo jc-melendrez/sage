@@ -92,20 +92,20 @@ class MedianTeamSpeedTests(TestCase):
     def test_the_tally_reads_both_pick_shapes(self):
         # The answer is what decides the vote; the time is irrelevant to it.
         picks = {'a': {'answer': 'A. yes', 'timeTaken': 2.0}, 'b': 'A. yes'}
-        choice, agreed, pickers, tie, split = tally_team_picks(picks)
-        self.assertEqual(choice, 'A. yes')
-        self.assertEqual(agreed, 2)
-        self.assertEqual(pickers, 2)
-        self.assertFalse(tie)
-        self.assertFalse(split)
+        t = tally_team_picks(picks)
+        self.assertEqual(t.choice, 'A. yes')
+        self.assertEqual(t.agreed, 2)
+        self.assertEqual(t.pickers, 2)
+        self.assertFalse(t.void)
+        self.assertFalse(t.split)
 
 
 class TeamTallyTests(TestCase):
-    """The 1-1 rule: two votes, one random winner -- never knowledge.
+    """The tie rule: a designated leader decides -- never a coin flip.
 
-    The tie-break used to be deterministic (the correct answer won, or the
-    question voided), which is exactly what made it feel rigged: the game
-    picked the winner for the team. A coin flip keeps both votes equally live.
+    A tie used to be settled by `rng.choice` (or voided), which let the game pick
+    the winner for the team. Now the tally merely reports the tie and its tied
+    candidates; the caller names a leader to choose among them.
     """
 
     def tally(self, picks, typed=False, correct_answer='A. yes'):
@@ -115,48 +115,43 @@ class TeamTallyTests(TestCase):
         t = self.tally({'a': 'A. yes', 'b': 'A. yes', 'c': 'B. no'})
         self.assertEqual((t.choice, t.agreed, t.pickers, t.void, t.split),
                          ('A. yes', 2, 3, False, False))
+        self.assertFalse(t.needs_leader)
 
     def test_one_picker_answers_for_the_team(self):
         t = self.tally({'a': 'B. no'})
         self.assertEqual((t.choice, t.pickers, t.void, t.split), ('B. no', 1, False, False))
+        self.assertFalse(t.needs_leader)
 
     def test_no_picker_voids_the_question(self):
         t = self.tally({})
         self.assertEqual((t.choice, t.pickers, t.void, t.split), ('', 0, True, False))
+        self.assertFalse(t.needs_leader)
         # Blank and None picks are not votes, so they cannot resolve anything.
         t2 = self.tally({'a': '', 'b': None})
         self.assertTrue(t2.void)
         self.assertTrue(t2.split == False)
+        self.assertFalse(t2.needs_leader)
 
-    def test_a_1_1_split_picks_one_of_the_two_votes_at_random(self):
-        # Whether the tie resolves to the correct side or not, the resolved
-        # answer is always one of the two members' picks -- never the third.
-        for expected in ('A. yes', 'B. no'):
-            with patch('game.views.rng.choice', return_value=expected):
-                t = self.tally({'a': 'A. yes', 'b': 'B. no'})
-            self.assertEqual(t.choice, expected)
-            self.assertFalse(t.void)
-            self.assertTrue(t.split)
-            self.assertEqual(t.pickers, 2)
+    def test_a_1_1_split_names_a_leader_and_the_candidates(self):
+        # A 1-1 has no majority, so it is NOT void and does NOT coin-flip: it
+        # reports both tied answers and asks a leader to choose.
         t = self.tally({'a': 'A. yes', 'b': 'B. no'})
-        self.assertIn(t.choice, ('A. yes', 'B. no'))
-
-    def test_a_1_1_split_does_not_need_the_correct_answer(self):
-        # The old rule voided a wrong-vs-wrong split; the coin flip resolves it
-        # just the same, so a split never scorches a two-person team.
-        with patch('game.views.rng.choice', return_value='A. yes'):
-            t = self.tally({'a': 'A. yes', 'b': 'B. no'}, correct_answer='C. maybe')
-        self.assertFalse(t.void)
-        self.assertEqual(t.choice, 'A. yes')
-
-    def test_a_larger_even_split_still_voids(self):
-        t = self.tally({'a': 'A. yes', 'b': 'A. yes', 'c': 'B. no', 'd': 'B. no'})
-        self.assertTrue(t.void)
         self.assertTrue(t.split)
+        self.assertTrue(t.needs_leader)
+        self.assertFalse(t.void)
         self.assertEqual(t.choice, '')
+        self.assertEqual(t.pickers, 2)
+        self.assertCountEqual(t.candidates, ('A. yes', 'B. no'))
+
+    def test_a_larger_even_split_also_names_a_leader(self):
+        # Any tie -- 2-2 or 1-1-1 -- is a leader's decision now, not a void.
+        t = self.tally({'a': 'A. yes', 'b': 'A. yes', 'c': 'B. no', 'd': 'B. no'})
+        self.assertTrue(t.needs_leader)
+        self.assertFalse(t.void)
+        self.assertCountEqual(t.candidates, ('A. yes', 'B. no'))
         t3 = self.tally({'a': 'A. yes', 'b': 'B. no', 'c': 'C. maybe'})
-        self.assertTrue(t3.void)
-        self.assertEqual(t3.choice, '')
+        self.assertTrue(t3.needs_leader)
+        self.assertCountEqual(t3.candidates, ('A. yes', 'B. no', 'C. maybe'))
 
     def test_typed_split_counts_casefolded_equivalents_as_one(self):
         # Two members typing the same term with different capitalisation are one
@@ -164,13 +159,14 @@ class TeamTallyTests(TestCase):
         t = self.tally({'a': 'Chlorophyll', 'b': 'chlorophyll'}, typed=True,
                        correct_answer='Chlorophyll')
         self.assertEqual((t.choice, t.agreed, t.void, t.split), ('Chlorophyll', 2, False, False))
+        self.assertFalse(t.needs_leader)
 
-    def test_typed_1_1_outcome_is_a_member_answer_not_a_normalised_key(self):
-        with patch('game.views.rng.choice', return_value='chlorophyll'):
-            t = self.tally({'a': 'Chlorophyll', 'b': 'photosynthesis'}, typed=True)
-        self.assertIn(t.choice, ('Chlorophyll', 'photosynthesis'))
-        self.assertFalse(t.void)
-        self.assertTrue(t.split)
+    def test_typed_tie_keeps_each_member_answer_as_a_candidate(self):
+        # The candidates are the members' own answers, not normalised keys, so the
+        # leader can pick the answer a teammate actually typed.
+        t = self.tally({'a': 'Chlorophyll', 'b': 'photosynthesis'}, typed=True)
+        self.assertTrue(t.needs_leader)
+        self.assertCountEqual(t.candidates, ('Chlorophyll', 'photosynthesis'))
 
 
 class TeamModeGameTests(TestCase):
@@ -1812,6 +1808,120 @@ class ClassicSnapshotEnrichmentTests(TestCase):
         self.assertEqual(self.participant(results, 'ace')['bestStreak'], 4)
 
 
+class RoomModeTests(TestCase):
+    """The host's Play-tab mode switch reconfigures a LIVE waiting room.
+
+    A room code students have already typed cannot be thrown away when the host
+    changes their mind about teams, so the mode has to move in place without
+    dropping the roster or stacking duplicate teams across toggles.
+    """
+
+    def setUp(self):
+        self.host = User.objects.create_user(username='mhost', password='pass')
+        self.a = User.objects.create_user(username='ma', password='pass')
+        self.b = User.objects.create_user(username='mb', password='pass')
+
+        self.store = FakeFirestoreClient()
+        patcher = patch('game.views.get_firestore', return_value=self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.client = APIClient()
+        self.room_ref = self.store.collection('gameRooms').document('MOD1')
+        self.room_ref.set({
+            'status': 'waiting', 'hostId': self.host.id, 'ownerId': self.host.id,
+            'mode': 'classic', 'teamMode': False, 'topic': 't', 'questionCount': 4,
+            'questions': [
+                {'question': f'q{i}', 'type': 'mcq', 'options': ['a', 'b'], 'answer': 'a'}
+                for i in range(4)
+            ],
+        })
+        for user, seat in ((self.a, None), (self.b, None)):
+            self.room_ref.collection('players').document(str(user.id)).set({
+                'displayName': user.username, 'score': 0, 'teamId': seat,
+            })
+
+    def switch(self, mode, user=None, **extra):
+        self.client.force_authenticate(user=user or self.host)
+        return self.client.post(reverse('room-mode'), {
+            'roomCode': 'MOD1', 'mode': mode, **extra}, format='json')
+
+    def team_ids(self):
+        return sorted(t.id for t in self.room_ref.collection('teams').stream())
+
+    def test_group_switch_flips_the_room_and_seeds_the_teams(self):
+        resp = self.switch('group', teamCount='3')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.json()['teamMode'], True)
+        room = self.room_ref.get().to_dict()
+        self.assertEqual(room['mode'], 'group')
+        self.assertTrue(room['teamMode'])
+        self.assertEqual(room['teamCount'], 3)
+        self.assertEqual(room['teamQuestionIndex'], 0)
+        self.assertIsNone(room['teamStartedAt'])
+        self.assertEqual(self.team_ids(), ['1', '2', '3'])
+
+    def test_classic_switch_clears_the_seats(self):
+        self.switch('group', teamCount='2')
+        self.room_ref.collection('players').document(str(self.a.id)).update({'teamId': '1'})
+        self.room_ref.collection('teams').document('1').update({
+            'memberIds': [str(self.a.id)], 'memberCount': 1,
+        })
+
+        resp = self.switch('classic')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.json()['teamMode'], False)
+        room = self.room_ref.get().to_dict()
+        self.assertFalse(room['teamMode'])
+        self.assertEqual(room['mode'], 'classic')
+        self.assertNotIn('teamId', self.room_ref.collection('players')
+                         .document(str(self.a.id)).get().to_dict())
+        team = self.room_ref.collection('teams').document('1').get().to_dict()
+        self.assertEqual(team['memberIds'], [])
+        self.assertEqual(team['memberCount'], 0)
+
+    def test_round_trip_does_not_duplicate_or_stack_teams(self):
+        self.switch('group', teamCount='2')
+        self.switch('classic')
+        self.switch('group', teamCount='2')
+        self.assertEqual(self.team_ids(), ['1', '2'])
+
+    def test_shrinking_the_team_count_prunes_the_extra_teams(self):
+        self.switch('group', teamCount='4')
+        self.room_ref.collection('players').document(str(self.b.id)).update({'teamId': '4'})
+
+        self.switch('group', teamCount='2')
+        self.assertEqual(self.team_ids(), ['1', '2'])
+        self.assertNotIn('teamId', self.room_ref.collection('players')
+                         .document(str(self.b.id)).get().to_dict())
+
+    def test_more_teams_than_questions_is_refused(self):
+        self.room_ref.update({'questionCount': 2})
+        resp = self.switch('group', teamCount='3')
+        self.assertEqual(resp.status_code, 400, resp.data)
+        # The room must not have been half-reconfigured.
+        self.assertFalse(self.room_ref.get().to_dict()['teamMode'])
+
+    def test_only_the_host_can_switch(self):
+        resp = self.switch('group', user=self.a)
+        self.assertEqual(resp.status_code, 403)
+
+    def test_the_mode_is_locked_once_the_game_starts(self):
+        self.room_ref.update({'status': 'active'})
+        resp = self.switch('group')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_an_unknown_mode_is_rejected(self):
+        resp = self.switch('zebra')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_a_missing_room_is_a_404(self):
+        self.client.force_authenticate(user=self.host)
+        resp = self.client.post(reverse('room-mode'), {
+            'roomCode': 'NOPE', 'mode': 'group'}, format='json')
+        self.assertEqual(resp.status_code, 404)
+
+
 class RematchTests(TestCase):
     """A rematch reuses the room so the code students typed keeps working.
 
@@ -2846,6 +2956,15 @@ class AnswerLogTests(TestCase):
             }, format='json')
             self.assertEqual(resp.status_code, 200, resp.data)
 
+    def decide(self, user, answer, index=0):
+        self.client.force_authenticate(user=user)
+        return self.client.post(reverse('team-decide'), {
+            'roomCode': 'LOG1', 'questionIndex': index, 'answer': answer,
+        }, format='json')
+
+    def pending_leader(self, team_id='1'):
+        return (self.team(team_id).get('pendingDecision') or {}).get('leaderId')
+
     def test_the_team_speed_is_the_median_not_the_last_submitter(self):
         """Whoever settles the question must not decide the payout.
 
@@ -2918,22 +3037,25 @@ class AnswerLogTests(TestCase):
             self.assertGreater(entry['points'], 0)
 
     def test_a_member_only_ever_sees_their_own_pick(self):
-        """A split is recorded per member without publishing either side.
+        """A tie is broken by one of the two, and the vote stays private.
 
         The team's own answer is public -- it has to be, it is what scored --
         but who voted for it is not, so the log for one member must never
-        contain the other member's choice. These two disagree, so a coin flip
-        decides between their two picks; `rng.choice` is pinned so the resolved
-        side is deterministic. The outcome is shared, the vote is not.
+        contain the other member's choice. These two disagree, so the tie names
+        a leader who then picks the final answer; the outcome is shared, the
+        vote is not.
         """
-        with patch('game.views.rng.choice', return_value='A. yes'):
-            resp = self.settle(0, 'A. yes', 'B. no')
+        body = self.settle(0, 'A. yes', 'B. no')
+        self.assertTrue(body.json()['needsLeader'])
+        leader_id = self.pending_leader()
+        leader = self.a if str(self.a.id) == str(leader_id) else self.b
+        resp = self.decide(leader, 'A. yes')
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(self.team()['reveals']['q0']['answer'], 'A. yes')
         self.assertEqual(self.answers(self.a)['q0']['picked'], 'A. yes')
         self.assertEqual(self.answers(self.b)['q0']['picked'], 'B. no')
-        # One side of the coin flip graded the whole team -- the outcome is
-        # shared, the vote is not.
+        # One resolved answer graded the whole team -- the outcome is shared, the
+        # vote is not.
         self.assertTrue(self.answers(self.a)['q0']['correct'])
         self.assertTrue(self.answers(self.b)['q0']['correct'])
         self.assertTrue(self.answers(self.a)['q0']['agreed'])
@@ -3270,6 +3392,18 @@ class TeamMajorityVoteTests(TestCase):
             body = resp.json()
         return body
 
+    def decide(self, user, answer, index=0):
+        self.client.force_authenticate(user=user)
+        return self.client.post(reverse('team-decide'), {
+            'roomCode': 'MAJ1', 'questionIndex': index, 'answer': answer,
+        }, format='json')
+
+    def pending_leader(self, team_id='1'):
+        return (self.team(team_id).get('pendingDecision') or {}).get('leaderId')
+
+    def member_by_id(self, uid):
+        return next(u for u in self.members if str(u.id) == str(uid))
+
     def test_the_question_stays_pending_until_everyone_has_picked(self):
         resp = self.pick(self.members[0], 'A. yes')
         self.assertEqual(resp.status_code, 200, resp.data)
@@ -3294,26 +3428,28 @@ class TeamMajorityVoteTests(TestCase):
             self.assertNotIn('answer', body)
             self.assertNotIn('correctAnswer', body)
 
-    def test_the_team_document_never_carries_the_tally(self):
-        """`firestore.rules` lets any signed-in user read a team document.
+    def test_the_team_document_publishes_only_live_picks_not_the_tally(self):
+        """The private tally lives in `_server`; the shared doc gets counts + live picks.
 
-        The mobile app needs that (roster, powerups, reveals), so a `picks` map
-        of player id to answer left there was readable by the whole room -- a
-        member could open the Firestore console, or simply read the document
-        their own app already subscribes to, and see every teammate's choice.
-        Private picking is only private if the votes are not on a shared
-        document, so the tally lives in the server-only `_server` collection and
-        the team document publishes nothing but a count.
+        Private picking means a member cannot see a teammate's choice *as a
+        stored vote with its time*; it does not mean the vote is hidden while it
+        is forming. The team agrees on one answer, so the split has to be
+        visible live (the "who picked what" badges). What stays server-only is
+        the `_server` tally with each player's `timeTaken`, and the raw `picks`
+        map never appears on the shared document.
         """
         self.pick(self.members[0], 'A. yes')
         self.pick(self.members[1], 'B. no')
 
         team_doc = self.team()
         self.assertNotIn('picks', team_doc)
-        # Only a bare number: no answers anywhere on the shared document.
+        # Only a bare number plus the live answers, no times.
         self.assertEqual(team_doc['pickCount'], 2)
-        self.assertNotIn('A. yes', json.dumps(team_doc))
-        self.assertNotIn('B. no', json.dumps(team_doc))
+        self.assertEqual(team_doc['livePicks'], {
+            str(self.members[0].id): 'A. yes',
+            str(self.members[1].id): 'B. no',
+        })
+        self.assertNotIn('timeTaken', json.dumps(team_doc))
         # The server can still tally it. A pick carries the time alongside the
         # answer so the team can be scored on its median rather than on whoever
         # submitted last.
@@ -3428,23 +3564,42 @@ class TeamMajorityVoteTests(TestCase):
         self.assertEqual(self.team()['answeredCount'], 1)
         self.assertEqual(self.team()['score'], 0)
 
-    def test_a_tie_voids_the_question_but_still_reveals_the_answer(self):
+    def test_a_tie_awaits_a_leader_decision_instead_of_voiding(self):
         body = self.close([
             (self.members[0], 'A. yes'),
             (self.members[1], 'B. no'),
             (self.members[2], 'C. maybe'),
         ])
-        self.assertTrue(body['void'])
-        # Voided means there IS no team answer -- awarding the void to whichever
-        # side was listed first would make the result depend on dict ordering.
-        self.assertEqual(body['answer'], '')
-        # ...but the team still learns what the right answer was.
-        self.assertEqual(body['correctAnswer'], 'A. yes')
-        self.assertFalse(body['correct'])
-        self.assertEqual(body['pointsAwarded'], 0)
-        # The attempt still counts against the question total.
+        # A tie no longer voids or coin-flips: it names a leader and the tied
+        # candidates, and waits.
+        self.assertTrue(body['needsLeader'])
+        self.assertFalse(body['pending'])
+        self.assertCountEqual(body['candidates'], ['A. yes', 'B. no', 'C. maybe'])
+        reveal = self.reveal()
+        self.assertTrue(reveal['needsLeader'])
+        self.assertTrue(reveal['void'])
+        self.assertEqual(reveal['answer'], '')
+        # Nothing is scored while the leader is deciding.
+        self.assertEqual(self.team()['score'], 0)
+        self.assertEqual(self.team()['answeredCount'], 0)
+
+        leader_id = self.pending_leader()
+        self.assertIn(str(leader_id), [str(u.id) for u in self.members])
+        decided = self.decide(self.member_by_id(leader_id), 'A. yes')
+        self.assertEqual(decided.status_code, 200, decided.data)
+        final = decided.json()
+        self.assertFalse(final['pending'])
+        self.assertEqual(final['answer'], 'A. yes')
+        self.assertTrue(final['correct'])
+        self.assertGreater(final['pointsAwarded'], 0)
+        # The attempt now counts, because the team has a real answer.
         self.assertEqual(self.team()['answeredCount'], 1)
-        self.assertEqual(self.reveal()['void'], True)
+        self.assertEqual(self.team()['score'], final['pointsAwarded'])
+        self.assertFalse(self.reveal()['void'])
+        self.assertEqual(self.reveal()['answer'], 'A. yes')
+        self.assertFalse(self.reveal().get('needsLeader'))
+        # The pending marker is cleared so the question cannot resolve twice.
+        self.assertIsNone(self.team().get('pendingDecision'))
 
     def test_every_member_shares_the_teams_score_and_outcome(self):
         body = self.close([(u, 'A. yes') for u in self.members])
@@ -3516,11 +3671,11 @@ class TeamMajorityVoteTests(TestCase):
         # And the member who did agree, really did.
         self.assertTrue(self.player(self.members[0])['answers']['q0']['agreed'])
 
-    def test_a_tie_records_no_agreement_for_anybody(self):
-        # A 2-2 split has no majority, so nobody agreed with anybody. This used
-        # to write `agreed: True` on every member's entry, and the client showed
-        # "You agreed with your team" to all four players -- including the two
-        # who had just voted against each other.
+    def test_a_tie_leader_decides_and_agreement_follows_the_final_answer(self):
+        # A 2-2 split has no majority. It used to write `agreed: True` on every
+        # member's entry -- "You agreed with your team" to all four, including
+        # the two who had just voted against each other. Now a leader picks the
+        # final answer, and each member is graded against that one answer.
         self.members.append(User.objects.create_user(username='m3', password='pass'))
         self.room_ref.collection('teams').document('1').update({
             'memberIds': [str(u.id) for u in self.members], 'memberCount': 4,
@@ -3536,12 +3691,94 @@ class TeamMajorityVoteTests(TestCase):
             (self.members[2], 'B. no'),
             (self.members[3], 'B. no'),
         ])
-        self.assertTrue(body['void'])
+        self.assertTrue(body['needsLeader'])
+        self.assertCountEqual(body['candidates'], ['A. yes', 'B. no'])
+        leader_id = self.pending_leader()
+        decided = self.decide(self.member_by_id(leader_id), body['candidates'][0])
+        self.assertEqual(decided.status_code, 200, decided.data)
+        chosen = decided.json()['answer']
+        # Every member is now either on the winning side or not -- no limbo.
         for user in self.members:
-            agreed = self.player(user)['answers']['q0']['agreed']
-            # None, not False: "the vote was split" is not "you were on the
-            # wrong side", and the client renders them differently.
-            self.assertIsNone(agreed, f'{user.username} should not be scored agreed or disagreed')
+            entry = self.player(user)['answers']['q0']
+            self.assertEqual(entry['agreed'], entry['picked'] == chosen,
+                             f'{user.username} should be graded against the final answer')
+
+    def test_only_the_named_leader_can_break_the_tie(self):
+        self.close([
+            (self.members[0], 'A. yes'),
+            (self.members[1], 'B. no'),
+            (self.members[2], 'C. maybe'),
+        ])
+        leader_id = self.pending_leader()
+        other = next(u for u in self.members if str(u.id) != str(leader_id))
+        refused = self.decide(other, 'A. yes')
+        self.assertEqual(refused.status_code, 403, refused.data)
+        self.assertEqual(str(refused.json()['leaderId']), str(leader_id))
+        # The named leader is still allowed, and the question is still open.
+        ok = self.decide(self.member_by_id(leader_id), 'A. yes')
+        self.assertEqual(ok.status_code, 200, ok.data)
+
+    def test_the_host_can_also_break_a_tie(self):
+        # The host is on an empty rival team here, so this exercises the
+        # host-override search rather than the caller's own team.
+        self.close([
+            (self.members[0], 'A. yes'),
+            (self.members[1], 'B. no'),
+            (self.members[2], 'C. maybe'),
+        ])
+        ok = self.decide(self.host, 'B. no')
+        self.assertEqual(ok.status_code, 200, ok.data)
+        self.assertEqual(self.reveal()['answer'], 'B. no')
+
+    def test_a_leader_choice_outside_the_candidates_falls_back_to_a_candidate(self):
+        self.close([
+            (self.members[0], 'A. yes'),
+            (self.members[1], 'B. no'),
+            (self.members[2], 'C. maybe'),
+        ])
+        leader_id = self.pending_leader()
+        ok = self.decide(self.member_by_id(leader_id), 'D. nope')
+        self.assertEqual(ok.status_code, 200, ok.data)
+        self.assertIn(self.reveal()['answer'], ['A. yes', 'B. no', 'C. maybe'])
+
+    def test_deciding_with_no_tie_to_break_is_rejected(self):
+        self.close([(u, 'A. yes') for u in self.members])
+        resp = self.decide(self.members[0], 'A. yes')
+        self.assertEqual(resp.status_code, 409, resp.data)
+
+    def test_the_tie_break_leader_alternates_between_questions(self):
+        # Two teammates disagree on consecutive questions; the decider must
+        # alternate rather than handing the tie to the same person every time.
+        self.room_ref.collection('teams').document('1').update({
+            'memberIds': [str(self.members[0].id), str(self.members[1].id)],
+            'memberCount': 2,
+        })
+        leaders = []
+        for index in (0, 1):
+            self.advance_to(index)
+            self.close([
+                (self.members[0], 'A. yes'),
+                (self.members[1], 'B. no'),
+            ], index=index)
+            leaders.append(str(self.pending_leader()))
+            decided = self.decide(self.member_by_id(self.pending_leader()), 'A. yes', index=index)
+            self.assertEqual(decided.status_code, 200, decided.data)
+        self.assertNotEqual(leaders[0], leaders[1])
+        self.assertCountEqual(leaders, [str(self.members[0].id), str(self.members[1].id)])
+
+    def test_a_repeat_pick_does_not_reroll_the_leader(self):
+        self.close([
+            (self.members[0], 'A. yes'),
+            (self.members[1], 'B. no'),
+            (self.members[2], 'C. maybe'),
+        ])
+        first = str(self.pending_leader())
+        count_before = self.team().get('splitDecisionCount')
+        # A teammate retries their pick while the leader is deciding.
+        again = self.pick(self.members[0], 'A. yes')
+        self.assertEqual(again.status_code, 200, again.data)
+        self.assertEqual(str(self.pending_leader()), first)
+        self.assertEqual(self.team().get('splitDecisionCount'), count_before)
 
     def test_agreement_is_graded_leniently_on_a_typed_question(self):
         # `is_correct` compares the team answer with `answer_matches`, but this

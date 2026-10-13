@@ -69,7 +69,7 @@ export const TUTORIAL_TOPICS: TutorialTopic[] = [
       {
         targetId: 'activities-quiz-card',
         title: 'Pick a type and save',
-        body: 'MCQ, True/False, Identification or Fill-in-the-Blank — chosen before you generate. The finished quiz lands in this list, ready to practise or share.',
+        body: 'MCQ, True/False or Identification — chosen before you generate. The finished quiz lands in this list, ready to practise or share.',
       },
     ],
   },

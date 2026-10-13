@@ -265,6 +265,14 @@ export interface TeamReveal {
   void: boolean;
   /** A two-way split with no majority -- nobody scored; used for UI copy. */
   split?: boolean;
+  /** The vote tied, so a named leader must pick the final answer first.
+   * While true nothing has been scored; `answer`/`correct`/`points` are not
+   * final until a later reveal has this absent/false. */
+  needsLeader?: boolean;
+  /** The member whose turn it is to break the tie (`needsLeader`). */
+  leaderId?: string;
+  /** The tied answers the leader may choose between (`needsLeader`). */
+  candidates?: string[];
   /** How many members backed the winning answer. Never who they were. */
   agreed: number;
   /** Distinct answers that were actually offered. */

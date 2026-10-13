@@ -4,8 +4,7 @@ import {
   ActivityIndicator, Platform, StatusBar, Animated, Image, Pressable, Share,
   BackHandler,
 } from 'react-native';
-import { useRouter, useLocalSearchParams, useNavigation } from 'expo-router';
-import { usePreventRemove } from '@react-navigation/native';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import firestore from '@react-native-firebase/firestore';
 import { getToken, getCurrentUser } from '@/services/authService';
@@ -13,11 +12,11 @@ import { API_BASE_URL } from '@/config/api';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { pfpSource } from '@/constants/pfps';
-import { getLanClient, lanGame, getLastLanRoster, setLastLanRoster, setLanPlayerId } from '@/services/lanSession';
-import type { LanMessage } from '@/services/lanProtocol';
+import { getLanClient, lanGame, getLastLanRoster, setLastLanRoster, setLanPlayerId, getLanHostServer, getLanTeams, setLanTeams } from '@/services/lanSession';
+import { stopAdvertising } from '@/services/lanDiscovery';
+import type { LanMessage, LanTeam } from '@/services/lanProtocol';
 import TeamColumns from '@/components/game/TeamColumns';
-import type { PlayerEntry, RoomStatus, TeamEntry } from '@/types/game';
-import { saveActiveGame } from '@/services/activeGameService';
+import { emptyPowerupPool, type PlayerEntry, type RoomStatus, type TeamEntry } from '@/types/game';
 
 /**
  * busyTeamId sentinel for the spectator column. Team ids are numeric strings,
@@ -92,7 +91,7 @@ const PICK_WINDOW_SECONDS = 30;
 
 export default function LobbyScreen() {
   const router = useRouter();
-  const { roomCode, isHost, topic, lan: lanParam, myId: myIdParam } = useLocalSearchParams<{ roomCode: string; isHost: string; topic: string; lan?: string; myId?: string }>();
+  const { roomCode, isHost, topic, lan: lanParam, myId: myIdParam, teamMode: teamModeParam } = useLocalSearchParams<{ roomCode: string; isHost: string; topic: string; lan?: string; myId?: string; teamMode?: string }>();
   // LAN (offline hotspot) lobbies share this screen with online rooms.
   const isLAN = lanParam === 'true';
   const [myLanId, setMyLanId] = useState<string | null>(myIdParam || null);
@@ -104,11 +103,10 @@ export default function LobbyScreen() {
   // seeding false painted the PLAYERS roster on the first frame and then hid it
   // when the snapshot landed -- a visible flash for anyone opening a team room.
   //
-  // LAN lobbies never get a room document (their subscription returns early), so
-  // they are seeded with the answer instead of waiting: a LAN game is always
-  // classic. Seeding from `isLAN` rather than in an effect keeps this correct on
-  // the very first render.
-  const [teamMode, setTeamMode] = useState<boolean | null>(isLAN ? false : null);
+  // LAN lobbies never get a room document (their subscription returns early),
+  // so they are seeded from the route param instead of waiting: a LAN game is
+  // classic unless the host opened it as a team room.
+  const [teamMode, setTeamMode] = useState<boolean | null>(isLAN ? teamModeParam === 'true' : null);
   const [loading, setLoading] = useState(false);
   const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
   const [addingTeam, setAddingTeam] = useState(false);
@@ -202,50 +200,6 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
     return () => sub.remove();
   }, [exitToPlay, isLAN]);
 
-  // Claimed whenever this screen navigates itself (countdown -> question), so
-  // the accidental-exit guard below lets those through. Mirrors the
-  // `navigatedRef` pattern on the question screen.
-  const navClaimedRef = useRef(false);
-
-  /* ── active-game record: a student who backs out mid-lobby can resume from
-     the Play tab. Never written for LAN lobbies, which have no room doc. ── */
-  useEffect(() => {
-    if (isLAN || !roomCode || !currentUserId) return;
-    saveActiveGame(currentUserId, {
-      roomCode,
-      role: isHost === 'true' ? 'host' : 'player',
-      mode: 'group',
-      isHost: isHost === 'true',
-      topic: roomTopic || '',
-    });
-  }, [currentUserId, isLAN, roomCode, isHost, roomTopic]);
-
-  /* ── accidental-exit guard: backing out of a live lobby used to be a silent
-     route pop. Now it confirms, and leaving keeps the room open (the resume
-     banner on the Play tab offers the way back). ── */
-  const navigation = useNavigation();
-  usePreventRemove(true, ({ data }) => {
-    if (navClaimedRef.current || isLAN) {
-      navigation.dispatch(data.action);
-      return;
-    }
-    Alert.alert(
-      'Leave the lobby?',
-      'The room stays open. You can resume it from the Play tab before the host starts.',
-      [
-        { text: 'Stay', style: 'cancel' },
-        {
-          text: 'Leave',
-          style: 'destructive',
-          onPress: () => {
-            navClaimedRef.current = true;
-            navigation.dispatch(data.action);
-          },
-        },
-      ],
-    );
-  });
-
   // Latched so the room listener fires the countdown exactly once. It re-fires
   // on every room-document update, and status stays 'active' for the whole
   // game, so a plain `if (status === 'active')` restarted the 3-2-1 from 3
@@ -314,18 +268,18 @@ const [roomTeamCount, setRoomTeamCount] = useState<number | null>(null);
       setCountdownValue(2);
       animateCountdownNumber(() => {
         setCountdownValue(1);
-animateCountdownNumber(() => {
-        setShowCountdown(false);
-        navClaimedRef.current = true;
-        router.replace({
-          pathname: '/game/question',
-          params: {
-            roomCode,
-            isHost,
-            ...(isLAN ? { lan: 'true' } : {}),
-          },
-        } as any);
-      });
+        animateCountdownNumber(() => {
+          setShowCountdown(false);
+          router.replace({
+            pathname: '/game/question',
+            params: {
+              roomCode,
+              isHost,
+              ...(isLAN ? { lan: 'true' } : {}),
+              ...(teamMode ? { teamMode: 'true' } : {}),
+            },
+          } as any);
+        });
       });
     });
   };
@@ -421,23 +375,34 @@ animateCountdownNumber(() => {
 
   /* ── LAN mode: roster + game start come from the LAN client, not Firestore ── */
   const lanStartedRef = useRef(false);
-  // LAN rooms have no teams and no scoring, so the roster is stored in a
-  // slimmer shape and widened to PlayerEntry here rather than making every
-  // online field optional across the game screens.
-  const asLobbyPlayer = (p: { id: string; name: string; avatar?: string; connected: boolean }): PlayerEntry => ({
+  // LAN rooms store the roster in a slimmer shape and widen it to PlayerEntry
+  // here rather than making every online field optional across the screens.
+  // teamId rides through so team columns mirror the host's assignments.
+  const asLobbyPlayer = (p: { id: string; name: string; avatar?: string; connected: boolean; teamId?: string }): PlayerEntry => ({
     id: p.id, displayName: p.name, avatar: p.avatar,
-    score: 0, answeredCount: 0, streak: 0, isFinished: false, teamId: null,
+    score: 0, answeredCount: 0, streak: 0, isFinished: false, teamId: p.teamId ?? null,
+  });
+  const asLobbyTeam = (t: LanTeam): TeamEntry => ({
+    id: t.id, name: t.name, color: t.color,
+    score: 0, correctCount: 0, answeredCount: 0,
+    memberIds: [], memberCount: 0, teamCorrect: 0,
+    teamStreak: 0, bestStreak: 0, powerups: emptyPowerupPool(),
   });
 
   useEffect(() => {
     if (!isLAN) return;
     const client = getLanClient();
     if (!client) return;
-    // Seed with the latest roster so players who joined before this screen
-    // mounted (e.g. between welcome and navigation) are visible immediately.
+    // Seed with the latest roster/teams so players who joined before this
+    // screen mounted (e.g. between welcome and navigation) are visible
+    // immediately.
     const seed = getLastLanRoster();
     if (seed.length > 0) {
       setPlayers(seed.map(asLobbyPlayer));
+    }
+    const seedTeams = getLanTeams();
+    if (seedTeams.length > 0) {
+      setTeams(seedTeams.map(asLobbyTeam));
     }
     client.onEvent = (msg: LanMessage) => {
       if (msg.t === 'welcome') {
@@ -447,6 +412,15 @@ animateCountdownNumber(() => {
         const connected = msg.players.filter(p => p.connected);
         setLastLanRoster(connected);
         setPlayers(connected.map(asLobbyPlayer));
+      } else if (msg.t === 'teams') {
+        const list = msg.teams ?? [];
+        setLanTeams(list);
+        setTeams(list.map(asLobbyTeam));
+      } else if (msg.t === 'mode') {
+        // The host flipped classic <-> group while the lobby is up. Rare, but if
+        // it happens the team columns must follow instead of showing a stale
+        // mode.
+        setTeamMode(!!msg.teamMode);
       } else if (msg.t === 'quiz') {
         lanGame.quiz = msg.quiz;
         lanGame.order = msg.order ?? lanGame.order;
@@ -498,6 +472,21 @@ animateCountdownNumber(() => {
   }, []);
 
   const startGame = async (allowUnassigned: boolean) => {
+    if (isLAN) {
+      const host = getLanHostServer();
+      if (!host) return;
+      hasAutoStartedRef.current = true;
+      setTeamPickCountdown(0);
+      try {
+        stopAdvertising();
+        host.startGame();
+      } catch (e: any) {
+        Alert.alert('Error', e?.message || 'Could not start the game');
+      }
+      // The quiz/start broadcast reaches our own loopback client, so the
+      // countdown + navigation run through the same path as a joining player.
+      return;
+    }
     setLoading(true);
     // Close the pick window before starting. Otherwise the countdown keeps
     // ticking, and if the host's start request is slower than the remaining
@@ -539,8 +528,16 @@ animateCountdownNumber(() => {
     );
   };
 
-  const isHostUser =
-    hostId != null && currentUserId != null && String(hostId) === String(currentUserId)
+  // Who "you" are in the roster. Online player ids are user ids; LAN player
+  // ids are minted by the host's welcome message. Everything team-related keys
+  // off this rather than currentUserId so LAN joiners are recognised.
+  const myIdentityId = isLAN
+    ? (myLanId ?? null)
+    : currentUserId != null ? String(currentUserId) : null;
+
+  const isHostUser = isLAN
+    ? isHost === 'true'
+    : hostId != null && currentUserId != null && String(hostId) === String(currentUserId)
       // The route param is only a fallback for the moment before the room
       // listener delivers. Deriving this from it alone meant a host who left
       // mid-game left everyone else stuck with stale host controls, and a
@@ -560,6 +557,20 @@ animateCountdownNumber(() => {
    */
   const doAutoAssign = async () => {
     if (autoAssigning) return;
+    if (isLAN) {
+      const host = getLanHostServer();
+      if (!host) return;
+      setAutoAssigning(true);
+      setAutoAssignDone(false);
+      try {
+        host.autoAssignTeams();
+        host.broadcastTeams();
+        setAutoAssignDone(true);
+      } finally {
+        setAutoAssigning(false);
+      }
+      return;
+    }
     setAutoAssigning(true);
     setAutoAssignDone(false);
     try {
@@ -599,6 +610,7 @@ animateCountdownNumber(() => {
    * one-player game before anyone had a chance to join.
    */
   useEffect(() => {
+    if (isLAN) return;
     if (!isHostUser || roomStatus !== 'waiting' || quizPending) return;
     if (pickStartedAt) return;
     if (players.length < 2) return;
@@ -700,7 +712,7 @@ animateCountdownNumber(() => {
   };
 
   /* ── team assignment ── */
-  const myPlayer = players.find(p => String(p.id) === String(currentUserId));
+  const myPlayer = players.find(p => String(p.id) === String(myIdentityId));
   const myTeamId = myPlayer?.teamId ?? null;
   const sortedTeams = [...teams].sort((a, b) => (parseInt(a.id, 10) || 0) - (parseInt(b.id, 10) || 0));
   const allAssigned = !teamMode || (players.length > 0 && players.every(p => p.teamId));
@@ -745,7 +757,7 @@ animateCountdownNumber(() => {
   // ceremony; leaving or switching teams does, since it silently changes who
   // you are answering for.
   const handlePickTeam = (teamId: string | null) => {
-    if (roomStatus === 'active' || !currentUserId) return;
+    if (roomStatus === 'active' || !myIdentityId) return;
 
     if (teamId == null) {
       const current = myTeam;
@@ -783,10 +795,17 @@ animateCountdownNumber(() => {
     // real one; it just marks the spectator column as the busy one.
     setBusyTeamId(teamId == null ? SPECTATOR_KEY : String(teamId));
     try {
-      // Sent as a real null, not String(null). The server reads teamId: null as
-      // "go back to the spectators"; the string "null" would look for a team
-      // with that id and 404.
-      await post('teams/assign/', { roomCode, teamId });
+      if (isLAN) {
+        // A `team-join` message over the loopback socket is authoritative on
+        // the host; the broadcast it triggers updates every device, so the host
+        // and joiners go through the exact same path.
+        getLanClient()?.send({ t: 'team-join', teamId });
+      } else {
+        // Sent as a real null, not String(null). The server reads teamId: null
+        // as "go back to the spectators"; the string "null" would look for a
+        // team with that id and 404.
+        await post('teams/assign/', { roomCode, teamId });
+      }
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to join team');
     } finally {
@@ -797,6 +816,24 @@ animateCountdownNumber(() => {
   // Lets the host decide how many teams the class needs while students are
   // still arriving, instead of guessing before the room is created.
   const doAddTeam = async () => {
+    if (isLAN) {
+      const host = getLanHostServer();
+      if (!host || addingTeam) return;
+      setAddingTeam(true);
+      setAddTeamError(null);
+      try {
+        const team = host.addTeam();
+        host.broadcastTeams();
+        setHighlightTeamId(team.id);
+        setAddTeamOk(`${team.name} was created`);
+        scrollRef.current?.scrollToEnd({ animated: true });
+      } catch (e: any) {
+        setAddTeamError(e?.message || 'Could not add team. Try again.');
+      } finally {
+        setAddingTeam(false);
+      }
+      return;
+    }
     // Logged rather than silently ignored: a guard that returns without a trace
     // is how "+ TEAM did nothing" became unreproducible from a bug report.
     // Each rejection path both explains itself on screen and stops the spinner.
@@ -857,6 +894,9 @@ animateCountdownNumber(() => {
   // assigned by arrival order, so without this a member who wanted either power
   // had no way to ask for it and a leader who left left the team stuck.
   const doTransferLeader = async (teamId: string, userId: string) => {
+    // LAN team play is asynchronous and has no leader/team-vote concept, so
+    // there is nothing to hand over.
+    if (isLAN) return;
     if (busyTransferTeamId != null) return;
     if (!roomCode) return;
     setBusyTransferTeamId(teamId);
@@ -882,7 +922,13 @@ animateCountdownNumber(() => {
 
   const doRename = async (teamId: string, name: string) => {
     try {
-      await post('teams/rename/', { roomCode, teamId, name });
+      if (isLAN) {
+        const host = getLanHostServer();
+        host?.renameTeam(teamId, name);
+        host?.broadcastTeams();
+      } else {
+        await post('teams/rename/', { roomCode, teamId, name });
+      }
     } catch (e: any) {
       Alert.alert('Rename failed', e?.message || 'Could not rename team');
     }
@@ -1083,10 +1129,10 @@ animateCountdownNumber(() => {
             <TeamColumns
               teams={sortedTeams}
               players={players}
-              myId={currentUserId != null ? String(currentUserId) : null}
+              myId={myIdentityId}
               myTeamId={myTeamId != null ? String(myTeamId) : null}
               locked={roomStatus === 'active' || roomStatus === 'finished'}
-              canRename={isHostUser || myTeamId != null}
+              canRename={isLAN ? isHostUser : (isHostUser || myTeamId != null)}
               busyTeamId={busyTeamId}
               onJoin={handlePickTeam}
               onRename={doRename}
@@ -1094,7 +1140,7 @@ animateCountdownNumber(() => {
               onAddTeam={doAddTeam}
               addingTeam={addingTeam}
 highlightTeamId={highlightTeamId}
-      canTransferLeader={isHostUser || myTeamId != null}
+      canTransferLeader={!isLAN && (isHostUser || myTeamId != null)}
       busyTransferTeamId={busyTransferTeamId}
       onTransferLeader={doTransferLeader}
     />

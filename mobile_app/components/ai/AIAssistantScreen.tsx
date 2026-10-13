@@ -4,6 +4,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { getToken, getCachedUserId } from '@/services/authService';
 import { API_BASE_URL } from '@/config/api';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useNetworkStatus } from '@/hooks/useNetworkStatus';
 import {
   AiAction,
   RateLimitError,
@@ -237,8 +239,18 @@ function mapHistoryRow(row: any): Message {
   };
 }
 
+// Read-only offline caches: the last sessions list and each thread's last synced
+// messages, so history stays viewable with no connection. Keyed by version so a
+// shape change can invalidate stale entries.
+const AI_SESSIONS_CACHE_KEY = 'ai_sessions_cache_v1';
+const AI_HISTORY_CACHE_PREFIX = 'ai_history_cache_v1_';
+
 export default function AIAssistantScreen({ variant }: { variant: AIAssistantVariant }) {
   const insets = useSafeAreaInsets();
+  // The assistant runs entirely on the server (Groq via Django), so there is no
+  // local model to answer offline. Instead of failing silently, sending is
+  // gated while offline and the last synced thread is rendered read-only.
+  const isOffline = useNetworkStatus();
   const scrollViewRef = useRef<ScrollView>(null);
   const userScrolledRef = useRef(false);
   // Set by loadHistory before it commits the populated message list. Opening a
@@ -310,8 +322,9 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
     userScrolledRef.current = false;
   };
 
-  // Send is live when there is something to say or something attached.
-  const sendDisabled = isLoading || isTyping || (!inputValue.trim() && !attachedFile);
+  // Send is live when there is something to say or something attached -- and
+  // only while online, since the reply is generated server-side.
+  const sendDisabled = isOffline === true || isLoading || isTyping || (!inputValue.trim() && !attachedFile);
 
   // 1. Load Sessions on Startup
   useEffect(() => {
@@ -324,17 +337,27 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
       const res = await fetch(`${API_BASE_URL}/ai/sessions/`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      if (res.ok) {
-        const data = await res.json();
-        setSessions(sortSessionsPinnedFirst(data));
-        if (data.length > 0 && !activeSessionId) {
-          loadHistory(data[0].id);
-        } else if (data.length === 0) {
-          startNewChat();
-        }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const sorted = sortSessionsPinnedFirst<ChatSession>(data);
+      setSessions(sorted);
+      AsyncStorage.setItem(AI_SESSIONS_CACHE_KEY, JSON.stringify(sorted)).catch(() => {});
+      if (data.length > 0 && !activeSessionId) {
+        loadHistory(data[0].id);
+      } else if (data.length === 0) {
+        startNewChat();
       }
     } catch (err) {
       console.error("Failed to load sessions", err);
+      // Offline fallback: browse the cached thread list rather than a blank menu.
+      try {
+        const cached = await AsyncStorage.getItem(AI_SESSIONS_CACHE_KEY);
+        if (cached) {
+          const list = JSON.parse(cached) as ChatSession[];
+          setSessions(list);
+          if (list.length > 0 && !activeSessionId) loadHistory(list[0].id);
+        }
+      } catch {}
     }
   };
 
@@ -348,21 +371,31 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
     // mid-thread or on a blank area.
     scrollViewRef.current?.scrollTo({ x: 0, y: 0, animated: false });
     setMessages([]);
-    
+    const cacheKey = `${AI_HISTORY_CACHE_PREFIX}${sessionId}`;
+
     try {
       const token = await getToken();
       const res = await fetch(`${API_BASE_URL}/ai/sessions/${sessionId}/history/`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      if (res.ok) {
-        const history = await res.json();
-        // Flag before the populated render commits, so the layout pass that
-        // finally has content is the one that scrolls.
-        pendingHistoryScrollRef.current = true;
-        setMessages(history.map(mapHistoryRow));
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const history = await res.json();
+      const mapped = history.map(mapHistoryRow);
+      AsyncStorage.setItem(cacheKey, JSON.stringify(mapped)).catch(() => {});
+      // Flag before the populated render commits, so the layout pass that
+      // finally has content is the one that scrolls.
+      pendingHistoryScrollRef.current = true;
+      setMessages(mapped);
     } catch (err) {
       console.error("Failed to load history", err);
+      // Offline fallback: render the last synced copy of this thread.
+      try {
+        const cached = await AsyncStorage.getItem(cacheKey);
+        if (cached) {
+          pendingHistoryScrollRef.current = true;
+          setMessages(JSON.parse(cached) as Message[]);
+        }
+      } catch {}
     }
   };
 
@@ -543,6 +576,13 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
 
   // 4. Send Message
   const handleSend = async (overrideText?: string) => {
+    // No local model: a reply has to come from the server. Block the send
+    // explicitly (quick actions reach here directly) instead of letting the
+    // request hang and fail.
+    if (isOffline === true) {
+      notify('AI offline', 'SAGE needs a connection to reply. Reconnect and try again.');
+      return;
+    }
     const textToSend = overrideText || inputValue;
     // A turn with only an attachment is valid -- the endpoint accepts it
     // ("explain this"). Requiring text meant picking a document and tapping
@@ -660,13 +700,21 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
       // Switch from "thinking" to showing the reply so the indicator hides.
       setIsLoading(false);
 
-      // Add the full AI reply in one go
-      setMessages((prev) => [...prev, {
-        id: aiMessageId,
-        type: 'ai',
-        text: fullReply || "Sorry, I didn't get a response. Please try again.",
-        time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
-      }]);
+      // Add the full AI reply in one go, and refresh the offline cache so the
+      // reply is readable without a connection after this.
+      const cacheSessionId = activeSessionId ?? (typeof data.session_id === 'number' ? data.session_id : null);
+      setMessages((prev) => {
+        const next: Message[] = [...prev, {
+          id: aiMessageId,
+          type: 'ai',
+          text: fullReply || "Sorry, I didn't get a response. Please try again.",
+          time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+        }];
+        if (cacheSessionId != null) {
+          AsyncStorage.setItem(`${AI_HISTORY_CACHE_PREFIX}${cacheSessionId}`, JSON.stringify(next)).catch(() => {});
+        }
+        return next;
+      });
 
     } catch (error) {
       // The optimistic user message is removed for a refusal but kept for a
@@ -1085,6 +1133,13 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
           </View>
         )}
 
+        {isOffline === true && (
+          <View style={styles.offlineComposerHint}>
+            <Ionicons name="cloud-offline-outline" size={14} color={COLORS.textMuted} />
+            <Text style={styles.offlineComposerText}>{`You're offline — SAGE can't reply until you reconnect.`}</Text>
+          </View>
+        )}
+
         <View style={styles.inputBox}>
           <TouchableOpacity 
             onPress={handleFileUpload} 
@@ -1096,12 +1151,12 @@ export default function AIAssistantScreen({ variant }: { variant: AIAssistantVar
           <View style={styles.inputField}>
             <TextInput 
               style={styles.input} 
-              placeholder="Ask me anything..." 
+              placeholder={isOffline === true ? 'Offline — reconnect to chat' : 'Ask me anything...'} 
               placeholderTextColor={COLORS.textMuted} 
               value={inputValue} 
               onChangeText={setInputValue} 
               onSubmitEditing={() => handleSend()} 
-              editable={!isLoading && !isTyping}
+              editable={!isLoading && !isTyping && isOffline !== true}
               multiline
             />
           </View>
@@ -1455,6 +1510,17 @@ sessionMenuButton: {
     flexDirection: 'row', 
     gap: 10, 
     alignItems: 'flex-end' 
+  },
+  offlineComposerHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingBottom: 8,
+  },
+  offlineComposerText: {
+    fontSize: 12,
+    color: COLORS.textMuted,
   },
   attachButton: { 
     padding: 8,
